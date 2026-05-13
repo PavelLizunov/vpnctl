@@ -122,6 +122,22 @@ Write to {path, e.g. crates/inventory/tests/spec_inventory.rs}. Constraints:
   Every test must check observable behavior against the spec.
 ```
 
+### Гочи методологии (lessons learned)
+
+- **Hook input приходит на stdin, не в env var.** В `.claude/settings.json`
+  читаем JSON через `python3 -c "..."` (или `jq`, если установлен — но в
+  нашем dev-контейнере `jq` нет; `python3` есть всегда).
+- **Settings watcher не подхватывает файлы созданные мид-сессии.** После
+  любого редактирования `.claude/settings.json` нужно либо открыть UI
+  `/hooks`, либо перезапустить Claude Code. Иначе хук молча игнорируется,
+  даже если pipe-test зелёный.
+- **Pipe-test обязателен** перед коммитом hook-а:
+  `echo '{"tool_input":{"command":"git commit -m x"}}' | bash -c '<your cmd>'`
+  должен вернуть ожидаемый вывод. Без этого силлентли break.
+- **Sub-agents изолированы**: review-agent / test-writer-agent видят
+  только то, что я кладу в `prompt`. Если я сошлюсь на «design discussion
+  выше» — они не увидят. Brief как нового коллегу, paste'ить полный spec.
+
 ### Когда добавить новый kernel (wgturn, xray, hysteria-server)
 
 Триггер: пользователь просит «добавь поддержку X».
