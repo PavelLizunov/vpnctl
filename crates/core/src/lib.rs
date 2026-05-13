@@ -70,9 +70,13 @@ pub struct Server {
     pub id: ServerId,
     pub address: String,
     pub ssh_port: u16,
+    pub ssh_user: String,
     pub kernel: KernelId,
     /// Какие протоколы мы хотим поднять на этом сервере.
     pub enabled_protocols: Vec<ProtocolId>,
+    /// SHA256-fingerprint SSH host key, который мы доверяем.
+    /// На первый коннект может быть `None` (TOFU — записывается после auth).
+    pub trusted_host_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

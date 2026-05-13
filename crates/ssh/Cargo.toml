@@ -10,7 +10,15 @@ rust-version.workspace = true
 vpnctl-core = { path = "../core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-# russh добавим следующей итерацией; сейчас крейт декларирует только мок-транспорт.
+
+# Real SSH transport.
+russh = "0.60"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util"] }
+backon = { version = "1", features = ["tokio-sleep"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
