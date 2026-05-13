@@ -49,6 +49,23 @@ enum Cmd {
     Grant { user: String, server: String },
     /// Revoke a user's access to a server.
     Revoke { user: String, server: String },
+    /// Push current inventory state to a server (install kernel, generate
+    /// missing REALITY keys / TUIC cert, render & apply config, restart).
+    Deploy {
+        server: String,
+        /// SSH private key path (default: ~/.ssh/id_ed25519).
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Query a server for kernel runtime status.
+    Status {
+        server: String,
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Print share links (vless://, tuic://, ...) for every server×protocol
+    /// the user has been granted access to.
+    Sub { user: String },
 }
 
 #[tokio::main]
@@ -65,6 +82,9 @@ async fn main() -> std::process::ExitCode {
         Cmd::User { cmd } => cmd::user::run(cmd, cli.db, cli.output).await,
         Cmd::Grant { user, server } => cmd::grant::run_grant(&user, &server, cli.db).await,
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
+        Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
+        Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
+        Cmd::Sub { user } => cmd::sub::run(&user, cli.db, cli.output).await,
     };
 
     match res {
