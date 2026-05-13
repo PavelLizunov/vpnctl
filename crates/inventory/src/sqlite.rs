@@ -33,6 +33,25 @@ pub enum SqliteInventoryError {
     Json(#[from] serde_json::Error),
     #[error("invalid data in db: {0}")]
     Invalid(String),
+    /// Тypизированная ошибка для PRIMARY KEY / UNIQUE — CLI может выдать
+    /// дружелюбный текст «already exists» вместо raw SQL message.
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+}
+
+/// Convert sqlx UNIQUE constraint violations to `AlreadyExists`. Other
+/// sqlx errors propagate untouched.
+fn map_unique<T>(
+    res: std::result::Result<T, sqlx::Error>,
+    what: impl std::fmt::Display,
+) -> Result<T> {
+    match res {
+        Ok(v) => Ok(v),
+        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+            Err(SqliteInventoryError::AlreadyExists(what.to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, SqliteInventoryError>;
@@ -82,7 +101,7 @@ impl SqliteInventory {
 
     pub async fn add_server(&self, s: &Server) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO servers (id, address, ssh_port, ssh_user, kernel, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
@@ -96,7 +115,8 @@ impl SqliteInventory {
         .bind(&s.trusted_host_fingerprint)
         .bind(s.usage_coefficient)
         .execute(&mut *tx)
-        .await?;
+        .await;
+        map_unique(res, format!("server {}", s.id.0))?;
 
         for proto in &s.enabled_protocols {
             sqlx::query("INSERT INTO server_protocols (server_id, protocol_id) VALUES (?1, ?2)")
@@ -142,6 +162,10 @@ impl SqliteInventory {
     }
 
     pub async fn list_servers(&self) -> Result<Vec<Server>> {
+        // NOTE(perf): N+1 query — one SELECT id, then per-server get_server
+        // (which itself does 2 queries). For a homelab with <100 servers
+        // this is fine; if it ever matters, switch to a single LEFT JOIN
+        // and aggregate protocols in Rust.
         let rows = sqlx::query("SELECT id FROM servers ORDER BY id")
             .fetch_all(&self.pool)
             .await?;
@@ -229,7 +253,7 @@ impl SqliteInventory {
     // ── Users ───────────────────────────────────────────────────────────
 
     pub async fn add_user(&self, u: &User) -> Result<()> {
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey)
              VALUES (?1, ?2, ?3, ?4)",
         )
@@ -238,7 +262,8 @@ impl SqliteInventory {
         .bind(&u.tuic_password)
         .bind(&u.wireguard_pubkey)
         .execute(&self.pool)
-        .await?;
+        .await;
+        map_unique(res, format!("user {}", u.id.0))?;
         Ok(())
     }
 
@@ -455,11 +480,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_server_errors() -> Result<()> {
+    async fn duplicate_server_returns_already_exists() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("dup")).await?;
-        let err = inv.add_server(&sample_server("dup")).await;
-        assert!(err.is_err(), "expected duplicate to error, got {err:?}");
+        let err = inv.add_server(&sample_server("dup")).await.unwrap_err();
+        assert!(
+            matches!(err, SqliteInventoryError::AlreadyExists(ref s) if s == "server dup"),
+            "expected AlreadyExists(\"server dup\"), got {err:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_user_returns_already_exists() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_user(&sample_user("alice")).await?;
+        let err = inv.add_user(&sample_user("alice")).await.unwrap_err();
+        assert!(
+            matches!(err, SqliteInventoryError::AlreadyExists(ref s) if s == "user alice"),
+            "expected AlreadyExists(\"user alice\"), got {err:?}"
+        );
         Ok(())
     }
 

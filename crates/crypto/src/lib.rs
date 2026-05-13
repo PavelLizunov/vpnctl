@@ -33,6 +33,11 @@ pub fn gen_short_id() -> std::io::Result<String> {
 
 /// X25519 keypair (для REALITY и для WireGuard).
 /// Возвращаем (private_key_b64, public_key_b64).
+///
+/// `OsRng.unwrap_err()` — это легитимный API в `rand` 0.9: оборачивает
+/// `TryRngCore` в `RngCore` (panic-on-failure). Поскольку `OsRng` черпает
+/// энтропию из ядра ОС, реальный сбой = система не функциональна, и panic
+/// — корректное поведение.
 pub fn gen_x25519_keypair() -> (String, String) {
     let mut rng = OsRng.unwrap_err();
     let mut sk_bytes = [0u8; 32];

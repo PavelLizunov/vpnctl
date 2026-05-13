@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, Result, Server, SshTransport,
-    User,
+    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
+    SshTransport, User,
 };
 
 /// sing-box 1.13.x из официального APT-репо SagerNet.
@@ -50,13 +50,13 @@ impl Kernel for SingBox {
 
     fn render_config(
         &self,
-        _server: &Server,
+        ctx: &RenderCtx<'_>,
         users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
         let mut inbounds = Vec::with_capacity(protocols.len());
         for p in protocols {
-            inbounds.push(p.server_inbound(users)?);
+            inbounds.push(p.server_inbound(ctx, users)?);
         }
         let cfg = json!({
             "log": { "level": "info", "output": "/var/log/sing-box.log", "timestamp": true },

@@ -21,41 +21,44 @@ enum Cmd {
     Uuid,
 }
 
-fn build_registry() -> Registry {
+fn build_registry() -> Result<Registry, vpnctl_core::CoreError> {
     let mut reg = Registry::new();
+
     // ─── ЯДРА ────────────────────────────────────────────────────────────
-    reg.register_kernel(Box::new(SingBox::new()));
+    reg.register_kernel(Box::new(SingBox::new()))?;
     // Чтобы добавить wgturn — раскомментируй и положи crates/kernels/src/wgturn.rs:
-    // reg.register_kernel(Box::new(Wgturn::new()));
+    // reg.register_kernel(Box::new(Wgturn::new()))?;
 
     // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
-    // Заглушечные ключи REALITY: реальные значения берутся из inventory при
-    // сборке конфига для конкретного сервера.
-    reg.register_protocol(Box::new(VlessReality::new(
-        "www.microsoft.com".into(),
-        "00000000".into(),
-        "PUBKEY_PLACEHOLDER".into(),
-        "PRIVKEY_PLACEHOLDER".into(),
-    )));
-    reg.register_protocol(Box::new(TuicV5::new()));
-    reg
+    // Stateless — реальные ключи (REALITY private/public/short_id, TUIC cert
+    // paths) приходят из inventory.server_secrets через RenderCtx во время
+    // деплоя. Здесь — просто declarative registration.
+    reg.register_protocol(Box::new(VlessReality::new()))?;
+    reg.register_protocol(Box::new(TuicV5::new()))?;
+
+    Ok(reg)
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Registry => {
-            let reg = build_registry();
-            // Для смок-теста просто выведем что-то осмысленное.
-            // Полноценный list-вывод появится, когда добавим публичные геттеры
-            // в Registry (это вторая итерация).
-            let _ = reg;
-            println!("registry built ok");
-            println!("kernel: sing-box (vless+reality, tuic-v5, hysteria2, shadowsocks-2022)");
-            println!("protocols: vless+reality, tuic-v5");
-        }
+        Cmd::Registry => match build_registry() {
+            Ok(_reg) => {
+                // TODO(v0.3): пройтись по reg и вывести фактический список.
+                // Сейчас Registry не имеет публичных геттеров для списка.
+                println!("registry built ok");
+                println!("kernel: sing-box (vless+reality, tuic-v5, hysteria2, shadowsocks-2022)");
+                println!("protocols: vless+reality, tuic-v5");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Cmd::Uuid => {
             println!("{}", vpnctl_crypto::gen_uuid());
+            std::process::ExitCode::SUCCESS
         }
     }
 }

@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 //
@@ -49,6 +50,12 @@ pub enum CoreError {
         kernel: KernelId,
         protocol: ProtocolId,
     },
+    #[error("kernel `{0}` is already registered")]
+    DuplicateKernel(KernelId),
+    #[error("protocol `{0}` is already registered")]
+    DuplicateProtocol(ProtocolId),
+    #[error("missing required secret `{key}` for server `{server}`")]
+    MissingSecret { server: ServerId, key: String },
     #[error("ssh transport error: {0}")]
     Transport(String),
     #[error("config render error: {0}")]
@@ -114,6 +121,46 @@ pub trait SshTransport: fmt::Debug + Send + Sync {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
 }
 
+/// Контекст рендеринга — то, что `Kernel`/`Protocol` нужно для генерации
+/// конфига. **Все секреты per-server приходят из `secrets`** (загружается
+/// из БД через `inventory::sqlite::SqliteInventory::list_server_secrets`).
+/// Это ключевой архитектурный приём: реализации `Protocol` остаются
+/// **stateless** — они не хранят REALITY-ключи, TUIC-сертификаты и т.п.,
+/// а читают их из контекста по конвенциональным именам.
+///
+/// Конвенция ключей:
+///
+/// - `vless.private_key`, `vless.public_key`, `vless.short_id`, `vless.sni`
+/// - `tuic.cert_path`, `tuic.key_path`
+/// - (новые протоколы добавляют свой namespace)
+#[derive(Debug)]
+pub struct RenderCtx<'a> {
+    pub server: &'a Server,
+    pub secrets: &'a HashMap<String, String>,
+}
+
+impl<'a> RenderCtx<'a> {
+    pub fn new(server: &'a Server, secrets: &'a HashMap<String, String>) -> Self {
+        Self { server, secrets }
+    }
+
+    /// Достать секрет или вернуть `MissingSecret` ошибку.
+    pub fn require(&self, key: &str) -> Result<&str> {
+        self.secrets
+            .get(key)
+            .map(String::as_str)
+            .ok_or_else(|| CoreError::MissingSecret {
+                server: self.server.id.clone(),
+                key: key.to_string(),
+            })
+    }
+
+    /// Достать секрет или дефолт.
+    pub fn or_default<'b>(&'b self, key: &str, default: &'b str) -> &'b str {
+        self.secrets.get(key).map(String::as_str).unwrap_or(default)
+    }
+}
+
 //
 // ── Kernel: что крутится на сервере ─────────────────────────────────────
 //
@@ -128,11 +175,13 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     /// Проверка готовности (есть ли пакет в репо, есть ли systemd-юнит).
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()>;
 
-    /// Сгенерировать конфиг для сервера, имея набор включённых протоколов и
-    /// список пользователей.
+    /// Сгенерировать серверный конфиг. `ctx` несёт сервер и его секреты,
+    /// `users` — все пользователи с грантом на этот сервер, `protocols` —
+    /// набор включённых протоколов (в порядке, в котором они должны
+    /// появиться в inbound'ах).
     fn render_config(
         &self,
-        server: &Server,
+        ctx: &RenderCtx<'_>,
         users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>>;
@@ -155,18 +204,22 @@ pub struct KernelStatus {
 // ── Protocol: что предъявляем клиенту ───────────────────────────────────
 //
 
+/// Протоколы — **stateless**. Ключи и прочие секреты приходят через
+/// `RenderCtx::secrets`. Это позволяет инстанциировать `Protocol` один раз в
+/// `Registry` (без знания ключей), а ключи на каждый деплой брать из
+/// inventory.
 pub trait Protocol: fmt::Debug + Send + Sync {
     fn id(&self) -> ProtocolId;
 
     /// Кусочек серверного inbound — например `{ "type": "vless", ... }`
     /// для sing-box. Ядро потом склеит inbound'ы вместе.
-    fn server_inbound(&self, users: &[User]) -> Result<serde_json::Value>;
+    fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value>;
 
     /// Полный клиентский конфиг (sing-box / wireguard / etc).
-    fn client_config(&self, server: &Server, user: &User) -> Result<serde_json::Value>;
+    fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value>;
 
     /// Share-link (`vless://...`, `tuic://...`, `wg://...`, и т.д.).
-    fn share_link(&self, server: &Server, user: &User) -> Result<String>;
+    fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String>;
 }
 
 //
@@ -190,12 +243,25 @@ impl Registry {
         }
     }
 
-    pub fn register_kernel(&mut self, k: Box<dyn Kernel>) {
+    /// Зарегистрировать ядро. Возвращает ошибку, если ядро с таким `id` уже
+    /// зарегистрировано (предотвращает silent inconsistency).
+    pub fn register_kernel(&mut self, k: Box<dyn Kernel>) -> Result<()> {
+        let id = k.id();
+        if self.kernels.iter().any(|existing| existing.id() == id) {
+            return Err(CoreError::DuplicateKernel(id));
+        }
         self.kernels.push(k);
+        Ok(())
     }
 
-    pub fn register_protocol(&mut self, p: Box<dyn Protocol>) {
+    /// Зарегистрировать протокол. Возвращает ошибку при дубликате.
+    pub fn register_protocol(&mut self, p: Box<dyn Protocol>) -> Result<()> {
+        let id = p.id();
+        if self.protocols.iter().any(|existing| existing.id() == id) {
+            return Err(CoreError::DuplicateProtocol(id));
+        }
         self.protocols.push(p);
+        Ok(())
     }
 
     pub fn kernel(&self, id: &KernelId) -> Option<&dyn Kernel> {
