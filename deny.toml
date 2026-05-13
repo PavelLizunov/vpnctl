@@ -6,16 +6,30 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: timing side-channel in `rsa` crate.
+    # Pulled transitively by russh. No patch upstream (as of 2026-05).
+    # Mitigation: vpnctl uses Ed25519 SSH keys throughout (claude-chat key is
+    # Ed25519). The RSA host-key auth path is unreachable in our control plane.
+    # Network-side timing on a deploy CLI does not apply (we initiate, the
+    # private key is on the client, and an attacker observing client-side
+    # timings has already won bigger).
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
 allow = [
+    # Our own crates.
+    "AGPL-3.0-or-later",
+
+    # Permissive licenses we accept in transitive deps.
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",
@@ -23,6 +37,8 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "Unlicense",
+    "OpenSSL",  # ring's nominal license; we use rustls not openssl, but ring
+                # bundles its own legacy SSLeay license file regardless.
 ]
 confidence-threshold = 0.93
 

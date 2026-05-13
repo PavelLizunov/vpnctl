@@ -62,6 +62,12 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check@v2 wants to write a check-run with annotations,
+    # which requires `checks: write`. Default GITHUB_TOKEN is read-only.
+    permissions:
+      contents: read
+      checks: write
+      issues: write  # used by audit-check to file an advisory issue if asked
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
