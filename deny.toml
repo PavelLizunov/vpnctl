@@ -15,6 +15,11 @@ ignore = [
     # private key is on the client, and an attacker observing client-side
     # timings has already won bigger).
     "RUSTSEC-2023-0071",
+    # The following two reach us only via `testcontainers` (dev-dep used in
+    # the e2e_sshd test); they cannot affect the shipped binary.
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained, transitively via bollard→testcontainers
+    "RUSTSEC-2025-0111", # tokio-tar PAX header parsing — file-smuggling on untrusted tar reads;
+                        # we don't read tarballs in production, only testcontainers does.
 ]
 
 [licenses]
