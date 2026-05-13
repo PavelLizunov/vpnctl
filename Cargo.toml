@@ -9,6 +9,7 @@ members = [
     "crates/hosters",
     "crates/inventory",
     "cli",
+    "daemon",
 ]
 
 [workspace.package]
