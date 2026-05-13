@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=\"${CLAUDE_TOOL_INPUT:-}\"; case \"$input\" in *'git commit'*|*'git push'*) cat <<'MSG'\n\n🤖 vpnctl workflow reminder (see CLAUDE.md → \"Workflow rules\"):\n  1. Did you spawn a review-agent on the diff? (Agent / general-purpose)\n  2. Did you spawn a test-writer-agent for new public APIs? (with spec only, no impl)\n  3. After push: `gh run watch <id> --exit-status` to verify CI.\n\nIf this commit is docs-only or a <5-line hotfix, ignore.\nMSG\n;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

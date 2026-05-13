@@ -2,6 +2,143 @@
 
 Этот файл автоматически загружается в каждый чат с Claude в проекте `vpnctl`.
 
+## Workflow rules (BLOCKING — must run before every commit)
+
+Эти правила — про то, как мы (Pavel + Claude) разрабатываем `vpnctl`.
+Они **обязательны** для каждой feature/refactor/fix. Хук в
+`.claude/settings.json` ловит `git commit` и напоминает, если шаги
+пропущены.
+
+### Перед коммитом (после написания/правки кода)
+
+1. **Review-agent** — независимая проверка через `Agent` (subagent_type =
+   `general-purpose`), prompt из шаблона ниже. Агент не видит мой
+   reasoning, только diff. Возвращает JSON списка findings. Я обрабатываю
+   `critical` и `important` (фиксы), `minor` — opt-in.
+
+2. **Test-writer-agent** — для **новой публичной функции/API** запускаю
+   через `Agent` (`general-purpose`) с prompt'ом, содержащим **только
+   спеку** (signatures + behavior contract), **без реализации**. Агент
+   пишет тесты в отдельный файл (`tests/spec_*.rs` или
+   `#[cfg(test)] mod spec_*`). Прогоняю их у себя. Тесты которые падают
+   = либо bug в реализации (фиксим), либо неверная спека (правим спеку
+   и регенерим тесты).
+
+3. **Локальные gates**: `just ci` (fmt-check + clippy -D warnings + test
+   + deny). Без зелёного — коммит не делать.
+
+### После push
+
+4. `gh run watch <id> --exit-status` — блокируюсь до конца CI.
+   Если красное → `gh run view --log-failed` → fix → push повтор.
+
+### Когда правила можно сократить
+
+- **Чисто docs/README/CLAUDE.md правки** — пункты 1-2 пропускаем,
+  пункт 3 (`just ci`) обязателен (fmt-check всё равно).
+- **Hotfix < 5 строк** — review-agent можно пропустить, test-writer —
+  по контексту.
+
+## Agent prompt templates
+
+Тексты ниже — копировать целиком в `Agent.prompt`, подставив `{...}`.
+
+### `review-agent` prompt template
+
+```
+You are an independent code reviewer for the vpnctl Rust workspace
+(github.com/PavelLizunov/vpnctl). You haven't seen the design discussion,
+only the diff below.
+
+Architectural invariants (cannot be violated):
+- Kernel × Protocol orthogonality: adding a new kernel (wgturn, xray) or
+  protocol (Hysteria2, WireGuard) must NOT require touching CLI, inventory,
+  SSH or crypto crates.
+- Protocols are STATELESS; per-server secrets arrive via RenderCtx.
+- Inventory write paths must be auditable (audit_log row per mutation).
+- No `unwrap()` / `expect()` / `panic!()` outside `#[cfg(test)]`.
+- No `unsafe`. No `openssl-sys` / `native-tls`.
+
+Files changed: {file list from `git diff --name-only HEAD~N..HEAD`}
+Diff: {git diff HEAD~N..HEAD}
+
+Find issues. Categories, in priority order:
+1. CORRECTNESS: bugs, off-by-one, wrong error mapping, swallowed errors,
+   race conditions, resource leaks, command injection in any exec(),
+   path traversal in upload()/read_file(), unhandled panics.
+2. ARCHITECTURE: violations of the invariants above; tight coupling;
+   stateful things that should be stateless.
+3. SECURITY: secrets logged to stdout/audit payload; missing host-key
+   verification path; weak randomness; permission/visibility leaks.
+4. TEST COVERAGE: a new public function with no test for its error path;
+   tests that would pass even if the implementation was inverted.
+5. LIBRARY MISUSE: anything that goes against russh / sqlx / tokio /
+   clap official patterns (cite the doc if you reference it).
+
+Output ≤300 words as a single JSON array:
+[{"severity":"critical|important|minor",
+  "file":"crates/.../foo.rs:42",
+  "issue":"one-line description",
+  "fix":"concrete change, ≤2 sentences"}]
+
+DO NOT comment on:
+- style / formatting (rustfmt handles it)
+- doc completeness
+- naming preferences (unless objectively confusing)
+- micro-optimisations
+```
+
+### `test-writer-agent` prompt template
+
+```
+You are writing Rust tests for vpnctl, INDEPENDENT of the implementation.
+
+CRITICAL: You have NOT seen the implementation source. Only the spec
+below. If a test fails when run, that means the implementation is wrong
+or the spec is ambiguous — DO NOT weaken the test to make it pass.
+
+Crate under test: {crate name, e.g. vpnctl-inventory}
+Cargo manifest deps you may use: {list, e.g. tokio, tempfile, serde_json}
+
+Public API spec (verbatim signatures + behavior):
+{paste signatures + per-function "must" rules; no impl, no internal
+ helpers; if there are invariants — list them}
+
+Behavior contract (rules every test must verify):
+{e.g. "WAL journal mode is enforced after open()",
+      "FK CASCADE removes grants when their user is deleted",
+      "duplicate add_server returns AlreadyExists, not generic sqlx error"}
+
+Write to {path, e.g. crates/inventory/tests/spec_inventory.rs}. Constraints:
+- Each test has its own tempdir / fresh state.
+- Test names describe the spec rule being checked.
+- ≤300 lines total.
+- Use `#[allow(clippy::unwrap_used, clippy::expect_used)]` on the test
+  module (workspace lints forbid them in non-test code; tests can use
+  them for setup).
+- Cover at least: happy path, ONE expected-failure path, one boundary
+  edge case per function.
+- DO NOT add tests that just call the function and assert "no panic".
+  Every test must check observable behavior against the spec.
+```
+
+### Когда добавить новый kernel (wgturn, xray, hysteria-server)
+
+Триггер: пользователь просит «добавь поддержку X».
+
+Сценарий:
+
+1. **Plan-agent** (`Agent`, `subagent_type=Plan`): «Design the file
+   structure for adding kernel `X` such that no existing crate other
+   than `crates/kernels/` and `cli/src/registry.rs` is touched.»
+2. По плану создаю `crates/kernels/src/<x>.rs` + `pub use`.
+3. `cli/src/registry.rs`: один `register_kernel`.
+4. `inventory::server_secrets` — расширить конвенцию ключей (записать
+   в CLAUDE.md и в doc-comment модуля).
+5. Review + Test-writer — как обычно.
+
+
+
 ## Что это
 
 Преемник bash-проекта `vpn-control`. Lightweight Linux-only CLI на Rust для
