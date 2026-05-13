@@ -100,13 +100,20 @@ pub(crate) async fn run(
             };
             reg.validate_server(&server)?;
             inv.add_server(&server).await?;
-            inv.audit(
-                "cli",
-                "server.add",
-                Some(&id),
-                Some(&serde_json::to_value(&server)?),
-            )
-            .await?;
+            // Whitelist what goes into audit_log — if Server ever gains a
+            // sensitive field (api token, jump credentials), serializing
+            // the whole struct would silently leak it. Be explicit.
+            let audit_payload = json!({
+                "id": server.id.0,
+                "address": server.address,
+                "ssh_port": server.ssh_port,
+                "ssh_user": server.ssh_user,
+                "kernel": server.kernel.0,
+                "hoster": server.hoster,
+                "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+            });
+            inv.audit("cli", "server.add", Some(&id), Some(&audit_payload))
+                .await?;
             ui::print(format, &json!({ "id": id, "added": true }), |_| {
                 println!("server '{id}' added");
                 Ok(())

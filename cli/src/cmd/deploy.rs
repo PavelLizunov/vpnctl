@@ -109,14 +109,27 @@ pub(crate) async fn run(
             .await?;
         if probe.trim() == "MISSING" {
             println!("→ generating TUIC self-signed certificate on node");
+            // `set -e` so a chown / chmod failure isn't silently swallowed
+            // mid-script (the original `&&` chain stopped at first error but
+            // didn't propagate exit status reliably across all sing-box
+            // package layouts). Use server.id as CN (deterministic, no
+            // dependency on the node's `hostname` output which may contain
+            // shell-special chars; though we pass it via single-quoted
+            // string anyway).
+            let cn = server.id.0.replace('\'', ""); // safety belt — shell_quote wraps in '..' below
             let gen_cmd = format!(
-                "openssl req -x509 -newkey rsa:2048 \
-                 -keyout {TUIC_KEY_PATH} -out {TUIC_CERT_PATH} \
-                 -days 3650 -nodes -subj \"/CN=$(hostname)\" 2>&1 && \
-                 chown sing-box:sing-box {TUIC_CERT_PATH} {TUIC_KEY_PATH} && \
+                "set -eu; \
+                 openssl req -x509 -newkey rsa:2048 \
+                   -keyout {TUIC_KEY_PATH} -out {TUIC_CERT_PATH} \
+                   -days 3650 -nodes -subj '/CN={cn}'; \
+                 chown sing-box:sing-box {TUIC_CERT_PATH} {TUIC_KEY_PATH}; \
                  chmod 600 {TUIC_KEY_PATH}"
             );
             ssh.exec(&gen_cmd).await?;
+            // Record presence in inventory so we can later support a
+            // `--rotate-tuic-cert` path that re-generates intentionally.
+            inv.set_server_secret(&sid, "tuic.cert_present", "1")
+                .await?;
         }
     }
 

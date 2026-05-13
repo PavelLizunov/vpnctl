@@ -1,5 +1,21 @@
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
 use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
+
+/// Set of bytes that must be percent-encoded in URL fragments (RFC 3986):
+/// everything that controls URL parsing, plus space/`#`/`?` which would
+/// otherwise truncate or open a new component.
+const FRAGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?')
+    .add(b'/')
+    .add(b'@')
+    .add(b':');
 
 /// VLESS + REALITY на TCP:443.
 ///
@@ -84,6 +100,10 @@ impl Protocol for VlessReality {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        // user.id.0 lands in the URL fragment (`#name`) where chars like
+        // `#`, ` `, `/` would corrupt the link or open a new component.
+        // Percent-encode defensively even though server/CLI validate ids.
+        let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         Ok(format!(
             "vless://{uuid}@{addr}:443?type=tcp&security=reality&pbk={pbk}&sid={sid}&sni={sni}&fp=chrome#{name}",
             uuid = user.uuid,
@@ -91,7 +111,7 @@ impl Protocol for VlessReality {
             pbk = public_key,
             sid = short_id,
             sni = sni,
-            name = user.id.0,
+            name = name,
         ))
     }
 }

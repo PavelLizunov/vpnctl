@@ -188,6 +188,14 @@ impl SqliteInventory {
     }
 
     pub async fn update_trusted_fingerprint(&self, id: &ServerId, fp: &str) -> Result<()> {
+        // Defensive validation — a malicious or buggy caller could otherwise
+        // store an empty / arbitrary value, after which every future connect
+        // silently rejects the real host key with a useless error.
+        if !is_valid_sha256_fingerprint(fp) {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "fingerprint must look like 'SHA256:<base64-43>', got {fp:?}"
+            )));
+        }
         sqlx::query(
             "UPDATE servers SET trusted_host_fingerprint = ?1,
                                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -409,6 +417,20 @@ impl SqliteInventory {
 // Owned `SqliteRow` is what `.map(...)` over `Vec<Row>` gives us — taking by
 // reference here would require a `.collect()` round-trip. Accepting by value
 // is correct.
+/// SSH host fingerprint sanity check — `SHA256:<base64-of-32-bytes>`.
+/// We don't try to decode the base64; just enforce the shape so a typo
+/// or empty string can't pass.
+fn is_valid_sha256_fingerprint(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("SHA256:") else {
+        return false;
+    };
+    // SHA-256 = 32 bytes; padded base64 is 44 chars, unpadded is 43.
+    matches!(rest.len(), 43 | 44)
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
     Ok(User {
@@ -507,10 +529,29 @@ mod tests {
     async fn fingerprint_update_persists() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("s")).await?;
-        inv.update_trusted_fingerprint(&ServerId("s".into()), "SHA256:abc")
+        // 43-char unpadded SHA-256 base64 (russh's natural format).
+        let valid = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        inv.update_trusted_fingerprint(&ServerId("s".into()), valid)
             .await?;
         let got = inv.get_server(&ServerId("s".into())).await?.unwrap();
-        assert_eq!(got.trusted_host_fingerprint.as_deref(), Some("SHA256:abc"));
+        assert_eq!(got.trusted_host_fingerprint.as_deref(), Some(valid));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fingerprint_update_rejects_garbage() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("s")).await?;
+        for bad in ["", "abc", "MD5:xxx", "SHA256:short", "SHA256:!!!!"] {
+            let err = inv
+                .update_trusted_fingerprint(&ServerId("s".into()), bad)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, SqliteInventoryError::Invalid(_)),
+                "input {bad:?} should be rejected with Invalid, got {err:?}"
+            );
+        }
         Ok(())
     }
 

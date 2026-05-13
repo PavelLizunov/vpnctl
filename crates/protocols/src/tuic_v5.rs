@@ -1,5 +1,32 @@
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
 use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
+
+/// Userinfo-safe set: everything that has a structural meaning in
+/// `<userinfo>@<host>` of an authority component (RFC 3986 §3.2.1).
+const USERINFO: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'@')
+    .add(b'/')
+    .add(b':')
+    .add(b'\\')
+    .add(b'[')
+    .add(b']');
+
+const FRAGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?');
 
 /// TUIC v5 на UDP:8443. Self-signed cert — на клиенте `insecure: true`
 /// (UUID+password — настоящая аутентификация, TLS чисто для шифрования).
@@ -68,12 +95,18 @@ impl Protocol for TuicV5 {
     }
 
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+        let raw_pw = user.tuic_password.clone().unwrap_or_default();
+        // Both UUID and password sit inside the userinfo segment, where `:`,
+        // `@`, `/`, and space would corrupt parsing. Name sits in the fragment.
+        let uuid = utf8_percent_encode(&user.uuid, USERINFO);
+        let pw = utf8_percent_encode(&raw_pw, USERINFO);
+        let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         Ok(format!(
             "tuic://{uuid}:{pw}@{addr}:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#{name}",
-            uuid = user.uuid,
-            pw = user.tuic_password.clone().unwrap_or_default(),
+            uuid = uuid,
+            pw = pw,
             addr = ctx.server.address,
-            name = user.id.0
+            name = name,
         ))
     }
 }

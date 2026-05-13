@@ -1,7 +1,7 @@
 //! Integration spec for `SqliteInventory`. Tests numbered after rules
 //! 1-15 in the test-writer brief; written from the spec only.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -186,14 +186,15 @@ async fn update_trusted_fingerprint_is_observable() {
     let before = inv.get_server(&id).await.unwrap().unwrap();
     assert!(before.trusted_host_fingerprint.is_none());
 
-    inv.update_trusted_fingerprint(&id, "SHA256:deadbeef")
-        .await
-        .unwrap();
+    // 43-char unpadded base64 — what `russh::keys::PublicKey::fingerprint`
+    // actually returns. SqliteInventory enforces this shape.
+    let fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    inv.update_trusted_fingerprint(&id, fp).await.unwrap();
 
     let after = inv.get_server(&id).await.unwrap().unwrap();
     assert_eq!(
         after.trusted_host_fingerprint.as_deref(),
-        Some("SHA256:deadbeef"),
+        Some(fp),
         "fingerprint update did not persist"
     );
 }
@@ -293,7 +294,9 @@ async fn grant_is_idempotent() {
     let uid = UserId("u".into());
 
     inv.grant(&uid, &sid).await.unwrap();
-    inv.grant(&uid, &sid).await.expect("second grant must not error");
+    inv.grant(&uid, &sid)
+        .await
+        .expect("second grant must not error");
 
     let users = inv.users_for_server(&sid).await.unwrap();
     assert_eq!(users.len(), 1, "duplicate grant row: {users:?}");
@@ -307,7 +310,9 @@ async fn audit_recent_order_limit_payload() {
 
     inv.audit("cli", "first", Some("t1"), None).await.unwrap();
     let p2 = json!({ "k": "v", "n": 42 });
-    inv.audit("cli", "second", Some("t2"), Some(&p2)).await.unwrap();
+    inv.audit("cli", "second", Some("t2"), Some(&p2))
+        .await
+        .unwrap();
     inv.audit("system", "third", None, Some(&json!([1, 2, 3])))
         .await
         .unwrap();
@@ -343,5 +348,12 @@ async fn audit_ts_is_rfc3339_utc() {
         .expect("ts must be RFC3339")
         .with_timezone(&chrono::Utc);
     assert_eq!(parsed, row.ts);
-    assert_eq!(row.ts.offset().to_string(), "+00:00", "ts not UTC: {s}");
+    // `DateTime<Utc>::offset()` returns the `Utc` singleton, whose Display
+    // is the literal "UTC" — not "+00:00". Format-print the offset to
+    // verify it's actually zero.
+    assert_eq!(
+        row.ts.format("%:z").to_string(),
+        "+00:00",
+        "ts not UTC: {s}"
+    );
 }
