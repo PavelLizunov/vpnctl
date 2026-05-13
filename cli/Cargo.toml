@@ -18,3 +18,6 @@ vpnctl-hosters = { path = "../crates/hosters" }
 vpnctl-inventory = { path = "../crates/inventory" }
 vpnctl-crypto = { path = "../crates/crypto" }
 clap = { version = "4", features = ["derive", "env"] }
+
+[lints]
+workspace = true

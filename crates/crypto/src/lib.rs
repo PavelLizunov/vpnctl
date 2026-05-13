@@ -1,9 +1,6 @@
 //! Чистые функции для генерации идентификаторов и ключей.
 //! Никакого I/O — всё детерминируемо из RNG.
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use rand::TryRngCore;

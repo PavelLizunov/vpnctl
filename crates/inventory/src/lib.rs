@@ -1,14 +1,11 @@
 //! Inventory — хранение состояния (servers/users/grants/audit).
 //! В этом скелете — in-memory; в следующей итерации заменим на sqlx+sqlite.
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vpnctl_core::{CoreError, Result, Server, ServerId, User, UserId};
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct InMemoryInventory {
     servers: HashMap<String, Server>,
     users: HashMap<String, User>,
@@ -23,7 +20,10 @@ impl InMemoryInventory {
 
     pub fn add_server(&mut self, s: Server) -> Result<()> {
         if self.servers.contains_key(&s.id.0) {
-            return Err(CoreError::Render(format!("server {} already exists", s.id.0)));
+            return Err(CoreError::Render(format!(
+                "server {} already exists",
+                s.id.0
+            )));
         }
         self.servers.insert(s.id.0.clone(), s);
         Ok(())

@@ -8,9 +8,6 @@
 //!
 //! Никакие другие крейты править не надо.
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 mod sing_box;
 
 pub use sing_box::SingBox;

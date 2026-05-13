@@ -1,22 +1,17 @@
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, Result, Server,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, Result, Server, SshTransport,
+    User,
 };
 
 /// sing-box 1.13.x из официального APT-репо SagerNet.
+#[derive(Debug, Default)]
 pub struct SingBox;
 
 impl SingBox {
     pub fn new() -> Self {
         Self
-    }
-}
-
-impl Default for SingBox {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

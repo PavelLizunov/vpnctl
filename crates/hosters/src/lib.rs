@@ -2,9 +2,6 @@
 //! Главное, что они задают: разрешён ли смена SSH-порта, и какие
 //! «особенности firewall'a».
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 pub trait Hoster: Send + Sync {
     fn name(&self) -> &'static str;
     /// На каком SSH-порту ноду надо настраивать. Для DigitalOcean — 22 (Cloud
@@ -17,6 +14,7 @@ pub trait Hoster: Send + Sync {
         Self: Sized;
 }
 
+#[derive(Debug, Default)]
 pub struct DigitalOcean;
 impl Hoster for DigitalOcean {
     fn name(&self) -> &'static str {
@@ -33,6 +31,7 @@ impl Hoster for DigitalOcean {
     }
 }
 
+#[derive(Debug, Default)]
 pub struct Cloudzy;
 impl Hoster for Cloudzy {
     fn name(&self) -> &'static str {
@@ -50,6 +49,7 @@ impl Hoster for Cloudzy {
 }
 
 /// Дефолтный hoster — для всего остального.
+#[derive(Debug, Default)]
 pub struct Generic;
 impl Hoster for Generic {
     fn name(&self) -> &'static str {

@@ -5,9 +5,6 @@
 //! Это позволяет добавлять новое ядро (например, wgturn) **не трогая**
 //! existing inventory / cli / ssh / crypto-слои.
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -89,7 +86,7 @@ pub struct User {
 /// Минимальный SSH-контракт: что-нибудь, что умеет дёрнуть команду.
 /// Реальная impl — в `vpnctl-ssh` поверх `russh`. В тестах — мок.
 #[async_trait]
-pub trait SshTransport: Send + Sync {
+pub trait SshTransport: fmt::Debug + Send + Sync {
     async fn exec(&self, cmd: &str) -> Result<String>;
     async fn upload(&self, path: &str, content: &[u8]) -> Result<()>;
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
@@ -100,7 +97,7 @@ pub trait SshTransport: Send + Sync {
 //
 
 #[async_trait]
-pub trait Kernel: Send + Sync {
+pub trait Kernel: fmt::Debug + Send + Sync {
     fn id(&self) -> KernelId;
 
     /// Список протоколов, которые это ядро вообще способно поднять.
@@ -136,7 +133,7 @@ pub struct KernelStatus {
 // ── Protocol: что предъявляем клиенту ───────────────────────────────────
 //
 
-pub trait Protocol: Send + Sync {
+pub trait Protocol: fmt::Debug + Send + Sync {
     fn id(&self) -> ProtocolId;
 
     /// Кусочек серверного inbound — например `{ "type": "vless", ... }`
@@ -157,6 +154,7 @@ pub trait Protocol: Send + Sync {
 // реестр. CLI ходит сюда: «дай мне Kernel по id».
 //
 
+#[derive(Debug, Default)]
 pub struct Registry {
     kernels: Vec<Box<dyn Kernel>>,
     protocols: Vec<Box<dyn Protocol>>,
@@ -179,17 +177,23 @@ impl Registry {
     }
 
     pub fn kernel(&self, id: &KernelId) -> Option<&dyn Kernel> {
-        self.kernels.iter().find(|k| &k.id() == id).map(|k| k.as_ref())
+        self.kernels
+            .iter()
+            .find(|k| &k.id() == id)
+            .map(|k| k.as_ref())
     }
 
     pub fn protocol(&self, id: &ProtocolId) -> Option<&dyn Protocol> {
-        self.protocols.iter().find(|p| &p.id() == id).map(|p| p.as_ref())
+        self.protocols
+            .iter()
+            .find(|p| &p.id() == id)
+            .map(|p| p.as_ref())
     }
 
     pub fn validate_server(&self, server: &Server) -> Result<()> {
-        let kernel = self.kernel(&server.kernel).ok_or_else(|| {
-            CoreError::Render(format!("unknown kernel {}", server.kernel))
-        })?;
+        let kernel = self
+            .kernel(&server.kernel)
+            .ok_or_else(|| CoreError::Render(format!("unknown kernel {}", server.kernel)))?;
         let supported = kernel.supported_protocols();
         for proto in &server.enabled_protocols {
             if !supported.contains(proto) {
@@ -200,11 +204,5 @@ impl Registry {
             }
         }
         Ok(())
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self::new()
     }
 }

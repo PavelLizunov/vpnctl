@@ -2,17 +2,12 @@ use serde_json::json;
 use vpnctl_core::{Protocol, ProtocolId, Result, Server, User};
 
 /// TUIC v5 на UDP:8443. Self-signed cert — на клиенте `insecure: true`.
+#[derive(Debug, Default)]
 pub struct TuicV5;
 
 impl TuicV5 {
     pub fn new() -> Self {
         Self
-    }
-}
-
-impl Default for TuicV5 {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -25,9 +20,9 @@ impl Protocol for TuicV5 {
         let users_json: Vec<_> = users
             .iter()
             .filter_map(|u| {
-                u.tuic_password.as_ref().map(|pw| {
-                    json!({ "uuid": u.uuid, "name": u.id.0, "password": pw })
-                })
+                u.tuic_password
+                    .as_ref()
+                    .map(|pw| json!({ "uuid": u.uuid, "name": u.id.0, "password": pw }))
             })
             .collect();
         Ok(json!({

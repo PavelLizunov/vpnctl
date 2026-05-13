@@ -4,9 +4,6 @@
 //! Сейчас здесь только `MockTransport`, чтобы остальные крейты могли
 //! компилироваться и тестироваться без сети.
 
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -14,6 +11,7 @@ use vpnctl_core::{CoreError, Result, SshTransport};
 
 /// Учебно-тестовый транспорт. Запоминает заливки, отдаёт сконфигурированные
 /// ответы на `exec`. Полезен для unit-тестов ядер без поднятия SSH-сервера.
+#[derive(Debug, Default)]
 pub struct MockTransport {
     exec_responses: Mutex<HashMap<String, String>>,
     files: Mutex<HashMap<String, Vec<u8>>>,
@@ -35,12 +33,6 @@ impl MockTransport {
 
     pub fn uploaded(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().ok()?.get(path).cloned()
-    }
-}
-
-impl Default for MockTransport {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

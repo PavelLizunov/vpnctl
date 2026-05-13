@@ -8,3 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 vpnctl-core = { path = "../core" }
+
+[lints]
+workspace = true

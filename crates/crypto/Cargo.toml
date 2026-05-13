@@ -12,3 +12,6 @@ rand = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 base64 = "0.22"
 hex = "0.4"
+
+[lints]
+workspace = true

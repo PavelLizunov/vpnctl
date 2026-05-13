@@ -2,6 +2,7 @@ use serde_json::json;
 use vpnctl_core::{Protocol, ProtocolId, Result, Server, User};
 
 /// VLESS + REALITY на TCP:443. SNI по умолчанию — `www.microsoft.com`.
+#[derive(Debug, Clone)]
 pub struct VlessReality {
     pub sni: String,
     pub short_id: String,

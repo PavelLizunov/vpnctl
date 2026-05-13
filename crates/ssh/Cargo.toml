@@ -11,3 +11,6 @@ vpnctl-core = { path = "../core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 # russh добавим следующей итерацией; сейчас крейт декларирует только мок-транспорт.
+
+[lints]
+workspace = true
