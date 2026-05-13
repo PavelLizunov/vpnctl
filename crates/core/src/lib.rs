@@ -76,7 +76,25 @@ pub struct Server {
     pub enabled_protocols: Vec<ProtocolId>,
     /// SHA256-fingerprint SSH host key, который мы доверяем.
     /// На первый коннект может быть `None` (TOFU — записывается после auth).
+    #[serde(default)]
     pub trusted_host_fingerprint: Option<String>,
+    /// Имя хостера (ключ в `vpnctl-hosters`): "digitalocean" / "cloudzy" / "generic".
+    #[serde(default = "default_hoster")]
+    pub hoster: String,
+    /// SSH-jump host (ProxyJump). `None` — прямое подключение. ProxyJump
+    /// в SSH-транспорте появится в v0.3, но поле резервируем заранее.
+    #[serde(default)]
+    pub jump_via: Option<ServerId>,
+    /// Множитель учёта трафика (Marzban-style). Резерв для будущих лимитов.
+    #[serde(default = "default_usage_coefficient")]
+    pub usage_coefficient: f64,
+}
+
+fn default_hoster() -> String {
+    "generic".to_string()
+}
+fn default_usage_coefficient() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -72,7 +72,11 @@ pub struct RusshTransportBuilder {
 }
 
 impl RusshTransportBuilder {
-    pub fn new(address: impl Into<String>, user: impl Into<String>, key_path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        address: impl Into<String>,
+        user: impl Into<String>,
+        key_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             address: address.into(),
             port: 22,
@@ -365,7 +369,10 @@ mod tests {
 
     #[test]
     fn quote_simple() {
-        assert_eq!(shell_quote("/etc/sing-box/config.json"), "'/etc/sing-box/config.json'");
+        assert_eq!(
+            shell_quote("/etc/sing-box/config.json"),
+            "'/etc/sing-box/config.json'"
+        );
     }
 
     #[test]

@@ -83,8 +83,10 @@ async fn host_fingerprint_observed() {
         .await
         .expect_err_or_pass("connect");
     let fp = t.observed_host_fingerprint().await;
-    assert!(fp.as_deref().is_some_and(|s| s.starts_with("SHA256:")),
-            "expected SHA256:... fingerprint, got {fp:?}");
+    assert!(
+        fp.as_deref().is_some_and(|s| s.starts_with("SHA256:")),
+        "expected SHA256:... fingerprint, got {fp:?}"
+    );
 }
 
 // Helper: integration tests legitimately panic on setup failure.
