@@ -17,7 +17,15 @@ vpnctl-kernels = { path = "../crates/kernels" }
 vpnctl-hosters = { path = "../crates/hosters" }
 vpnctl-inventory = { path = "../crates/inventory" }
 vpnctl-crypto = { path = "../crates/crypto" }
+vpnctl-ssh = { path = "../crates/ssh" }
+
 clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+anyhow = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = "5"
+comfy-table = "7"
 
 [lints]
 workspace = true

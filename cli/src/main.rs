@@ -1,64 +1,77 @@
-//! Тонкий CLI поверх крейтов. Архитектурное правило: бизнес-логики здесь нет —
-//! только парсинг аргументов, вызов крейтов, форматирование вывода.
+//! `vpnctl` — тонкий CLI поверх крейтов. Бизнес-логика живёт в крейтах,
+//! здесь только парсинг аргументов, dispatch и форматирование вывода.
 
-use clap::{Parser, Subcommand};
-use vpnctl_core::Registry;
-use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{TuicV5, VlessReality};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
-#[derive(Parser)]
+mod cmd;
+mod registry;
+mod ui;
+
+#[derive(Parser, Debug)]
 #[command(name = "vpnctl", version, about = "VPN infrastructure control")]
 struct Cli {
+    /// Path to the SQLite inventory file. Created on first use.
+    #[arg(long, env = "VPNCTL_DB", global = true)]
+    db: Option<PathBuf>,
+
+    /// Output format for list/show commands.
+    #[arg(long, short, global = true, default_value = "text", value_enum)]
+    output: OutputFormat,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
 
-#[derive(Subcommand)]
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub(crate) enum OutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Показать зарегистрированные ядра и протоколы.
-    Registry,
-    /// Сгенерировать UUID v4 (для smoke-теста криптокрейта).
+    /// Generate a fresh UUID v4 (smoke).
     Uuid,
+    /// Show registered kernels and protocols.
+    Registry,
+    /// Manage servers in the inventory.
+    Server {
+        #[command(subcommand)]
+        cmd: cmd::server::ServerCmd,
+    },
+    /// Manage users in the inventory.
+    User {
+        #[command(subcommand)]
+        cmd: cmd::user::UserCmd,
+    },
+    /// Grant a user access to a server.
+    Grant { user: String, server: String },
+    /// Revoke a user's access to a server.
+    Revoke { user: String, server: String },
 }
 
-fn build_registry() -> Result<Registry, vpnctl_core::CoreError> {
-    let mut reg = Registry::new();
-
-    // ─── ЯДРА ────────────────────────────────────────────────────────────
-    reg.register_kernel(Box::new(SingBox::new()))?;
-    // Чтобы добавить wgturn — раскомментируй и положи crates/kernels/src/wgturn.rs:
-    // reg.register_kernel(Box::new(Wgturn::new()))?;
-
-    // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
-    // Stateless — реальные ключи (REALITY private/public/short_id, TUIC cert
-    // paths) приходят из inventory.server_secrets через RenderCtx во время
-    // деплоя. Здесь — просто declarative registration.
-    reg.register_protocol(Box::new(VlessReality::new()))?;
-    reg.register_protocol(Box::new(TuicV5::new()))?;
-
-    Ok(reg)
-}
-
-fn main() -> std::process::ExitCode {
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.cmd {
-        Cmd::Registry => match build_registry() {
-            Ok(_reg) => {
-                // TODO(v0.3): пройтись по reg и вывести фактический список.
-                // Сейчас Registry не имеет публичных геттеров для списка.
-                println!("registry built ok");
-                println!("kernel: sing-box (vless+reality, tuic-v5, hysteria2, shadowsocks-2022)");
-                println!("protocols: vless+reality, tuic-v5");
-                std::process::ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::ExitCode::FAILURE
-            }
-        },
+
+    let res: anyhow::Result<()> = match cli.cmd {
         Cmd::Uuid => {
             println!("{}", vpnctl_crypto::gen_uuid());
-            std::process::ExitCode::SUCCESS
+            Ok(())
+        }
+        Cmd::Registry => cmd::registry_cmd::run(cli.output),
+        Cmd::Server { cmd } => cmd::server::run(cmd, cli.db, cli.output).await,
+        Cmd::User { cmd } => cmd::user::run(cmd, cli.db, cli.output).await,
+        Cmd::Grant { user, server } => cmd::grant::run_grant(&user, &server, cli.db).await,
+        Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
+    };
+
+    match res {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::ExitCode::FAILURE
         }
     }
 }
