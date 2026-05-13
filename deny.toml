@@ -37,14 +37,17 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "Unlicense",
-    "OpenSSL",  # ring's nominal license; we use rustls not openssl, but ring
-                # bundles its own legacy SSLeay license file regardless.
+    "OpenSSL",                # legacy SSLeay text bundled inside `ring`
+    "CDLA-Permissive-2.0",    # webpki-roots / Mozilla CA bundle
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path-deps (`{ path = "../core" }`) have no version pin and look
+# like wildcards; that's normal for a workspace.
+allow-wildcard-paths = true
 deny = [
     # banned: openssl-sys — мы не хотим тянуть system OpenSSL, всё через rustls / RustCrypto.
     { name = "openssl" },

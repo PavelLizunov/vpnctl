@@ -59,17 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    # rustsec/audit-check@v2 wants to write a check-run with annotations,
-    # which requires `checks: write`. Default GITHUB_TOKEN is read-only.
-    permissions:
-      contents: read
-      checks: write
-      issues: write  # used by audit-check to file an advisory issue if asked
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # NOTE: a separate `cargo audit` job was removed — the `deny` job above
+  # already runs `cargo deny check advisories` against the same RustSec DB,
+  # AND honours our deny.toml `[advisories].ignore` list. Having both meant
+  # double-failing on RUSTSEC-2023-0071 (Marvin Attack on `rsa` via russh).
