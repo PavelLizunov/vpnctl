@@ -9,6 +9,26 @@
 Цель — единственный статический musl-бинарник, без БД-сервера, без агента
 на ноде, SSH-first.
 
+## Где живёт проект (важно — GitHub-first)
+
+| | |
+|---|---|
+| **Canonical home** | https://github.com/PavelLizunov/vpnctl |
+| **Issues / PRs** | только на GitHub |
+| **Primary CI** | GitHub Actions (`.github/workflows/ci.yml`) |
+| **Mirror (LAN dev)** | http://192.168.0.207:18300/slovn/vpnctl (Forgejo) |
+| **Mirror CI** | Forgejo Actions (`.forgejo/workflows/ci.yml`) — best-effort |
+
+`origin` настроен так:
+```
+fetch  git@github.com:PavelLizunov/vpnctl.git
+push   git@github.com:PavelLizunov/vpnctl.git              (GitHub, primary)
+push   ssh://git@192.168.0.207:18222/slovn/vpnctl.git      (Forgejo, mirror)
+```
+`git push` улетает в оба. Если когда-то надо отключить mirror — просто
+`git remote set-url --delete --push origin '.*forgejo.*'` (или удалить
+конкретный URL).
+
 ## Архитектурный принцип (нельзя нарушать)
 
 Два **независимых** trait-уровня:
@@ -73,12 +93,12 @@ just ci          # fmt-check + clippy + test + deny — прогон до push
 
 ## CI
 
-| | Где | Что проверяет |
+| Where | File | What it gates |
 |---|---|---|
-| Forgejo Actions | `.forgejo/workflows/ci.yml` | check + fmt + clippy + test (внутри `rust:1.85-slim-bookworm`) |
-| GitHub Actions | `.github/workflows/ci.yml` | то же + `cargo deny` + `cargo audit` |
+| **GitHub Actions (primary)** | `.github/workflows/ci.yml` | check + fmt + clippy -D warnings + test + `cargo deny` + `cargo audit` |
+| Forgejo Actions (mirror) | `.forgejo/workflows/ci.yml` | то же без deny/audit, в `rust:1.85-slim-bookworm` |
 
-Зелёный CI — обязательное условие для push в main.
+Зелёный GitHub CI — обязательное условие для merge в main. Forgejo — best-effort.
 
 ## Грабли
 
@@ -88,13 +108,8 @@ just ci          # fmt-check + clippy + test + deny — прогон до push
 Решение на уровне инфры: добавить `~/.cargo` и `~/.rustup` в персистентные
 volumes Docker compose (TODO для Pavel).
 
-### Mirror remote — push в оба места одной командой
-```
-origin fetch ssh://git@192.168.0.207:18222/slovn/vpnctl.git
-origin push  ssh://git@192.168.0.207:18222/slovn/vpnctl.git    (Forgejo, primary)
-origin push  git@github.com:PavelLizunov/vpnctl.git            (GitHub, mirror)
-```
-`git push` уходит в оба. Fetch — только из Forgejo.
+### Mirror remote — см. секцию «Где живёт проект» выше
+Один `git push` уходит в оба remote. Fetch — только из GitHub.
 
 ### Без C-линкера (`cc`) на хосте cargo install ничего не соберёт
 В Dockerfile claude-chat теперь зашит `build-essential` (Pavel сделал
@@ -108,20 +123,25 @@ origin push  git@github.com:PavelLizunov/vpnctl.git            (GitHub, mirror)
 
 ## Связанные репо и серверы
 
-- **Старый bash-проект**: `slovn/vpn-control` — там список production VPN
-  серверов (`SERVERS.md`), inventory с секретами (`inventory/<IP>.env`,
-  не коммитить!), и SSH-ключ `claude-dev` (`/home/user/.ssh/id_ed25519`,
-  НЕ `/home/appuser/.ssh/`).
-- **Production VPN серверы** — пока не трогаем, миграция на Rust будет
+- **Старый bash-проект `vpn-control`** — живёт пока только в локальном
+  Forgejo (`slovn/vpn-control`). Там список production VPN серверов
+  (`SERVERS.md`), inventory с секретами (`inventory/<IP>.env`, не коммитить!),
+  и SSH-ключ `claude-dev` (`/home/user/.ssh/id_ed25519`,
+  НЕ `/home/appuser/.ssh/`). Если миграция на vpnctl завершится успешно,
+  старый репо уйдёт в archive.
+- **Production VPN серверы** — пока не трогаем, миграция на vpnctl будет
   только когда v0.2 пройдёт интеграционный тест на staging.
 
 ## Roadmap
 
 - **v0.1** ✅ — scaffold (workspace, traits, registry, smoke binary), CI
-- **v0.2** — `russh` транспорт, `sqlx+sqlite` inventory, CLI команды
-  (server/user/deploy/status/sub), интеграционный тест
+- **v0.2** in progress
+  - ✅ `russh` транспорт (4 integration tests на live SSH)
+  - ⏳ `sqlx+sqlite` inventory с миграциями
+  - ⏳ CLI команды server / user / deploy / status / sub
+  - ⏳ Интеграционный тест end-to-end через testcontainers
 - **v0.3** — bootstrap fresh-node (ssh harden, fail2ban, UFW, BBR), ProxyJump
-  через russh, subscription URLs (offline-генерация)
+  через russh, subscription URLs (offline-генерация), backon retry layer
 - **v0.4** — daemon `vpnctld` + REST API + `/sub/<token>` HTTP endpoint
 - **v0.5** — опциональный mTLS gRPC агент на ноде для live stats
 
