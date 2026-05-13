@@ -16,6 +16,11 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["slovn"]
 rust-version = "1.85"
+# Self-hosted homelab tool; never published to crates.io. Setting this
+# workspace-wide also lets cargo-deny's `allow-wildcard-paths` apply (it
+# only kicks in for non-public crates, because crates.io rejects path
+# deps in published packages).
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
