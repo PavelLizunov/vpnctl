@@ -104,12 +104,34 @@ fn default_usage_coefficient() -> f64 {
     1.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
     pub uuid: String,
     pub tuic_password: Option<String>,
     pub wireguard_pubkey: Option<String>,
+    /// Opaque token for `vpnctld /sub/<token>` lookup. Populated by
+    /// `inventory::add_user` if `None`. Field is `Option` so JSON snapshots
+    /// from before v0.4 still deserialise.
+    #[serde(default)]
+    pub sub_token: Option<String>,
+}
+
+// Manual Debug: derived would print sub_token / tuic_password verbatim,
+// which leaks credential-equivalents into logs / panics / anyhow chains.
+impl fmt::Debug for User {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("User")
+            .field("id", &self.id)
+            .field("uuid", &self.uuid)
+            .field(
+                "tuic_password",
+                &self.tuic_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("wireguard_pubkey", &self.wireguard_pubkey)
+            .field("sub_token", &self.sub_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Минимальный SSH-контракт: что-нибудь, что умеет дёрнуть команду.

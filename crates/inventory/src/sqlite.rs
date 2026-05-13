@@ -37,6 +37,9 @@ pub enum SqliteInventoryError {
     /// дружелюбный текст «already exists» вместо raw SQL message.
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    /// Wrapping `std::io::Error` from the crypto layer (RNG failure).
+    #[error("io (rng): {0}")]
+    CryptoIo(std::io::Error),
 }
 
 /// Convert sqlx UNIQUE constraint violations to `AlreadyExists`. Other
@@ -89,6 +92,12 @@ impl SqliteInventory {
             .await?;
 
         MIGRATOR.run(&pool).await?;
+
+        // Backfill: every user must have a non-null sub_token after open().
+        // Migration 0002 adds the column nullable; we fill it here so the
+        // rest of the code can rely on `User.sub_token` being Some.
+        backfill_sub_tokens(&pool).await?;
+
         Ok(Self { pool })
     }
 
@@ -261,23 +270,63 @@ impl SqliteInventory {
     // ── Users ───────────────────────────────────────────────────────────
 
     pub async fn add_user(&self, u: &User) -> Result<()> {
+        // Ensure every user gets a sub_token. Caller may pre-set one (e.g.
+        // when restoring from a snapshot); we generate only if absent.
+        let token = match u.sub_token.as_deref() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
+        };
         let res = sqlx::query(
-            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, sub_token)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(&u.id.0)
         .bind(&u.uuid)
         .bind(&u.tuic_password)
         .bind(&u.wireguard_pubkey)
+        .bind(&token)
         .execute(&self.pool)
         .await;
         map_unique(res, format!("user {}", u.id.0))?;
         Ok(())
     }
 
+    /// Look up a user by their subscription token. Constant-time'ish at the
+    /// SQL layer (sqlite scans the unique index), but the caller is the
+    /// public daemon — see also `vpnctld` rate-limit middleware.
+    pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {
+        let row = sqlx::query(
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+             FROM users WHERE sub_token = ?1",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_user).transpose()
+    }
+
+    /// Regenerate the sub_token for an existing user (rotation). Returns the
+    /// new token. Old URL stops working immediately.
+    pub async fn regenerate_sub_token(&self, id: &UserId) -> Result<String> {
+        let token = vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?;
+        let res = sqlx::query("UPDATE users SET sub_token = ?1 WHERE id = ?2")
+            .bind(&token)
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}",
+                id.0
+            )));
+        }
+        Ok(token)
+    }
+
     pub async fn get_user(&self, id: &UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey FROM users WHERE id = ?1",
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+             FROM users WHERE id = ?1",
         )
         .bind(&id.0)
         .fetch_optional(&self.pool)
@@ -286,10 +335,12 @@ impl SqliteInventory {
     }
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
-        let rows =
-            sqlx::query("SELECT id, uuid, tuic_password, wireguard_pubkey FROM users ORDER BY id")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+             FROM users ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_user).collect()
     }
 
@@ -326,7 +377,7 @@ impl SqliteInventory {
 
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey
+            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey, u.sub_token
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
@@ -438,7 +489,33 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         uuid: r.try_get("uuid")?,
         tuic_password: r.try_get("tuic_password")?,
         wireguard_pubkey: r.try_get("wireguard_pubkey")?,
+        sub_token: r.try_get("sub_token")?,
     })
+}
+
+/// Walk users whose sub_token is NULL after migrate, generate one each.
+/// Idempotent — a second call sees no rows.
+async fn backfill_sub_tokens(pool: &SqlitePool) -> Result<()> {
+    // Wrap in a transaction so two concurrent `open()` calls can't race on
+    // the same NULL row. sqlx::Transaction holds an `IMMEDIATE` write lock
+    // on first write; the loser blocks until the winner commits, then sees
+    // no NULLs and does nothing. On crash mid-loop the txn rolls back —
+    // next open retries cleanly, no half-state.
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query("SELECT id FROM users WHERE sub_token IS NULL")
+        .fetch_all(&mut *tx)
+        .await?;
+    for r in rows {
+        let id: String = r.try_get("id")?;
+        let token = vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?;
+        sqlx::query("UPDATE users SET sub_token = ?1 WHERE id = ?2")
+            .bind(&token)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -479,6 +556,7 @@ mod tests {
             uuid: format!("uuid-{id}"),
             tuic_password: Some(format!("pw-{id}")),
             wireguard_pubkey: None,
+            sub_token: None, // inventory will generate one
         }
     }
 

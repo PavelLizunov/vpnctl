@@ -44,6 +44,7 @@ fn user(id: &str) -> User {
         uuid: format!("uuid-of-{id}"),
         tuic_password: Some(format!("tuic-{id}")),
         wireguard_pubkey: None,
+        sub_token: None, // inventory generates
     }
 }
 

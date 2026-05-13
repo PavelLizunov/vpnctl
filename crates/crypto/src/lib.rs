@@ -31,6 +31,17 @@ pub fn gen_short_id() -> std::io::Result<String> {
     Ok(hex::encode(buf))
 }
 
+/// Subscription token — 32-byte URL-safe base64 (43 chars unpadded). Opaque,
+/// safe to put into a URL path. Never derived from user data — pure CSPRNG.
+/// Used by `vpnctld` for `/sub/<token>` lookup.
+pub fn gen_sub_token() -> std::io::Result<String> {
+    let mut buf = [0u8; 32];
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut buf)
+        .map_err(|e| std::io::Error::other(format!("rng: {e}")))?;
+    Ok(URL_SAFE_NO_PAD.encode(buf))
+}
+
 /// X25519 keypair (для REALITY и для WireGuard).
 /// Возвращаем (private_key_b64, public_key_b64).
 ///
@@ -74,6 +85,28 @@ mod tests {
         let s = gen_short_id()?;
         assert_eq!(s.len(), 8);
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+        Ok(())
+    }
+
+    #[test]
+    fn sub_token_is_url_safe_43_chars() -> std::io::Result<()> {
+        let t = gen_sub_token()?;
+        // 32 bytes of entropy → 43 chars unpadded URL-safe base64.
+        assert_eq!(t.len(), 43, "expected 43 chars, got {}", t.len());
+        // URL-safe alphabet: A-Z a-z 0-9 - _
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "non URL-safe char in {t:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sub_token_is_unique_across_calls() -> std::io::Result<()> {
+        let a = gen_sub_token()?;
+        let b = gen_sub_token()?;
+        assert_ne!(a, b);
         Ok(())
     }
 }

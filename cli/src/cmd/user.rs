@@ -35,6 +35,14 @@ pub(crate) enum UserCmd {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Regenerate the user's subscription token (rotation). Old sub URL
+    /// stops working immediately; clients need the new one.
+    RegenSub {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub(crate) async fn run(
@@ -56,6 +64,9 @@ pub(crate) async fn run(
                 uuid: uuid.unwrap_or_else(gen_uuid),
                 tuic_password: Some(tuic_password.unwrap_or(gen_password(TUIC_PASSWORD_BYTES)?)),
                 wireguard_pubkey: None,
+                // None → inventory generates one. Don't pre-gen here so the
+                // generation lives in one place (`SqliteInventory::add_user`).
+                sub_token: None,
             };
             inv.add_user(&user).await?;
             inv.audit(
@@ -119,6 +130,10 @@ pub(crate) async fn run(
                     user.tuic_password.as_deref().unwrap_or("(none)")
                 );
                 println!(
+                    "sub_token     : {}",
+                    user.sub_token.as_deref().unwrap_or("(missing — bug)")
+                );
+                println!(
                     "granted on    : {}",
                     if servers.is_empty() {
                         "(none)".to_string()
@@ -138,6 +153,23 @@ pub(crate) async fn run(
             inv.remove_user(&UserId(id.clone())).await?;
             inv.audit("cli", "user.remove", Some(&id), None).await?;
             println!("user '{id}' removed");
+            Ok(())
+        }
+
+        UserCmd::RegenSub { id, yes } => {
+            if !yes {
+                println!(
+                    "dry-run: would rotate sub_token for '{id}' — \
+                     all existing subscription URLs will stop working. \
+                     Pass --yes to confirm."
+                );
+                return Ok(());
+            }
+            let new_token = inv.regenerate_sub_token(&UserId(id.clone())).await?;
+            inv.audit("cli", "user.sub_token.regen", Some(&id), None)
+                .await?;
+            println!("rotated sub_token for '{id}'");
+            println!("  new token: {new_token}");
             Ok(())
         }
     }
