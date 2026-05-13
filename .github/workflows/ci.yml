@@ -73,4 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: pre-pull sshd image (cuts test latency, surfaces network errors here)
         run: docker pull lscr.io/linuxserver/openssh-server:latest
-      - run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
+      - name: e2e_sshd
+        run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
+      - name: spec_password_auth (independent test-writer-agent suite)
+        run: cargo test -p vpnctl-ssh --test spec_password_auth -- --ignored --nocapture

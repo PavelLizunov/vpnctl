@@ -66,6 +66,10 @@ enum Cmd {
     /// Print share links (vless://, tuic://, ...) for every server×protocol
     /// the user has been granted access to.
     Sub { user: String },
+    /// Provision a brand-new node: install our SSH key (using root password
+    /// once), record the host fingerprint, and add the server to inventory.
+    /// After this, `vpnctl deploy <id>` works key-only.
+    Bootstrap(cmd::bootstrap::BootstrapArgs),
 }
 
 #[tokio::main]
@@ -85,6 +89,7 @@ async fn main() -> std::process::ExitCode {
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
         Cmd::Sub { user } => cmd::sub::run(&user, cli.db, cli.output).await,
+        Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
     };
 
     match res {

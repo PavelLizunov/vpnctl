@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use vpnctl_core::{CoreError, Result, SshTransport};
+use zeroize::Zeroizing;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -60,15 +61,41 @@ impl Handler for VerifyHandler {
 // Builder
 // ────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
 pub struct RusshTransportBuilder {
     address: String,
     port: u16,
     user: String,
     key_path: PathBuf,
-    key_passphrase: Option<String>,
+    /// Wrapped in `Zeroizing` so it gets memset(0) on drop and never appears
+    /// in `{:?}` output (custom Debug below redacts it).
+    key_passphrase: Option<Zeroizing<String>>,
+    /// Опциональный password-fallback. Используется ТОЛЬКО если pubkey-auth
+    /// не прошёл (например, во время `vpnctl bootstrap` — наш ключ ещё не
+    /// добавлен на ноду). В обычном `deploy` остаётся `None` и лишний
+    /// network round-trip не делается.
+    password: Option<Zeroizing<String>>,
     trusted_fingerprint: Option<String>,
     op_timeout: Duration,
+}
+
+// Manual Debug — DERIVED Debug would print the wrapped String contents
+// (Zeroizing implements Deref). Redact secret-bearing fields explicitly.
+impl std::fmt::Debug for RusshTransportBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RusshTransportBuilder")
+            .field("address", &self.address)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("key_path", &self.key_path)
+            .field(
+                "key_passphrase",
+                &self.key_passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("trusted_fingerprint", &self.trusted_fingerprint)
+            .field("op_timeout", &self.op_timeout)
+            .finish()
+    }
 }
 
 impl RusshTransportBuilder {
@@ -83,9 +110,19 @@ impl RusshTransportBuilder {
             user: user.into(),
             key_path: key_path.into(),
             key_passphrase: None,
+            password: None,
             trusted_fingerprint: None,
             op_timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// Установить password как fallback для первого подключения. Pubkey-auth
+    /// пытается первой; если ключа на сервере ещё нет — auth откатывается на
+    /// password. Используется в `vpnctl bootstrap` при провижне новой ноды.
+    /// Хранится в `Zeroizing<String>` — memset(0) при drop.
+    pub fn password(mut self, p: impl Into<String>) -> Self {
+        self.password = Some(Zeroizing::new(p.into()));
+        self
     }
 
     pub fn port(mut self, p: u16) -> Self {
@@ -94,7 +131,7 @@ impl RusshTransportBuilder {
     }
 
     pub fn passphrase(mut self, p: impl Into<String>) -> Self {
-        self.key_passphrase = Some(p.into());
+        self.key_passphrase = Some(Zeroizing::new(p.into()));
         self
     }
 
@@ -112,7 +149,8 @@ impl RusshTransportBuilder {
     }
 
     pub async fn connect(self) -> Result<RusshTransport> {
-        let key = load_secret_key(&self.key_path, self.key_passphrase.as_deref())
+        let passphrase_str = self.key_passphrase.as_deref().map(|s| s.as_str());
+        let key = load_secret_key(&self.key_path, passphrase_str)
             .map_err(|e| CoreError::Transport(format!("load key {:?}: {e}", self.key_path)))?;
 
         let observed = Arc::new(AsyncMutex::new(None));
@@ -144,12 +182,32 @@ impl RusshTransportBuilder {
         let auth = handle
             .authenticate_publickey(&self.user, pk)
             .await
-            .map_err(|e| CoreError::Transport(format!("auth: {e}")))?;
+            .map_err(|e| CoreError::Transport(format!("auth (pubkey): {e}")))?;
         if !auth.success() {
-            return Err(CoreError::Transport(format!(
-                "auth failed for user {}",
-                self.user
-            )));
+            // Pubkey не принят — это нормально на первый bootstrap-коннект.
+            // Если builder задал `password()`, пробуем password-fallback.
+            if let Some(pw) = self.password.as_deref() {
+                tracing::warn!(
+                    target = "vpnctl::ssh",
+                    "pubkey auth failed for {}, trying password fallback",
+                    self.user
+                );
+                let auth = handle
+                    .authenticate_password(&self.user, pw)
+                    .await
+                    .map_err(|e| CoreError::Transport(format!("auth (password): {e}")))?;
+                if !auth.success() {
+                    return Err(CoreError::Transport(format!(
+                        "auth failed for user {} (both pubkey and password)",
+                        self.user
+                    )));
+                }
+            } else {
+                return Err(CoreError::Transport(format!(
+                    "pubkey auth failed for user {} (no password fallback configured)",
+                    self.user
+                )));
+            }
         }
 
         tracing::info!(
