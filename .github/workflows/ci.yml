@@ -63,3 +63,14 @@ jobs:
   # already runs `cargo deny check advisories` against the same RustSec DB,
   # AND honours our deny.toml `[advisories].ignore` list. Having both meant
   # double-failing on RUSTSEC-2023-0071 (Marvin Attack on `rsa` via russh).
+
+  e2e:
+    name: e2e (testcontainers — Docker required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: pre-pull sshd image (cuts test latency, surfaces network errors here)
+        run: docker pull lscr.io/linuxserver/openssh-server:latest
+      - run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture

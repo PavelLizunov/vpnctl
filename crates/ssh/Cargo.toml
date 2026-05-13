@@ -20,6 +20,11 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# E2E tests against a real sshd in a container. Only built when running
+# tests that exercise it; gated by `#[ignore]` so `cargo test` on machines
+# without Docker stays green (CI has Docker by default).
+testcontainers = { version = "0.25", default-features = false }
+tempfile = "3"
 
 [lints]
 workspace = true
