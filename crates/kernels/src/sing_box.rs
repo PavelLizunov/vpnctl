@@ -32,17 +32,34 @@ impl Kernel for SingBox {
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         // Идемпотентно: пакет ставится только если не установлен.
-        // Скрипт держим короткий — детальный bootstrap хостинга — в `vpnctl-hosters`.
+        //
+        // Каноничный минимальный Debian (например, новый VDS) НЕ имеет
+        // curl/gpg/ca-certificates — поэтому ставим их безусловно перед
+        // тем, как тянуть APT-репо SagerNet. Найдено на staging-деплое
+        // 84.19.3.104 (Debian 12 minimal): exec exit=127 «curl: команда
+        // не найдена».
         let script = r#"
-            set -e
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
             if ! command -v sing-box >/dev/null; then
-                curl -fsSL https://sing-box.app/gpg.key | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
+                apt-get update -qq
+                apt-get install -y --no-install-recommends \
+                    curl gpg ca-certificates
+                install -d -m 0755 /usr/share/keyrings
+                curl -fsSL https://sing-box.app/gpg.key \
+                    | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
                 echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
                     > /etc/apt/sources.list.d/sagernet.list
-                apt-get update
+                apt-get update -qq
                 apt-get install -y sing-box
             fi
-            systemctl enable sing-box
+            # Pre-create log file with sing-box ownership. Otherwise the
+            # service crash-loops with "open /var/log/sing-box.log:
+            # permission denied" — observed live on the staging deploy.
+            install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
+            chown -R sing-box:sing-box /etc/sing-box
+            systemctl enable sing-box >/dev/null
+            command -v sing-box  # final assertion — fails the exec on regression
         "#;
         ssh.exec(script).await?;
         Ok(())
@@ -71,13 +88,32 @@ impl Kernel for SingBox {
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
         ssh.upload("/etc/sing-box/config.json.new", config).await?;
-        // Атомарная замена + валидация перед перезагрузкой.
+        // Атомарная замена + валидация перед перезагрузкой + ВЕРИФИКАЦИЯ
+        // что сервис реально поднялся. Без последнего блока deploy'и
+        // молча «succeed» когда sing-box crash-loop'ит (живой пример:
+        // permission denied на /var/log/sing-box.log на свежей ноде).
         let cmd = r#"
-            set -e
+            set -eu
             sing-box check -c /etc/sing-box/config.json.new
             mv /etc/sing-box/config.json.new /etc/sing-box/config.json
             chown sing-box:sing-box /etc/sing-box/config.json
+            chmod 0640 /etc/sing-box/config.json
             systemctl reload-or-restart sing-box
+
+            # Wait up to 8 seconds for the service to settle. systemd's
+            # auto-restart back-off kicks in every 10s, so 8s is past the
+            # first attempt — if we're not "active" by then, we're in a
+            # crash loop.
+            for i in 1 2 3 4 5 6 7 8; do
+                state=$(systemctl is-active sing-box || true)
+                [ "$state" = "active" ] && exit 0
+                sleep 1
+            done
+
+            # Bail with the most diagnostic output possible.
+            echo "sing-box did not become active. Last 20 log lines:" >&2
+            journalctl -u sing-box --no-pager -n 20 >&2 || true
+            exit 1
         "#;
         ssh.exec(cmd).await?;
         Ok(())

@@ -122,6 +122,23 @@ Write to {path, e.g. crates/inventory/tests/spec_inventory.rs}. Constraints:
   Every test must check observable behavior against the spec.
 ```
 
+### Lessons from the first real staging deploy (84.19.3.104, Debian 12)
+
+`vpnctl bootstrap stg ... && vpnctl deploy stg` worked end-to-end after
+**three** fixes that ONLY surfaced on a live node — not via review-agent
+or test-writer-agent. This empirically validates the three-layer
+methodology (review → spec-tests → live-staging) all together; cutting
+any layer would have shipped this bug-class.
+
+| # | Surface | What live caught | Fix |
+|---|---|---|---|
+| 1 | `kernels::sing_box::ensure_installed` | Minimal Debian 12 has no `curl` / `gpg` / `ca-certificates` — exec exit=127 «curl: команда не найдена». | apt-install prerequisites first; `set -eu`; `command -v sing-box` final assertion. |
+| 2 | `kernels::sing_box::ensure_installed` | sing-box service crash-loops with «open /var/log/sing-box.log: permission denied» — same gotcha that's in the old vpn-control HANDBOOK. | `install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log`; recursive chown of `/etc/sing-box`. |
+| 3 | `kernels::sing_box::apply_config` | `systemctl reload-or-restart` returns 0 even when the service immediately exits — deploy reports «complete» while sing-box crash-loops. Silent failure = worst kind. | After restart, poll `systemctl is-active` for up to 8 s; on failure, dump `journalctl -u sing-box -n 20` to stderr and exit 1. |
+
+Takeaway: review/test-writer cover **bugs in code logic**; live-staging
+covers **assumptions about the environment**. Both layers are required.
+
 ### Гочи методологии (lessons learned)
 
 - **Hook input приходит на stdin, не в env var.** В `.claude/settings.json`
