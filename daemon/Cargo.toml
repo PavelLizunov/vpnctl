@@ -24,7 +24,10 @@ vpnctl-inventory = { path = "../crates/inventory" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = { version = "0.5", default-features = false }
-tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout"] }
+tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout", "fs", "set-header"] }
+maud = { version = "0.27", features = ["axum"] }
+base64 = "0.22"
+subtle = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
