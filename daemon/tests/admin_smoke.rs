@@ -99,13 +99,15 @@ async fn admin_tweak_theme_sets_cookie_and_redirects() {
 
     let resp = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/tweak/theme")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("referer", "/admin/")
-                .body(Body::from("value=foxed"))
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/theme")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/")),
+            )
+            .body(Body::from("value=foxed"))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -144,16 +146,21 @@ async fn admin_tweak_rejects_external_referer() {
         "javascript:alert(1)",
         "data:text/html,<script>1</script>",
     ] {
+        // Same-origin Host + Origin so the CSRF middleware lets this
+        // through — we want to test the SECOND-layer open-redirect
+        // defense (`sanitize_referer`), not the CSRF rejection.
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/tweak/theme")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .header("referer", hostile)
-                    .body(Body::from("value=foxed"))
-                    .unwrap(),
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/tweak/theme")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", hostile),
+                )
+                .body(Body::from("value=foxed"))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -199,13 +206,15 @@ async fn admin_tweak_preserves_safe_referer() {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/tweak/theme")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .header("referer", referer)
-                    .body(Body::from("value=foxed"))
-                    .unwrap(),
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/tweak/theme")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", referer),
+                )
+                .body(Body::from("value=foxed"))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -229,12 +238,14 @@ async fn admin_tweak_rejects_unknown_value() {
 
     let resp = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/tweak/theme")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("value=neon"))
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/theme")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("value=neon"))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1052,13 +1063,15 @@ async fn admin_tweak_tweaks_kind_sets_cookie_and_redirects() {
     let app = router(state(&dir).await);
     let resp = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/tweak/tweaks")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("referer", "/admin/users")
-                .body(Body::from("value=closed"))
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/tweaks")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/users")),
+            )
+            .body(Body::from("value=closed"))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1091,12 +1104,14 @@ async fn admin_tweak_tweaks_kind_rejects_unknown_value() {
     let app = router(state(&dir).await);
     let resp = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/tweak/tweaks")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("value=maybe"))
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/tweaks")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("value=maybe"))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1196,8 +1211,25 @@ async fn admin_backend_error_responses_use_unified_prefix() {
     );
 }
 
+/// Default same-origin host used by every test that POSTs to /admin
+/// without explicitly testing CSRF behaviour. Using a single constant
+/// here means a future schema change (e.g. switching to a vhost-aware
+/// router) only touches one place.
+const SAME_ORIGIN_HOST: &str = "test.example";
+
+/// Inject the Host + Origin headers that the CSRF middleware expects
+/// (`handlers::csrf::require_same_origin` rejects state-mutating requests
+/// whose Origin does not match Host). Tests that explicitly verify the
+/// CSRF rejection path do not call this helper.
+fn add_same_origin(req: axum::http::request::Builder) -> axum::http::request::Builder {
+    req.header("host", SAME_ORIGIN_HOST)
+        .header("origin", format!("http://{SAME_ORIGIN_HOST}"))
+}
+
 /// Helper for the copy-contract tests — exercises the router and
-/// returns the response body as a UTF-8 String.
+/// returns the response body as a UTF-8 String. Sets same-origin
+/// headers on every method so the CSRF middleware passes mutating
+/// requests through (GET passes regardless).
 async fn body_of(
     app: axum::Router,
     method: &str,
@@ -1206,6 +1238,7 @@ async fn body_of(
     body: Option<&str>,
 ) -> String {
     let mut req = Request::builder().method(method).uri(path);
+    req = add_same_origin(req);
     if let Some(ct) = content_type {
         req = req.header("content-type", ct);
     }
@@ -1425,11 +1458,13 @@ async fn admin_user_regen_sub_token_mutates_and_audits() {
     let app = router(s.clone());
     let resp = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/users/u0/sub-token/regenerate")
-                .body(Body::empty())
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/sub-token/regenerate"),
+            )
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1542,11 +1577,13 @@ async fn admin_user_detail_after_regen_shows_new_token() {
     let app = router(s.clone());
     app.clone()
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/users/u0/sub-token/regenerate")
-                .body(Body::empty())
-                .unwrap(),
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/sub-token/regenerate"),
+            )
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1754,5 +1791,158 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
     assert!(
         !html.contains("UA-FOR-U0"),
         "leaked u0's UA onto u1's detail page"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase Hardening — CSRF middleware (handlers/csrf.rs)
+//
+//  Caught by retroactive review-agent (review #2) AND security-review
+//  (security #1) on 2026-05-14: the regenerate handler had no
+//  Origin/Referer check, so any cross-origin form-POST visited by an
+//  authenticated operator's browser would silently rotate a victim
+//  user's sub_token.
+//
+//  The middleware now sits OUTSIDE basic-auth on /admin/* and rejects
+//  state-mutating requests whose Origin (or Referer fallback) does not
+//  match the Host header.
+// ────────────────────────────────────────────────────────────────────────
+
+/// State-mutating POST WITHOUT an Origin (and WITHOUT a Referer) is
+/// the classic "form auto-submitted from evil.example.com" scenario —
+/// some browsers omit Origin on form-POST. Must 403 with the unified
+/// `vpnctl admin:` error prefix.
+#[tokio::test]
+async fn admin_csrf_post_without_origin_is_403() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            // Deliberately NO Host, NO Origin, NO Referer.
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/theme")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("value=foxed"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST without Origin must be rejected by CSRF middleware"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        s.starts_with("vpnctl admin: csrf"),
+        "CSRF reject body must use unified prefix, got: {s:?}"
+    );
+}
+
+/// State-mutating POST WITH an Origin pointing at a different host
+/// than the request's Host header — the cross-origin attack surface.
+/// Must 403, must NOT mutate state.
+#[tokio::test]
+async fn admin_csrf_post_with_mismatched_origin_is_403() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Snapshot the token; if CSRF protection works the regenerate
+    // request below MUST NOT change it.
+    let before = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/sub-token/regenerate")
+                .header("host", "test.example")
+                .header("origin", "http://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "cross-origin POST must be rejected by CSRF middleware"
+    );
+    let after = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "sub_token must be unchanged after CSRF-rejected POST"
+    );
+}
+
+/// GET requests pass through the CSRF middleware unchanged — they are
+/// not state-mutating per RFC 9110 and the admin tree's GET handlers
+/// are read-only. A test rig that hits /admin/ without ANY headers
+/// should still see the page.
+#[tokio::test]
+async fn admin_csrf_get_passes_through_without_origin() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "GET on /admin/ must pass through CSRF middleware regardless of Origin"
+    );
+}
+
+/// Falling back from Origin to Referer: when the browser omits Origin
+/// (older clients on simple form-POSTs) but sends a Referer pointing
+/// at the same host, the middleware must accept the request.
+#[tokio::test]
+async fn admin_csrf_referer_fallback_when_origin_absent() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/theme")
+                .header("host", "test.example")
+                // NO Origin — Referer fallback should kick in.
+                .header("referer", "http://test.example/admin/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("value=foxed"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+        "same-origin Referer (no Origin) must pass CSRF, got {:?}",
+        resp.status()
     );
 }

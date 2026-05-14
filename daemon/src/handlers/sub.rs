@@ -12,6 +12,7 @@
 //! be able to fill the table by spamming garbage tokens.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -20,6 +21,13 @@ use serde_json::{Value, json};
 use vpnctl_core::{RenderCtx, User, UserId};
 
 use crate::app::AppState;
+
+/// One-shot flag: true once we've already warned about a missing
+/// `ConnectInfo` extension. Without this flag a misconfigured daemon
+/// would spam the journal with one warn per request — once is enough
+/// for the operator to notice. Resets on daemon restart, which is what
+/// we want (a fresh warn after a deploy that re-broke the wiring).
+static WARNED_MISSING_CONNECT_INFO: AtomicBool = AtomicBool::new(false);
 
 pub(crate) async fn get(
     State(state): State<AppState>,
@@ -42,16 +50,37 @@ pub(crate) async fn get(
     // explode the cardinality of "distinct IPs". Both v4 and v6 land as
     // `IpAddr::to_string()` (192.0.2.1 / fe80::1) — same shape SQLite
     // can index without a separate column.
-    let ip = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
+    let ip = match request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        Some(ConnectInfo(addr)) => addr.ip().to_string(),
+        None => {
+            // Production rigs MUST install ConnectInfo via
+            // `into_make_service_with_connect_info::<SocketAddr>()`. If
+            // the extension is missing, every access-log row will land
+            // with `0.0.0.0` and the abuse-signal counters silently
+            // collapse all clients to one bucket. Warn once per process
+            // so the operator notices in journalctl. Test rigs (oneshot
+            // Service::call) deliberately don't install ConnectInfo;
+            // there the warn is a benign single line.
+            if !WARNED_MISSING_CONNECT_INFO.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    target = "vpnctld::sub",
+                    "ConnectInfo extension absent — sub_access_log will record 0.0.0.0 for every hit \
+                     until make-service is fixed; this kills the abuse-signal accuracy"
+                );
+            }
+            "0.0.0.0".to_string()
+        }
+    };
 
     match resolve(&state, &token).await {
         Ok((user_id, cfg)) => {
             let body = cfg.to_string();
-            let bytes = body.len() as u64;
+            // 32-bit defensive — `body.len()` is `usize`; on a 32-bit
+            // build `as u64` would silently truncate if it ever exceeded
+            // 4 GiB (impossible for a sub-config, but the same defensive
+            // cast pattern is used in `log_sub_access` for the bytes
+            // bind, so keep symmetry).
+            let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
             // Fire-and-forget access log. Cloning the inventory handle is
             // cheap (it's an Arc<Pool> internally). If the write errors
             // we log a warn but the response has already been sent so

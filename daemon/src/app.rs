@@ -131,13 +131,22 @@ fn admin_router(state: AppState) -> Router {
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);
 
+    // CSRF guard runs FIRST (outermost layer), so basic-auth never even
+    // gets a chance to validate credentials on a cross-origin POST. This
+    // also means the 403 lands without consuming the auth check, so an
+    // attacker can't probe whether a given user/password combo is valid
+    // via a CSRF flow.
+    let with_csrf = with_admin.layer(axum::middleware::from_fn(
+        crate::handlers::csrf::require_same_origin,
+    ));
+
     if let Some(auth) = BasicAuth::from_env() {
-        with_admin.layer(axum::middleware::from_fn_with_state(
+        with_csrf.layer(axum::middleware::from_fn_with_state(
             auth,
             crate::handlers::auth::require_basic_auth,
         ))
     } else {
-        with_admin
+        with_csrf
     }
 }
 
