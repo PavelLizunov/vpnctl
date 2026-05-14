@@ -8,10 +8,14 @@
 //! All admin routes live behind a basic-auth middleware (see
 //! `super::auth::basic_auth_layer`).
 
-use axum::extract::Path;
+use std::collections::HashSet;
+
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{DOCTYPE, Markup, html};
+
+use crate::AppState;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
 const COOKIE_ACCENT: &str = "vpnctl_accent";
@@ -282,33 +286,176 @@ fn tweak_indicator(theme: &str, accent: &str) -> Markup {
     }
 }
 
-pub(crate) async fn dashboard(headers: HeaderMap) -> Markup {
+/// Aggregated counters used in the dashboard top-row metric tiles.
+struct DashboardStats {
+    servers: i64,
+    users: i64,
+    grants: i64,
+    distinct_protocols: usize,
+}
+
+/// Pull every counter the dashboard needs in one pass. All five inventory
+/// queries (4 counters + recent audit) are independent so we kick them off
+/// in parallel via `try_join` — the round-trips are cheap, but rendering
+/// should still feel instant even after the inventory grows.
+async fn collect_dashboard_data(
+    state: &AppState,
+) -> anyhow::Result<(DashboardStats, Vec<vpnctl_inventory::AuditEntry>)> {
+    let (servers_count, users_count, grants_count, server_list, audit) = tokio::try_join!(
+        state.inv.count_servers(),
+        state.inv.count_users(),
+        state.inv.count_grants(),
+        state.inv.list_servers(),
+        state.inv.recent_audit(10),
+    )?;
+    let distinct_protocols: HashSet<_> = server_list
+        .iter()
+        .flat_map(|s| s.enabled_protocols.iter().map(|p| p.0.as_str()))
+        .collect();
+    let stats = DashboardStats {
+        servers: servers_count,
+        users: users_count,
+        grants: grants_count,
+        distinct_protocols: distinct_protocols.len(),
+    };
+    Ok((stats, audit))
+}
+
+/// Render an editorial 4-cell metric row from the dashboard stats.
+fn dashboard_metrics(stats: &DashboardStats) -> Markup {
+    html! {
+        div.ed-metrics {
+            div.ed-metric {
+                span.ed-metric__lbl { "Servers" }
+                span.ed-metric__v { (stats.servers) }
+                span.ed-metric__sub { "in inventory" }
+            }
+            div.ed-metric {
+                span.ed-metric__lbl { "Users" }
+                span.ed-metric__v { (stats.users) }
+                span.ed-metric__sub {
+                    "across " b { (stats.grants) }
+                    @if stats.grants == 1 { " grant" } @else { " grants" }
+                }
+            }
+            div.ed-metric {
+                span.ed-metric__lbl { "Protocols" }
+                span.ed-metric__v { (stats.distinct_protocols) }
+                span.ed-metric__sub { "distinct, enabled" }
+            }
+            div.ed-metric {
+                span.ed-metric__lbl { "Daemon" }
+                span.ed-metric__v { em { "live" } }
+                span.ed-metric__sub { "vpnctld " b { (env!("CARGO_PKG_VERSION")) } }
+            }
+        }
+    }
+}
+
+/// Editorial timeline of the most recent audit entries. Empty inventory
+/// gets a deliberate "no activity yet" stub so the section never renders
+/// as a bare rule.
+fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry]) -> Markup {
+    html! {
+        div.ed-art-eyebrow style="margin-top: 28px;" { "Recent activity" }
+        @if audit.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
+                "No actions logged yet — vpnctl bootstrap / deploy / add-user will start filling this stream."
+            }
+        } @else {
+            div.ed-time {
+                @for e in audit {
+                    div.ed-time-row {
+                        // 16-char ISO clip — drops fractional seconds and Z.
+                        span.ed-time-row__t { (clip_ts(&e.ts.to_rfc3339())) }
+                        span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
+                            (e.action)
+                        }
+                        span.ed-time-row__tgt {
+                            @match &e.target {
+                                Some(t) => (t),
+                                None => "—",
+                            }
+                        }
+                        span.ed-time-row__pl {
+                            "by " (e.actor)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Map an audit action like "server.deploy" to a CSS modifier matching
+/// the editorial palette (deploy/create/grant/revoke/...). Unknown
+/// suffixes fall back to "other" — never to a known kind, otherwise a
+/// new untyped action would silently masquerade as a deploy in the
+/// timeline.
+fn action_kind(action: &str) -> &'static str {
+    let kind = action.split('.').next_back().unwrap_or("");
+    match kind {
+        "deploy" => "deploy",
+        "create" => "create",
+        "grant" => "grant",
+        "revoke" => "revoke",
+        "regenerate" => "regenerate",
+        "delete" | "remove" => "delete",
+        "bootstrap" => "bootstrap",
+        _ => "other",
+    }
+}
+
+/// Trim an RFC3339 timestamp like "2026-05-14T11:55:32.819+00:00" to
+/// "2026-05-14 11:55" — the timeline column is narrow and we don't
+/// want fractional seconds eating it.
+fn clip_ts(ts: &str) -> String {
+    // Be defensive: short strings (shouldn't happen) just round-trip.
+    if ts.len() < 16 {
+        return ts.to_string();
+    }
+    // Replace 'T' with a space and drop everything past minutes.
+    let head = &ts[..16];
+    head.replacen('T', " ", 1)
+}
+
+pub(crate) async fn dashboard(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
     let (theme, accent) = theme_accent(&headers);
 
+    let (stats, audit) = collect_dashboard_data(&state)
+        .await
+        .map_err(internal_error)?;
+
     let body = html! {
-        // Phase A placeholder — masthead/nav/footer/tweaks are real;
-        // dashboard content lands in Phase B.
-        div.ed-art-eyebrow { "Phase A · foundation" }
-        h1.ed-art-h1 { "vpnctl " em { "admin" } }
+        div.ed-art-eyebrow { "Dashboard" }
+        h1.ed-art-h1 { "homelab " em { "at a glance" } }
         p.ed-art-deck {
-            "The shell is wired. "
-            b { "Masthead, nav, footer, theme + accent toggles" }
-            " all read from real state. The screens themselves "
-            em { "(dashboard, servers, users, audit, monitoring, settings)" }
-            " arrive in subsequent phases."
+            "Counts straight from the SQLite inventory backing this daemon "
+            "(" span.ed-mono { "/var/lib/vpnctl/inv.db" } "). "
+            b { "Servers, users, grants and the daemon version" }
+            " update on every reload."
         }
+        (dashboard_metrics(&stats))
         (tweak_indicator(&theme, &accent))
-        div.ed-rule {}
-        div.ed-art-eyebrow { "Currently wired" }
-        ul style="font-family: var(--serif); font-size: 15px; line-height: 1.8; color: var(--soft); list-style: none; padding: 0;" {
-            li { "— masthead with " span.ed-mono { "[•]" } " glyph and date strip" }
-            li { "— inline nav with active-page rule (clickable, routes to each section placeholder)" }
-            li { "— footer with version" }
-            li { "— Tweaks panel (paper × accent), cookie-persistent, instantly reflected above" }
-            li { "— basic-auth middleware on " span.ed-mono { "/admin/*" } " (env: VPNCTLD_ADMIN_USER / VPNCTLD_ADMIN_PASSWORD)" }
-        }
+        (dashboard_audit(&audit))
     };
-    shell("dashboard", &theme, &accent, body)
+    Ok(shell("dashboard", &theme, &accent, body))
+}
+
+/// Convert any error into a plaintext 500 response. The body is one line
+/// (mirrors what the operator would see in `journalctl -u vpnctld`); a
+/// shell-rendered 500 page would need to re-derive theme/accent + cookies
+/// inside an error path and isn't worth the surface for an admin UI.
+///
+/// `anyhow::Error` is a single boxed pointer; passing by value keeps
+/// call sites clean (`.map_err(internal_error)`), so silence clippy.
+#[allow(clippy::needless_pass_by_value)]
+fn internal_error(err: anyhow::Error) -> Response {
+    tracing::error!(target = "vpnctld::admin", error = %err, "handler failed");
+    (StatusCode::INTERNAL_SERVER_ERROR, format!("admin: {err}\n")).into_response()
 }
 
 /// Generic placeholder body for nav sections that don't have content yet
@@ -337,10 +484,92 @@ pub(crate) async fn monitoring(headers: HeaderMap) -> Markup {
     shell("monitoring", &theme, &accent, body)
 }
 
-pub(crate) async fn servers(headers: HeaderMap) -> Markup {
+/// Editorial server card — one per row, matches `.ed-server` from the
+/// design source. Renders the inventory's `Server` plus the per-server
+/// user count looked up from `users_count_per_server` (defaulting to 0).
+fn server_card(idx: usize, s: &vpnctl_core::Server, user_count: i64) -> Markup {
+    let proto_list = if s.enabled_protocols.is_empty() {
+        "—".to_string()
+    } else {
+        s.enabled_protocols
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let jump = match &s.jump_via {
+        Some(j) => j.0.clone(),
+        None => "direct".to_string(),
+    };
+    let fp = s
+        .trusted_host_fingerprint
+        .as_deref()
+        .unwrap_or("(unverified)");
+    html! {
+        article.ed-server {
+            div.ed-server__no { (format!("№ {:02}", idx + 1)) }
+            div {
+                h2.ed-server__h { (s.id.0) }
+                div.ed-server__addr {
+                    (s.address) ":" (s.ssh_port)
+                    " · " (s.ssh_user) "@"
+                    " · " span.ed-mono { (s.kernel.0) }
+                }
+                p.ed-server__lede {
+                    "Hoster " b { (s.hoster) }
+                    " · " b { (user_count) } " "
+                    @if user_count == 1 { "user" } @else { "users" }
+                    " granted access · jump " em { (jump) }
+                }
+            }
+            dl.ed-server__meta {
+                dt { "protocols" }   dd { (proto_list) }
+                dt { "fingerprint" } dd style="font-family: var(--mono); font-size: 11px;" { (fp) }
+                dt { "usage ×" }     dd { (format!("{:.2}", s.usage_coefficient)) }
+            }
+        }
+    }
+}
+
+pub(crate) async fn servers(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
     let (theme, accent) = theme_accent(&headers);
-    let body = section_placeholder_body("Servers", &theme, &accent);
-    shell("servers", &theme, &accent, body)
+
+    let (server_list, user_counts) =
+        tokio::try_join!(state.inv.list_servers(), state.inv.users_count_per_server())
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    let body = html! {
+        div.ed-art-eyebrow { "Servers" }
+        h1.ed-art-h1 {
+            (server_list.len()) " "
+            @if server_list.len() == 1 { em { "server" } } @else { em { "servers" } }
+            " in inventory"
+        }
+        p.ed-art-deck {
+            "Read straight from the SQLite inventory. Add a server with "
+            span.ed-mono { "vpnctl bootstrap" } " then "
+            span.ed-mono { "vpnctl deploy" }
+            " — the wizard UI is on the Phase D roadmap."
+        }
+        (tweak_indicator(&theme, &accent))
+        @if server_list.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
+                "No servers yet. Run "
+                span.ed-mono { "vpnctl bootstrap <id> <address> <ssh-user> <ssh-port>" }
+                " on a fresh node and refresh."
+            }
+        } @else {
+            div {
+                @for (idx, s) in server_list.iter().enumerate() {
+                    (server_card(idx, s, user_counts.get(&s.id).copied().unwrap_or(0)))
+                }
+            }
+        }
+    };
+    Ok(shell("servers", &theme, &accent, body))
 }
 
 pub(crate) async fn users(headers: HeaderMap) -> Markup {

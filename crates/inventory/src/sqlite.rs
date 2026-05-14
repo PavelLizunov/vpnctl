@@ -406,6 +406,48 @@ impl SqliteInventory {
         Ok(out)
     }
 
+    // ── Aggregations (read-only, used by daemon dashboard / list views) ──
+
+    /// Cheap row count. `0` on an empty table.
+    pub async fn count_servers(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM servers")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
+    /// Cheap row count. `0` on an empty table.
+    pub async fn count_users(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM users")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
+    /// Cheap row count of (user, server) grant pairs. `0` on empty table.
+    pub async fn count_grants(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM grants")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
+    /// Map of `server_id → number of users granted access to it`. Servers
+    /// with no grants are absent (callers default to 0). One query, no N+1
+    /// — call this once and look up by ID when rendering a server list.
+    pub async fn users_count_per_server(&self) -> Result<HashMap<ServerId, i64>> {
+        let rows = sqlx::query("SELECT server_id, COUNT(*) AS n FROM grants GROUP BY server_id")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let sid: String = r.try_get("server_id")?;
+            let n: i64 = r.try_get("n")?;
+            out.insert(ServerId(sid), n);
+        }
+        Ok(out)
+    }
+
     // ── Audit ───────────────────────────────────────────────────────────
 
     pub async fn audit(
