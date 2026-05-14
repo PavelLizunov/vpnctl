@@ -381,8 +381,14 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 .ed-server__lede em { font-style: italic; color: var(--ink); font-weight: 400; }
 .ed-server__meta {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  column-gap: 16px;
+  /* Labels (PROTOCOLS, FINGERPRINT, USAGE) are short and uppercase —
+     `auto` sizes them to their content. The value column gets `minmax(0, 1fr)`
+     which (a) lets the dd shrink below its content's max-content size so
+     wrap hints actually fire, and (b) gives values the rest of the
+     320px outer track. Without `minmax(0, …)` the implicit `min-width: auto`
+     on grid items keeps them at max-content and they overflow. */
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 14px;
   row-gap: 4px;
   padding: 4px 0;
 }
@@ -393,15 +399,25 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
   text-transform: uppercase;
   color: var(--mute);
   grid-column: 1 / 2;
+  align-self: baseline;
+  padding-top: 2px;
 }
 .ed-server__meta dd {
   margin: 0 0 6px;
   grid-column: 2 / 3;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ink);
-  justify-self: end;
+  /* Drop `justify-self: end`: in CSS Grid that shrinks the dd to its
+     max-content width (so wrap hints never trigger) and aligns the
+     resulting box to the track's end edge — long opaque tokens then
+     escape past the page. Default stretch + `text-align: right` keeps
+     the right-aligned look while letting overflow-wrap fold the string
+     inside the value column. */
   text-align: right;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 .ed-server__cta {
   margin-top: 10px;

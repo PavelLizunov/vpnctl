@@ -417,11 +417,16 @@ async fn admin_inactive_nav_anchors_have_no_empty_class() {
     );
 }
 
-/// The placeholder body must use `var(--acc)` somewhere so the operator
-/// sees the accent toggle take visible effect. Earlier Phase A page only
-/// used neutral colours so the accent change felt inert.
+/// At least one element on the page must reference `var(--acc)` so the
+/// operator sees the accent toggle take visible effect. Earlier Phase A
+/// pages used neutral colours only so the accent change felt inert.
+///
+/// Phase C-2 dropped the inline "tweaks live →" indicator (it duplicated
+/// the panel's own highlighting). The accent now surfaces via the active
+/// segmented button in the bottom-right Tweaks panel; this test just
+/// confirms the variable is referenced inline at least once on the page.
 #[tokio::test]
-async fn admin_placeholder_uses_accent_variable() {
+async fn admin_renders_accent_variable_inline() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
 
@@ -437,12 +442,15 @@ async fn admin_placeholder_uses_accent_variable() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(
-        html.contains("border-left: 3px solid var(--acc)"),
-        "tweak indicator stripe should be coloured by var(--acc)"
+        html.contains("var(--acc)"),
+        "page must reference var(--acc) so the accent toggle is observable"
     );
+    // The Tweaks panel (open by default) highlights the active accent
+    // button by giving it `background: var(--acc)`. With no cookie, that
+    // button is the "default" one. This nails down WHERE the var lives.
     assert!(
-        html.contains("ed-acc"),
-        "tweak indicator labels should use the .ed-acc class which reads var(--acc)"
+        html.contains("background: var(--acc)"),
+        "default accent button in the open Tweaks panel must use var(--acc) as its background"
     );
 }
 
@@ -956,4 +964,165 @@ async fn admin_user_detail_handles_missing_sub_token() {
         !html.contains("No sub-token assigned"),
         "user has a token — must not render the 'no token' fallback"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-2 — Tweaks panel UX (collapsible + dropped inline indicator)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Default state (no `vpnctl_tweaks` cookie): the open panel is rendered
+/// — both the title chip "Tweaks" and the close-button form must be
+/// present, the collapsed pill must NOT be.
+#[tokio::test]
+async fn admin_tweaks_panel_open_by_default() {
+    let dir = TempDir::new().unwrap();
+    let html = fetch_html(router(state(&dir).await), "/admin/").await;
+
+    // Title chip + segmented controls (open state).
+    assert!(
+        html.contains(">Tweaks<"),
+        "open panel title 'Tweaks' missing"
+    );
+    // Close button form — POSTs value=closed to /admin/tweak/tweaks.
+    assert!(
+        html.contains("/admin/tweak/tweaks") && html.contains("value=\"closed\""),
+        "open panel must include the × close form (POST /admin/tweak/tweaks value=closed)"
+    );
+    // The collapsed-pill text "↑ Tweaks" must NOT appear when open.
+    assert!(
+        !html.contains("↑ Tweaks"),
+        "collapsed pill leaked into the open-state markup"
+    );
+}
+
+/// With `vpnctl_tweaks=closed` cookie: only the tiny re-open pill renders
+/// — no theme/accent buttons, no × close button.
+#[tokio::test]
+async fn admin_tweaks_panel_collapsed_when_cookie_closed() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .header("cookie", "vpnctl_tweaks=closed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    // The pill is the ONLY tweaks UI in this state.
+    assert!(
+        html.contains("↑ Tweaks"),
+        "collapsed pill missing when vpnctl_tweaks=closed"
+    );
+    // Open the pill posts value=open back to the same dispatcher route.
+    assert!(
+        html.contains("/admin/tweak/tweaks") && html.contains("value=\"open\""),
+        "collapsed pill must POST value=open to re-open the panel"
+    );
+    // Theme + accent forms must be GONE (panel is collapsed).
+    assert!(
+        !html.contains("/admin/tweak/theme"),
+        "theme form leaked into collapsed-state markup"
+    );
+    assert!(
+        !html.contains("/admin/tweak/accent"),
+        "accent form leaked into collapsed-state markup"
+    );
+    // The × close button must be GONE too.
+    assert!(
+        !html.contains("value=\"closed\""),
+        "close button leaked into collapsed-state markup"
+    );
+}
+
+/// POST /admin/tweak/tweaks with value=closed must set the cookie and
+/// redirect back. Mirrors the theme/accent dispatcher exactly so the
+/// open-redirect / safe-referer guards apply uniformly.
+#[tokio::test]
+async fn admin_tweak_tweaks_kind_sets_cookie_and_redirects() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/tweaks")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("referer", "/admin/users")
+                .body(Body::from("value=closed"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+        "expected 303/307, got {:?}",
+        resp.status()
+    );
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    assert!(cookie.contains("vpnctl_tweaks=closed"));
+    assert!(cookie.contains("Path=/admin"));
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/admin/users",
+        "safe referer must be honoured for the tweaks-kind dispatcher too"
+    );
+}
+
+/// /admin/tweak/tweaks with an unknown value (e.g. "maybe") must 400 —
+/// guards the cookie against junk values that would later confuse the
+/// open/closed boolean logic.
+#[tokio::test]
+async fn admin_tweak_tweaks_kind_rejects_unknown_value() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/tweaks")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("value=maybe"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Regression: the inline "tweaks live →" indicator was removed in
+/// Phase C-2 because it duplicated the panel's own active-state highlight.
+/// Make sure no page accidentally re-introduces it.
+#[tokio::test]
+async fn admin_pages_do_not_render_inline_tweaks_indicator() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let app = router(s);
+
+    for path in [
+        "/admin/",
+        "/admin/servers",
+        "/admin/users",
+        "/admin/users/u0",
+        "/admin/audit",
+        "/admin/settings",
+        "/admin/monitoring",
+    ] {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            !html.contains("tweaks live →"),
+            "{path}: inline 'tweaks live →' indicator must not appear (it was dropped in Phase C-2)"
+        );
+    }
 }

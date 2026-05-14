@@ -19,9 +19,14 @@ use crate::AppState;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
 const COOKIE_ACCENT: &str = "vpnctl_accent";
+const COOKIE_TWEAKS_OPEN: &str = "vpnctl_tweaks";
 
 const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
+/// Open / closed state of the bottom-right Tweaks panel. Default is
+/// "open" — first-time visitors see the controls. After the operator
+/// hits the × they get a tiny pill they can click to expand again.
+const VALID_TWEAKS_OPEN: &[&str] = &["open", "closed"];
 
 /// Inline glyph — `[•]` bracket-dot, scales with `currentColor`. Matches
 /// `Glyph()` from the design source.
@@ -151,14 +156,52 @@ fn foot() -> Markup {
     }
 }
 
-fn tweaks_panel(theme: &str, accent: &str) -> Markup {
+/// The bottom-right Tweaks panel — two collapse states, controlled by
+/// the `vpnctl_tweaks` cookie:
+///
+/// - **`open`** (default): the full panel with theme + accent segmented
+///   controls plus a `×` close button that POSTs `value=closed` to the
+///   `/admin/tweak/tweaks` endpoint.
+/// - **`closed`**: a tiny "↑ Tweaks" pill in the same corner. Clicking
+///   it POSTs `value=open` and the panel returns. Without the pill the
+///   panel would be unreachable once dismissed.
+///
+/// The visual rationale for collapsing: the panel was floating over the
+/// page footer and (on the user-detail page) over the share-link rows
+/// the operator wants to copy. Operators who are happy with their
+/// theme/accent now get the chrome out of the way without sacrificing
+/// discoverability.
+fn tweaks_panel(theme: &str, accent: &str, open: bool) -> Markup {
+    let pos_style =
+        "position: fixed; right: 24px; bottom: 24px; z-index: 50; background: var(--paper);";
+    if !open {
+        return html! {
+            // Pill form — single button POSTs `value=open`. Same /admin/tweak
+            // dispatcher route, new "tweaks" kind. Without `display: inline`
+            // the form would push the pill onto its own line.
+            form method="post" action="/admin/tweak/tweaks" style="display: inline;" {
+                button name="value" value="open"
+                       title="Open theme + accent tweaks"
+                       style=(format!("{pos_style} border: 1px solid var(--rule-s); padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.08);")) {
+                    "↑ Tweaks"
+                }
+            }
+        };
+    }
     html! {
-        // Bottom-right floating panel — matches the design's "Tweaks"
-        // affordance (theme + accent toggles) but minimal: just two
-        // segmented controls. Each option is a POST that flips the
-        // cookie and redirects back.
-        div style="position: fixed; right: 24px; bottom: 24px; z-index: 50; background: var(--paper); border: 1px solid var(--ink); padding: 12px 14px; font-family: var(--mono); font-size: 11px; color: var(--soft); box-shadow: 0 8px 24px rgba(0,0,0,0.12);" {
-            div style="margin-bottom: 8px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);" { "Tweaks" }
+        // Open state: full panel with × close. Header row holds the
+        // label + a tight close form so the button sits inline-end.
+        div style=(format!("{pos_style} border: 1px solid var(--ink); padding: 12px 14px; font-family: var(--mono); font-size: 11px; color: var(--soft); box-shadow: 0 8px 24px rgba(0,0,0,0.12);")) {
+            div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px;" {
+                span style="letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);" { "Tweaks" }
+                form method="post" action="/admin/tweak/tweaks" style="margin: 0; padding: 0;" {
+                    button name="value" value="closed"
+                           title="Hide tweaks panel"
+                           style="background: transparent; border: 0; padding: 0 2px; font-family: var(--mono); font-size: 14px; color: var(--mute); cursor: pointer; line-height: 1;" {
+                        "×"
+                    }
+                }
+            }
             div style="display: flex; flex-direction: column; gap: 6px;" {
                 form method="post" action="/admin/tweak/theme" style="display: flex; gap: 4px; align-items: baseline;" {
                     span style="width: 50px; color: var(--mute);" { "paper" }
@@ -215,8 +258,19 @@ fn root_class(theme: &str, accent: &str) -> String {
 ///
 /// `Markup` (a `PreEscaped<String>`) is owned and small; passing by value
 /// is intentional and clippy's needless_pass_by_value is over-eager here.
+///
+/// The shell needs to know whether the Tweaks panel is open or collapsed,
+/// so callers pass the cookie-derived state via `tweaks_open`. A bool
+/// parameter rather than re-reading headers here keeps `shell` pure /
+/// testable (no I/O, no globals).
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -> Markup {
+pub(crate) fn shell(
+    active_nav: &str,
+    theme: &str,
+    accent: &str,
+    tweaks_open: bool,
+    body: Markup,
+) -> Markup {
     let cls = root_class(theme, accent);
     html! {
         (DOCTYPE)
@@ -239,7 +293,7 @@ pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -
                     }
                     (foot())
                 }
-                (tweaks_panel(theme, accent))
+                (tweaks_panel(theme, accent, tweaks_open))
             }
         }
     }
@@ -260,30 +314,20 @@ pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> 
     None
 }
 
-/// Read theme + accent cookies into owned strings (default = "default").
-fn theme_accent(headers: &HeaderMap) -> (String, String) {
+/// Read theme + accent + tweaks-open cookies into owned strings + bool
+/// (default = "default" / open). Single accessor so handlers don't have
+/// to thread three cookie reads each.
+fn theme_accent(headers: &HeaderMap) -> (String, String, bool) {
     let theme = cookie(headers, COOKIE_THEME)
         .unwrap_or("default")
         .to_string();
     let accent = cookie(headers, COOKIE_ACCENT)
         .unwrap_or("default")
         .to_string();
-    (theme, accent)
-}
-
-/// Visible accent + theme indicator strip — every Phase A screen renders
-/// it so the operator gets immediate feedback when toggling either tweak.
-/// The left border + the `ed-acc` span both read from `var(--acc)`, so a
-/// rust/forest/plum switch is instantly visible (without it the placeholder
-/// content didn't use the variable at all).
-fn tweak_indicator(theme: &str, accent: &str) -> Markup {
-    html! {
-        div style="display: flex; gap: 16px; align-items: baseline; padding: 10px 14px; border-left: 3px solid var(--acc); background: var(--acc-bg); margin: 18px 0; font-family: var(--mono); font-size: 12px;" {
-            span style="color: var(--mute);" { "tweaks live →" }
-            span { "paper " span.ed-acc { (theme) } }
-            span { "accent " span.ed-acc { (accent) } }
-        }
-    }
+    // Default = open. Anything that isn't literally "closed" stays open
+    // — that way a malformed cookie value can't silently hide the panel.
+    let tweaks_open = cookie(headers, COOKIE_TWEAKS_OPEN) != Some("closed");
+    (theme, accent, tweaks_open)
 }
 
 /// Aggregated counters used in the dashboard top-row metric tiles.
@@ -423,7 +467,7 @@ pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, tw) = theme_accent(&headers);
 
     let (stats, audit) = collect_dashboard_data(&state)
         .await
@@ -439,10 +483,9 @@ pub(crate) async fn dashboard(
             " update on every reload."
         }
         (dashboard_metrics(&stats))
-        (tweak_indicator(&theme, &accent))
         (dashboard_audit(&audit))
     };
-    Ok(shell("dashboard", &theme, &accent, body))
+    Ok(shell("dashboard", &theme, &accent, tw, body))
 }
 
 /// Convert any error into a plaintext 500 response. The body is one line
@@ -459,18 +502,18 @@ fn internal_error(err: anyhow::Error) -> Response {
 }
 
 /// Generic placeholder body for nav sections that don't have content yet
-/// (Phase B+). Re-uses `tweak_indicator` so accent changes are visible
-/// on every section, not just the dashboard.
-fn section_placeholder_body(section_label: &str, theme: &str, accent: &str) -> Markup {
+/// (Phase B+). The Tweaks panel itself surfaces the active theme/accent
+/// (highlighted segmented buttons), so a separate inline indicator is
+/// redundant and was just adding noise above the page content.
+fn section_placeholder_body(section_label: &str) -> Markup {
     html! {
         div.ed-art-eyebrow { "Phase A · placeholder" }
         h1.ed-art-h1 { (section_label) }
         p.ed-art-deck {
             "Section content lands in a later phase. The shell, nav and "
             b { "theme + accent toggles" }
-            " are wired and visible above."
+            " are wired — see the bottom-right Tweaks panel."
         }
-        (tweak_indicator(theme, accent))
         div.ed-rule {}
         p style="font-family: var(--mono); font-size: 12px; color: var(--mute);" {
             "← use the nav strip above to switch sections; bottom-right Tweaks panel persists across reloads via cookie"
@@ -479,9 +522,9 @@ fn section_placeholder_body(section_label: &str, theme: &str, accent: &str) -> M
 }
 
 pub(crate) async fn monitoring(headers: HeaderMap) -> Markup {
-    let (theme, accent) = theme_accent(&headers);
-    let body = section_placeholder_body("Monitoring", &theme, &accent);
-    shell("monitoring", &theme, &accent, body)
+    let (theme, accent, tw) = theme_accent(&headers);
+    let body = section_placeholder_body("Monitoring");
+    shell("monitoring", &theme, &accent, tw, body)
 }
 
 /// Editorial server card — one per row, matches `.ed-server` from the
@@ -535,7 +578,7 @@ pub(crate) async fn servers(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, tw) = theme_accent(&headers);
 
     let (server_list, user_counts) =
         tokio::try_join!(state.inv.list_servers(), state.inv.users_count_per_server())
@@ -554,7 +597,6 @@ pub(crate) async fn servers(
             span.ed-mono { "vpnctl deploy" }
             " — the wizard UI is on the Phase D roadmap."
         }
-        (tweak_indicator(&theme, &accent))
         @if server_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 "No servers yet. Run "
@@ -569,7 +611,7 @@ pub(crate) async fn servers(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, body))
+    Ok(shell("servers", &theme, &accent, tw, body))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -666,7 +708,7 @@ pub(crate) async fn users(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, tw) = theme_accent(&headers);
 
     // list_users + servers_for_user-per-user would be N+1; instead use
     // the inventory's grants-count map (one query) and look up by user.
@@ -703,7 +745,6 @@ pub(crate) async fn users(
             "sing-box client a fresh config covering every server they're granted on. "
             "Open a row for the QR you'll point a phone at."
         }
-        (tweak_indicator(&theme, &accent))
         @if users_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 "No users yet. Run "
@@ -720,7 +761,7 @@ pub(crate) async fn users(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, body))
+    Ok(shell("users", &theme, &accent, tw, body))
 }
 
 /// Build the canonical sub URL the QR encodes. Uses the request's `Host`
@@ -815,7 +856,7 @@ pub(crate) async fn user_detail(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, tw) = theme_accent(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
 
     let user = state
@@ -857,7 +898,6 @@ pub(crate) async fn user_detail(
         p.ed-art-deck {
             "uuid " span.ed-mono { (user.uuid) }
         }
-        (tweak_indicator(&theme, &accent))
 
         // Subscription URL + QR — the headline for this page.
         div.ed-art-eyebrow style="margin-top: 28px;" { "Subscription" }
@@ -919,7 +959,7 @@ pub(crate) async fn user_detail(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, body))
+    Ok(shell("users", &theme, &accent, tw, body))
 }
 
 /// 404 response for `/admin/users/<id>` when no such user exists. Keeps
@@ -934,15 +974,15 @@ fn user_not_found(id: &str) -> Response {
 }
 
 pub(crate) async fn audit(headers: HeaderMap) -> Markup {
-    let (theme, accent) = theme_accent(&headers);
-    let body = section_placeholder_body("Audit", &theme, &accent);
-    shell("audit", &theme, &accent, body)
+    let (theme, accent, tw) = theme_accent(&headers);
+    let body = section_placeholder_body("Audit");
+    shell("audit", &theme, &accent, tw, body)
 }
 
 pub(crate) async fn settings(headers: HeaderMap) -> Markup {
-    let (theme, accent) = theme_accent(&headers);
-    let body = section_placeholder_body("Settings", &theme, &accent);
-    shell("settings", &theme, &accent, body)
+    let (theme, accent, tw) = theme_accent(&headers);
+    let body = section_placeholder_body("Settings");
+    shell("settings", &theme, &accent, tw, body)
 }
 
 fn set_tweak_cookie(
@@ -1014,7 +1054,8 @@ fn sanitize_referer(referer: Option<&str>) -> String {
     }
 }
 
-/// Path `/admin/tweak/{kind}` dispatcher — `kind` is "theme" or "accent".
+/// Path `/admin/tweak/{kind}` dispatcher — `kind` is "theme", "accent",
+/// or "tweaks" (the open/closed state of the panel itself).
 pub(crate) async fn set_tweak(
     headers: HeaderMap,
     Path(kind): Path<String>,
@@ -1023,6 +1064,7 @@ pub(crate) async fn set_tweak(
     match kind.as_str() {
         "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
         "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
+        "tweaks" => set_tweak_cookie(&headers, COOKIE_TWEAKS_OPEN, VALID_TWEAKS_OPEN, &body),
         _ => (StatusCode::NOT_FOUND, "unknown tweak\n").into_response(),
     }
 }

@@ -139,6 +139,55 @@ any layer would have shipped this bug-class.
 Takeaway: review/test-writer cover **bugs in code logic**; live-staging
 covers **assumptions about the environment**. Both layers are required.
 
+### Visual layer for the admin UI (Phase C-2 lesson)
+
+The admin shell (`/admin/*` HTML pages rendered by `vpnctld`) added a
+**fourth methodology layer** because the first three couldn't catch
+*layout* regressions:
+
+| Layer | What it catches | What it misses |
+|---|---|---|
+| `cargo test --test admin_smoke` | DOM presence, classes, routing, escaping | Floating panels overlapping content, grid overflow, columns escaping the viewport |
+| `cargo clippy` | API misuse, dead code | Anything CSS-only |
+| review-agent | logic bugs, security issues | Whether the page actually *renders* well |
+| **`scripts/visual_check.py`** | full-page PNG via headless Chrome (CDP), proves layout end-to-end | Cross-browser quirks (we run only the homelab's Chromium) |
+
+Phase C-2 caught (only because Pavel asked for screenshots):
+
+- The bottom-right Tweaks panel covered the page footer on every page
+  and the share-link row on the user-detail page.
+- A redundant inline "tweaks live →" indicator was rendered above the
+  content of every page (duplicating the panel's own active-state).
+- `.ed-server__meta dd` had `justify-self: end` which shrinks the dd
+  to its max-content width, so SHA256 fingerprints overflowed past
+  the right edge of the page.
+
+Run order for any user-visible UI change:
+
+```bash
+# 1. DOM-level smoke (fast, runs in CI)
+cargo test -p vpnctld --test admin_smoke
+
+# 2. Live deploy to homelab (192.168.0.236 — already wired, see below)
+scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
+scp daemon/assets/admin.css user@192.168.0.236:/tmp/admin.css
+ssh user@192.168.0.236 'sudo install ... && sudo systemctl restart vpnctld'
+
+# 3. Visual gate — PNG of every page that changed
+ADMIN_PW=$(grep VPNCTLD_ADMIN_PASSWORD inventory/vpnctld-192.168.0.236.env | cut -d= -f2)
+python3 scripts/visual_check.py http://192.168.0.236:18402/admin/users \
+    /tmp/users.png "slovn:${ADMIN_PW}"
+# repeat for /admin/, /admin/servers, /admin/users/<id>, etc.
+
+# 4. Read /tmp/*.png with the Read tool — actual eyeballs on the diff.
+```
+
+Headless Chrome runs at `http://192.168.0.142:9222` (homelab CDP
+endpoint, exposed on the LAN). The script reuses the persistent tab,
+disables the network cache, and accepts both basic-auth and a
+synthetic Cookie header so collapsible / theme / accent states can be
+captured without round-tripping through real cookie storage.
+
 ### Гочи методологии (lessons learned)
 
 - **Hook input приходит на stdin, не в env var.** В `.claude/settings.json`
