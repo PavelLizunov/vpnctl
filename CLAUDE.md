@@ -302,6 +302,59 @@ volumes Docker compose (TODO для Pavel).
 - **Production VPN серверы** — пока не трогаем, миграция на vpnctl будет
   только когда v0.2 пройдёт интеграционный тест на staging.
 
+## Live-deploy `vpnctld` на homelab (LAN)
+
+`vpnctld` (admin UI + `/sub/<token>`) поднят на homelab-хосте
+**192.168.0.236** и доступен с ноута Pavel'а в локальной сети:
+
+| | |
+|---|---|
+| URL | http://192.168.0.236:18402/admin/ |
+| Health | http://192.168.0.236:18402/api/v1/health |
+| Auth | basic-auth, user `slovn`, пароль в `/etc/vpnctl/vpnctld.env` (sudo cat) |
+| Бинарь | `/opt/vpnctl/vpnctld` (root:root 0755) |
+| Assets | `/opt/vpnctl/assets/admin.css` |
+| Inventory DB | `/var/lib/vpnctl/inv.db` (user:user 0640) |
+| EnvFile | `/etc/vpnctl/vpnctld.env` (root:user 0640) |
+| Systemd unit | `/etc/systemd/system/vpnctld.service` |
+| Firewall | iptables INPUT: `192.168.0.0/24 → tcp/18402 ACCEPT`, persisted в `/etc/iptables/rules.v4` |
+
+Креды для локального доступа из контейнера: `inventory/vpnctld-192.168.0.236.env`
+(в проекте `vpn-control`, gitignored через `inventory/*.env`).
+
+### Обновление бинарника / ассетов / БД
+
+```bash
+# 1. собрать (контейнер glibc 2.41, host 2.36 — binary использует max GLIBC_2.34, OK)
+cd ~/vpn-control/vpnctl && cargo build --release -p vpnctld
+
+# 2. SCP
+scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
+scp daemon/assets/admin.css user@192.168.0.236:/tmp/admin.css
+
+# 3. install + restart
+ssh user@192.168.0.236 '
+  sudo install -o root -g root -m 0755 /tmp/vpnctld /opt/vpnctl/vpnctld &&
+  sudo install -o root -g root -m 0644 /tmp/admin.css /opt/vpnctl/assets/admin.css &&
+  rm /tmp/vpnctld /tmp/admin.css &&
+  sudo systemctl restart vpnctld &&
+  sudo systemctl status vpnctld --no-pager | head'
+```
+
+### Грабли деплоя на 192.168.0.236
+
+- **iptables INPUT policy DROP** — на хосте есть hand-crafted iptables (не
+  UFW, не firewalld), и любой новый порт надо явно открыть + сохранить в
+  `/etc/iptables/rules.v4`. Загружается из `iptables-restore.service`.
+- **Бинарь динамически линкуется к glibc** — при сборке в claude-chat
+  (Debian trixie, glibc 2.41) и деплое на bookworm (2.36) проверь
+  `objdump -T <binary> | grep GLIBC_ | sort -u` — нужно ≤ 2.36. Сейчас
+  максимум — 2.34, но новая dep может затащить 2.38+.
+- **`MemoryDenyWriteExecute=true`** в systemd unit — может сломать future
+  JIT (если когда-то добавим V8/wasmtime). Сейчас OK.
+- **Креды в EnvironmentFile**, не в `Environment=` — `systemctl cat`
+  не палит пароль в логах.
+
 ## Roadmap
 
 - **v0.1** ✅ — scaffold (workspace, traits, registry, smoke binary), CI
