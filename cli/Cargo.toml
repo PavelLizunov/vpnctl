@@ -27,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "5"
 comfy-table = "7"
+qrcode = { version = "0.14", default-features = false }
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 
 use vpnctl_core::Registry;
 use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{TuicV5, VlessReality};
+use vpnctl_protocols::{Hysteria2, TuicV5, VlessReality};
 
 /// Build the canonical Registry. Add new kernels/protocols here.
 pub(crate) fn build() -> anyhow::Result<Registry> {
@@ -19,6 +19,7 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // inventory.server_secrets and arrive via RenderCtx at deploy time.
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
+    reg.register_protocol(Box::new(Hysteria2::new()))?;
 
     Ok(reg)
 }

@@ -1,0 +1,133 @@
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use serde_json::json;
+use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
+
+/// Hysteria 2 — UDP/QUIC-based proxy. Same TLS material as TUIC by design
+/// (we want one cert per node, not one per protocol), so the secrets
+/// convention REUSES `tuic.cert_path` / `tuic.key_path`. Per-user auth is
+/// the same shared secret as TUIC (`User.tuic_password`) — for v0.4.x
+/// we treat "UDP-tunnel password" as a single per-user secret; if a
+/// future use case needs split secrets per protocol, we add
+/// `hysteria.password` and prefer it when present.
+///
+/// Listens on UDP:8444 (next to TUIC's UDP:8443).
+///
+/// # Security trade-off (intentional)
+///
+/// Sharing `tuic_password` across two protocols means **a leak in either
+/// client (logs, screenshots, accidental commit) compromises both**. We
+/// accept this in v0.4.x to simplify rotation (one `vpnctl user
+/// regen-sub` style command later will rotate everything atomically).
+/// Migration path when needed: add a `hysteria.password` field to
+/// `User`, prefer it when set, fall back to `tuic_password` for
+/// backward compat — pure-additive schema change.
+///
+/// **Stateless**, like every other Protocol in this crate.
+#[derive(Debug, Default)]
+pub struct Hysteria2;
+
+impl Hysteria2 {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+// `%` is included so a password that already contains `%` doesn't produce
+// malformed pct-encoding when re-encoded by a downstream parser.
+const USERINFO: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'@')
+    .add(b'/')
+    .add(b':')
+    .add(b'\\')
+    .add(b'[')
+    .add(b']');
+
+const FRAGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?');
+
+impl Protocol for Hysteria2 {
+    fn id(&self) -> ProtocolId {
+        ProtocolId("hysteria2".to_string())
+    }
+
+    fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
+        // Reuse the TUIC cert paths so we provision ONE self-signed cert
+        // per node (the existing deploy command already does that for TUIC).
+        let cert_path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
+        let key_path = ctx.or_default("tuic.key_path", "/etc/sing-box/key.pem");
+
+        // Per-user record. Sing-box hysteria2 wants `name` + `password`.
+        // We reuse the same per-user secret as TUIC.
+        let users_json: Vec<_> = users
+            .iter()
+            .filter_map(|u| {
+                u.tuic_password
+                    .as_ref()
+                    .map(|pw| json!({ "name": u.id.0, "password": pw }))
+            })
+            .collect();
+
+        Ok(json!({
+            "type": "hysteria2",
+            "tag": "hy2-in",
+            "listen": "::",
+            "listen_port": 8444,
+            "users": users_json,
+            "tls": {
+                "enabled": true,
+                "alpn": ["h3"],
+                "certificate_path": cert_path,
+                "key_path": key_path,
+            }
+        }))
+    }
+
+    fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
+        Ok(json!({
+            "type": "hysteria2",
+            "tag": "hy2-out",
+            "server": ctx.server.address,
+            "server_port": 8444,
+            "password": user.tuic_password.clone().unwrap_or_default(),
+            "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
+        }))
+    }
+
+    fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+        // Per review-agent finding: `unwrap_or_default()` would emit
+        // `hysteria2://@host/...` which clients parse fine but can't
+        // authenticate — silent failure for the end user. Refuse instead.
+        let raw_pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint a Hysteria2 link",
+                user.id.0
+            ))
+        })?;
+        // Official URI scheme (https://hysteria.network/docs/developers/URI-Scheme/):
+        //   hysteria2://<auth>@<host>:<port>/?sni=<sni>&insecure=1
+        // ALPN is negotiated at TLS handshake regardless; we skip it here.
+        let pw = utf8_percent_encode(raw_pw, USERINFO);
+        let name = utf8_percent_encode(&user.id.0, FRAGMENT);
+        Ok(format!(
+            "hysteria2://{pw}@{addr}:8444/?sni={addr}&insecure=1#{name}",
+            pw = pw,
+            addr = ctx.server.address,
+            name = name,
+        ))
+    }
+}

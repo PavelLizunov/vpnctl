@@ -65,7 +65,12 @@ enum Cmd {
     },
     /// Print share links (vless://, tuic://, ...) for every server×protocol
     /// the user has been granted access to.
-    Sub { user: String },
+    Sub {
+        user: String,
+        /// Render an ASCII QR code under each link (for phone scanning).
+        #[arg(long)]
+        qr: bool,
+    },
     /// Provision a brand-new node: install our SSH key (using root password
     /// once), record the host fingerprint, and add the server to inventory.
     /// After this, `vpnctl deploy <id>` works key-only.
@@ -88,7 +93,7 @@ async fn main() -> std::process::ExitCode {
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
-        Cmd::Sub { user } => cmd::sub::run(&user, cli.db, cli.output).await,
+        Cmd::Sub { user, qr } => cmd::sub::run(&user, qr, cli.db, cli.output).await,
         Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
     };
 

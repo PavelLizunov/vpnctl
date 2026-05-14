@@ -1,0 +1,334 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//! Independent spec tests for `vpnctl_protocols::Hysteria2`.
+//!
+//! These tests are written from the spec only (no peeking at the impl).
+//! If a test fails, the implementation is wrong — do NOT weaken the test.
+
+use std::collections::HashMap;
+
+use serde_json::Value;
+use vpnctl_core::{KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId};
+use vpnctl_protocols::Hysteria2;
+
+// ── helpers ─────────────────────────────────────────────────────────────
+
+fn srv() -> Server {
+    Server {
+        id: ServerId("node-1".to_string()),
+        address: "203.0.113.7".to_string(),
+        ssh_port: 22,
+        ssh_user: "root".to_string(),
+        kernel: KernelId("sing-box".to_string()),
+        enabled_protocols: vec![ProtocolId("hysteria2".to_string())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".to_string(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
+fn user(name: &str, pw: Option<&str>) -> User {
+    User {
+        id: UserId(name.to_string()),
+        uuid: "00000000-0000-0000-0000-000000000001".to_string(),
+        tuic_password: pw.map(str::to_string),
+        wireguard_pubkey: None,
+        sub_token: None,
+    }
+}
+
+fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> RenderCtx<'a> {
+    RenderCtx::new(server, secrets)
+}
+
+// ── H1: id() ────────────────────────────────────────────────────────────
+
+#[test]
+fn h1_protocol_id_is_hysteria2() {
+    let p = Hysteria2::new();
+    assert_eq!(p.id(), ProtocolId("hysteria2".to_string()));
+}
+
+// ── H2: server_inbound ──────────────────────────────────────────────────
+
+#[test]
+fn h2_server_inbound_top_level_type_is_hysteria2() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    assert_eq!(v.get("type").and_then(Value::as_str), Some("hysteria2"));
+}
+
+#[test]
+fn h2_server_inbound_listen_port_is_8444() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    assert_eq!(v.get("listen_port").and_then(Value::as_u64), Some(8444));
+}
+
+#[test]
+fn h2_server_inbound_tls_alpn_contains_h3() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    let alpn = v
+        .pointer("/tls/alpn")
+        .and_then(Value::as_array)
+        .expect("tls.alpn must be an array");
+    assert!(
+        alpn.iter().any(|x| x.as_str() == Some("h3")),
+        "tls.alpn must contain \"h3\"; got {alpn:?}"
+    );
+}
+
+#[test]
+fn h2_server_inbound_uses_default_cert_paths() {
+    let s = srv();
+    let secrets = HashMap::new(); // tuic.cert_path / tuic.key_path absent
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    assert_eq!(
+        v.pointer("/tls/certificate_path").and_then(Value::as_str),
+        Some("/etc/sing-box/cert.pem"),
+    );
+    assert_eq!(
+        v.pointer("/tls/key_path").and_then(Value::as_str),
+        Some("/etc/sing-box/key.pem"),
+    );
+}
+
+#[test]
+fn h2_server_inbound_uses_secret_cert_paths_verbatim() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert("tuic.cert_path".to_string(), "/srv/keys/h2.crt".to_string());
+    secrets.insert("tuic.key_path".to_string(), "/srv/keys/h2.key".to_string());
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    assert_eq!(
+        v.pointer("/tls/certificate_path").and_then(Value::as_str),
+        Some("/srv/keys/h2.crt"),
+    );
+    assert_eq!(
+        v.pointer("/tls/key_path").and_then(Value::as_str),
+        Some("/srv/keys/h2.key"),
+    );
+}
+
+#[test]
+fn h2_server_inbound_users_one_per_user_with_name_and_password() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw-A")), user("bob", Some("pw-B"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    let arr = v
+        .get("users")
+        .and_then(Value::as_array)
+        .expect("users must be an array");
+    assert_eq!(arr.len(), 2, "expected one entry per user; got {arr:?}");
+    let alice = &arr[0];
+    let bob = &arr[1];
+    assert_eq!(alice.get("name").and_then(Value::as_str), Some("alice"));
+    assert_eq!(alice.get("password").and_then(Value::as_str), Some("pw-A"));
+    assert_eq!(bob.get("name").and_then(Value::as_str), Some("bob"));
+    assert_eq!(bob.get("password").and_then(Value::as_str), Some("pw-B"));
+}
+
+#[test]
+fn h2_server_inbound_skips_users_without_tuic_password() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [
+        user("alice", Some("pw-A")),
+        user("nopw", None),
+        user("bob", Some("pw-B")),
+    ];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    let arr = v
+        .get("users")
+        .and_then(Value::as_array)
+        .expect("users must be an array");
+    assert_eq!(arr.len(), 2, "users without tuic_password must be skipped");
+    let names: Vec<&str> = arr
+        .iter()
+        .filter_map(|u| u.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(!names.contains(&"nopw"), "got names: {names:?}");
+}
+
+// ── H3: client_config ───────────────────────────────────────────────────
+
+#[test]
+fn h3_client_config_basic_fields() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("client-pw"));
+    let v = Hysteria2::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(v.get("type").and_then(Value::as_str), Some("hysteria2"));
+    assert_eq!(v.get("server").and_then(Value::as_str), Some("203.0.113.7"),);
+    assert_eq!(v.get("server_port").and_then(Value::as_u64), Some(8444));
+    assert_eq!(v.get("password").and_then(Value::as_str), Some("client-pw"),);
+}
+
+#[test]
+fn h3_client_config_password_defaults_to_empty_when_absent() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", None);
+    let v = Hysteria2::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(v.get("password").and_then(Value::as_str), Some(""));
+}
+
+#[test]
+fn h3_client_config_tls_insecure_and_alpn() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw"));
+    let v = Hysteria2::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(
+        v.pointer("/tls/insecure").and_then(Value::as_bool),
+        Some(true),
+    );
+    let alpn = v
+        .pointer("/tls/alpn")
+        .and_then(Value::as_array)
+        .expect("tls.alpn must be an array");
+    assert!(
+        alpn.iter().any(|x| x.as_str() == Some("h3")),
+        "client tls.alpn must contain \"h3\"; got {alpn:?}"
+    );
+}
+
+// ── H4: share_link ──────────────────────────────────────────────────────
+
+#[test]
+fn h4_share_link_starts_with_hysteria2_scheme() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw"));
+    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
+    assert!(link.starts_with("hysteria2://"), "got link: {link}");
+}
+
+#[test]
+fn h4_share_link_password_segment_percent_encodes_colon_and_at() {
+    // Password "ab:cd@ef" — both `:` and `@` are structural in userinfo and
+    // MUST be percent-encoded inside the password segment.
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("ab:cd@ef"));
+    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
+
+    // password sits between "//" and "@<host>" — extract that prefix.
+    let after_scheme = link
+        .strip_prefix("hysteria2://")
+        .expect("link must start with hysteria2://");
+    let at_idx = after_scheme
+        .rfind('@')
+        .expect("share link must contain '@' between userinfo and host");
+    let userinfo = &after_scheme[..at_idx];
+
+    assert!(
+        userinfo.contains("%3A") || userinfo.contains("%3a"),
+        "raw ':' must be percent-encoded in password; userinfo = {userinfo:?}",
+    );
+    assert!(
+        userinfo.contains("%40"),
+        "raw '@' must be percent-encoded in password; userinfo = {userinfo:?}",
+    );
+    // And the literal characters must NOT survive in the userinfo segment.
+    assert!(
+        !userinfo.contains('@'),
+        "raw '@' leaked into userinfo: {userinfo:?}",
+    );
+}
+
+#[test]
+fn h4_share_link_fragment_percent_encodes_space_and_hash() {
+    // user.id "alice cool#1" — space → %20, '#' → %23 in fragment.
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice cool#1", Some("pw"));
+    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
+
+    let frag_idx = link
+        .find('#')
+        .expect("share link must contain a '#' fragment separator");
+    let fragment = &link[frag_idx + 1..];
+
+    assert!(
+        fragment.contains("%20"),
+        "space must be %20 in fragment; got {fragment:?}",
+    );
+    assert!(
+        fragment.contains("%23"),
+        "'#' must be %23 in fragment; got {fragment:?}",
+    );
+    assert!(
+        !fragment.contains(' '),
+        "raw space leaked into fragment: {fragment:?}",
+    );
+    assert!(
+        !fragment.contains('#'),
+        "raw '#' leaked into fragment: {fragment:?}",
+    );
+}
+
+#[test]
+fn h4_share_link_contains_insecure_and_sni_query_params() {
+    // Spec evolved per review-agent: official Hysteria2 URI scheme
+    // (https://hysteria.network/docs/developers/URI-Scheme/) lists
+    // `sni`, `obfs`, `obfs-password`, `pinSHA256`, `insecure` — NO
+    // `alpn`. ALPN is negotiated at TLS handshake regardless. Stricter
+    // parsers reject unknown URI params.
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw"));
+    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
+    assert!(
+        link.contains("insecure=1"),
+        "share link must carry insecure=1; got {link}",
+    );
+    assert!(
+        link.contains(&format!("sni={}", s.address)),
+        "share link must carry sni=<address>; got {link}",
+    );
+    assert!(
+        !link.contains("alpn="),
+        "share link must NOT carry alpn (not in official URI spec); got {link}",
+    );
+}
+
+#[test]
+fn h4_share_link_user_without_password_returns_error() {
+    // Per review-agent: silent `unwrap_or_default()` was producing
+    // `hysteria2://@host/...` which clients accept syntactically but
+    // can't authenticate. Refuse to mint such links explicitly.
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", None);
+    let res = Hysteria2::new().share_link(&ctx, &u);
+    assert!(
+        res.is_err(),
+        "expected Err for user without tuic_password, got {res:?}",
+    );
+}
