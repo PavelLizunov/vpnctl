@@ -2,6 +2,66 @@
 
 Этот файл автоматически загружается в каждый чат с Claude в проекте `vpnctl`.
 
+## Strategic context (final goal — keep aligned)
+
+Confirmed by Pavel 2026-05-14:
+
+- **Operator model.** Single operator (Pavel). No multi-tenancy, no
+  RBAC. `actor="admin"` everywhere in audit. Don't waste cycles on
+  role abstractions.
+- **Users are operator-managed, NOT self-service.** No "request access"
+  flow, no user-facing portal. Notifications cover *infrastructure*
+  events only (server down, sing-box crash-loop, fail2ban banned-self).
+- **Web is the primary surface; CLI stays as escape hatch / scripting.**
+  Anything done via CLI must also be doable via the admin UI by v1.0.
+- **Add-server wizard is THE core differentiator over the bash project.**
+  Operator pastes IP + root password → admin does ALL the magic
+  automatically: push pubkey, create non-root user, disable password
+  auth, harden SSH, install fail2ban, install sing-box, render config,
+  restart, prove it's live. Streaming UX (SSE) with per-step progress.
+  This is Phase E and it's the most important phase.
+- **Production deployment.** LAN-only for now (homelab `192.168.0.236`).
+  External exposure with OAuth/2FA is a later concern; design today
+  must not make that *harder* but doesn't have to support it.
+- **Mobile / responsive.** Not needed.
+- **Migration from bash `vpn-control`.** **Seamless preservation** of
+  every existing client. Old phones holding `vless://` / `tuic://`
+  links keep working byte-for-byte after the switch. The protocols
+  crate's `share_link()` MUST produce identical output to the bash
+  scripts for the same secret material — there's a regression test
+  due here. Migration tool reads `inventory/<IP>.env` and imports
+  servers + users + grants preserving UUID and password material.
+- **Backups are critical, not optional.** If `192.168.0.236` burns
+  today, every sub_token is lost and every client has to re-import.
+  Need: scheduled `inv.db` snapshot + asset bundle + off-site copy
+  (homelab Forgejo is a candidate target) + a documented restore
+  procedure.
+- **Design source = me (Claude).** No Figma. The editorial voice
+  ("a daily report from your homelab", sentence-case, mono CLI
+  inline) lives in code + this file; consistency is on me.
+- **v1.0 is far.** Defined as "everything in the roadmap shipped
+  AND we have months of operating experience without rolling back".
+  Until then keep cutting v0.x with no marketing stunts.
+
+### Roadmap (current order, post-2026-05-14)
+
+| Phase | Suffix | Status | What |
+|---|---|---|---|
+| A, B | shell + read-only servers/dashboard | ✅ shipped | masthead, nav, themes, dashboard KPIs |
+| C-1 | users list + detail + QR | ✅ shipped | Phase C-1 commit `aafc180` |
+| C-2 | UX polish (collapsible Tweaks, copy contracts, favicon) | ✅ shipped | commit `663a653` |
+| **C-3** | **writes (users)** | **next** | regen sub-token, add user, grant/revoke, delete user — each web-mutation paired with `inv.audit("admin", …)` |
+| **C-4** | **backup + restore** | queued (priority) | scheduled inv.db snapshot, off-site target, `vpnctl restore` command |
+| **C-5** | **migrate from bash** | queued (priority) | `vpnctl migrate from-bash <path>` reads `inventory/*.env`, preserves UUIDs & passwords; share_link byte-equality test |
+| E | add-server wizard (THE feature) | planned | IP+root → SSE-streamed bootstrap, hardening, install, deploy |
+| D | audit timeline | planned | filters, search, export |
+| F | monitoring | planned | sparklines (needs stats endpoint design) |
+| G | infra notifications | planned | server-down / crash-loop / fail2ban-banned-self alerts |
+
+When making non-trivial design decisions, re-read this section first
+and check the choice doesn't quietly bake in an assumption that
+contradicts a confirmed answer above.
+
 ## Workflow rules (BLOCKING — must run before every commit)
 
 Эти правила — про то, как мы (Pavel + Claude) разрабатываем `vpnctl`.

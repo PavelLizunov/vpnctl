@@ -938,14 +938,34 @@ pub(crate) async fn user_detail(
                         div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
                             "Point a Hiddify-style client at the URL once; it will re-pull the config on its own schedule."
                         }
+                        // Rotate sub-token. Idempotent-ish: clicking twice
+                        // gives two new tokens, the previous URL is dead
+                        // immediately. Operator's existing client must
+                        // re-fetch /sub/<new-token> to keep working — so
+                        // the inline copy spells out the consequence.
+                        form method="post"
+                             action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                             style="margin-top: 14px;" {
+                            button type="submit"
+                                   title="Mint a new sub_token; the previous URL stops working immediately"
+                                   style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "rotate sub-token"
+                            }
+                        }
                     }
                 }
             }
             _ => {
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "No sub-token assigned to this user. Run "
-                    span.ed-mono { "vpnctl user regenerate-sub-token " (user.id.0) }
-                    " to mint one."
+                    "No sub-token assigned to this user. "
+                    form method="post"
+                         action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                         style="display: inline; margin-left: 8px;" {
+                        button type="submit"
+                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "mint sub-token"
+                            }
+                    }
                 }
             }
         }
@@ -998,6 +1018,79 @@ fn user_not_found(id: &str) -> Response {
         error_text(&format!("no such user '{id}'")),
     )
         .into_response()
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-3 — write handlers (Users)
+//
+//  Convention shared by every write in this section:
+//   1. Validate the target exists → 404 with the canonical "no such X"
+//      body if not. Avoids leaking a generic 500 from the inventory's
+//      "rows_affected == 0" path.
+//   2. Perform the mutation.
+//   3. Write the audit row (`actor="admin"`, action namespaced like the
+//      CLI: `user.sub_token.regen`, target = the affected entity id).
+//      An audit-write failure is LOGGED (warn) but does NOT roll the
+//      mutation back: rolling back would itself need an audit row, and
+//      the alternative (failed mutation, no record of the attempt) is
+//      worse than (succeeded mutation, missing audit). The warn-log
+//      goes to journalctl so the operator can spot the gap.
+//   4. Redirect 303 back to the relevant page so the operator sees
+//      the post-mutation state without a stale form re-submit risk.
+// ────────────────────────────────────────────────────────────────────────
+
+/// `POST /admin/users/{id}/sub-token/regenerate` — mint a fresh sub_token,
+/// invalidate the previous one, write the audit row, redirect back to
+/// the user-detail page (which will render the new token + new QR).
+///
+/// CSRF posture: same as the existing tweak handlers — Referer is
+/// sanitised so a hostile origin can't redirect the operator off-site,
+/// but the mutation itself is allowed (worst case: operator's own
+/// client gets disconnected and they have to re-pull, no secret leak).
+pub(crate) async fn user_regen_sub_token(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+
+    // Step 1: existence check. The downstream regenerate_sub_token
+    // would error with `Invalid("no such user: …")` but that maps to
+    // a 500 via `internal_error`; an explicit 404 here matches every
+    // other "unknown id" surface in the admin tree.
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    // Step 2: mutation. Returns the new token, but we don't expose it
+    // here — the redirect target re-renders the page from the inventory,
+    // which is the single source of truth.
+    if let Err(e) = state.inv.regenerate_sub_token(&uid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+
+    // Step 3: audit. Best-effort; see module-level convention above.
+    if let Err(e) = state
+        .inv
+        .audit("admin", "user.sub_token.regen", Some(&user_id_str), None)
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "audit write failed for user.sub_token.regen — mutation already committed"
+        );
+    }
+
+    // Step 4: redirect. `path_segment_encode` so the redirect target
+    // matches the URL the operator clicked from.
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
 }
 
 pub(crate) async fn audit(headers: HeaderMap) -> Markup {

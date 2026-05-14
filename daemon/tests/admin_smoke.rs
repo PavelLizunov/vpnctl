@@ -1388,3 +1388,186 @@ async fn admin_open_tweaks_pads_footer_via_root_class() {
         "admin.css missing the rule that pads the footer when tweaks are open"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-3 — write handlers (Users) — first chunk: regenerate sub-token
+//
+//  These tests exercise the full mutation contract from §"Phase C-3 write
+//  handlers" in `daemon/src/handlers/admin.rs`:
+//   1. validate target exists → 404 if not
+//   2. perform mutation
+//   3. write audit row (best-effort; warn-log on failure)
+//   4. redirect 303 to the relevant page
+//
+//  The detail page button is also pinned: it must POST to the right URL
+//  so the form keeps wiring together as separate edits land.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Happy path: POST regenerate → 303 to /admin/users/{id}; the user's
+/// sub_token in the inventory is different from before; an audit row
+/// `user.sub_token.regen` lands with target=user-id, actor=admin.
+#[tokio::test]
+async fn admin_user_regen_sub_token_mutates_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+
+    // Snapshot the original token so we can assert it changed.
+    let before = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .expect("open() backfilled a token");
+
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/sub-token/regenerate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "expected 303 (POST-redirect-GET), got {:?}",
+        resp.status()
+    );
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/admin/users/u0",
+        "redirect target must be the user-detail page"
+    );
+
+    // The mutation actually happened.
+    let after = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .expect("token still present");
+    assert_ne!(
+        before, after,
+        "sub_token must be different after regenerate"
+    );
+
+    // The audit row landed.
+    let entries = s.inv.recent_audit(10).await.unwrap();
+    let regen = entries
+        .iter()
+        .find(|e| e.action == "user.sub_token.regen")
+        .expect("audit row for user.sub_token.regen missing");
+    assert_eq!(regen.actor, "admin");
+    assert_eq!(regen.target.as_deref(), Some("u0"));
+    assert!(
+        regen.payload.is_none(),
+        "regen audit row should carry no payload (token MUST NOT be logged)"
+    );
+}
+
+/// Unknown user path: POST regenerate against an id that doesn't exist
+/// must return the canonical 404 + `vpnctl admin: no such user '<id>'`
+/// body. Without the explicit existence-check this would surface as a
+/// generic 500 from the inventory's `rows_affected == 0` path.
+#[tokio::test]
+async fn admin_user_regen_sub_token_404_for_unknown_user() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let body = body_of(
+        app,
+        "POST",
+        "/admin/users/no-such/sub-token/regenerate",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        body, "vpnctl admin: no such user 'no-such'\n",
+        "404 body for missing user drifted from the copy contract"
+    );
+}
+
+/// On the user-detail page, the rotate-button form must POST to the
+/// canonical regenerate URL — keeps the markup in sync with the route
+/// after either side is touched independently.
+#[tokio::test]
+async fn admin_user_detail_renders_rotate_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    let html = fetch_html(app, "/admin/users/u0").await;
+    assert!(
+        html.contains(r#"action="/admin/users/u0/sub-token/regenerate""#),
+        "rotate-button form must POST to /admin/users/u0/sub-token/regenerate"
+    );
+    // Wording contract: the button text is "rotate sub-token" — short,
+    // mono, fits the editorial voice. Pinned so a casual UI-rewrite
+    // can't accidentally rename it to "Refresh" or "New token".
+    assert!(
+        html.contains(">rotate sub-token<"),
+        "rotate-button label drifted from 'rotate sub-token'"
+    );
+}
+
+/// After a successful regenerate, GET on /admin/users/u0 renders the
+/// NEW token (full token appears EXACTLY ONCE — only inside the
+/// canonical sub URL), not the previous one. Validates the
+/// "redirect-to-canonical-page" pattern end-to-end.
+#[tokio::test]
+async fn admin_user_detail_after_regen_shows_new_token() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let before = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    // Trigger regenerate.
+    let app = router(s.clone());
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/sub-token/regenerate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let after = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let html = fetch_html(app, "/admin/users/u0").await;
+    assert!(
+        html.contains(&after),
+        "detail page must render the NEW sub_token after regenerate"
+    );
+    assert!(
+        !html.contains(&before),
+        "detail page must NOT render the previous sub_token after regenerate \
+         (would be a stale-token leak)"
+    );
+}

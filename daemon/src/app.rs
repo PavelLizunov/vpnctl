@@ -117,6 +117,12 @@ fn admin_router(state: AppState) -> Router {
         // `/admin/users/` continues to hit the list above.
         .route("/admin/users/{id}", get(admin::user_detail))
         .route("/admin/users/{id}/", get(admin::user_detail))
+        // Phase C-3 writes (Users). Each write goes via POST so a casual
+        // GET (link preview, prefetch, search-bot) cannot mutate state.
+        .route(
+            "/admin/users/{id}/sub-token/regenerate",
+            post(admin::user_regen_sub_token),
+        )
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/settings", get(admin::settings))
