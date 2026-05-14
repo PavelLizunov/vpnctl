@@ -69,6 +69,21 @@ pub struct AuditEntry {
     pub payload: Option<serde_json::Value>,
 }
 
+/// One row of `sub_access_log` (Phase Track-1) — emitted by the daemon
+/// every time `/sub/<token>` is hit, after the token has been resolved.
+/// The token itself is never stored, only the resolved `user_id`, so a
+/// row alone can't replay the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAccessEntry {
+    pub id: i64,
+    pub ts: DateTime<Utc>,
+    pub user_id: String,
+    pub ip: String,
+    pub ua: Option<String>,
+    pub status: u16,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pool: SqlitePool,
@@ -505,6 +520,116 @@ impl SqliteInventory {
             })
             .collect()
     }
+
+    // ── Subscription access log (Phase Track-1) ─────────────────────────
+
+    /// Append one row to `sub_access_log`. Called by the `/sub/<token>`
+    /// handler AFTER the token has been resolved to a user (so a 404 path
+    /// — "unknown token" — does NOT land here; that's intentional, we
+    /// don't want to keep a per-attempt log of probing tokens because it
+    /// would let an attacker fill the table by spamming garbage).
+    ///
+    /// Best-effort write. The handler calls this in a fire-and-forget
+    /// `tokio::spawn`; if it errors the response has already been sent.
+    pub async fn log_sub_access(
+        &self,
+        user_id: &UserId,
+        ip: &str,
+        ua: Option<&str>,
+        status: u16,
+        bytes: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sub_access_log (user_id, ip, ua, status, bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&user_id.0)
+        .bind(ip)
+        .bind(ua)
+        // SQLite has no u16 affinity; cast through i64.
+        .bind(i64::from(status))
+        .bind(i64::try_from(bytes).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Number of distinct source IPs that fetched this user's
+    /// subscription URL in the last `since_hours` hours. Drives the
+    /// "abuse signal" headline on the user-detail page.
+    pub async fn distinct_ips_for_user(&self, user_id: &UserId, since_hours: u32) -> Result<u64> {
+        // Use SQLite's `datetime('now', '-N hours')` predicate — keeps
+        // the time math server-side and tolerates clock skew between
+        // the daemon process and the DB connection (same machine here,
+        // but the rule still helps when the DB lives on NFS or similar).
+        let row = sqlx::query(
+            "SELECT COUNT(DISTINCT ip) AS n FROM sub_access_log
+             WHERE user_id = ?1
+               AND ts > datetime('now', ?2)",
+        )
+        .bind(&user_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_one(&self.pool)
+        .await?;
+        let n: i64 = row.try_get("n")?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Most recent N access rows for one user, newest first. Drives the
+    /// recent-activity table on the user-detail page; the limit caps
+    /// memory + render cost since chatty clients can rack up thousands
+    /// of rows in the retention window.
+    pub async fn recent_sub_access(
+        &self,
+        user_id: &UserId,
+        limit: i64,
+    ) -> Result<Vec<SubAccessEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, user_id, ip, ua, status, bytes
+             FROM sub_access_log
+             WHERE user_id = ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )
+        .bind(&user_id.0)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_sub_access).collect()
+    }
+
+    /// Drop all rows older than `days`. Returns the number of rows
+    /// removed so the caller (a periodic task in the daemon) can log
+    /// the retention activity.
+    pub async fn purge_sub_access_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM sub_access_log WHERE ts < datetime('now', ?1)")
+            .bind(format!("-{days} days"))
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_sub_access(r: sqlx::sqlite::SqliteRow) -> Result<SubAccessEntry> {
+    let ts_str: String = r.try_get("ts")?;
+    let ts = DateTime::parse_from_rfc3339(&ts_str)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!("sub_access_log ts not RFC3339 ({ts_str}): {e}"))
+        })?;
+    let status_i: i64 = r.try_get("status")?;
+    let bytes_i: i64 = r.try_get("bytes")?;
+    Ok(SubAccessEntry {
+        id: r.try_get("id")?,
+        ts,
+        user_id: r.try_get("user_id")?,
+        ip: r.try_get("ip")?,
+        ua: r.try_get("ua")?,
+        // SQLite stores INTEGER, narrow defensively rather than panic.
+        status: u16::try_from(status_i).unwrap_or(0),
+        bytes: u64::try_from(bytes_i).unwrap_or(0),
+    })
 }
 
 // Owned `SqliteRow` is what `.map(...)` over `Vec<Row>` gives us — taking by

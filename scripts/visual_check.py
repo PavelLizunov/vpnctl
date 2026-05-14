@@ -83,7 +83,7 @@ async def shoot(
     url: str,
     out_path: str,
     basic_auth: str | None,
-    viewport: tuple[int, int] = (1280, 900),
+    viewport: tuple[int, int] = (1280, 1600),
     extra_cookie: str | None = None,
 ) -> None:
     tabs = json.loads(urllib.request.urlopen(f"{CDP_HTTP}/json").read())

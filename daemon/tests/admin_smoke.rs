@@ -1571,3 +1571,188 @@ async fn admin_user_detail_after_regen_shows_new_token() {
          (would be a stale-token leak)"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase Track-1 — subscription-access section on user-detail
+//
+//  Pin the UI surface that surfaces abuse signals:
+//   * empty state (no fetches yet) shows the "no fetches recorded" copy,
+//     never an empty table that looks broken;
+//   * with fetches, distinct-IP counters render and the recent table
+//     contains the IP / UA / status / bytes columns;
+//   * heat flag fires at the documented threshold (5 distinct IPs/24h).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Empty state: a freshly-created user with no fetches must show the
+/// "Subscription access" eyebrow + the friendly nudge, NOT an empty
+/// HTML table that looks like a render error.
+#[tokio::test]
+async fn admin_user_detail_track1_empty_state_renders_nudge() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    let html = fetch_html(app, "/admin/users/u0").await;
+    assert!(
+        html.contains("Subscription access"),
+        "section eyebrow 'Subscription access' missing"
+    );
+    assert!(
+        html.contains("No subscription fetches recorded yet"),
+        "empty-state nudge copy drifted"
+    );
+    // Counters should still render — both 0 — so the operator gets
+    // the full layout shape from day 1.
+    assert!(
+        html.contains("distinct IPs · 24h"),
+        "24h counter label missing"
+    );
+    assert!(
+        html.contains("distinct IPs · 7 days"),
+        "7-day counter label missing"
+    );
+}
+
+/// With logged fetches the counters reflect the data, the recent table
+/// renders rows newest-first, and the per-row IP / UA / status / bytes
+/// land in the right columns.
+#[tokio::test]
+async fn admin_user_detail_track1_renders_counters_and_recent_table() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+
+    // Three fetches from two distinct IPs. UAs differ so the operator
+    // could spot a roaming pattern.
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "192.0.2.10",
+            Some("Hiddify/Android/2.5.0"),
+            200,
+            1500,
+        )
+        .await
+        .unwrap();
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "192.0.2.10",
+            Some("Hiddify/Android/2.5.0"),
+            200,
+            1500,
+        )
+        .await
+        .unwrap();
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "198.51.100.42",
+            Some("sing-box/1.10.0"),
+            200,
+            1500,
+        )
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/u0").await;
+
+    // Counters reflect the data: 2 distinct IPs in both windows
+    // (24h and 7d), 3 recent fetches.
+    // The counter values render in big-serif <div>s; literal numbers
+    // are present somewhere on the page.
+    assert!(html.contains(">2<"), "distinct-IP counter 2 missing");
+    assert!(html.contains(">3<"), "recent-fetches counter 3 missing");
+
+    // Recent table holds both IPs.
+    assert!(
+        html.contains("192.0.2.10") && html.contains("198.51.100.42"),
+        "recent table missing one of the logged IPs"
+    );
+    // UAs land in their column.
+    assert!(html.contains("Hiddify/Android/2.5.0"));
+    assert!(html.contains("sing-box/1.10.0"));
+    // Status code rendered.
+    assert!(html.contains(">200<"));
+    // Empty-state nudge MUST NOT appear when we have data.
+    assert!(
+        !html.contains("No subscription fetches recorded yet"),
+        "empty-state nudge leaked into populated render"
+    );
+    // Heat flag must NOT fire under the 5-IP threshold.
+    assert!(
+        !html.contains("abuse signal"),
+        "heat flag fired below threshold ({} distinct IPs)",
+        2
+    );
+}
+
+/// At or above the threshold (5 distinct IPs / 24h) the heat flag
+/// renders next to the eyebrow with the abuse-signal copy. This is
+/// the "URL got shared" tell.
+#[tokio::test]
+async fn admin_user_detail_track1_heat_flag_fires_at_threshold() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+
+    for i in 1..=5 {
+        s.inv
+            .log_sub_access(
+                &UserId("u0".into()),
+                &format!("192.0.2.{i}"),
+                None,
+                200,
+                100,
+            )
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("abuse signal"),
+        "heat flag must fire at exactly the threshold (5 IPs/24h)"
+    );
+    assert!(
+        html.contains("5 distinct IPs in 24h"),
+        "heat flag copy must include the actual count and the window"
+    );
+}
+
+/// Per-user isolation: alice's fetches must NOT show on bob's detail.
+#[tokio::test]
+async fn admin_user_detail_track1_does_not_leak_other_users_access() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 2, &[]).await;
+
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "10.10.10.10",
+            Some("UA-FOR-U0"),
+            200,
+            100,
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u1").await;
+    // u1 has no fetches.
+    assert!(
+        html.contains("No subscription fetches recorded yet"),
+        "u1 should show empty state"
+    );
+    // u0's row must NOT appear on u1's page.
+    assert!(
+        !html.contains("10.10.10.10"),
+        "leaked u0's IP onto u1's detail page"
+    );
+    assert!(
+        !html.contains("UA-FOR-U0"),
+        "leaked u0's UA onto u1's detail page"
+    );
+}

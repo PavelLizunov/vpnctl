@@ -49,10 +49,24 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bind {}", config.addr))?;
     info!(target = "vpnctld", "listening on http://{}", config.addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("axum::serve")?;
+    // `into_make_service_with_connect_info::<SocketAddr>()` lets the
+    // `/sub/<token>` handler extract `ConnectInfo<SocketAddr>` so it
+    // can log the source IP into `sub_access_log` (Phase Track-1
+    // abuse-detection layer). Without this, axum's `ConnectInfo`
+    // extractor fails and the IP shows up as "unknown".
+    //
+    // Reverse-proxy caveat: when vpnctld eventually sits behind nginx
+    // / Cloudflare / Caddy, ConnectInfo will be the proxy's loopback
+    // address. Honour `X-Forwarded-For` (only when the immediate peer
+    // is in a trusted-proxy allowlist) at that point — out of scope
+    // for the LAN-only deployment shape we have today.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("axum::serve")?;
     Ok(())
 }
 

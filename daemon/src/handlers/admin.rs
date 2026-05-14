@@ -916,6 +916,41 @@ pub(crate) async fn user_detail(
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
 
+    // Phase Track-1 abuse-detection signal: how many distinct IPs hit
+    // this user's /sub URL in the last 24h / 7d, plus the recent
+    // access rows themselves. Failures here log a warn but DON'T block
+    // the page render — the operator can still see the rest of the
+    // user detail without telemetry.
+    let ips_24h = state
+        .inv
+        .distinct_ips_for_user(&uid, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "distinct_ips_for_user(24) failed");
+            0
+        });
+    let ips_7d = state
+        .inv
+        .distinct_ips_for_user(&uid, 24 * 7)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "distinct_ips_for_user(168) failed");
+            0
+        });
+    let recent_access = state
+        .inv
+        .recent_sub_access(&uid, 25)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sub_access failed");
+            Vec::new()
+        });
+    // Heat threshold — first cut. 5 distinct IPs in 24h is a soft
+    // signal that the URL has been shared. Configurable later via the
+    // Settings section once that exists.
+    const ABUSE_HEAT_THRESHOLD: u64 = 5;
+    let heat_24h = ips_24h >= ABUSE_HEAT_THRESHOLD;
+
     let body = html! {
         div.ed-art-eyebrow {
             a href="/admin/users" style="color: var(--mute); text-decoration: none;" { "← all users" }
@@ -1003,6 +1038,87 @@ pub(crate) async fn user_detail(
                         }
                     }
                 }
+            }
+        }
+
+        // ── Subscription access (Phase Track-1 abuse-detection signal) ──
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            "Subscription access"
+            @if heat_24h {
+                // Inline heat flag with accent colour. The eyebrow is
+                // small so the operator notices it on scroll without
+                // it screaming. ABUSE_HEAT_THRESHOLD documents the cut.
+                span style="color: var(--acc); margin-left: 12px; letter-spacing: 0;" {
+                    "· abuse signal: " (ips_24h) " distinct IPs in 24h (≥" (ABUSE_HEAT_THRESHOLD) " threshold)"
+                }
+            }
+        }
+        // Headline counters — distinct IPs in two windows. Side-by-side
+        // so the operator sees both at a glance without clicking.
+        div style="display: flex; gap: 36px; padding: 12px 0 18px; font-family: var(--serif);" {
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "distinct IPs · 24h"
+                }
+            }
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "distinct IPs · 7 days"
+                }
+            }
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "recent fetches"
+                }
+            }
+        }
+        // Recent rows table — last N hits, newest first. Mono-font for
+        // IPs / UAs so shared-prefix cases (192.168.0.1 vs 192.168.0.2)
+        // are easy to scan visually. The operator can spot patterns
+        // (one IP, several UAs over time = roaming device; one UA,
+        // many ASNs at once = shared URL).
+        @if recent_access.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                "No subscription fetches recorded yet. "
+                "Hits will appear here as soon as a client pulls the URL above."
+            }
+        } @else {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "when" }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "ip" }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "user-agent" }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "status" }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "bytes" }
+                    }
+                }
+                tbody {
+                    @for row in &recent_access {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
+                                (clip_ts(&row.ts.to_rfc3339()))
+                            }
+                            td style="padding: 5px 8px; color: var(--ink);" { (row.ip) }
+                            td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere; word-break: break-all;" {
+                                @match &row.ua {
+                                    Some(s) => (s),
+                                    None => em style="color: var(--mute);" { "(none)" },
+                                }
+                            }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (row.status) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--soft);" { (row.bytes) }
+                        }
+                    }
+                }
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
+                "Showing the " (recent_access.len()) " most recent fetches. "
+                "Rows are auto-purged after 30 days (default retention)."
             }
         }
     };

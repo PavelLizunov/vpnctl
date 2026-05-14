@@ -48,15 +48,36 @@ Confirmed by Pavel 2026-05-14:
 | Phase | Suffix | Status | What |
 |---|---|---|---|
 | A, B | shell + read-only servers/dashboard | ✅ shipped | masthead, nav, themes, dashboard KPIs |
-| C-1 | users list + detail + QR | ✅ shipped | Phase C-1 commit `aafc180` |
+| C-1 | users list + detail + QR | ✅ shipped | commit `aafc180` |
 | C-2 | UX polish (collapsible Tweaks, copy contracts, favicon) | ✅ shipped | commit `663a653` |
-| **C-3** | **writes (users)** | **next** | regen sub-token, add user, grant/revoke, delete user — each web-mutation paired with `inv.audit("admin", …)` |
+| C-3.1 | writes — regenerate sub-token | ✅ shipped | commit `276e47d` |
+| **C-3.2-4** | **writes — add user / grants / delete** | **next** | each web-mutation paired with `inv.audit("admin", …)` |
+| **Track-1** | **abuse signal: per-user sub-fetch log + UI** | ✅ shipped | next commit |
+| Track-2 | rate-limit `/sub/<token>` (per-IP, per-token), auto-deny on burst | queued | `tower-governor` or hand-rolled token bucket |
 | **C-4** | **backup + restore** | queued (priority) | scheduled inv.db snapshot, off-site target, `vpnctl restore` command |
 | **C-5** | **migrate from bash** | queued (priority) | `vpnctl migrate from-bash <path>` reads `inventory/*.env`, preserves UUIDs & passwords; share_link byte-equality test |
 | E | add-server wizard (THE feature) | planned | IP+root → SSE-streamed bootstrap, hardening, install, deploy |
+| Track-3 | clash-api polling on each node, per-user real-time conns/traffic | planned (after E) | adds clash-api to deploy, daemon poller, `vpn_connection_stats` table |
 | D | audit timeline | planned | filters, search, export |
 | F | monitoring | planned | sparklines (needs stats endpoint design) |
+| Track-4 | UA fingerprint heuristic (roaming vs shared URL) | low priority | classifier on top of Track-1 data |
 | G | infra notifications | planned | server-down / crash-loop / fail2ban-banned-self alerts |
+
+### Three-layer visibility model (abuse detection)
+
+The admin needs to spot abuse — primarily a subscription URL that's
+been shared past one human, secondarily a single client racking up
+unreasonable traffic. Three independent surfaces, each catches a
+different bug class:
+
+| Layer | Source | What it catches | What it misses | Cost to add |
+|---|---|---|---|---|
+| **1. /sub fetch log** | vpnctld access log → `sub_access_log` table | URL leaked / shared (many ASNs hitting one user's URL); scrapers pulling on a tight loop; UA-based "what client are they on" fingerprint | Real-time connections (clients re-fetch only periodically); device count behind NAT | LOW — Track-1, ✅ shipped |
+| **2. VPN protocol stats** | sing-box `clash-api` on each node, polled by vpnctld via SSH | active connections, traffic up/down, per-user real-time | Same NAT problem; needs SSH polling overhead; new column in deploy | MEDIUM — Track-3, planned after E (wizard touches deploy anyway) |
+| **3. UA fingerprint** | UA strings + IP+time+ASN clustering on Layer-1 data | Approximate "is this the same physical device roaming vs is this many devices sharing the URL" | Never exact — NAT collapses devices; clients with no UA are invisible | LOW — Track-4, low priority |
+
+A device count **behind NAT** is roughly impossible from the server
+side without client cooperation. Track-4 is the best we can do.
 
 When making non-trivial design decisions, re-read this section first
 and check the choice doesn't quietly bake in an assumption that
