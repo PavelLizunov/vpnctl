@@ -546,18 +546,49 @@ ssh user@192.168.0.236 '
 - **Креды в EnvironmentFile**, не в `Environment=` — `systemctl cat`
   не палит пароль в логах.
 
-## Roadmap
+## Version snapshot (post-Track-1, 2026-05-14)
 
-- **v0.1** ✅ — scaffold (workspace, traits, registry, smoke binary), CI
-- **v0.2** in progress
-  - ✅ `russh` транспорт (4 integration tests на live SSH)
-  - ⏳ `sqlx+sqlite` inventory с миграциями
-  - ⏳ CLI команды server / user / deploy / status / sub
-  - ⏳ Интеграционный тест end-to-end через testcontainers
-- **v0.3** — bootstrap fresh-node (ssh harden, fail2ban, UFW, BBR), ProxyJump
-  через russh, subscription URLs (offline-генерация), backon retry layer
-- **v0.4** — daemon `vpnctld` + REST API + `/sub/<token>` HTTP endpoint
-- **v0.5** — опциональный mTLS gRPC агент на ноде для live stats
+The detailed phased roadmap lives at the **top** of this file
+(`Strategic context → Roadmap`). This section is the version-stamped
+high-level summary so external readers (CHANGELOG, release notes) can
+get oriented without reading the whole methodology block.
+
+- **v0.1** ✅ scaffold (workspace, traits, registry, smoke binary), CI
+- **v0.2** ✅ `russh` transport, `sqlx+sqlite` inventory with migrations,
+  CLI subcommands (`server`, `user`, `grant`, `deploy`, `status`, `sub`),
+  e2e integration test via testcontainers
+- **v0.3** ✅ bootstrap fresh-node (SSH harden, fail2ban, sing-box install,
+  config render), ProxyJump via russh, subscription URLs (offline-
+  generated, byte-stable across rebuilds), `backon` retry layer
+- **v0.4** ✅ daemon `vpnctld` + REST API + `GET /sub/<token>` + admin UI
+  Phase A (editorial shell, theme/accent cookies) + Phase B
+  (dashboard metrics, servers list)
+- **v0.5** in progress — admin UI feature delivery
+  - ✅ Phase C-1: users list + detail + inline-SVG QR (`aafc180`)
+  - ✅ Phase C-2: collapsible Tweaks + footer overlap fix + favicon +
+    unified backend copy contract (`d1c0578`, `663a653`)
+  - ✅ Phase C-3.1: regenerate sub-token from web (`276e47d`)
+  - ✅ Phase Track-1: subscription-access log + abuse-signal UI on
+    user-detail (`1e91eeb`) — first abuse-detection layer
+  - ⏳ Phase C-3.2-4: web add-user / grant / revoke / delete
+  - ⏳ Phase Track-1.1: retention scheduler (purge runs periodically;
+    UI today says "auto-purged after 30 days" but the scheduler is not
+    yet wired — known gap, queued for the hardening commit)
+  - ⏳ Phase Track-2: rate-limit `/sub/<token>` (per-IP + per-token
+    token bucket, 429 on burst)
+- **v0.6** queued — backups + migration before more features
+  - ⏳ Phase C-4: scheduled `inv.db` snapshot + off-site target +
+    `vpnctl restore` (the homelab `192.168.0.236` is a single point
+    of failure today; no backup exists)
+  - ⏳ Phase C-5: `vpnctl migrate from-bash <path>` with byte-equal
+    `share_link` regression test (existing bash-vpn-control clients on
+    phones MUST keep working without re-import)
+- **v0.7+** Phase E (add-server wizard with SSE-streamed bootstrap),
+  Phase Track-3 (clash-api real-time connections), Phase D (audit
+  timeline), Phase F (monitoring), Track-4 (UA fingerprint), Phase G
+  (infra notifications)
+- **v1.0** far away — defined as "everything in roadmap shipped + months
+  of operating experience without rolling back"
 
 ## Текущая дата контекста
 
