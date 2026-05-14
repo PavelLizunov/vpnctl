@@ -47,8 +47,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // directly via `router(state)` and don't need a background tokio
     // task running per test (those leak handles across the test
     // process). Production goes through `build()` and gets one purger
-    // per daemon process.
-    let _ = spawn_retention_purger(inv.clone());
+    // per daemon process. The returned JoinHandle is intentionally
+    // dropped — the task lives until the process exits, and the
+    // tokio runtime aborts it on graceful shutdown.
+    drop(spawn_retention_purger(inv.clone()));
 
     let state = AppState { inv, registry };
     Ok(router(state))
