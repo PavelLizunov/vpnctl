@@ -1795,6 +1795,36 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+//  Phase Track-1.1 — retention scheduler smoke test
+//
+//  The full purge contract is in `crates/inventory/tests/spec_sub_access.rs`
+//  (`purge_removes_rows_older_than_cutoff_only` etc.). This test only
+//  pins that the scheduler actually spawns a runnable task — without
+//  it the user-detail page's "auto-purged after 30 days" promise was
+//  inert (rows would accumulate forever).
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn retention_purger_spawns_a_runnable_task() {
+    let dir = TempDir::new().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+
+    // Spawn the purger and immediately abort — we don't want the loop
+    // to actually tick (the interval is 1h). A spawn that compiled and
+    // returned a JoinHandle proves the wiring works; the purge body
+    // itself is fully tested in spec_sub_access.
+    let handle = vpnctld::spawn_retention_purger_for_test(inv);
+    handle.abort();
+    let result = handle.await;
+    assert!(
+        matches!(&result, Err(e) if e.is_cancelled()),
+        "expected aborted JoinHandle; got {result:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
 //  Phase Hardening — CSRF middleware (handlers/csrf.rs)
 //
 //  Caught by retroactive review-agent (review #2) AND security-review

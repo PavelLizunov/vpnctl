@@ -12,3 +12,12 @@ pub mod handlers;
 
 pub use app::{AppState, build, router};
 pub use config::DaemonConfig;
+
+/// Test-only re-export of the retention purger spawner so integration
+/// tests can verify the wiring. Production code uses
+/// `vpnctld::build()` which calls this internally.
+pub fn spawn_retention_purger_for_test(
+    inv: vpnctl_inventory::SqliteInventory,
+) -> tokio::task::JoinHandle<()> {
+    app::spawn_retention_purger(inv)
+}

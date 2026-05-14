@@ -37,8 +37,71 @@ impl std::fmt::Debug for AppState {
 pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     let inv = SqliteInventory::open(&config.db_path).await?;
     let registry = Arc::new(build_registry()?);
+
+    // Phase Track-1.1 retention scheduler: hourly purge of access-log
+    // rows older than 30 days. The user-detail page promises this
+    // ("auto-purged after 30 days") — without the scheduler the rows
+    // accumulate forever and the UI lies.
+    //
+    // Spawned ONLY here, not in `router()` — tests construct AppState
+    // directly via `router(state)` and don't need a background tokio
+    // task running per test (those leak handles across the test
+    // process). Production goes through `build()` and gets one purger
+    // per daemon process.
+    let _ = spawn_retention_purger(inv.clone());
+
     let state = AppState { inv, registry };
     Ok(router(state))
+}
+
+/// Spawn the access-log retention purger. Returns the `JoinHandle` so
+/// callers (production: discard; tests: abort to prove the spawn worked
+/// without letting the loop actually tick). The loop body is
+/// `inv.purge_sub_access_older_than(30)` which has full spec coverage in
+/// `crates/inventory/tests/spec_sub_access.rs` — the scheduler itself
+/// is dumb wiring around it.
+pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
+    use std::time::Duration;
+    use tokio::time::{MissedTickBehavior, interval};
+
+    /// 30-day retention matches the user-detail page copy. Configurable
+    /// later via the Settings section.
+    const RETENTION_DAYS: u32 = 30;
+    /// Hourly cadence is plenty — the purge cost grows linearly with
+    /// row count, and at homelab scale (<10k rows/day) one tick per
+    /// hour bounds the table to ~30 days × 24 h × 10k = ~7M rows worst
+    /// case, safely indexed.
+    const TICK_INTERVAL: Duration = Duration::from_secs(3600);
+
+    tokio::spawn(async move {
+        let mut tick = interval(TICK_INTERVAL);
+        // Skip the immediate first tick — daemon startup is hot enough
+        // (migrations, registry init); a purge on the same scheduler
+        // pass adds noise to the journal without doing useful work.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            match inv.purge_sub_access_older_than(RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old sub_access_log rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "retention purge failed; will retry next tick"
+                ),
+            }
+        }
+    })
 }
 
 /// Pulled out so tests can inject a state pointed at a tempdir DB.
