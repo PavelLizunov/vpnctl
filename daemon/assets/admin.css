@@ -173,6 +173,14 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 }
 .ed-foot__l { display:flex; gap: 20px; }
 
+/* When the bottom-right Tweaks panel is OPEN it sits over whatever's
+   in the right half of the footer (the github URL). Push the footer
+   contents left by the panel's footprint plus a comfortable visual
+   gap. The panel is ~296px wide + 24px right offset = 320px; we
+   round up to 360px so the github URL never even touches the panel
+   edge. The collapsed-pill state is small enough to ignore. */
+.ed-tweaks-open .ed-foot { padding-right: 360px; }
+
 /* ── article typography ── */
 .ed-art-eyebrow {
   font-family: var(--mono);

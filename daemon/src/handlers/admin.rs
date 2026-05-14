@@ -234,9 +234,12 @@ fn tweaks_panel(theme: &str, accent: &str, open: bool) -> Markup {
     }
 }
 
-/// Build the page-root class string from theme/accent (matches the v3
-/// stylesheet — `.ed`, `.ed.ed-newsprint`, `.ed.ed-acc-rust`, etc.).
-fn root_class(theme: &str, accent: &str) -> String {
+/// Build the page-root class string from theme/accent + tweaks-panel
+/// state. The `ed-tweaks-open` modifier lets the stylesheet add right-
+/// padding to the footer so the panel doesn't cover the github URL when
+/// open; without this hook the panel was sitting on top of the foot
+/// link visibly even with the × close button.
+fn root_class(theme: &str, accent: &str, tweaks_open: bool) -> String {
     let mut cls = String::from("ed");
     match theme {
         "newsprint" => cls.push_str(" ed-newsprint"),
@@ -249,6 +252,9 @@ fn root_class(theme: &str, accent: &str) -> String {
         "forest" => cls.push_str(" ed-acc-forest"),
         "plum" => cls.push_str(" ed-acc-plum"),
         _ => {}
+    }
+    if tweaks_open {
+        cls.push_str(" ed-tweaks-open");
     }
     cls
 }
@@ -271,7 +277,7 @@ pub(crate) fn shell(
     tweaks_open: bool,
     body: Markup,
 ) -> Markup {
-    let cls = root_class(theme, accent);
+    let cls = root_class(theme, accent, tweaks_open);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -279,6 +285,12 @@ pub(crate) fn shell(
                 meta charset="utf-8" {}
                 meta name="viewport" content="width=device-width, initial-scale=1" {}
                 title { "vpnctl admin" }
+                // Inline-SVG favicon — the same [•] glyph as the
+                // masthead, served as a static asset. Without this the
+                // browser tab shows a blank square, which is a tell-
+                // tale "unfinished homepage" signal even when the rest
+                // of the chrome is polished.
+                link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg" {}
                 link rel="preconnect" href="https://fonts.googleapis.com" {}
                 link rel="preconnect" href="https://fonts.gstatic.com" crossorigin {}
                 link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,300;1,6..72,400&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" {}
@@ -493,12 +505,27 @@ pub(crate) async fn dashboard(
 /// shell-rendered 500 page would need to re-derive theme/accent + cookies
 /// inside an error path and isn't worth the surface for an admin UI.
 ///
+/// **Copy contract:** every backend response in the admin tree starts
+/// with `vpnctl admin:` so an operator grepping `journalctl` or tailing
+/// curl output has one stable prefix to filter on. See `error_text()`.
+///
 /// `anyhow::Error` is a single boxed pointer; passing by value keeps
 /// call sites clean (`.map_err(internal_error)`), so silence clippy.
 #[allow(clippy::needless_pass_by_value)]
 fn internal_error(err: anyhow::Error) -> Response {
     tracing::error!(target = "vpnctld::admin", error = %err, "handler failed");
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("admin: {err}\n")).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error_text(&err.to_string()),
+    )
+        .into_response()
+}
+
+/// Single source of truth for the textual prefix used on every admin
+/// error body. Tests pin this string so it can't drift away from the
+/// `vpnctl admin: …\n` convention by accident.
+pub(crate) fn error_text(detail: &str) -> String {
+    format!("vpnctl admin: {detail}\n")
 }
 
 /// Generic placeholder body for nav sections that don't have content yet
@@ -968,7 +995,7 @@ pub(crate) async fn user_detail(
 fn user_not_found(id: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
-        format!("admin: no such user '{id}'\n"),
+        error_text(&format!("no such user '{id}'")),
     )
         .into_response()
 }
@@ -997,7 +1024,17 @@ fn set_tweak_cookie(
         .find_map(|kv| kv.strip_prefix("value="))
         .unwrap_or("");
     if !valid.contains(&value) {
-        return (StatusCode::BAD_REQUEST, "invalid value\n").into_response();
+        // Be specific: the operator already knows it was a tweak POST
+        // (they hit /admin/tweak/<kind>); the surface they need is
+        // *what value* and *which kind*. Include both.
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+                valid.join(", ")
+            )),
+        )
+            .into_response();
     }
     // 1-year, HttpOnly, SameSite=Lax — operator-only UI, no XSS surface.
     let cookie_val =
@@ -1065,6 +1102,12 @@ pub(crate) async fn set_tweak(
         "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
         "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
         "tweaks" => set_tweak_cookie(&headers, COOKIE_TWEAKS_OPEN, VALID_TWEAKS_OPEN, &body),
-        _ => (StatusCode::NOT_FOUND, "unknown tweak\n").into_response(),
+        unknown => (
+            StatusCode::NOT_FOUND,
+            error_text(&format!(
+                "unknown tweak kind '{unknown}' (known: theme, accent, tweaks)"
+            )),
+        )
+            .into_response(),
     }
 }

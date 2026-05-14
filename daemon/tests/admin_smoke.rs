@@ -60,12 +60,15 @@ async fn admin_root_renders_editorial_shell() {
     assert!(html.contains("ed-mast__nav-inline"), "missing nav");
     assert!(html.contains("Tweaks"), "missing tweaks panel");
     assert!(html.contains("vpnctl"), "missing wordmark text");
-    // The page-root class should default to bare "ed" (no theme/accent
-    // cookies set in this test).
+    // Page-root class composition: default theme/accent (no cookies)
+    // contributes nothing beyond `ed`; the Tweaks panel defaults to
+    // `open` so the `ed-tweaks-open` modifier lands too. That class
+    // is what triggers the footer's right-padding rule so the panel
+    // doesn't cover the github URL — pin both bits explicitly.
     assert!(
-        html.contains(r#"class="ed""#),
-        "expected default page class \"ed\", got: {}",
-        &html[..html.len().min(400)]
+        html.contains(r#"class="ed ed-tweaks-open""#),
+        "expected default page class \"ed ed-tweaks-open\", got: {}",
+        &html[..html.len().min(500)]
     );
 }
 
@@ -1125,4 +1128,263 @@ async fn admin_pages_do_not_render_inline_tweaks_indicator() {
             "{path}: inline 'tweaks live →' indicator must not appear (it was dropped in Phase C-2)"
         );
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-2 — copy contracts (backend response texts + frontend voice)
+//
+//  These tests pin USER-FACING STRINGS — both the backend's plaintext
+//  error responses (what the operator sees in `journalctl` / curl) and
+//  a handful of headline frontend strings (what the operator sees in
+//  the browser). Drift in copy was previously caught only by review;
+//  pinning it here means a casual one-word edit can't accidentally land
+//  in main.
+//
+//  Backend contract: every admin response body starts with
+//  `vpnctl admin: ` and ends with a single newline. Status code and
+//  WWW-Authenticate header are checked alongside.
+//
+//  Frontend contract: the editorial voice is sentence-case with em-
+//  dashes, never shouting; the empty states quote a literal CLI command
+//  the operator can copy.
+// ────────────────────────────────────────────────────────────────────────
+
+/// All four backend error endpoints must use the unified
+/// `vpnctl admin: <detail>\n` prefix. Tested in one place so the
+/// contract can't drift handler-by-handler.
+#[tokio::test]
+async fn admin_backend_error_responses_use_unified_prefix() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    // 1. 404 — unknown user-detail id.
+    let body = body_of(app.clone(), "GET", "/admin/users/no-such", None, None).await;
+    assert_eq!(
+        body, "vpnctl admin: no such user 'no-such'\n",
+        "user-not-found 404 body drifted from the copy contract"
+    );
+
+    // 2. 400 — invalid tweak value. Includes which kind + what value
+    //    + the allowed values (operators don't have to remember them).
+    let body = body_of(
+        app.clone(),
+        "POST",
+        "/admin/tweak/theme",
+        Some("application/x-www-form-urlencoded"),
+        Some("value=neon"),
+    )
+    .await;
+    assert_eq!(
+        body,
+        "vpnctl admin: invalid value 'neon' for tweak 'vpnctl_theme' \
+         (allowed: default, newsprint, foxed, ink)\n",
+        "tweak 400 body drifted"
+    );
+
+    // 3. 404 — unknown tweak kind. Lists known kinds inline.
+    let body = body_of(
+        app.clone(),
+        "POST",
+        "/admin/tweak/whatever",
+        Some("application/x-www-form-urlencoded"),
+        Some("value=foxed"),
+    )
+    .await;
+    assert_eq!(
+        body, "vpnctl admin: unknown tweak kind 'whatever' (known: theme, accent, tweaks)\n",
+        "unknown-tweak 404 body drifted"
+    );
+}
+
+/// Helper for the copy-contract tests — exercises the router and
+/// returns the response body as a UTF-8 String.
+async fn body_of(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    content_type: Option<&str>,
+    body: Option<&str>,
+) -> String {
+    let mut req = Request::builder().method(method).uri(path);
+    if let Some(ct) = content_type {
+        req = req.header("content-type", ct);
+    }
+    let body = match body {
+        Some(s) => Body::from(s.to_string()),
+        None => Body::empty(),
+    };
+    let resp = app.oneshot(req.body(body).unwrap()).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("response body must be utf-8")
+}
+
+/// Frontend voice contract: each section's headline + deck must read
+/// in the editorial style we're committed to. Pin one canonical phrase
+/// per page so a careless re-write can't flatten the voice into a
+/// generic admin-panel default ("Users (1)" / "Click to add").
+#[tokio::test]
+async fn admin_frontend_section_headlines_match_voice() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let app = router(s);
+
+    let dash = fetch_html(app.clone(), "/admin/").await;
+    assert!(
+        dash.contains("homelab "),
+        "dashboard headline lost the 'homelab' wordmark"
+    );
+    assert!(
+        dash.contains("at a glance"),
+        "dashboard headline lost the 'at a glance' kicker"
+    );
+
+    let users = fetch_html(app.clone(), "/admin/users").await;
+    assert!(
+        users.contains("on file"),
+        "users headline lost the 'on file' kicker"
+    );
+    assert!(
+        users.contains("Open a row for the QR you'll point a phone at"),
+        "users deck lost the QR call-to-action"
+    );
+
+    let servers = fetch_html(app.clone(), "/admin/servers").await;
+    assert!(
+        servers.contains("in inventory"),
+        "servers headline lost the 'in inventory' kicker"
+    );
+
+    let detail = fetch_html(app.clone(), "/admin/users/u0").await;
+    assert!(
+        detail.contains("Subscription"),
+        "user-detail subscription section heading drifted"
+    );
+    assert!(
+        detail.contains("Point a Hiddify-style client at the URL once"),
+        "user-detail Hiddify nudge copy drifted"
+    );
+}
+
+/// Empty-state contract: when there are no users (or no servers), the
+/// page must quote a literal CLI command the operator can copy. The
+/// admin UI can't yet create either via web (Phase C-2 / D), so the CLI
+/// is the only path forward — losing the command would strand a fresh
+/// operator on their first visit.
+#[tokio::test]
+async fn admin_empty_states_quote_cli_commands() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let users = fetch_html(app.clone(), "/admin/users").await;
+    assert!(
+        users.contains("vpnctl user create"),
+        "empty users page must quote `vpnctl user create`"
+    );
+    assert!(
+        users.contains("vpnctl grant"),
+        "empty users page must quote `vpnctl grant`"
+    );
+
+    let servers = fetch_html(app.clone(), "/admin/servers").await;
+    assert!(
+        servers.contains("vpnctl bootstrap"),
+        "empty servers page must quote `vpnctl bootstrap`"
+    );
+}
+
+/// Favicon contract: every page links to the SVG favicon, and the SVG
+/// is served. Without this the browser tab shows a blank square — a
+/// tell-tale "unfinished" signal even when the page chrome is polished.
+#[tokio::test]
+async fn admin_pages_link_favicon_and_asset_is_served() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let html = fetch_html(app.clone(), "/admin/").await;
+    assert!(
+        html.contains(r#"<link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg">"#),
+        "favicon <link> missing from page <head>"
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/assets/favicon.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "favicon.svg must serve 200, got {:?}",
+        resp.status()
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        body.starts_with("<?xml") || body.starts_with("<svg"),
+        "favicon body must look like SVG, got {:?}",
+        &body[..body.len().min(80)]
+    );
+    assert!(
+        body.contains("circle") || body.contains("path"),
+        "favicon SVG must draw the [•] glyph (circle + paths)"
+    );
+}
+
+/// The `ed-tweaks-open` modifier on the page-root must carry through
+/// to the served HTML so the CSS rule that pads the footer right (so
+/// it doesn't get covered by the panel) actually fires. Pinning both
+/// the class and a presence check on the rule's CSS source.
+#[tokio::test]
+async fn admin_open_tweaks_pads_footer_via_root_class() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    // Default cookie state = open. Page-root carries `ed-tweaks-open`.
+    let html = fetch_html(app.clone(), "/admin/").await;
+    assert!(
+        html.contains("ed-tweaks-open"),
+        "open tweaks state must surface as `ed-tweaks-open` on page-root"
+    );
+
+    // Explicit closed cookie: class is GONE.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .header("cookie", "vpnctl_tweaks=closed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html_closed = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html_closed.contains("ed-tweaks-open"),
+        "collapsed-state HTML leaked the `ed-tweaks-open` class"
+    );
+
+    // The CSS rule itself must exist — otherwise the class is decorative
+    // and the footer overlap stays.
+    let css_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/assets/admin.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let css_bytes = css_resp.into_body().collect().await.unwrap().to_bytes();
+    let css = std::str::from_utf8(&css_bytes).unwrap();
+    assert!(
+        css.contains(".ed-tweaks-open .ed-foot"),
+        "admin.css missing the rule that pads the footer when tweaks are open"
+    );
 }

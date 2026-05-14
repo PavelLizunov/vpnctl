@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  vpnctl admin favicon — same `[•]` bracket-dot mark used by the
+  masthead glyph, drawn at 64×64 with a 4px stroke so it stays legible
+  at the 16×16 favicon viewport that Chrome typically renders.
+
+  Colour is hard-coded to ink (#1a1a1a) rather than `currentColor` —
+  browser favicon contexts don't inherit page colour, and the dark
+  glyph reads on every paper / newsprint / foxed background. The
+  `ed-ink` (dark) admin theme will look slightly off, but the favicon
+  is rendered against the browser chrome (not the page), so the page
+  background never matters here.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none">
+  <rect width="24" height="24" fill="#fbf6ee" rx="4"/>
+  <path d="M8 4 H5 V20 H8" stroke="#1a1a1a" stroke-width="1.6" stroke-linecap="square" fill="none"/>
+  <path d="M16 4 H19 V20 H16" stroke="#1a1a1a" stroke-width="1.6" stroke-linecap="square" fill="none"/>
+  <circle cx="12" cy="12" r="2.6" fill="#1a1a1a"/>
+</svg>

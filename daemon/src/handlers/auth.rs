@@ -47,7 +47,10 @@ pub(crate) async fn require_basic_auth(
     if check(&req, &auth) {
         return next.run(req).await;
     }
-    let mut resp = (StatusCode::UNAUTHORIZED, "auth required\n").into_response();
+    // Match the `vpnctl admin: …` copy contract used by every other
+    // backend response (see `handlers::admin::error_text`). Operators
+    // grep `journalctl -u vpnctld` for the prefix.
+    let mut resp = (StatusCode::UNAUTHORIZED, "vpnctl admin: auth required\n").into_response();
     if let Ok(hv) = HeaderValue::from_str(r#"Basic realm="vpnctl admin", charset="UTF-8""#) {
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, hv);
     }

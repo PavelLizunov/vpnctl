@@ -139,48 +139,109 @@ any layer would have shipped this bug-class.
 Takeaway: review/test-writer cover **bugs in code logic**; live-staging
 covers **assumptions about the environment**. Both layers are required.
 
-### Visual layer for the admin UI (Phase C-2 lesson)
+### Methodology for the admin SITE (six layers, post-Phase-C-2)
 
-The admin shell (`/admin/*` HTML pages rendered by `vpnctld`) added a
-**fourth methodology layer** because the first three couldn't catch
-*layout* regressions:
+Phase C-2 surfaced bug classes the original three-layer
+(review / spec-tests / live-deploy) workflow could not catch on
+HTML-rendering code paths. The site stack now uses **six layers**,
+each catching a strict subset of issues that the others miss:
 
-| Layer | What it catches | What it misses |
-|---|---|---|
-| `cargo test --test admin_smoke` | DOM presence, classes, routing, escaping | Floating panels overlapping content, grid overflow, columns escaping the viewport |
-| `cargo clippy` | API misuse, dead code | Anything CSS-only |
-| review-agent | logic bugs, security issues | Whether the page actually *renders* well |
-| **`scripts/visual_check.py`** | full-page PNG via headless Chrome (CDP), proves layout end-to-end | Cross-browser quirks (we run only the homelab's Chromium) |
+| # | Layer | What it catches | What it misses |
+|---|---|---|---|
+| 1 | `cargo clippy --workspace --all-targets -D warnings` | API misuse, dead code, unwrap/expect/panic outside tests | Anything CSS-only or HTML-string-only |
+| 2 | `cargo test --test admin_smoke` (currently 34 tests) | DOM presence, classes, routing, status codes, escaping, masking | Floating panels overlapping content, grid overflow, font-rendering issues |
+| 3 | **Copy-contract tests** (subset of admin_smoke) | Backend response prefix drift, headline / deck / empty-state copy regressions | Style of NEW copy that was never pinned (additive — pin it) |
+| 4 | review-agent | Logic bugs, security issues, library misuse | Whether the page actually *renders* well |
+| 5 | Live-deploy + curl on `192.168.0.236` | runtime + auth + DB integration | Visual layout (curl never paints) |
+| 6 | **`scripts/visual_check.py`** (headless Chrome over CDP) | Floating panel overlap, grid overflow, font fallback, anything pixels-related | Cross-browser quirks (we render only on homelab Chromium) |
 
-Phase C-2 caught (only because Pavel asked for screenshots):
+Phase C-2 evidence — bugs each new layer caught that no other would:
 
-- The bottom-right Tweaks panel covered the page footer on every page
-  and the share-link row on the user-detail page.
-- A redundant inline "tweaks live →" indicator was rendered above the
-  content of every page (duplicating the panel's own active-state).
-- `.ed-server__meta dd` had `justify-self: end` which shrinks the dd
-  to its max-content width, so SHA256 fingerprints overflowed past
-  the right edge of the page.
+| Bug | Caught by |
+|---|---|
+| Tweaks panel covered the page footer on every page | layer 6 (visual screenshot) — invisible to layers 1-5 |
+| Inline `tweaks live →` indicator duplicated panel state | layer 6 — DOM-test was happy |
+| SHA256 fingerprint overflowed `.ed-server__meta dd` | layer 6 — content was correct, just escaped its column |
+| Backend errors used 4 different prefixes | layer 3 (copy-contract) — pre-existing inconsistency invisible to all live curl tests because each was tested in isolation |
+| `auth required` had no `vpnctl admin:` prefix | layer 3 |
+| Favicon missing → blank browser tab | layer 3 — would be invisible to layer 6 because Chrome shows a default square; only the explicit test caught it |
 
-Run order for any user-visible UI change:
+#### Run order for any user-visible UI change
 
 ```bash
-# 1. DOM-level smoke (fast, runs in CI)
+# 1. Static checks (fast, runs in CI)
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p vpnctld --test admin_smoke
 
-# 2. Live deploy to homelab (192.168.0.236 — already wired, see below)
+# 2. Live deploy to homelab (binary + CSS + favicon)
+cargo build --release -p vpnctld
 scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
-scp daemon/assets/admin.css user@192.168.0.236:/tmp/admin.css
-ssh user@192.168.0.236 'sudo install ... && sudo systemctl restart vpnctld'
+scp daemon/assets/{admin.css,favicon.svg} user@192.168.0.236:/tmp/
+ssh user@192.168.0.236 '
+  sudo install -o root -g root -m 0755 /tmp/vpnctld /opt/vpnctl/vpnctld &&
+  sudo install -o root -g root -m 0644 /tmp/admin.css /opt/vpnctl/assets/admin.css &&
+  sudo install -o root -g root -m 0644 /tmp/favicon.svg /opt/vpnctl/assets/favicon.svg &&
+  sudo systemctl restart vpnctld'
 
-# 3. Visual gate — PNG of every page that changed
+# 3. Backend copy contract — confirm error responses match the prefix
 ADMIN_PW=$(grep VPNCTLD_ADMIN_PASSWORD inventory/vpnctld-192.168.0.236.env | cut -d= -f2)
+curl -sS -u "slovn:${ADMIN_PW}" http://192.168.0.236:18402/admin/users/no-such
+# Expect: vpnctl admin: no such user 'no-such'
+
+# 4. Visual gate — PNG of every page that changed
 python3 scripts/visual_check.py http://192.168.0.236:18402/admin/users \
     /tmp/users.png "slovn:${ADMIN_PW}"
-# repeat for /admin/, /admin/servers, /admin/users/<id>, etc.
+python3 scripts/visual_check.py http://192.168.0.236:18402/admin/users \
+    /tmp/users-collapsed.png "slovn:${ADMIN_PW}" "vpnctl_tweaks=closed"
 
-# 4. Read /tmp/*.png with the Read tool — actual eyeballs on the diff.
+# 5. Read /tmp/*.png with the Read tool — actual eyeballs on the diff.
 ```
+
+#### Backend / frontend copy contract
+
+**Backend:** every response body in the `/admin/*` tree starts with
+`vpnctl admin: `, ends with a single `\n`, and (where applicable)
+includes the offending value + the allowed alternatives so the
+operator can fix the request without consulting source. The
+`error_text()` helper in `daemon/src/handlers/admin.rs` is the single
+source of truth; auth.rs duplicates the literal prefix because the
+basic-auth layer runs before the admin module is reachable. Tests in
+`admin_backend_error_responses_use_unified_prefix` pin the four
+canonical strings (404 user, 401 auth, 400 invalid value, 404 unknown
+tweak kind).
+
+**Frontend:** the editorial voice is sentence-case with em-dashes and
+mono-font CLI commands inline (`span.ed-mono { "vpnctl user create" }`).
+Every empty state must quote a literal CLI command (operators CAN'T
+yet create users / servers via the web — losing the command would
+strand them). `admin_frontend_section_headlines_match_voice` and
+`admin_empty_states_quote_cli_commands` are the regression net. When
+adding a new screen: first write the headline + deck strings, then
+**add a copy-contract test for them in the same commit** so future
+edits surface in code review.
+
+#### Where MCP servers fit
+
+We have three MCP servers wired (when their connections are healthy);
+each is useful at a different point in the loop:
+
+- **context7** — `mcp__context7__query-docs` / `resolve-library-id`.
+  Use when the diff touches a dependency's API surface (axum upgrade,
+  `qrcode` crate options, maud's `PreEscaped` semantics) or before
+  picking a new dep. Cheaper and more current than guessing from
+  training data — relevant for axum 0.8's path-param routing edge
+  cases that bit us in Phase A.
+- **sequential-thinking** — `mcp__sequential-thinking__sequentialthinking`.
+  Use for layered layout / architecture decisions where the failure
+  mode is "I picked the wrong abstraction". Phase C-2's CSS-Grid
+  `justify-self: end` shrink-to-content gotcha would have been worth
+  a sequential-thinking pass — instead it took two screenshot rounds
+  to diagnose.
+- **memory** — `mcp__memory__create_entities` etc. Use for
+  cross-session state that genuinely doesn't fit in CLAUDE.md
+  (e.g. a long-lived "copy catalog" mapping every user-facing string
+  to its file:line + history of edits). For now CLAUDE.md is enough;
+  re-evaluate when the admin UI grows past ~20 screens.
 
 Headless Chrome runs at `http://192.168.0.142:9222` (homelab CDP
 endpoint, exposed on the LAN). The script reuses the persistent tab,
