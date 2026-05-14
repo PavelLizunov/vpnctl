@@ -251,6 +251,14 @@ async fn distinct_ips_window_filter_includes_fresh_excludes_old() {
     let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
         .await
         .unwrap();
+    // Foreign keys default OFF on a freshly-opened raw connection
+    // (the prod inventory turns them ON via `SqliteConnectOptions`).
+    // Without this, the orphan-FK guard in `log_against_unknown_user_fails_via_fk`
+    // would pass for the wrong reason — caught by review-agent #5.
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&raw)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
          VALUES (datetime('now', '-25 hours'), 'alice', '2.2.2.2', 200, 100)",
@@ -352,4 +360,61 @@ async fn distinct_ips_window_filter_handles_same_day_rows_correctly() {
         "row 30 min old must be EXCLUDED by 0-hour window — \
          was the timestamp-format bug from retroactive review-agent."
     );
+}
+
+/// Phase Hardening regression for migration 0004: deleting a user must
+/// PRESERVE their `sub_access_log` rows (with `user_id` set to NULL),
+/// not cascade-delete them. The old `ON DELETE CASCADE` schema would
+/// have erased forensic evidence at the exact moment the operator
+/// might want to inspect it.
+#[tokio::test]
+async fn deleting_user_keeps_their_access_rows_with_null_user_id() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.log_sub_access(&UserId("alice".into()), "9.9.9.9", None, 200, 100)
+        .await
+        .unwrap();
+
+    // No public delete_user yet (Phase C-3.4 queued); reach in via raw
+    // SQL with foreign_keys ON so the FK rule we're testing actually
+    // fires. This is a TEMPORARY test pattern that will collapse into
+    // a proper inventory.delete_user() call once C-3.4 lands.
+    let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&raw)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = 'alice'")
+        .execute(&raw)
+        .await
+        .unwrap();
+
+    // Forensic row survives — IP/UA/ts intact — and user_id is NULL.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sub_access_log WHERE ip = '9.9.9.9' AND user_id IS NULL",
+    )
+    .fetch_one(&raw)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "row must SURVIVE user delete with user_id NULLed (was the \
+         CASCADE→SET NULL fix in migration 0004)"
+    );
+
+    // The orphaned row no longer counts towards any user's distinct
+    // IPs — `WHERE user_id = ?1` excludes NULL by SQL semantics.
+    let n = inv
+        .distinct_ips_for_user(&UserId("alice".into()), 24)
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "deleted user's orphaned rows must not show up in \
+         distinct_ips_for_user — it filters by `user_id = ?1`"
+    );
+    raw.close().await;
 }

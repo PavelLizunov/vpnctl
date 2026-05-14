@@ -309,6 +309,17 @@ impl SqliteInventory {
     /// Look up a user by their subscription token. Constant-time'ish at the
     /// SQL layer (sqlite scans the unique index), but the caller is the
     /// public daemon — see also `vpnctld` rate-limit middleware.
+    ///
+    /// **Side-channel posture (review-agent #5, security-review #3,
+    /// 2026-05-14):** SQLite's index walk + the Rust `String` comparison
+    /// inside `bind` are not constant-time. With ~256 bits of entropy
+    /// in `sub_token` (43 chars URL-safe base64 = 252 bits) brute force
+    /// is infeasible regardless. Timing-based prefix discovery would
+    /// matter ONLY if the daemon were exposed externally with no
+    /// rate-limit. The deployment is LAN-only today, and Phase Track-2
+    /// (per-token rate limit + auto-deny on burst) MUST land before any
+    /// external exposure — see CLAUDE.md Roadmap. Do NOT remove this
+    /// invariant by exposing the daemon publicly without Track-2.
     pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
