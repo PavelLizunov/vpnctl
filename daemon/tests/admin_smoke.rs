@@ -123,6 +123,101 @@ async fn admin_tweak_theme_sets_cookie_and_redirects() {
     assert!(cookie.contains("SameSite=Lax"));
 }
 
+/// CSRF-flavoured open-redirect guard: a Referer pointing at an external
+/// host (or a non-/admin path) must NOT become the redirect target. The
+/// tweak still succeeds (cookie set), but the browser lands on /admin/
+/// instead of the attacker's page.
+#[tokio::test]
+async fn admin_tweak_rejects_external_referer() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for hostile in [
+        "https://evil.example.com/foo",
+        "http://evil.example.com/admin/", // path looks ok, host doesn't
+        "//evil.example.com/admin/",      // protocol-relative
+        "/etc/passwd",                    // path, but not under /admin
+        "javascript:alert(1)",
+        "data:text/html,<script>1</script>",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/theme")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", hostile)
+                    .body(Body::from("value=foxed"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The cookie still gets set (request was authenticated), but the
+        // redirect target must be the safe fallback.
+        assert!(
+            resp.status() == StatusCode::SEE_OTHER
+                || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+            "expected 303/307 for hostile referer {hostile:?}, got {:?}",
+            resp.status()
+        );
+        let location = resp
+            .headers()
+            .get("location")
+            .expect("location missing")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            location, "/admin/",
+            "open-redirect: hostile referer {hostile:?} was followed (location={location})"
+        );
+    }
+}
+
+/// Sanity: a same-origin Referer pointing INSIDE /admin must be honoured.
+/// Otherwise the round-trip back to whichever section the operator was on
+/// would always dump them at the dashboard.
+#[tokio::test]
+async fn admin_tweak_preserves_safe_referer() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for (referer, expected_target) in [
+        ("/admin/users", "/admin/users"),
+        ("/admin/", "/admin/"),
+        ("http://192.168.0.236:18402/admin/audit", "/admin/audit"),
+        (
+            "http://192.168.0.236:18402/admin/settings/",
+            "/admin/settings/",
+        ),
+        ("/admin/users?tab=grants", "/admin/users?tab=grants"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/theme")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", referer)
+                    .body(Body::from("value=foxed"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = resp
+            .headers()
+            .get("location")
+            .expect("location missing")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            location, expected_target,
+            "safe referer {referer:?} was rewritten to {location} (wanted {expected_target})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn admin_tweak_rejects_unknown_value() {
     let dir = TempDir::new().unwrap();
@@ -168,5 +263,184 @@ async fn admin_respects_theme_and_accent_cookies() {
             .split('"')
             .next()
             .unwrap_or("?")
+    );
+}
+
+/// The nav must render anchors that actually navigate. Previous version had
+/// `<a class="...">` with no `href`, so clicks were silent no-ops.
+#[tokio::test]
+async fn admin_nav_anchors_have_hrefs() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    // Dashboard canonical URL is /admin/, others are /admin/<section>.
+    for href in [
+        "href=\"/admin/\"",
+        "href=\"/admin/monitoring\"",
+        "href=\"/admin/servers\"",
+        "href=\"/admin/users\"",
+        "href=\"/admin/audit\"",
+        "href=\"/admin/settings\"",
+    ] {
+        assert!(html.contains(href), "missing nav href: {href}");
+    }
+}
+
+/// Locate the `<a ...>` open tag for a given href in the rendered html
+/// and return its attribute soup. Returns None if no such anchor exists.
+/// Lets active-nav assertions check `class="on"` without depending on
+/// the order maud serialises attributes in.
+fn anchor_attrs<'a>(html: &'a str, href_value: &str) -> Option<&'a str> {
+    let needle = format!("href=\"{href_value}\"");
+    for chunk in html.split("<a ") {
+        if let Some(end) = chunk.find('>') {
+            let open = &chunk[..end];
+            if open.contains(&needle) {
+                return Some(open);
+            }
+        }
+    }
+    None
+}
+
+/// Each route (incl. dashboard) must respond 200 and mark its own nav
+/// item active. Uses an unordered attribute check so future maud version
+/// changes that re-order attribute serialisation don't break the test.
+#[tokio::test]
+async fn admin_section_routes_render_with_active_nav() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for (path, href_in_nav) in [
+        ("/admin/", "/admin/"),
+        ("/admin/monitoring", "/admin/monitoring"),
+        ("/admin/servers", "/admin/servers"),
+        ("/admin/users", "/admin/users"),
+        ("/admin/audit", "/admin/audit"),
+        ("/admin/settings", "/admin/settings"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected 200 from {path}, got {:?}",
+            resp.status()
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        let attrs = anchor_attrs(html, href_in_nav)
+            .unwrap_or_else(|| panic!("no anchor with href={href_in_nav} on {path}"));
+        assert!(
+            attrs.contains("class=\"on\""),
+            "expected active nav for {path} (anchor attrs: {attrs:?})"
+        );
+    }
+}
+
+/// Trailing-slash variant of every section route must also respond 200,
+/// otherwise nav copies that get pasted with a trailing `/` (browsers,
+/// share links, etc.) would 404. Dashboard already handles `/admin` and
+/// `/admin/` — the section routes follow the same convention.
+#[tokio::test]
+async fn admin_section_routes_accept_trailing_slash() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for path in [
+        "/admin/monitoring/",
+        "/admin/servers/",
+        "/admin/users/",
+        "/admin/audit/",
+        "/admin/settings/",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected 200 from {path}, got {:?}",
+            resp.status()
+        );
+    }
+}
+
+/// Inactive nav anchors must NOT carry an empty `class=""` attribute —
+/// the maud `.on[bool]` toggle drops the class entirely when inactive.
+/// Catches accidental `class=(if … else "")` regressions.
+#[tokio::test]
+async fn admin_inactive_nav_anchors_have_no_empty_class() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    // The dashboard is active, so EXACTLY one anchor should carry class="on";
+    // none should carry the wasteful class="" placeholder.
+    assert!(
+        !html.contains("class=\"\""),
+        "inactive nav anchors leaked an empty class attribute"
+    );
+    assert_eq!(
+        html.matches("class=\"on\"").count(),
+        1,
+        "expected exactly one active nav item on /admin/"
+    );
+}
+
+/// The placeholder body must use `var(--acc)` somewhere so the operator
+/// sees the accent toggle take visible effect. Earlier Phase A page only
+/// used neutral colours so the accent change felt inert.
+#[tokio::test]
+async fn admin_placeholder_uses_accent_variable() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("border-left: 3px solid var(--acc)"),
+        "tweak indicator stripe should be coloured by var(--acc)"
+    );
+    assert!(
+        html.contains("ed-acc"),
+        "tweak indicator labels should use the .ed-acc class which reads var(--acc)"
     );
 }

@@ -73,14 +73,41 @@ const NAV: &[NavItem] = &[
     },
 ];
 
+/// URL for a nav item. Dashboard lives at `/admin/` (canonical home),
+/// other sections at `/admin/<key>`. Keeps URLs predictable.
+fn nav_href(key: &str) -> String {
+    if key == "dashboard" {
+        "/admin/".to_string()
+    } else {
+        format!("/admin/{key}")
+    }
+}
+
 fn nav(active: &str) -> Markup {
     html! {
         nav.ed-mast__nav-inline style="padding: 12px 56px 0; border-bottom: 1px solid var(--rule);" {
             @for it in NAV {
-                a class=(if it.key == active { "on" } else { "" }) {
-                    (it.label)
-                    @if let Some(c) = it.count {
-                        span.ct { (c) }
+                // Real anchor with href — without it the previous version
+                // rendered styled text that didn't navigate on click.
+                //
+                // The active branch emits `class="on"`; the inactive one
+                // emits no class attribute at all. Maud's `.on[cond]` toggle
+                // would have emitted `class=""` when false (verified
+                // empirically), which is wasteful and would clutter
+                // selector-based assertions.
+                @if it.key == active {
+                    a.on href=(nav_href(it.key)) {
+                        (it.label)
+                        @if let Some(c) = it.count {
+                            span.ct { (c) }
+                        }
+                    }
+                } @else {
+                    a href=(nav_href(it.key)) {
+                        (it.label)
+                        @if let Some(c) = it.count {
+                            span.ct { (c) }
+                        }
                     }
                 }
             }
@@ -229,13 +256,34 @@ pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> 
     None
 }
 
+/// Read theme + accent cookies into owned strings (default = "default").
+fn theme_accent(headers: &HeaderMap) -> (String, String) {
+    let theme = cookie(headers, COOKIE_THEME)
+        .unwrap_or("default")
+        .to_string();
+    let accent = cookie(headers, COOKIE_ACCENT)
+        .unwrap_or("default")
+        .to_string();
+    (theme, accent)
+}
+
+/// Visible accent + theme indicator strip — every Phase A screen renders
+/// it so the operator gets immediate feedback when toggling either tweak.
+/// The left border + the `ed-acc` span both read from `var(--acc)`, so a
+/// rust/forest/plum switch is instantly visible (without it the placeholder
+/// content didn't use the variable at all).
+fn tweak_indicator(theme: &str, accent: &str) -> Markup {
+    html! {
+        div style="display: flex; gap: 16px; align-items: baseline; padding: 10px 14px; border-left: 3px solid var(--acc); background: var(--acc-bg); margin: 18px 0; font-family: var(--mono); font-size: 12px;" {
+            span style="color: var(--mute);" { "tweaks live →" }
+            span { "paper " span.ed-acc { (theme) } }
+            span { "accent " span.ed-acc { (accent) } }
+        }
+    }
+}
+
 pub(crate) async fn dashboard(headers: HeaderMap) -> Markup {
-    let theme = cookie(&headers, COOKIE_THEME)
-        .unwrap_or("default")
-        .to_string();
-    let accent = cookie(&headers, COOKIE_ACCENT)
-        .unwrap_or("default")
-        .to_string();
+    let (theme, accent) = theme_accent(&headers);
 
     let body = html! {
         // Phase A placeholder — masthead/nav/footer/tweaks are real;
@@ -249,17 +297,68 @@ pub(crate) async fn dashboard(headers: HeaderMap) -> Markup {
             em { "(dashboard, servers, users, audit, monitoring, settings)" }
             " arrive in subsequent phases."
         }
+        (tweak_indicator(&theme, &accent))
         div.ed-rule {}
         div.ed-art-eyebrow { "Currently wired" }
         ul style="font-family: var(--serif); font-size: 15px; line-height: 1.8; color: var(--soft); list-style: none; padding: 0;" {
             li { "— masthead with " span.ed-mono { "[•]" } " glyph and date strip" }
-            li { "— inline nav with active-page rule" }
+            li { "— inline nav with active-page rule (clickable, routes to each section placeholder)" }
             li { "— footer with version" }
-            li { "— Tweaks panel (paper × accent), cookie-persistent" }
+            li { "— Tweaks panel (paper × accent), cookie-persistent, instantly reflected above" }
             li { "— basic-auth middleware on " span.ed-mono { "/admin/*" } " (env: VPNCTLD_ADMIN_USER / VPNCTLD_ADMIN_PASSWORD)" }
         }
     };
     shell("dashboard", &theme, &accent, body)
+}
+
+/// Generic placeholder body for nav sections that don't have content yet
+/// (Phase B+). Re-uses `tweak_indicator` so accent changes are visible
+/// on every section, not just the dashboard.
+fn section_placeholder_body(section_label: &str, theme: &str, accent: &str) -> Markup {
+    html! {
+        div.ed-art-eyebrow { "Phase A · placeholder" }
+        h1.ed-art-h1 { (section_label) }
+        p.ed-art-deck {
+            "Section content lands in a later phase. The shell, nav and "
+            b { "theme + accent toggles" }
+            " are wired and visible above."
+        }
+        (tweak_indicator(theme, accent))
+        div.ed-rule {}
+        p style="font-family: var(--mono); font-size: 12px; color: var(--mute);" {
+            "← use the nav strip above to switch sections; bottom-right Tweaks panel persists across reloads via cookie"
+        }
+    }
+}
+
+pub(crate) async fn monitoring(headers: HeaderMap) -> Markup {
+    let (theme, accent) = theme_accent(&headers);
+    let body = section_placeholder_body("Monitoring", &theme, &accent);
+    shell("monitoring", &theme, &accent, body)
+}
+
+pub(crate) async fn servers(headers: HeaderMap) -> Markup {
+    let (theme, accent) = theme_accent(&headers);
+    let body = section_placeholder_body("Servers", &theme, &accent);
+    shell("servers", &theme, &accent, body)
+}
+
+pub(crate) async fn users(headers: HeaderMap) -> Markup {
+    let (theme, accent) = theme_accent(&headers);
+    let body = section_placeholder_body("Users", &theme, &accent);
+    shell("users", &theme, &accent, body)
+}
+
+pub(crate) async fn audit(headers: HeaderMap) -> Markup {
+    let (theme, accent) = theme_accent(&headers);
+    let body = section_placeholder_body("Audit", &theme, &accent);
+    shell("audit", &theme, &accent, body)
+}
+
+pub(crate) async fn settings(headers: HeaderMap) -> Markup {
+    let (theme, accent) = theme_accent(&headers);
+    let body = section_placeholder_body("Settings", &theme, &accent);
+    shell("settings", &theme, &accent, body)
 }
 
 fn set_tweak_cookie(
@@ -279,16 +378,56 @@ fn set_tweak_cookie(
     // 1-year, HttpOnly, SameSite=Lax — operator-only UI, no XSS surface.
     let cookie_val =
         format!("{cookie_name}={value}; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax");
-    let referer = headers
-        .get(header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("/admin/")
-        .to_string();
-    let mut resp = Redirect::to(&referer).into_response();
+    let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok());
+    let target = sanitize_referer(referer);
+    let mut resp = Redirect::to(&target).into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
         resp.headers_mut().append(header::SET_COOKIE, hv);
     }
     resp
+}
+
+/// Convert a Referer header into a safe redirect target. Only paths under
+/// `/admin` are accepted; everything else falls back to `/admin/` so a
+/// browser tricked into POSTing the tweak from `evil.example.com` doesn't
+/// then get redirected to the attacker's page (open-redirect class).
+///
+/// Accepts:
+///   - relative paths starting with `/admin` or exactly `/admin`
+///   - absolute URLs whose path component starts with `/admin`
+///
+/// CRLF (header injection) and any other shape fall back to `/admin/`.
+fn sanitize_referer(referer: Option<&str>) -> String {
+    let raw = match referer {
+        Some(r) => r,
+        None => return "/admin/".to_string(),
+    };
+    if raw.contains('\n') || raw.contains('\r') {
+        return "/admin/".to_string();
+    }
+    let path = if let Some(stripped) = raw
+        .strip_prefix("http://")
+        .or_else(|| raw.strip_prefix("https://"))
+    {
+        // Skip authority (host[:port]); take from the first '/' onward.
+        // No '/' at all means the URL is just a host — no path to keep.
+        match stripped.find('/') {
+            Some(i) => &stripped[i..],
+            None => return "/admin/".to_string(),
+        }
+    } else if raw.starts_with('/') {
+        raw
+    } else {
+        // Anything else (scheme-less, javascript:, data: …) is rejected.
+        return "/admin/".to_string();
+    };
+    // Strip query/fragment for the prefix check, then keep the original.
+    let path_only = path.split(['?', '#']).next().unwrap_or(path);
+    if path_only == "/admin" || path_only.starts_with("/admin/") {
+        path.to_string()
+    } else {
+        "/admin/".to_string()
+    }
 }
 
 /// Path `/admin/tweak/{kind}` dispatcher — `kind` is "theme" or "accent".

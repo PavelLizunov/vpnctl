@@ -94,9 +94,28 @@ fn admin_router(state: AppState) -> Router {
     // (so `/admin` works but `/admin/` 404s). Explicitly register both.
     // `nest_service` is fine for static — its prefix-match handles the
     // trailing slash naturally.
+    //
+    // Phase A section routes render the same shell with `active_nav` set
+    // and a placeholder body; real content lands in subsequent phases.
+    // Without these, clicking a nav anchor 404'd.
+    //
+    // Each section is registered with AND without the trailing slash —
+    // axum 0.8 routes match exactly, so `/admin/users` and `/admin/users/`
+    // would otherwise diverge (200 vs 404). Same reason `/admin` and
+    // `/admin/` are both wired for dashboard.
     let with_admin = Router::new()
         .route("/admin", get(admin::dashboard))
         .route("/admin/", get(admin::dashboard))
+        .route("/admin/monitoring", get(admin::monitoring))
+        .route("/admin/monitoring/", get(admin::monitoring))
+        .route("/admin/servers", get(admin::servers))
+        .route("/admin/servers/", get(admin::servers))
+        .route("/admin/users", get(admin::users))
+        .route("/admin/users/", get(admin::users))
+        .route("/admin/audit", get(admin::audit))
+        .route("/admin/audit/", get(admin::audit))
+        .route("/admin/settings", get(admin::settings))
+        .route("/admin/settings/", get(admin::settings))
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);
