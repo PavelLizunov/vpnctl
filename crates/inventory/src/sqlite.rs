@@ -557,15 +557,23 @@ impl SqliteInventory {
     /// Number of distinct source IPs that fetched this user's
     /// subscription URL in the last `since_hours` hours. Drives the
     /// "abuse signal" headline on the user-detail page.
+    ///
+    /// **Timestamp-format invariant (caught by retroactive review-agent
+    /// 2026-05-14, was a critical bug):** the cutoff must be produced
+    /// in the **same** format as `ts` is written by `log_sub_access` —
+    /// ISO `YYYY-MM-DDTHH:MM:SS.fffZ` (note the `T` separator and the
+    /// trailing `Z`). `datetime('now', ?)` returns the SQL form
+    /// `YYYY-MM-DD HH:MM:SS` (space separator, no millis, no `Z`) and
+    /// then SQLite compares both sides as TEXT — the `T` (0x54) is
+    /// greater than space (0x20), so every same-day row would compare
+    /// as "newer than the cutoff" regardless of its actual time-of-day.
+    /// Always wrap with `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)` so
+    /// both sides share the format the row was written in.
     pub async fn distinct_ips_for_user(&self, user_id: &UserId, since_hours: u32) -> Result<u64> {
-        // Use SQLite's `datetime('now', '-N hours')` predicate — keeps
-        // the time math server-side and tolerates clock skew between
-        // the daemon process and the DB connection (same machine here,
-        // but the rule still helps when the DB lives on NFS or similar).
         let row = sqlx::query(
             "SELECT COUNT(DISTINCT ip) AS n FROM sub_access_log
              WHERE user_id = ?1
-               AND ts > datetime('now', ?2)",
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
         )
         .bind(&user_id.0)
         .bind(format!("-{since_hours} hours"))
@@ -601,11 +609,17 @@ impl SqliteInventory {
     /// Drop all rows older than `days`. Returns the number of rows
     /// removed so the caller (a periodic task in the daemon) can log
     /// the retention activity.
+    ///
+    /// See `distinct_ips_for_user` for the timestamp-format invariant;
+    /// the same `strftime` wrap applies here so the purge cutoff is
+    /// comparable to the ISO timestamps `log_sub_access` writes.
     pub async fn purge_sub_access_older_than(&self, days: u32) -> Result<u64> {
-        let res = sqlx::query("DELETE FROM sub_access_log WHERE ts < datetime('now', ?1)")
-            .bind(format!("-{days} days"))
-            .execute(&self.pool)
-            .await?;
+        let res = sqlx::query(
+            "DELETE FROM sub_access_log WHERE ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
         Ok(res.rows_affected())
     }
 }

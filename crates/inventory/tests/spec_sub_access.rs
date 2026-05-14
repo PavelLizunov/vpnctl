@@ -280,3 +280,76 @@ async fn distinct_ips_window_filter_includes_fresh_excludes_old() {
         "row 25h old must be INCLUDED by 48h window (both IPs visible)"
     );
 }
+
+/// Regression test for the timestamp-format bug caught by retroactive
+/// review-agent 2026-05-14.
+///
+/// **Bug:** `log_sub_access` wrote `ts` via `strftime('%Y-%m-%dT%H:%M:%fZ',
+/// 'now')` → ISO format with a `T` separator (`2026-05-14T20:00:00.500Z`).
+/// But `distinct_ips_for_user` compared against `datetime('now', ?)`
+/// which returns the SQL form `YYYY-MM-DD HH:MM:SS` (space separator,
+/// no millis, no `Z`). SQLite compared both sides as TEXT — `T` (0x54)
+/// is greater than space (0x20), so EVERY same-day row passed `ts > cutoff`
+/// regardless of actual time-of-day. Sub-day windows silently included
+/// rows that should have been excluded; the abuse signal was unreliable.
+///
+/// **The fix** (in `distinct_ips_for_user` + `purge_sub_access_older_than`):
+/// wrap the cutoff in `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)` so both
+/// sides share the format the row was written in.
+///
+/// This test fails on the buggy code and passes on the fixed code. The
+/// existing `distinct_ips_window_filter_includes_fresh_excludes_old`
+/// test happened to cross a calendar boundary (-25 hours), where the
+/// date-level prefix mismatch hid the bug — that's why review-agent
+/// caught it instead of the spec suite.
+#[tokio::test]
+async fn distinct_ips_window_filter_handles_same_day_rows_correctly() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // Inject a row 30 minutes in the past, in the SAME ISO format the
+    // production `log_sub_access` writes — so the format-mismatch bug
+    // can manifest. Foreign keys must be ON on this raw pool, else the
+    // INSERT would succeed even with an orphan user_id and the test
+    // would pass for the wrong reason (caught by review-agent #5).
+    let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&raw)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes'),
+                 'alice', '3.3.3.3', 200, 100)",
+    )
+    .execute(&raw)
+    .await
+    .unwrap();
+    raw.close().await;
+
+    // A 0-hour window means "rows strictly after `now`" — the injected
+    // row is 30 min old, so it MUST be excluded.
+    //
+    // With the BUG (cutoff in `datetime` space-form, row in ISO `T`-form):
+    //   row ts  = "2026-05-14T19:30:00.500Z"
+    //   cutoff  = "2026-05-14 20:00:00"
+    //   compare position 10: 'T' (0x54) > ' ' (0x20) → row > cutoff
+    //   → row passes filter → count = 1
+    // With the FIX (both sides ISO):
+    //   row ts  = "2026-05-14T19:30:00.500Z"
+    //   cutoff  = "2026-05-14T20:00:00.500Z"
+    //   compare position 11: '1' < '2' → row < cutoff
+    //   → row excluded → count = 0
+    let n = inv
+        .distinct_ips_for_user(&UserId("alice".into()), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "row 30 min old must be EXCLUDED by 0-hour window — \
+         was the timestamp-format bug from retroactive review-agent."
+    );
+}
