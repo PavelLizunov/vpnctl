@@ -34,6 +34,8 @@ anyhow = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+# Inline-SVG QR codes for /admin/users/<id> share-links.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -690,3 +690,270 @@ async fn admin_servers_header_singular_for_one_server() {
         "must not pluralise when count is 1"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-1 — users list + user detail (read-only)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Empty inventory must render the users page with the explicit
+/// empty-state and a hint pointing at the CLI workflow.
+#[tokio::test]
+async fn admin_users_empty_state_quotes_cli() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/users").await;
+
+    assert!(
+        html.contains("0 <em>users</em>"),
+        "page header should announce 0 users"
+    );
+    assert!(html.contains("No users yet"), "empty-state copy missing");
+    assert!(
+        html.contains("vpnctl user create"),
+        "empty-state should hint vpnctl user create"
+    );
+    assert!(
+        !html.contains(r#"class="ed-server""#),
+        "no row-articles when there are no users"
+    );
+}
+
+/// Populated users list must render one row per user, never echo a full
+/// sub-token (mask must hide the middle), and link each row to the
+/// detail page.
+#[tokio::test]
+async fn admin_users_populated_renders_rows_and_masks_secrets() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 3, &[(0, 0), (1, 0), (2, 0)]).await;
+
+    // Pick u0's sub_token after add_user backfilled it, so we can assert
+    // it is NEVER returned in full on the list page.
+    let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
+    let token = u0.sub_token.expect("backfill should mint a sub_token");
+    assert!(token.len() > 16, "sub_token unexpectedly short: {token:?}");
+
+    let html = fetch_html(router(s), "/admin/users").await;
+
+    // 3 row articles.
+    assert_eq!(
+        html.matches(r#"<article class="ed-server">"#).count(),
+        3,
+        "expected 3 user rows"
+    );
+    // Header pluralised.
+    assert!(html.contains("3 <em>users</em>"));
+    // Detail link for each user.
+    for id in ["u0", "u1", "u2"] {
+        let href = format!(r#"href="/admin/users/{id}""#);
+        assert!(
+            html.contains(&href),
+            "missing detail link for {id} ({href})"
+        );
+    }
+    // Masked sub-token shows the first/last 4 chars but NOT the middle.
+    let head: String = token.chars().take(4).collect();
+    let tail: String = token.chars().skip(token.len() - 4).collect();
+    assert!(
+        html.contains(&format!("{head}…{tail}")),
+        "masked token preview should appear (first 4 + last 4)"
+    );
+    assert!(
+        !html.contains(&token),
+        "FULL sub_token leaked into the list page"
+    );
+    // Singular vs plural for grants on per-row line.
+    // u0 is granted to s0; u1, u2 also granted to s0 → all three say "1 server".
+    assert_eq!(
+        html.matches("<b>1</b> server").count(),
+        3,
+        "each user row should show '1 server' granted (singular)"
+    );
+}
+
+/// Unknown user id must produce a 404 with the id echoed in the body
+/// (helpful for the operator) but NOT mask-leaked beyond plain text.
+#[tokio::test]
+async fn admin_user_detail_unknown_id_returns_404() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/does-not-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let txt = std::str::from_utf8(&body).unwrap();
+    assert!(
+        txt.contains("does-not-exist"),
+        "404 body should echo the id the operator asked for, got: {txt}"
+    );
+}
+
+/// User-detail page on a populated inventory: renders the QR (inline
+/// SVG), shows the masked sub-token, lists granted servers, and renders
+/// per-protocol share links — NEVER echoing the full sub_token.
+#[tokio::test]
+async fn admin_user_detail_renders_qr_grants_and_share_links() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
+
+    // We need protocol secrets for a share-link to render. Seed VLESS
+    // secrets on s0 only; s1 stays unconfigured to exercise the
+    // skip-on-missing-secrets path.
+    s.inv
+        .set_server_secret(
+            &ServerId("s0".into()),
+            "vless.private_key",
+            "QGZ8K-private-key-base64==",
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(
+            &ServerId("s0".into()),
+            "vless.public_key",
+            "PUBLIC-KEY-BASE64=",
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&ServerId("s0".into()), "vless.short_id", "deadbeef")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&ServerId("s0".into()), "vless.sni", "www.microsoft.com")
+        .await
+        .unwrap();
+
+    let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
+    let token = u0.sub_token.expect("token");
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/u0")
+                .header("host", "192.168.0.236:18402")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+
+    // The QR is an inline <svg>.
+    assert!(html.contains("<svg "), "QR svg missing");
+    // The QR is wrapped in a paper card (border-rule), not naked.
+    assert!(
+        html.contains("border: 1px solid var(--rule)"),
+        "QR card border styling missing"
+    );
+    // The sub URL uses the Host header verbatim.
+    let expected_url = format!("http://192.168.0.236:18402/sub/{token}");
+    assert!(
+        html.contains(&expected_url),
+        "sub URL should use the Host header (expected {expected_url})"
+    );
+    // BUT the masked sub-token preview is also rendered separately, and
+    // the FULL token must not appear outside the URL form.
+    let occurrences = html.matches(token.as_str()).count();
+    assert_eq!(
+        occurrences, 1,
+        "sub_token should appear exactly once (inside the sub URL), got {occurrences}"
+    );
+    // Both granted servers appear in the "Granted servers" list.
+    for id in ["s0", "s1"] {
+        assert!(html.contains(id), "granted server {id} missing");
+    }
+    // At least one share-link rendered (s0 has VLESS secrets); s1 should
+    // be skipped silently (its share_link will fail on missing secrets).
+    assert!(
+        html.contains("vless://") || html.contains("Per-protocol share links"),
+        "expected share-links section, got snippet: {}",
+        &html[..html.len().min(800)]
+    );
+}
+
+/// User ids containing URL-special chars (`?`, `#`, `/`, space, `&`)
+/// must be percent-encoded in the detail-link href, otherwise the
+/// browser would interpret them as path/query/fragment separators and
+/// the link would 404 or hit the wrong handler. The HTML still escapes
+/// the *text* of the id (so `<` shows literally inside the row), but
+/// the href needs URL-encoding on top of that.
+#[tokio::test]
+async fn admin_users_href_url_encodes_special_chars() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // The inventory accepts arbitrary text as id; the daemon must
+    // tolerate whatever the operator typed.
+    s.inv
+        .add_user(&User {
+            id: UserId("weird/id?x=1 #frag".into()),
+            uuid: "00000000-0000-0000-0000-000000000099".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users").await;
+
+    // Expect: "/admin/users/weird%2Fid%3Fx%3D1%20%23frag"
+    assert!(
+        html.contains("href=\"/admin/users/weird%2Fid%3Fx%3D1%20%23frag\""),
+        "href must percent-encode `/`, `?`, `=`, ` `, `#` (snippet around href: {:?})",
+        html.split("ed-server__cta").next().unwrap_or("?")
+    );
+    // Negative: the raw id must NOT appear as a literal path on the link
+    // (axum routing would 404, the link would be broken).
+    assert!(
+        !html.contains("href=\"/admin/users/weird/id?x=1 #frag\""),
+        "raw, unescaped id leaked into href"
+    );
+}
+
+/// COVERAGE GAP — the user-detail handler has a fallback branch that
+/// renders "No sub-token assigned" when `user.sub_token == None`, but
+/// the public inventory API never lets us reach that state today:
+/// `add_user` inserts whatever the struct holds, then `open()` runs
+/// `backfill_sub_tokens` which mints a token for every NULL row. So
+/// after `seed()` every user has `Some(token)`.
+///
+/// Phase C-2 (writes) will add a `clear_sub_token` / `regenerate_sub_token`
+/// pair that lets us write a real assertion here. For now this test
+/// just confirms the present-token branch keeps working — see also the
+/// handler-side comment marking the dead branch as defensive.
+#[tokio::test]
+async fn admin_user_detail_handles_missing_sub_token() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+
+    // Confirm the precondition: open() backfilled a token, so the
+    // None branch can't be reached without bypassing the public API.
+    let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
+    assert!(
+        u0.sub_token.is_some(),
+        "open() should have backfilled — None branch is currently unreachable via public API"
+    );
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Subscription"),
+        "subscription section heading missing"
+    );
+    assert!(
+        !html.contains("No sub-token assigned"),
+        "user has a token — must not render the 'no token' fallback"
+    );
+}

@@ -4640,6 +4640,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "maud",
+ "qrcode",
  "serde",
  "serde_json",
  "subtle",

@@ -112,6 +112,11 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/servers/", get(admin::servers))
         .route("/admin/users", get(admin::users))
         .route("/admin/users/", get(admin::users))
+        // User detail: `/admin/users/<id>` (with and without trailing
+        // slash). Path param doesn't capture an empty segment, so
+        // `/admin/users/` continues to hit the list above.
+        .route("/admin/users/{id}", get(admin::user_detail))
+        .route("/admin/users/{id}/", get(admin::user_detail))
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/settings", get(admin::settings))

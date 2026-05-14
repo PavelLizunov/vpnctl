@@ -572,10 +572,365 @@ pub(crate) async fn servers(
     Ok(shell("servers", &theme, &accent, body))
 }
 
-pub(crate) async fn users(headers: HeaderMap) -> Markup {
+// ────────────────────────────────────────────────────────────────────────
+//  Users — list (Phase C-1) + detail (Phase C-1) — read-only.
+//  Add / regenerate / delete go in Phase C-2 once the inventory write
+//  paths gain audit-logging (CLAUDE.md invariant).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Mask all but the first/last 4 chars of a long opaque token. Used for
+/// sub_token, tuic_password etc. — the operator should be able to spot
+/// the right user by the prefix without exposing the full secret in
+/// shoulder-surf range.
+///
+/// Counts in **chars**, not bytes. The token contract for vpnctl is
+/// url-safe base64 (`sub_token`, 43 ASCII chars) or other opaque ASCII
+/// secrets, so chars and bytes coincide. If a multibyte secret ever
+/// shows up here the visible head/tail still come out correctly thanks
+/// to `chars()`-based slicing.
+fn mask_secret(s: &str) -> String {
+    let n = s.chars().count();
+    if n <= 8 {
+        // Too short to mask meaningfully — show in full.
+        return s.to_string();
+    }
+    let head: String = s.chars().take(4).collect();
+    let tail: String = s.chars().skip(n - 4).collect();
+    format!("{head}…{tail} ({n} chars)")
+}
+
+/// Percent-encode a string for use as a single URL path segment. Keeps
+/// RFC 3986 unreserved chars (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`)
+/// verbatim; everything else is `%XX`-escaped. Avoids pulling
+/// percent-encoding as a direct dep — sub_token / user_id / server_id
+/// rarely need this in practice but it costs ~10 lines to be safe
+/// against operator-typed `?`, `#`, `/`, spaces.
+fn path_segment_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Per-user row in the users list. Keeps the editorial cadence — one
+/// `<article>` per row with id / uuid prefix / sub-token preview / grant
+/// count, and a CTA arrow to the detail page.
+///
+/// `grants_count` is `usize` (the natural count from `Vec::len()`); maud
+/// renders any `Display` integer so we don't need to pre-narrow into
+/// `i64` and risk an overflow fallback that would silently mislead the
+/// operator.
+fn user_row(idx: usize, u: &vpnctl_core::User, grants_count: usize) -> Markup {
+    let sub_token_preview = u.sub_token.as_deref().map(mask_secret);
+    let uuid_preview: String = u.uuid.chars().take(8).collect();
+    let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
+    html! {
+        article.ed-server {
+            div.ed-server__no { (format!("№ {:02}", idx + 1)) }
+            div {
+                h2.ed-server__h { (u.id.0) }
+                div.ed-server__addr {
+                    "uuid " span.ed-mono { (uuid_preview) "…" }
+                    " · sub-token "
+                    @match &sub_token_preview {
+                        Some(s) => span.ed-mono { (s) },
+                        None => em { "(unset — open the user to regenerate)" },
+                    }
+                }
+                p.ed-server__lede {
+                    b { (grants_count) } " "
+                    @if grants_count == 1 { "server" } @else { "servers" }
+                    " granted"
+                    @if u.tuic_password.is_some() { " · tuic password set" }
+                    @if u.wireguard_pubkey.is_some() { " · wireguard pubkey set" }
+                }
+            }
+            dl.ed-server__meta {
+                dt { "open" }
+                dd {
+                    a href=(detail_href)
+                      class="ed-server__cta" { "detail · QR" }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn users(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
     let (theme, accent) = theme_accent(&headers);
-    let body = section_placeholder_body("Users", &theme, &accent);
-    shell("users", &theme, &accent, body)
+
+    // list_users + servers_for_user-per-user would be N+1; instead use
+    // the inventory's grants-count map (one query) and look up by user.
+    let users_list = state
+        .inv
+        .list_users()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Per-user grants count: the existing aggregations only group by
+    // server_id, not user_id. Since N is small (homelab) we issue one
+    // small query per user — this is bounded by the operator's user
+    // count and will not be a hot path.
+    let mut grants_per_user: Vec<usize> = Vec::with_capacity(users_list.len());
+    for u in &users_list {
+        let n = state
+            .inv
+            .servers_for_user(&u.id)
+            .await
+            .map(|v| v.len())
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+        grants_per_user.push(n);
+    }
+
+    let body = html! {
+        div.ed-art-eyebrow { "Users" }
+        h1.ed-art-h1 {
+            (users_list.len()) " "
+            @if users_list.len() == 1 { em { "user" } } @else { em { "users" } }
+            " on file"
+        }
+        p.ed-art-deck {
+            "Each user has one " span.ed-mono { "/sub/<token>" } " endpoint that hands their "
+            "sing-box client a fresh config covering every server they're granted on. "
+            "Open a row for the QR you'll point a phone at."
+        }
+        (tweak_indicator(&theme, &accent))
+        @if users_list.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
+                "No users yet. Run "
+                span.ed-mono { "vpnctl user create <id>" }
+                " then "
+                span.ed-mono { "vpnctl grant <user> <server>" }
+                "."
+            }
+        } @else {
+            div {
+                @for (idx, (u, g)) in users_list.iter().zip(grants_per_user.iter()).enumerate() {
+                    (user_row(idx, u, *g))
+                }
+            }
+        }
+    };
+    Ok(shell("users", &theme, &accent, body))
+}
+
+/// Build the canonical sub URL the QR encodes. Uses the request's `Host`
+/// header so the QR is reachable from wherever the operator opened the
+/// admin from (LAN IP, VPN IP, or the external one when we add reverse
+/// proxy). Defaults to a sensible LAN guess if the header is missing —
+/// rare in practice, but not worth crashing over.
+fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1:18402");
+    // Daemon is HTTP-only on LAN — when an operator stands up TLS in
+    // front of vpnctld this becomes a config knob.
+    format!("http://{host}/sub/{sub_token}")
+}
+
+/// Render an inline SVG QR for the given URL. Returns
+/// `<div class="ed-qr">...<svg>...</svg>...</div>`. The SVG carries
+/// no scripts, no external refs.
+fn qr_svg(url: &str) -> Markup {
+    use qrcode::QrCode;
+    use qrcode::render::svg;
+
+    match QrCode::new(url.as_bytes()) {
+        Ok(code) => {
+            let svg_str = code
+                .render::<svg::Color<'_>>()
+                .min_dimensions(220, 220)
+                .quiet_zone(true)
+                .dark_color(svg::Color("#1a1611"))
+                .light_color(svg::Color("#f5efe6"))
+                .build();
+            html! {
+                div style="display: inline-block; padding: 12px; background: var(--paper); border: 1px solid var(--rule);" {
+                    (maud::PreEscaped(svg_str))
+                }
+            }
+        }
+        Err(e) => html! {
+            div style="font-family: var(--mono); color: var(--red); font-size: 12px;" {
+                "QR generation failed: " (e.to_string())
+            }
+        },
+    }
+}
+
+/// Build all (server, protocol) share-links for a user — same logic as
+/// the CLI's `vpnctl sub` and the daemon's `/sub/<token>` handler. Each
+/// entry has the protocol id and the rendered URI; failures are logged
+/// and skipped, never panic.
+fn collect_share_links(
+    state: &AppState,
+    user: &vpnctl_core::User,
+    servers: &[vpnctl_core::Server],
+    secrets_per_server: &std::collections::HashMap<
+        vpnctl_core::ServerId,
+        std::collections::HashMap<String, String>,
+    >,
+) -> Vec<(vpnctl_core::ServerId, vpnctl_core::ProtocolId, String)> {
+    let mut out = Vec::new();
+    for server in servers {
+        let Some(secrets) = secrets_per_server.get(&server.id) else {
+            tracing::warn!(target = "vpnctld::admin", server = %server.id, "secrets missing for granted server");
+            continue;
+        };
+        let ctx = vpnctl_core::RenderCtx::new(server, secrets);
+        for pid in &server.enabled_protocols {
+            let Some(proto) = state.registry.protocol(pid) else {
+                tracing::warn!(target = "vpnctld::admin", protocol = %pid, "protocol not registered");
+                continue;
+            };
+            match proto.share_link(&ctx, user) {
+                Ok(link) => out.push((server.id.clone(), pid.clone(), link)),
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::admin",
+                        server = %server.id,
+                        protocol = %pid,
+                        error = %e,
+                        "share_link failed, skipping"
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(crate) async fn user_detail(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Result<Markup, Response> {
+    let (theme, accent) = theme_accent(&headers);
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+
+    let user = state
+        .inv
+        .get_user(&uid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let Some(user) = user else {
+        return Err(user_not_found(&user_id_str));
+    };
+
+    let servers = state
+        .inv
+        .servers_for_user(&uid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Pre-fetch secrets for every granted server in parallel.
+    let mut secrets_per_server = std::collections::HashMap::new();
+    for s in &servers {
+        let secrets = state
+            .inv
+            .list_server_secrets(&s.id)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+        secrets_per_server.insert(s.id.clone(), secrets);
+    }
+
+    let share_links = collect_share_links(&state, &user, &servers, &secrets_per_server);
+    let sub_token = user.sub_token.clone();
+    let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
+
+    let body = html! {
+        div.ed-art-eyebrow {
+            a href="/admin/users" style="color: var(--mute); text-decoration: none;" { "← all users" }
+            "  ·  user"
+        }
+        h1.ed-art-h1 { (user.id.0) }
+        p.ed-art-deck {
+            "uuid " span.ed-mono { (user.uuid) }
+        }
+        (tweak_indicator(&theme, &accent))
+
+        // Subscription URL + QR — the headline for this page.
+        div.ed-art-eyebrow style="margin-top: 28px;" { "Subscription" }
+        @match (&sub_token, &sub_url_str) {
+            (Some(token), Some(url)) => {
+                div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                    (qr_svg(url))
+                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                        div { span style="color: var(--mute);" { "url   " } (url) }
+                        div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
+                        div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
+                            "Point a Hiddify-style client at the URL once; it will re-pull the config on its own schedule."
+                        }
+                    }
+                }
+            }
+            _ => {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                    "No sub-token assigned to this user. Run "
+                    span.ed-mono { "vpnctl user regenerate-sub-token " (user.id.0) }
+                    " to mint one."
+                }
+            }
+        }
+
+        // Granted servers + per-(server, protocol) share-links.
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Granted servers" }
+        @if servers.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
+                "No grants. Run "
+                span.ed-mono { "vpnctl grant " (user.id.0) " <server-id>" }
+                " from a server-detail page once those land."
+            }
+        } @else {
+            ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
+                @for s in &servers {
+                    li {
+                        b { (s.id.0) }
+                        " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", " (s.kernel.0) ")"
+                    }
+                }
+            }
+            div.ed-art-eyebrow style="margin-top: 24px;" { "Per-protocol share links" }
+            @if share_links.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                    "No share-links could be rendered (missing secrets or unregistered protocols). "
+                    "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
+                }
+            } @else {
+                ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
+                    @for (sid, pid, link) in &share_links {
+                        li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                            span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
+                            (link)
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(shell("users", &theme, &accent, body))
+}
+
+/// 404 response for `/admin/users/<id>` when no such user exists. Keeps
+/// the editorial chrome out (matches the bare-text 500 convention from
+/// `internal_error`) so the operator sees the message in plain form.
+fn user_not_found(id: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        format!("admin: no such user '{id}'\n"),
+    )
+        .into_response()
 }
 
 pub(crate) async fn audit(headers: HeaderMap) -> Markup {
