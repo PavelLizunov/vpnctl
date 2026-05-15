@@ -2932,3 +2932,108 @@ async fn admin_user_delete_mismatch_400() {
     // User STILL there — mismatch must not delete.
     assert!(inv.get_user(&UserId("u0".into())).await.unwrap().is_some());
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase Track-4 — UA fingerprint section on user-detail.
+//
+// Backed by `inventory::ua_clusters_for_user`. Three behaviors covered:
+//   1. Empty case — the section silently disappears (no headline, no
+//      empty-state copy). Operators only see the section when there's
+//      something to read; an empty table on a fresh user would just be
+//      noise.
+//   2. Populated case — one row per distinct UA, with the verdict
+//      column rendering "likely shared URL" for /16 spread ≥ 3.
+//   3. Roaming verdict — distinct_ips ≥ 3, distinct_slash16 ≤ 1 →
+//      "likely roaming". This is the operator's "one device hopping
+//      ISPs" tell, opposite of the shared-URL signal.
+//
+// Per-section copy contract: the headline reads "UA fingerprint · last
+// 24h"; the deck contains the word "Heuristic" so the operator knows
+// not to treat the verdict as authoritative.
+
+#[tokio::test]
+async fn admin_user_detail_track4_ua_section_hidden_when_empty() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        !html.contains("UA fingerprint"),
+        "UA section must be hidden for users with no /sub fetches"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_track4_ua_section_renders_likely_shared() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Same UA hitting from three different /16 networks — classic
+    // "subscription URL got shared with friends in different ISPs".
+    for ip in ["192.0.2.1", "203.0.113.7", "198.51.100.5"] {
+        s.inv
+            .log_sub_access(
+                &UserId("u0".into()),
+                ip,
+                Some("Hiddify/Android/2.5.0"),
+                200,
+                100,
+            )
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+
+    // Section headline + deck (copy contract).
+    assert!(
+        html.contains("UA fingerprint"),
+        "UA section headline missing"
+    );
+    assert!(
+        html.contains("Heuristic"),
+        "UA section deck must caveat the verdict"
+    );
+    // Verdict label shows up.
+    assert!(
+        html.contains("likely shared URL"),
+        "expected 'likely shared URL' verdict; html (truncated): {}",
+        &html[..html.len().min(800)]
+    );
+    // The UA renders in its column.
+    assert!(html.contains("Hiddify/Android/2.5.0"));
+    // Counters per row: hits=3, ips=3, /16=3 — they all show as ">3<"
+    // somewhere; this just confirms the row data wired through.
+    assert!(
+        html.matches(">3<").count() >= 3,
+        "expected at least 3 columns rendering '3' (hits/ips/slash16); got {}",
+        html.matches(">3<").count()
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_track4_ua_section_detects_roaming() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Three distinct IPs but all in the same /16 — one device whose
+    // carrier reassigned its IP a few times.
+    for ip in ["192.0.2.10", "192.0.2.11", "192.0.2.12"] {
+        s.inv
+            .log_sub_access(&UserId("u0".into()), ip, Some("sing-box/1.10.0"), 200, 100)
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("likely roaming"),
+        "expected 'likely roaming' verdict for 3 IPs in 1 /16; html (truncated): {}",
+        &html[..html.len().min(800)]
+    );
+    // Must NOT misclassify as shared.
+    assert!(
+        !html.contains("likely shared URL"),
+        "roaming pattern should not trip the shared-URL verdict"
+    );
+}

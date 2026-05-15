@@ -69,6 +69,25 @@ pub struct AuditEntry {
     pub payload: Option<serde_json::Value>,
 }
 
+/// One UA-cluster row for the Phase Track-4 fingerprint heuristic.
+/// Groups `sub_access_log` rows by User-Agent within the recent
+/// window. The classifier ("roaming" vs "shared URL") lives in the
+/// admin handler, not here — inventory just exposes raw aggregates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UaCluster {
+    /// User-Agent string. `None` means rows whose UA was missing
+    /// (curl scripts, misconfigured clients).
+    pub ua: Option<String>,
+    /// Distinct IPs that hit /sub with this UA in the window.
+    pub distinct_ips: u64,
+    /// Distinct /16 networks (first two octets of v4) — the heuristic
+    /// signal: one device usually roams within a single ISP /16,
+    /// while a shared URL spreads across ASNs and therefore /16s.
+    pub distinct_slash16: u64,
+    /// Total hits with this UA in the window.
+    pub hits: u64,
+}
+
 /// One time-bucket of `sub_access_log` aggregated for the Phase F
 /// monitoring sparklines. `ts` is the bucket start (ISO-8601, UTC),
 /// `hits` is the count of requests in the bucket, `distinct_ips` is
@@ -691,6 +710,68 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_sub_access).collect()
     }
 
+    /// UA-cluster aggregate for the Phase Track-4 fingerprint
+    /// heuristic. Groups this user's recent `sub_access_log` rows
+    /// by User-Agent and reports per-UA distinct IPs, distinct /16
+    /// networks (first two v4 octets), and total hits.
+    ///
+    /// The /16 count is the key signal: a single roaming device
+    /// usually moves within one ISP /16 (Wi-Fi switching subnets,
+    /// LTE base stations under the same provider) — so distinct_ips
+    /// can be high but distinct_slash16 stays at 1-2. A shared sub
+    /// URL hits from many ISPs / countries → distinct_slash16 climbs.
+    ///
+    /// IPv6 addresses contribute `0` to the /16 count (we don't try
+    /// to derive a meaningful network prefix without ASN data); the
+    /// `distinct_ips` count still reflects them.
+    pub async fn ua_clusters_for_user(
+        &self,
+        user_id: &UserId,
+        since_hours: u32,
+    ) -> Result<Vec<UaCluster>> {
+        // Pull raw (ua, ip) tuples then aggregate in Rust — SQLite
+        // can't extract /16 prefixes natively, and the row count is
+        // bounded by the recent window so memory is fine.
+        let rows = sqlx::query(
+            "SELECT ua, ip FROM sub_access_log
+             WHERE user_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+        )
+        .bind(&user_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+
+        use std::collections::{HashMap, HashSet};
+        // (ua_or_none) → (set of distinct IPs, set of distinct /16, hit count)
+        let mut by_ua: HashMap<Option<String>, (HashSet<String>, HashSet<String>, u64)> =
+            HashMap::new();
+        for r in rows {
+            let ua: Option<String> = r.try_get("ua")?;
+            let ip: String = r.try_get("ip")?;
+            let s16 = ip_slash16(&ip);
+            let entry = by_ua.entry(ua).or_default();
+            entry.0.insert(ip);
+            if let Some(net) = s16 {
+                entry.1.insert(net);
+            }
+            entry.2 += 1;
+        }
+        let mut out: Vec<UaCluster> = by_ua
+            .into_iter()
+            .map(|(ua, (ips, s16s, hits))| UaCluster {
+                ua,
+                distinct_ips: ips.len() as u64,
+                distinct_slash16: s16s.len() as u64,
+                hits,
+            })
+            .collect();
+        // Sort by hit count DESC so the noisy UAs surface first in
+        // the UI.
+        out.sort_by_key(|c| std::cmp::Reverse(c.hits));
+        Ok(out)
+    }
+
     /// Drop all rows older than `days`. Returns the number of rows
     /// removed so the caller (a periodic task in the daemon) can log
     /// the retention activity.
@@ -866,6 +947,29 @@ impl SqliteInventory {
         .await?;
         Ok(res.rows_affected())
     }
+}
+
+/// Extract the `/16` network prefix from a v4 IP literal as a
+/// string (`"192.168.0.1"` → `Some("192.168")`). Returns `None`
+/// for v6 addresses (no meaningful prefix without ASN data) or
+/// malformed strings. Used by the Track-4 UA fingerprint heuristic
+/// to count distinct ISP-ish networks per UA.
+pub(crate) fn ip_slash16(ip: &str) -> Option<String> {
+    // Reject v6 cheaply — colons don't appear in v4 dotted-quad.
+    if ip.contains(':') {
+        return None;
+    }
+    let mut parts = ip.split('.');
+    let a = parts.next()?;
+    let b = parts.next()?;
+    let _ = parts.next()?; // third octet must exist (else not v4)
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    if !a.bytes().all(|x| x.is_ascii_digit()) || !b.bytes().all(|x| x.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{a}.{b}"))
 }
 
 /// Escape SQLite LIKE metacharacters (`\`, `%`, `_`) so user-supplied

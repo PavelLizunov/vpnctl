@@ -1387,6 +1387,9 @@ pub(crate) async fn user_detail(
             }
         }
 
+        // ── UA fingerprint (Phase Track-4) ──────────────────────
+        (ua_clusters_section(&state, &uid).await)
+
         // Destructive zone (Phase C-3.4) — deliberately at the very
         // bottom so the operator scrolls past everything else first.
         // The link goes to a confirm page (GET) NOT a direct POST,
@@ -1404,6 +1407,110 @@ pub(crate) async fn user_detail(
         }
     };
     Ok(shell("users", &theme, &accent, tw, body))
+}
+
+/// Phase Track-4 — UA fingerprint heuristic. Renders one row per
+/// distinct User-Agent that has hit this user's `/sub` URL in the
+/// last 24h, with a "likely roaming" / "likely shared URL" label.
+///
+/// Classifier (initial cut, intentionally conservative):
+///   * `distinct_slash16 >= 3` → `likely shared URL` (orange)
+///   * `distinct_ips >= 3 && distinct_slash16 <= 1` → `likely roaming`
+///     (one device hopping subnets within one ISP)
+///   * else → unlabeled (single-IP normal client)
+///
+/// On inventory error returns a small "(unavailable)" nudge instead
+/// of failing the whole page.
+async fn ua_clusters_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+    let clusters = match state.inv.ua_clusters_for_user(uid, 24).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "ua_clusters_for_user failed");
+            return html! {
+                div.ed-rule {}
+                div.ed-art-eyebrow { "UA fingerprint" }
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                    "(temporarily unavailable — see journalctl)"
+                }
+            };
+        }
+    };
+    if clusters.is_empty() {
+        return html! {};
+    }
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "UA fingerprint · last 24h" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Heuristic. One device usually roams within one ISP /16, "
+            "while a shared sub URL spreads across many ISPs. "
+            "Labels: orange = likely shared, green = likely roaming."
+        }
+        table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            thead {
+                tr style="border-bottom: 1px solid var(--ink);" {
+                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "user-agent" }
+                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "hits" }
+                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "ips" }
+                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "/16 nets" }
+                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "verdict" }
+                }
+            }
+            tbody {
+                @for c in &clusters {
+                    @let verdict = ua_verdict(c.distinct_ips, c.distinct_slash16);
+                    tr style="border-bottom: 1px dotted var(--rule);" {
+                        td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere;" {
+                            @match &c.ua {
+                                Some(s) => (s),
+                                None => em style="color: var(--mute);" { "(no UA)" },
+                            }
+                        }
+                        td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (c.hits) }
+                        td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (c.distinct_ips) }
+                        td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (c.distinct_slash16) }
+                        td style=(verdict.style()) { (verdict.label()) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Verdict shape — pairs the operator-visible label with its CSS
+/// styling so the table cell stays consistent across rows.
+enum UaVerdict {
+    LikelyShared,
+    LikelyRoaming,
+    Unlabeled,
+}
+
+impl UaVerdict {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::LikelyShared => "likely shared URL",
+            Self::LikelyRoaming => "likely roaming",
+            Self::Unlabeled => "—",
+        }
+    }
+    fn style(&self) -> &'static str {
+        match self {
+            Self::LikelyShared => "padding: 5px 8px; color: var(--acc); font-style: italic;",
+            Self::LikelyRoaming => "padding: 5px 8px; color: var(--soft); font-style: italic;",
+            Self::Unlabeled => "padding: 5px 8px; color: var(--mute);",
+        }
+    }
+}
+
+fn ua_verdict(distinct_ips: u64, distinct_slash16: u64) -> UaVerdict {
+    if distinct_slash16 >= 3 {
+        UaVerdict::LikelyShared
+    } else if distinct_ips >= 3 && distinct_slash16 <= 1 {
+        UaVerdict::LikelyRoaming
+    } else {
+        UaVerdict::Unlabeled
+    }
 }
 
 /// 404 response for `/admin/users/<id>` when no such user exists. Keeps
