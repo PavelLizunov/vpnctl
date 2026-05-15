@@ -332,3 +332,117 @@ fn h4_share_link_user_without_password_returns_error() {
         "expected Err for user without tuic_password, got {res:?}",
     );
 }
+
+// ── H7: Hysteria Realm (NAT-traversal) — optional realm block in inbound
+//
+// Activation rule (per impl docstring):
+//   * `hysteria2.realm.server_url` set → realm block emitted with all
+//     four keys; `realm_id` defaults to server.id, `token` to "",
+//     `stun_servers` to [] (empty list = sing-box default pool).
+//   * Absent → no realm key in JSON (back-compat: existing nodes
+//     deployed before Realm support was added MUST not regress).
+//
+// `listen` and `listen_port` are kept regardless — sing-box accepts
+// concurrent direct + realm transports.
+
+#[test]
+fn h7_no_realm_secrets_means_no_realm_key_in_inbound() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let users = [user("alice", Some("pw1"))];
+    let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
+    assert!(
+        v.get("realm").is_none(),
+        "no realm secrets ⇒ no realm key (back-compat); got {v}"
+    );
+    // Direct-listen path must still be intact.
+    assert_eq!(v.get("listen_port").and_then(Value::as_u64), Some(8444));
+}
+
+#[test]
+fn h7_realm_emitted_when_server_url_present_with_defaults() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert(
+        "hysteria2.realm.server_url".into(),
+        "https://realm.example.com".into(),
+    );
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+        .unwrap();
+    let realm = v.get("realm").expect("realm block must be emitted");
+    assert_eq!(
+        realm.get("server_url").and_then(Value::as_str),
+        Some("https://realm.example.com")
+    );
+    // Defaults: realm_id = server.id, token = "", stun_servers = [].
+    assert_eq!(
+        realm.get("realm_id").and_then(Value::as_str),
+        Some("node-1"),
+        "realm_id must default to server.id when not configured"
+    );
+    assert_eq!(
+        realm.get("token").and_then(Value::as_str),
+        Some(""),
+        "token must default to empty (anonymous register)"
+    );
+    assert_eq!(
+        realm.get("stun_servers").and_then(Value::as_array),
+        Some(&vec![]),
+        "stun_servers must default to empty array (sing-box uses its default pool)"
+    );
+    // Direct-listen path still present — concurrent transport.
+    assert_eq!(v.get("listen_port").and_then(Value::as_u64), Some(8444));
+}
+
+#[test]
+fn h7_realm_id_and_token_overrides_apply() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert(
+        "hysteria2.realm.server_url".into(),
+        "https://rendezvous.lan".into(),
+    );
+    secrets.insert("hysteria2.realm.realm_id".into(), "homelab-vpn".into());
+    secrets.insert("hysteria2.realm.token".into(), "shh-secret".into());
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+        .unwrap();
+    let realm = v.get("realm").unwrap();
+    assert_eq!(
+        realm.get("realm_id").and_then(Value::as_str),
+        Some("homelab-vpn")
+    );
+    assert_eq!(
+        realm.get("token").and_then(Value::as_str),
+        Some("shh-secret")
+    );
+}
+
+#[test]
+fn h7_stun_servers_csv_is_parsed_into_json_array() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert(
+        "hysteria2.realm.server_url".into(),
+        "https://r.example".into(),
+    );
+    // Whitespace + trailing comma must not produce empty entries.
+    secrets.insert(
+        "hysteria2.realm.stun_servers".into(),
+        " stun.example.com:3478 , stun.cloudflare.com:3478 , ".into(),
+    );
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+        .unwrap();
+    let arr = v["realm"]["stun_servers"].as_array().unwrap();
+    assert_eq!(
+        arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>(),
+        vec!["stun.example.com:3478", "stun.cloudflare.com:3478"],
+        "stun_servers must trim whitespace + drop empty entries"
+    );
+}

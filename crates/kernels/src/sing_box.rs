@@ -6,6 +6,21 @@ use vpnctl_core::{
 };
 
 /// sing-box 1.13.x из официального APT-репо SagerNet.
+///
+/// **Optional features that need a newer sing-box than what's in the
+/// SagerNet stable APT channel:**
+///
+/// | Feature | Required | Activation |
+/// |---|---|---|
+/// | `experimental.clash_api` block | sing-box ≥ 1.10 | always rendered (Track-3 prep) |
+/// | Hysteria2 `realm` (NAT-traversal via rendezvous + STUN) | sing-box ≥ 1.14 | only when `hysteria2.realm.server_url` is set in `RenderCtx::secrets` |
+///
+/// On a stale node (1.13.x without the rendered key support), the
+/// `sing-box check -c …` step in `apply_config` rejects the config
+/// before `mv` swaps it in — so the deploy fails loud rather than
+/// silently dropping the directive. To unlock 1.14+, switch the APT
+/// repo from `*/*` to a channel that ships 1.14, or pull a release
+/// `.deb` from sing-box GitHub releases.
 #[derive(Debug, Default)]
 pub struct SingBox;
 

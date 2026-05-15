@@ -82,7 +82,7 @@ impl Protocol for Hysteria2 {
             })
             .collect();
 
-        Ok(json!({
+        let mut inbound = json!({
             "type": "hysteria2",
             "tag": "hy2-in",
             "listen": "::",
@@ -94,7 +94,71 @@ impl Protocol for Hysteria2 {
                 "certificate_path": cert_path,
                 "key_path": key_path,
             }
-        }))
+        });
+
+        // Hysteria Realm — optional NAT-traversal mode. When the operator
+        // configures a rendezvous service, the inbound REGISTERS itself
+        // there + uses STUN-discovered public addresses + UDP hole-punching
+        // to accept clients that can NOT reach `listen_port` directly
+        // (CGNAT, residential ISP, no port-forwarding).
+        //
+        // Per https://sing-box.sagernet.org/configuration/inbound/hysteria2/
+        // (Realm support: sing-box ≥ 1.14.0). On older sing-box this block
+        // would be rejected at `sing-box check` time — `apply_config`
+        // catches that and refuses to deploy, so a stale node fails loud
+        // rather than silently ignoring the directive.
+        //
+        // Activation rule: emit the `realm` block IFF
+        // `hysteria2.realm.server_url` is set in `RenderCtx::secrets`.
+        // The other realm fields fall back to sensible defaults:
+        //   - `hysteria2.realm.realm_id`   → server.id (one node, one realm)
+        //   - `hysteria2.realm.token`      → "" (anonymous register; OK
+        //     for self-hosted rendezvous services on the LAN)
+        //   - `hysteria2.realm.stun_servers` → comma-separated list,
+        //     parsed into a JSON array. Empty list lets sing-box fall
+        //     back to its default STUN server pool.
+        //
+        // We KEEP the `listen` / `listen_port` keys even when realm is
+        // active — sing-box accepts both transports concurrently, so
+        // clients on a flat network can connect directly while clients
+        // behind NAT use the realm path. No-op cost on a public-IP node.
+        if let Some(server_url) = ctx.secrets.get("hysteria2.realm.server_url") {
+            let realm_id = ctx
+                .secrets
+                .get("hysteria2.realm.realm_id")
+                .map(String::as_str)
+                .unwrap_or(&ctx.server.id.0);
+            let token = ctx
+                .secrets
+                .get("hysteria2.realm.token")
+                .map(String::as_str)
+                .unwrap_or("");
+            let stun_servers: Vec<&str> = ctx
+                .secrets
+                .get("hysteria2.realm.stun_servers")
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|piece| !piece.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            // serde_json::Value::Object is mutated via as_object_mut —
+            // safe because the literal above always builds an Object.
+            if let Some(map) = inbound.as_object_mut() {
+                map.insert(
+                    "realm".to_string(),
+                    json!({
+                        "server_url": server_url,
+                        "realm_id": realm_id,
+                        "token": token,
+                        "stun_servers": stun_servers,
+                    }),
+                );
+            }
+        }
+
+        Ok(inbound)
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
