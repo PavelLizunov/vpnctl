@@ -103,37 +103,56 @@ impl Kernel for AmneziaWg {
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         // Same lessons as sing_box::ensure_installed (CLAUDE.md
-        // staging-deploy table): pre-install curl/gpg/ca-certificates,
-        // pre-create dirs, final assertion via `command -v`.
+        // staging-deploy table) PLUS three AmneziaWG-specific ones
+        // captured live on 84.19.3.104 on 2026-05-15:
         //
-        // AmneziaWG specifics:
-        //   * DKMS kernel module needs `linux-headers-$(uname -r)`,
-        //     otherwise the package post-install silently leaves the
-        //     module unbuilt and `awg-quick up` fails at runtime.
-        //   * The PPA is hosted on Launchpad (Ubuntu PPA format),
-        //     which works on Debian via `signed-by=` entries.
-        //   * `apt-key` is deprecated; we install the keyring file
-        //     directly.
+        //   * **Lesson #1 (SagerNet equivalent):** `add-apt-repository`
+        //     is broken on Debian 12 (launchpadlib's API auth bug,
+        //     `AttributeError: 'NoneType' object has no attribute
+        //     'people'`). Manual `gpg --dearmor` keyring install with
+        //     a pinned fingerprint is the only reliable path.
         //
-        // GPG fingerprint pinning: the AmneziaVPN PPA's signing key
-        // fingerprint is fetched from keyserver.ubuntu.com on first
-        // install. TODO(Pavel): confirm fingerprint after first
-        // staging deploy and pin verbatim here so a compromised
-        // keyserver can't substitute a hostile signer.
+        //   * **Lesson #2 (DKMS reality):** the `amneziawg` package
+        //     installs via DKMS, which builds against the LATEST
+        //     installed kernel headers — NOT the running kernel.
+        //     `linux-headers-amd64` (meta) installs whatever kernel
+        //     headers Debian currently ships (e.g. 6.1.0-48 even when
+        //     the box is running 6.1.0-28). `modprobe amneziawg` on
+        //     the running kernel then fails with "Module amneziawg
+        //     not found in directory /lib/modules/<running-kernel>".
+        //     Fix: detect mismatch + reboot. We do the detection
+        //     after install and ABORT with a clear error message —
+        //     the operator decides whether to reboot now or later.
+        //
+        //   * **Lesson #3 (gpg ecosystem):** stock Debian 12 ships
+        //     `gnupg` but not `dirmngr`, so `gpg --keyserver ...
+        //     --recv-keys` fails with "can't connect to the agent".
+        //     Install `dirmngr` explicitly.
+        //
+        // **PPA signing key fingerprint:** `75C9DD72C799870E310542E24166F2C257290828`
+        // Confirmed on 2026-05-15 from the Launchpad API
+        // (`https://api.launchpad.net/1.0/~amnezia/+archive/ubuntu/ppa`
+        // → `signing_key_fingerprint`). Pinned in this script — a
+        // compromised keyserver can't substitute a different signer.
         let script = r#"
             set -eu
             export DEBIAN_FRONTEND=noninteractive
             if ! command -v awg-quick >/dev/null; then
                 apt-get update -qq
+                # Lesson #2: linux-headers-amd64 is the meta — it
+                # tracks the LATEST shipped kernel, not the running one.
+                # Lesson #3: dirmngr is the missing piece for gpg
+                # --recv-keys to work.
                 apt-get install -y --no-install-recommends \
-                    curl gpg ca-certificates iptables \
-                    software-properties-common \
-                    "linux-headers-$(uname -r)"
-                # Install Launchpad signing key. add-apt-repository would
-                # do this for us but pulls Python; manual is leaner.
+                    curl gpg dirmngr ca-certificates iptables \
+                    linux-headers-amd64
                 install -d -m 0755 /usr/share/keyrings
-                curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x57290828bb0a2320821bb9b2d101bb74cb98a1d0" \
-                    | gpg --dearmor -o /usr/share/keyrings/amnezia.gpg
+                # Lesson #1: manual keyring (apt-key is deprecated and
+                # add-apt-repository is broken on Debian 12).
+                gpg --keyserver hkp://keyserver.ubuntu.com:80 \
+                    --recv-keys 75C9DD72C799870E310542E24166F2C257290828
+                gpg --export 75C9DD72C799870E310542E24166F2C257290828 \
+                    > /usr/share/keyrings/amnezia.gpg
                 echo "deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" \
                     > /etc/apt/sources.list.d/amnezia.list
                 apt-get update -qq
@@ -144,6 +163,17 @@ impl Kernel for AmneziaWg {
             command -v awg-quick
             command -v awg
             test -d /etc/amnezia/amneziawg
+            # Lesson #2: detect kernel mismatch BEFORE someone tries
+            # `awg-quick up` and gets a cryptic modprobe failure. The
+            # message tells the operator exactly what to do.
+            running_kernel=$(uname -r)
+            if [ ! -d "/lib/modules/${running_kernel}/updates/dkms" ] \
+                && ! lsmod | grep -q amneziawg; then
+                echo "WARNING: amneziawg DKMS module built for newer kernel" >&2
+                echo "than running ${running_kernel}. Reboot required." >&2
+                echo "After reboot: \`modprobe amneziawg && lsmod | grep amneziawg\`" >&2
+                exit 2
+            fi
         "#;
         ssh.exec(script).await?;
         Ok(())
