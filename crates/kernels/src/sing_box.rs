@@ -81,7 +81,24 @@ impl Kernel for SingBox {
             "outbounds": [
                 { "type": "direct", "tag": "direct" },
                 { "type": "block", "tag": "block" }
-            ]
+            ],
+            // Phase Track-3 prep: clash-api on loopback so the daemon
+            // can poll active connections + traffic counters in a
+            // future iteration. Bound to 127.0.0.1 (no external
+            // exposure); no secret needed because nothing on the node
+            // is allowed to bind 9090 except sing-box itself.
+            //
+            // No `external_ui` set — we don't need a clash dashboard.
+            // The future poller talks the JSON API directly.
+            //
+            // sing-box ≥ 1.10 accepts this top-level key; on older
+            // builds the `sing-box check` step would reject the
+            // config, so the deploy fails loudly on a stale node.
+            "experimental": {
+                "clash_api": {
+                    "external_controller": "127.0.0.1:9090"
+                }
+            }
         });
         serde_json::to_vec_pretty(&cfg).map_err(CoreError::from)
     }
@@ -136,5 +153,68 @@ impl Kernel for SingBox {
             version,
             uptime_seconds: None,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use vpnctl_core::{Server, ServerId};
+
+    fn dummy_ctx<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> RenderCtx<'a> {
+        RenderCtx::new(server, secrets)
+    }
+
+    fn dummy_server() -> Server {
+        Server {
+            id: ServerId("srv".into()),
+            address: "10.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("sing-box".into()),
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    /// Track-3 prep: render_config must include the
+    /// `experimental.clash_api.external_controller` block bound to
+    /// loopback so a future daemon-side poller can talk to sing-box's
+    /// JSON API for active connections + traffic counters.
+    #[test]
+    fn render_config_includes_clash_api_on_loopback() {
+        let s = dummy_server();
+        let secrets = HashMap::new();
+        let ctx = dummy_ctx(&s, &secrets);
+        let bytes = SingBox::new().render_config(&ctx, &[], &[]).unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["experimental"]["clash_api"]["external_controller"],
+            Value::String("127.0.0.1:9090".into()),
+            "clash_api must bind to 127.0.0.1:9090 (loopback only — no external exposure)"
+        );
+    }
+
+    /// Pre-existing keys (log, inbounds, outbounds) must still render
+    /// — adding `experimental` shouldn't accidentally drop them.
+    #[test]
+    fn render_config_keeps_existing_top_level_keys() {
+        let s = dummy_server();
+        let secrets = HashMap::new();
+        let ctx = dummy_ctx(&s, &secrets);
+        let bytes = SingBox::new().render_config(&ctx, &[], &[]).unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["log"].is_object(), "log block missing");
+        assert!(v["inbounds"].is_array(), "inbounds array missing");
+        let out = v["outbounds"].as_array().unwrap();
+        assert_eq!(out.len(), 2, "outbounds should be [direct, block]");
+        assert_eq!(out[0]["type"], "direct");
+        assert_eq!(out[1]["type"], "block");
     }
 }
