@@ -3324,3 +3324,137 @@ async fn admin_user_detail_track4_ua_section_detects_roaming() {
         "roaming pattern should not trip the shared-URL verdict"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Track-3 chunk 3 — live VPN stats section on user-detail.
+//
+// Reads `recent_vpn_stats_for_user(uid, 24)`. Two states matter:
+//   * Empty: explicit "polling not yet wired (chunk 4)" copy that
+//     points at the daemon's SSH key location — without this the
+//     missing data looks like a bug.
+//   * Populated: KPI tiles (uploaded / downloaded / peak conns) +
+//     per-server breakdown table.
+
+use vpnctl_inventory::VpnStatsDelta;
+
+#[tokio::test]
+async fn admin_user_detail_track3_empty_state_quotes_chunk4_status() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Live VPN stats"),
+        "section headline must appear even in empty state"
+    );
+    // Empty-state copy must mention chunk 4 + the SSH key path.
+    assert!(
+        html.contains("No live stats yet"),
+        "empty-state nudge missing"
+    );
+    assert!(
+        html.contains("chunk 4"),
+        "empty-state must point at chunk 4 so operator knows what's missing"
+    );
+    assert!(
+        html.contains("/var/lib/vpnctl/.ssh"),
+        "empty-state must quote the SSH key path the operator needs to populate"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_track3_renders_kpis_and_per_server_breakdown() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[]).await; // s0, s1, u0
+
+    // Simulate two ticks worth of poller output.
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[
+                VpnStatsDelta {
+                    user_id: Some(UserId("u0".into())),
+                    upload_bytes: 1_000_000,   // 976 KiB
+                    download_bytes: 5_000_000, // ~4.77 MiB
+                    active_connections: 3,
+                },
+                // Server-wide row — must NOT appear in user query.
+                VpnStatsDelta {
+                    user_id: None,
+                    upload_bytes: 99_999_999,
+                    download_bytes: 99_999_999,
+                    active_connections: 99,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s1".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 500_000,
+                download_bytes: 2_000_000,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+
+    // Aggregated totals appear (rendered via humanize_bytes — KiB/MiB).
+    // Sum of u0's bytes: up = 1_500_000 (~1.4 MiB), dn = 7_000_000 (~6.7 MiB).
+    assert!(html.contains("uploaded"), "uploaded KPI label missing");
+    assert!(html.contains("downloaded"), "downloaded KPI label missing");
+    assert!(html.contains("peak conns"), "peak conns KPI label missing");
+    // Per-server breakdown table must list both servers.
+    assert!(html.contains("s0"), "server s0 row missing");
+    assert!(html.contains("s1"), "server s1 row missing");
+    // Server-wide totals (99,999,999) MUST NOT appear — that row was
+    // user_id=NULL and recent_vpn_stats_for_user filters those out.
+    assert!(
+        !html.contains("99.9 MiB") && !html.contains("99,999,999"),
+        "server-wide row must not leak into per-user view"
+    );
+    // The empty-state nudge must NOT render when there's data.
+    assert!(
+        !html.contains("No live stats yet"),
+        "empty-state copy leaked into populated render"
+    );
+    // Aggregation footer mentions the snapshot count.
+    assert!(
+        html.contains("Aggregated from 2 snapshots"),
+        "snapshot count footer missing or wrong"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_track3_does_not_leak_other_users_stats() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 2, &[]).await; // s0, u0, u1
+
+    // u0 has stats, u1 has none.
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 1234,
+                download_bytes: 5678,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u1").await;
+    // u1 must show empty state, not u0's bytes.
+    assert!(
+        html.contains("No live stats yet"),
+        "u1 must show empty state when only u0 has data"
+    );
+}

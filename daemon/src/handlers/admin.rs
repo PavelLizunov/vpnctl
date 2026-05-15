@@ -1405,6 +1405,9 @@ pub(crate) async fn user_detail(
         // ── UA fingerprint (Phase Track-4) ──────────────────────
         (ua_clusters_section(&state, &uid).await)
 
+        // ── Live VPN stats (Track-3 chunk 3) ────────────────────
+        (live_vpn_stats_section(&state, &uid).await)
+
         // Destructive zone (Phase C-3.4) — deliberately at the very
         // bottom so the operator scrolls past everything else first.
         // The link goes to a confirm page (GET) NOT a direct POST,
@@ -1526,6 +1529,139 @@ fn ua_verdict(distinct_ips: u64, distinct_slash16: u64) -> UaVerdict {
     } else {
         UaVerdict::Unlabeled
     }
+}
+
+/// Track-3 chunk 3 — live VPN stats section. Reads
+/// `recent_vpn_stats_for_user(uid, 24h)` and renders aggregate KPIs
+/// (bytes up/down, peak active connections) plus a per-server
+/// breakdown.
+///
+/// Empty-state copy explicitly tells the operator that polling isn't
+/// wired yet — chunk 4 lights up the background task. Without this
+/// nudge the "no data" message would look like a bug.
+async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+    let rows = match state.inv.recent_vpn_stats_for_user(uid, 24).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_vpn_stats_for_user failed");
+            return html! {
+                div.ed-rule {}
+                div.ed-art-eyebrow { "Live VPN stats" }
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                    "(temporarily unavailable — see journalctl)"
+                }
+            };
+        }
+    };
+    if rows.is_empty() {
+        return html! {
+            div.ed-rule {}
+            div.ed-art-eyebrow { "Live VPN stats · last 24h" }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                "No live stats yet. The clash-api poller is shipped (Track-3 chunks 1+2) "
+                "but the daemon-side scheduler that pulls snapshots from each VPN node "
+                "is queued for chunk 4 — it needs the SSH key on "
+                span.ed-mono { "192.168.0.236:/var/lib/vpnctl/.ssh" }
+                " plus per-node authorisation. Once wired, this section will show real "
+                "per-user upload/download totals and active connection counts."
+            }
+        };
+    }
+
+    // Aggregate over the window: total up + down (sum of all rows
+    // for this user), peak active_connections.
+    let mut total_up: u64 = 0;
+    let mut total_dn: u64 = 0;
+    let mut peak_conns: u32 = 0;
+    let mut per_server: std::collections::BTreeMap<String, (u64, u64, u32)> =
+        std::collections::BTreeMap::new();
+    for r in &rows {
+        total_up = total_up.saturating_add(r.upload_bytes);
+        total_dn = total_dn.saturating_add(r.download_bytes);
+        if r.active_connections > peak_conns {
+            peak_conns = r.active_connections;
+        }
+        let entry = per_server.entry(r.server_id.0.clone()).or_default();
+        entry.0 = entry.0.saturating_add(r.upload_bytes);
+        entry.1 = entry.1.saturating_add(r.download_bytes);
+        if r.active_connections > entry.2 {
+            entry.2 = r.active_connections;
+        }
+    }
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Live VPN stats · last 24h" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Pulled from each node's clash-api by the daemon. "
+            "Numbers reflect actual VPN traffic (delta-vs-prior-snapshot per tick), "
+            "not subscription-config fetches."
+        }
+        div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
+            (vpn_kpi_tile("uploaded", &humanize_bytes(total_up)))
+            (vpn_kpi_tile("downloaded", &humanize_bytes(total_dn)))
+            (vpn_kpi_tile("peak conns", &peak_conns.to_string()))
+        }
+        @if !per_server.is_empty() {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "server" }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "uploaded" }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "downloaded" }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "peak conns" }
+                    }
+                }
+                tbody {
+                    @for (server_id, (up, dn, conns)) in &per_server {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 5px 8px; color: var(--ink);" { (server_id) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*up)) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*dn)) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (conns) }
+                        }
+                    }
+                }
+            }
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
+            "Aggregated from " (rows.len())
+            @if rows.len() == 1 { " snapshot" } @else { " snapshots" }
+            " over the last 24 hours. Rows are auto-purged after 30 days."
+        }
+    }
+}
+
+/// Editorial KPI tile — small label + big-serif number. Reused
+/// pattern from the dashboard / Track-1 abuse signal.
+fn vpn_kpi_tile(label: &str, value: &str) -> Markup {
+    html! {
+        div style="border: 1px solid var(--rule); padding: 10px 12px; background: var(--paper);" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" { (label) }
+            div style="font-family: var(--serif); font-size: 22px; color: var(--ink); margin-top: 2px;" { (value) }
+        }
+    }
+}
+
+/// Convert a raw byte count into a human-readable string with a
+/// binary-IEC suffix. Picks the largest unit at which the number
+/// is >= 1, e.g. 1024 → "1.0 KiB", 1_572_864 → "1.5 MiB".
+///
+/// Hand-rolled rather than pulling `byte-unit` / `humansize` —
+/// this is the only place we need it and the rules are short
+/// enough that an inline implementation beats a new dep.
+fn humanize_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// 404 response for `/admin/users/<id>` when no such user exists. Keeps

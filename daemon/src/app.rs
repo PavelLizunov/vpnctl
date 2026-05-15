@@ -227,7 +227,7 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                 Ok(0) => tracing::debug!(
                     target = "vpnctld::retention",
                     days = RETENTION_DAYS,
-                    "purge tick: nothing to remove"
+                    "sub_access purge tick: nothing to remove"
                 ),
                 Ok(n) => tracing::info!(
                     target = "vpnctld::retention",
@@ -238,7 +238,30 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                 Err(e) => tracing::warn!(
                     target = "vpnctld::retention",
                     error = %e,
-                    "retention purge failed; will retry next tick"
+                    "sub_access retention purge failed; will retry next tick"
+                ),
+            }
+            // Track-3 chunk 3: sweep vpn_connection_stats on the same
+            // cadence. Same retention window — the table grows with
+            // N_servers × N_users × ticks/h × hours_kept and would
+            // accumulate forever otherwise. Logs separately so journal
+            // tags identify which sweep removed how much.
+            match inv.purge_vpn_stats_older_than(RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "vpn_connection_stats purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old vpn_connection_stats rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "vpn_connection_stats purge failed; will retry next tick"
                 ),
             }
         }
