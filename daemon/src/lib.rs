@@ -6,11 +6,12 @@
 //!
 //! The binary itself just calls `vpnctld::serve(config)` — kept thin.
 
+pub mod access_log;
 pub mod app;
 pub mod config;
 pub mod handlers;
 
-pub use app::{AppState, build, router};
+pub use app::{AppState, build, make_app_state_for_tests, router};
 pub use config::DaemonConfig;
 
 /// Test-only re-export of the retention purger spawner so integration

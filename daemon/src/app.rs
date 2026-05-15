@@ -15,17 +15,26 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info_span;
 
+use tokio::sync::mpsc;
+
 use crate::handlers::auth::BasicAuth;
 
+use crate::access_log::{self, AccessLogRecord};
 use crate::config::DaemonConfig;
 use crate::handlers;
 use vpnctl_core::Registry;
 use vpnctl_inventory::SqliteInventory;
 
+/// Per-process state cloned into every handler. The `access_log_tx`
+/// is the producer side of the bounded mpsc that backs Phase Track-1
+/// (see `crate::access_log` module docs for the full rationale).
+/// Cloning `AppState` clones the `Sender` — channel stays open as
+/// long as ANY clone of the state lives.
 #[derive(Clone)]
 pub struct AppState {
     pub inv: SqliteInventory,
     pub registry: Arc<Registry>,
+    pub access_log_tx: mpsc::Sender<AccessLogRecord>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -52,8 +61,40 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // tokio runtime aborts it on graceful shutdown.
     drop(spawn_retention_purger(inv.clone()));
 
-    let state = AppState { inv, registry };
+    // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
+    // / security #2): a dedicated writer task drains a bounded mpsc
+    // channel into `sub_access_log`. Without this, an attacker
+    // holding ONE valid sub-token could OOM the daemon by spawning a
+    // tokio task per request.
+    let (access_log_tx, _writer_handle) = access_log::spawn_writer(inv.clone());
+
+    let state = AppState {
+        inv,
+        registry,
+        access_log_tx,
+    };
     Ok(router(state))
+}
+
+/// Test-only: build an `AppState` with the access-log writer wired up,
+/// the same way `build()` does. Returns the `AppState` plus the
+/// writer's `JoinHandle` so the test can `abort()` it deterministically
+/// at teardown (the task otherwise lives until all senders drop, which
+/// happens when the state goes out of scope — usually fine, but tests
+/// that want to inspect the writer's behavior need the explicit handle).
+pub fn make_app_state_for_tests(
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+) -> (AppState, tokio::task::JoinHandle<()>) {
+    let (access_log_tx, handle) = access_log::spawn_writer(inv.clone());
+    (
+        AppState {
+            inv,
+            registry,
+            access_log_tx,
+        },
+        handle,
+    )
 }
 
 /// Spawn the access-log retention purger. Returns the `JoinHandle` so

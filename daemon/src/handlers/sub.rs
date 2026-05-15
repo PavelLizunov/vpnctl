@@ -81,25 +81,26 @@ pub(crate) async fn get(
             // cast pattern is used in `log_sub_access` for the bytes
             // bind, so keep symmetry).
             let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-            // Fire-and-forget access log. Cloning the inventory handle is
-            // cheap (it's an Arc<Pool> internally). If the write errors
-            // we log a warn but the response has already been sent so
-            // the client never sees it.
-            let inv = state.inv.clone();
-            tokio::spawn(async move {
-                if let Err(e) = inv
-                    .log_sub_access(&user_id, &ip, ua.as_deref(), 200, bytes)
-                    .await
-                {
-                    tracing::warn!(
-                        target = "vpnctld::sub",
-                        user = %user_id,
-                        ip = %ip,
-                        error = %e,
-                        "sub_access_log write failed (response already sent)"
-                    );
-                }
-            });
+
+            // Bounded back-pressure (audit-fix Plan B / retroactive
+            // review #3 / security #2): hand the record to the
+            // dedicated writer task via a non-blocking `try_send`.
+            // Channel-full → record dropped + warn-log; channel-closed
+            // → error-log (writer crashed). Either way the HTTP
+            // response stays 200 — we never block on the log write
+            // and we never spawn an unbounded number of tasks. See
+            // `crate::access_log` module docs for the full rationale.
+            let _ = crate::access_log::try_enqueue(
+                &state.access_log_tx,
+                crate::access_log::AccessLogRecord {
+                    user_id,
+                    ip,
+                    ua,
+                    status: 200,
+                    bytes,
+                },
+            );
+
             (StatusCode::OK, [("content-type", "application/json")], body).into_response()
         }
         Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),

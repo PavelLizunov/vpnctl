@@ -26,10 +26,14 @@ async fn state(dir: &TempDir) -> AppState {
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();
-    AppState {
-        inv,
-        registry: Arc::new(reg),
-    }
+    // Wire the access-log writer the same way `build()` does. Drop the
+    // JoinHandle — for tests that don't introspect the writer, the
+    // task lives until the AppState clones drop, which happens at end
+    // of test. Tests that DO need to assert writer behavior (e.g.
+    // back-pressure spec) call `vpnctld::make_app_state_for_tests`
+    // directly to keep the handle.
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
 }
 
 #[tokio::test]
@@ -1791,6 +1795,127 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
     assert!(
         !html.contains("UA-FOR-U0"),
         "leaked u0's UA onto u1's detail page"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase Track-1 (back-pressure) — bounded mpsc + writer task
+//
+//  Caught by retroactive review-agent (review #3) AND security-review
+//  (security #2) on 2026-05-14: the original Track-1 wired access
+//  logging via `tokio::spawn` per request, fire-and-forget. An
+//  attacker holding ONE valid sub-token could DoS the daemon by
+//  spawning unbounded background tasks until the SQLite pool / memory
+//  saturated.
+//
+//  The fix moves the work off the request path entirely: requests
+//  `try_send` a record into a bounded mpsc channel; one dedicated
+//  writer task drains it. Channel-full → record dropped + warn-log;
+//  HTTP response stays 200.
+//
+//  These tests pin the contract end-to-end through the public
+//  `/sub/<token>` handler.
+// ────────────────────────────────────────────────────────────────────────
+
+/// A single `/sub/<token>` hit lands one row in `sub_access_log`.
+/// Validates the writer task drains the channel into the inventory
+/// in the same way the old direct-await did.
+#[tokio::test]
+async fn sub_access_writer_persists_one_hit() {
+    use http_body_util::BodyExt;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Token of u0 (open() backfilled it).
+    let token = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    // Snapshot the inv handle for later assertion (state.inv is moved
+    // into the router).
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.into_body().collect().await.unwrap();
+
+    // The writer task is async — give it a moment to drain. In practice
+    // sub-millisecond, but we sleep long enough that flaky CI doesn't
+    // trip. The contract says the row WILL eventually land, not that
+    // it is synchronous with the response.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let rows = inv
+        .recent_sub_access(&UserId("u0".into()), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "writer task must drain exactly one row from one /sub hit"
+    );
+    assert_eq!(rows[0].status, 200);
+    // ConnectInfo absent in `oneshot` → recorded as 0.0.0.0 per the
+    // sub.rs fallback (already pinned by the warn-once test).
+    assert_eq!(rows[0].ip, "0.0.0.0");
+}
+
+/// Module-level back-pressure contract: when the channel is full,
+/// `access_log::try_enqueue` returns false and drops the record
+/// (instead of panicking, blocking, or growing memory unbounded).
+/// Production capacity is 1024; this test forces a tiny channel via
+/// the public type to make the boundary observable in milliseconds.
+#[tokio::test]
+async fn access_log_back_pressure_drops_records_when_full() {
+    use tokio::sync::mpsc;
+    use vpnctld::access_log::{AccessLogRecord, try_enqueue};
+
+    // Tiny channel: 2 slots. Build it directly instead of using
+    // `spawn_writer` — a writer would drain too fast for the test to
+    // reliably observe the full state. Without a writer, every
+    // try_enqueue past the second one MUST return false.
+    let (tx, _rx) = mpsc::channel::<AccessLogRecord>(2);
+
+    let mk = |ip: &str| AccessLogRecord {
+        user_id: UserId("u0".into()),
+        ip: ip.to_string(),
+        ua: None,
+        status: 200,
+        bytes: 100,
+    };
+
+    // First two enqueues fill the buffer → both return true.
+    assert!(
+        try_enqueue(&tx, mk("1.1.1.1")),
+        "first enqueue must succeed"
+    );
+    assert!(
+        try_enqueue(&tx, mk("2.2.2.2")),
+        "second enqueue must succeed"
+    );
+    // Third enqueue with no drainer → channel full → dropped.
+    assert!(
+        !try_enqueue(&tx, mk("3.3.3.3")),
+        "third enqueue must FAIL with back-pressure (no drainer running)"
+    );
+    // Fourth too — same drop path; the contract is "drop, don't panic".
+    assert!(
+        !try_enqueue(&tx, mk("4.4.4.4")),
+        "fourth enqueue must FAIL — back-pressure must not panic, must not block, must not grow unbounded"
     );
 }
 

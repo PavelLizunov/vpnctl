@@ -69,13 +69,8 @@ async fn seed(dir: &TempDir) -> (AppState, String) {
         .sub_token
         .unwrap();
 
-    (
-        AppState {
-            inv,
-            registry: Arc::new(reg),
-        },
-        token,
-    )
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    (state, token)
 }
 
 #[tokio::test]
@@ -181,10 +176,8 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
         .sub_token
         .unwrap();
 
-    let app = router(AppState {
-        inv,
-        registry: Arc::new(reg),
-    });
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    let app = router(state);
     let resp = app
         .oneshot(
             Request::builder()
