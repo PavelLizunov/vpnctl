@@ -182,7 +182,7 @@ session-started: 2026-05-15T15:59:45Z
 
 2026-05-15T16:50:00Z | 555fd5a | task#1 | Track-2 chunk 2 backend (migration 0005 + Ban API + handler escalation at == K + audit row + cleanup task) | tests 167→177 (+10: 9 spec_sub_rate_bans via test-writer-agent + 1 e2e ban) | live: yes (15 429s → 1 ban row, audit landed, 21st req returns ip-ban body) | review-agent: 3 important fixed inline (audit gap, conditional reset, ==K dedupe)
 
-2026-05-15T17:35:00Z | <pending-commit> | task#2 | Phase D audit timeline UI (inventory recent_audit_paginated + handler rewrite + filter form + sticky-date headers + pagination + CSV export) | tests 177→190 (+13: 8 spec_audit_paginated via test-writer-agent + 5 admin_smoke audit) | live: yes (filter `user_` literal-matches 0 rows, `user.` matches via prefix; CSV download has Content-Disposition + RFC 4180 escape) | review-agent: 3 important fixed inline (LIKE escape, CSV `||` ambiguity, pagination row-count) + 4 minor fixed (dead idx, url-builder unification, page overflow clamp, payload Err warn-log)
+2026-05-15T17:35:00Z | 1a2d8c9 | task#2 | Phase D audit timeline UI (inventory recent_audit_paginated + handler rewrite + filter form + sticky-date headers + pagination + CSV export) | tests 177→190 (+13: 8 spec_audit_paginated via test-writer-agent + 5 admin_smoke audit) | live: yes (filter `user_` literal-matches 0 rows, `user.` matches via prefix; CSV download has Content-Disposition + RFC 4180 escape) | review-agent: 3 important fixed inline (LIKE escape, CSV `||` ambiguity, pagination row-count) + 4 minor fixed (dead idx, url-builder unification, page overflow clamp, payload Err warn-log)
 
 ---
 
