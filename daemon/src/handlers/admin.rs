@@ -1386,6 +1386,22 @@ pub(crate) async fn user_detail(
                 "Rows are auto-purged after 30 days (default retention)."
             }
         }
+
+        // Destructive zone (Phase C-3.4) — deliberately at the very
+        // bottom so the operator scrolls past everything else first.
+        // The link goes to a confirm page (GET) NOT a direct POST,
+        // so a misclick doesn't immediately delete.
+        div.ed-rule {}
+        div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" { "Danger zone" }
+        p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+            "Deleting drops the user, cascades to grants, and clears the FK on "
+            span.ed-mono { "sub_access_log" }
+            " rows (forensics survive with NULL user_id)."
+        }
+        a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
+          style="display: inline-block; padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+            "delete user…"
+        }
     };
     Ok(shell("users", &theme, &accent, tw, body))
 }
@@ -1743,6 +1759,120 @@ fn decode_form_value(s: &str) -> String {
         }
     }
     out
+}
+
+/// `GET /admin/users/{id}/delete-confirm` — destructive-action
+/// double-submit confirm page (C-3.4). Renders a form that requires
+/// the operator to retype the user-id; only a matching POST to
+/// `/admin/users/{id}/delete` actually deletes.
+pub(crate) async fn user_delete_confirm(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Result<Markup, Response> {
+    let (theme, accent, tw) = theme_accent(&headers);
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(user_not_found(&user_id_str)),
+        Err(e) => return Err(internal_error(anyhow::Error::new(e))),
+    }
+    let body = html! {
+        div.ed-art-eyebrow {
+            a href=(format!("/admin/users/{}", path_segment_encode(&user_id_str)))
+              style="color: var(--mute); text-decoration: none;" { "← back to user" }
+            "  ·  delete"
+        }
+        h1.ed-art-h1 {
+            "delete "
+            em { (user_id_str) }
+            " — really?"
+        }
+        p.ed-art-deck {
+            "This drops the user from the inventory. "
+            b { "Grants" }
+            " (the user × server bridge) cascade-delete via FK. "
+            b { "Subscription-access log rows" }
+            " for this user SURVIVE with NULL user_id (per migration 0004) "
+            "so post-mortem forensics still works. "
+            b { "Persistent bans" }
+            " keyed by IP also survive (they're keyed by IP, not user)."
+        }
+        p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+            "Type the user-id "
+            span.ed-mono { (user_id_str) }
+            " in the box below to confirm. The id has to match exactly — copy/paste counts."
+        }
+        form method="post"
+             action=(format!("/admin/users/{}/delete", path_segment_encode(&user_id_str)))
+             style="display: flex; gap: 10px; align-items: baseline; padding: 14px 16px; border: 1px solid var(--rule); margin: 16px 0;" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                "confirm id"
+            }
+            input type="text" name="confirm" required="required"
+                  autocomplete="off"
+                  style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+            button type="submit"
+                   title=(format!("Delete user {} permanently", user_id_str))
+                   style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                "delete forever"
+            }
+            a href=(format!("/admin/users/{}", path_segment_encode(&user_id_str)))
+              style="padding: 4px 10px; border: 1px solid var(--rule-s); color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "cancel"
+            }
+        }
+    };
+    Ok(shell("users", &theme, &accent, tw, body))
+}
+
+/// `POST /admin/users/{id}/delete` — actually delete. Body must be
+/// `confirm=<exact-user-id>`; mismatch → 400 (the GET-form sets up
+/// the correct value, so a mismatch means the operator typed
+/// something different on a manual curl OR a CSRF attempt slipped
+/// past the middleware — neither is a normal flow).
+pub(crate) async fn user_delete(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let confirm_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("confirm="))
+        .unwrap_or("");
+    let confirm = decode_form_value(confirm_raw);
+    if confirm != user_id_str {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "delete confirm mismatch: form sent '{confirm}', URL targets '{user_id_str}' — type the user id exactly to confirm"
+            )),
+        )
+            .into_response();
+    }
+
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    if let Err(e) = state.inv.remove_user(&uid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit("admin", "user.remove", Some(&user_id_str), None)
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "audit row for user.remove failed; mutation already committed"
+        );
+    }
+    Redirect::to("/admin/users").into_response()
 }
 
 /// Phase D — paginated, filterable audit timeline. Replaces the

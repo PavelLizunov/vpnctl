@@ -344,6 +344,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/grants/{server_id}/revoke",
             post(admin::user_revoke_server),
         )
+        // Phase C-3.4 — destructive: GET shows a double-submit confirm
+        // form, POST deletes only if `confirm=<exact-id>` matches.
+        .route(
+            "/admin/users/{id}/delete-confirm",
+            get(admin::user_delete_confirm),
+        )
+        .route("/admin/users/{id}/delete", post(admin::user_delete))
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         // Phase D — CSV export uses the same filter query string as
