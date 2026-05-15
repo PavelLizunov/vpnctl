@@ -3,7 +3,7 @@
 
 use vpnctl_core::Registry;
 use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{Hysteria2, TuicV5, VlessReality};
+use vpnctl_protocols::{Hysteria2, Shadowsocks2022, TuicV5, VlessReality};
 
 /// Build the canonical Registry. Add new kernels/protocols here.
 pub(crate) fn build() -> anyhow::Result<Registry> {
@@ -20,6 +20,7 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
+    reg.register_protocol(Box::new(Shadowsocks2022::new()))?;
 
     Ok(reg)
 }
