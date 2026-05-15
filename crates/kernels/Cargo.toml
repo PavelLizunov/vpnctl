@@ -11,6 +11,12 @@ publish.workspace = true
 vpnctl-core = { path = "../core" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# AmneziaWg kernel tests use the real WireGuard Protocol impl to
+# round-trip envelope → INI without a hand-rolled mock protocol.
+vpnctl-protocols = { path = "../protocols" }
 
 [lints]
 workspace = true

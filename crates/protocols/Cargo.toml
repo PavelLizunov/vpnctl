@@ -11,6 +11,9 @@ publish.workspace = true
 vpnctl-core = { path = "../core" }
 serde_json = { workspace = true }
 percent-encoding = "2"
+# WireGuard share_link encodes the rendered .conf as base64url-no-pad
+# inside a `wireguard://?conf=...` pseudo-URI for QR / paste import.
+base64 = "0.22"
 
 [lints]
 workspace = true

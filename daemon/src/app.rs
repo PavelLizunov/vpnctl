@@ -434,14 +434,16 @@ fn admin_router(state: AppState) -> Router {
 /// future shared `crate vpnctl-registry` can replace this without changing
 /// callers.
 fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::SingBox;
-    use vpnctl_protocols::{Hysteria2, Shadowsocks2022, TuicV5, VlessReality};
+    use vpnctl_kernels::{AmneziaWg, SingBox};
+    use vpnctl_protocols::{Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
 
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new()))?;
+    reg.register_kernel(Box::new(AmneziaWg::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
     reg.register_protocol(Box::new(Shadowsocks2022::new()))?;
+    reg.register_protocol(Box::new(WireGuard::new()))?;
     Ok(reg)
 }

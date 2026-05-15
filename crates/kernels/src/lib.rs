@@ -8,6 +8,8 @@
 //!
 //! Никакие другие крейты править не надо.
 
+mod amnezia_wg;
 mod sing_box;
 
+pub use amnezia_wg::AmneziaWg;
 pub use sing_box::SingBox;
