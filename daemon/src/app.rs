@@ -303,6 +303,20 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/sub-token/regenerate",
             post(admin::user_regen_sub_token),
         )
+        // Phase C-3.3: per-(user, server) grant + revoke. Both POST (HTML
+        // forms can't easily DELETE), both idempotent at the SQL layer
+        // but audited every time so re-grant attempts show in the
+        // timeline. The `/revoke` suffix keeps URL routing
+        // unambiguous: `…/grants/{id}` = grant, `…/grants/{id}/revoke`
+        // = revoke. Same path-param tuple `(user_id, server_id)`.
+        .route(
+            "/admin/users/{id}/grants/{server_id}",
+            post(admin::user_grant_server),
+        )
+        .route(
+            "/admin/users/{id}/grants/{server_id}/revoke",
+            post(admin::user_revoke_server),
+        )
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/settings", get(admin::settings))

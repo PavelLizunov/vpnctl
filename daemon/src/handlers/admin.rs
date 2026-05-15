@@ -929,6 +929,17 @@ pub(crate) async fn user_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Phase C-3.3: also need the FULL inventory of servers so the
+    // detail page can show "ungranted" rows with a "grant" button.
+    // The set of granted ids lets us split the full list visually.
+    let all_servers = state
+        .inv
+        .list_servers()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let granted_ids: HashSet<vpnctl_core::ServerId> =
+        servers.iter().map(|s| s.id.clone()).collect();
+
     // Pre-fetch secrets for every granted server in parallel.
     let mut secrets_per_server = std::collections::HashMap::new();
     for s in &servers {
@@ -1033,24 +1044,61 @@ pub(crate) async fn user_detail(
             }
         }
 
-        // Granted servers + per-(server, protocol) share-links.
+        // Server access (Phase C-3.3) — full server inventory with a
+        // per-row grant/revoke form. Granted rows show "✓ access ·
+        // [revoke]"; ungranted rows show "[grant]". One POST per
+        // click, server returns 303 to this same detail page so the
+        // operator sees the post-mutation state immediately.
         div.ed-rule {}
-        div.ed-art-eyebrow { "Granted servers" }
-        @if servers.is_empty() {
+        div.ed-art-eyebrow { "Server access" }
+        @if all_servers.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                "No grants. Run "
-                span.ed-mono { "vpnctl grant " (user.id.0) " <server-id>" }
-                " from a server-detail page once those land."
+                "No servers in the inventory yet. Run "
+                span.ed-mono { "vpnctl bootstrap <id> <ip>" }
+                " to add one (web wizard lands in Phase E)."
             }
         } @else {
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
-                @for s in &servers {
-                    li {
-                        b { (s.id.0) }
-                        " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", " (s.kernel.0) ")"
+                @for s in &all_servers {
+                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        span style="flex: 1;" {
+                            b { (s.id.0) }
+                            " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", " (s.kernel.0) ")"
+                        }
+                        @if granted_ids.contains(&s.id) {
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
+                            form method="post"
+                                 action=(format!("/admin/users/{}/grants/{}/revoke",
+                                                 path_segment_encode(&user.id.0),
+                                                 path_segment_encode(&s.id.0)))
+                                 style="margin: 0;" {
+                                button type="submit"
+                                       title=(format!("Revoke {}'s access to {}", user.id.0, s.id.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                    "revoke"
+                                }
+                            }
+                        } @else {
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
+                            form method="post"
+                                 action=(format!("/admin/users/{}/grants/{}",
+                                                 path_segment_encode(&user.id.0),
+                                                 path_segment_encode(&s.id.0)))
+                                 style="margin: 0;" {
+                                button type="submit"
+                                       title=(format!("Grant {} access to {}", user.id.0, s.id.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                    "grant"
+                                }
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        // Per-protocol share-links — only meaningful for granted servers.
+        @if !servers.is_empty() {
             div.ed-art-eyebrow style="margin-top: 24px;" { "Per-protocol share links" }
             @if share_links.is_empty() {
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
@@ -1349,6 +1397,126 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     Redirect::to(&format!(
         "/admin/users/{}",
         path_segment_encode(&id_decoded)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/users/{id}/grants/{server_id}` — grant the user
+/// access to the server. Idempotent: re-granting an existing pair
+/// is a no-op at the SQL layer (`ON CONFLICT … DO NOTHING`), but the
+/// handler still writes an audit row each time so operators can see
+/// re-grant attempts in the timeline.
+///
+/// Both ids are validated to exist before the mutation — unknown
+/// user → 404, unknown server → 404 with the same canonical body
+/// shape. The `vpnctl admin: no such X` prefix is in `error_text`.
+pub(crate) async fn user_grant_server(
+    State(state): State<AppState>,
+    Path((user_id_str, server_id_str)): Path<(String, String)>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    // Both existence checks before mutation — same convention as
+    // user_regen_sub_token. Prevents a generic 500 from "no such row"
+    // surfaces in the inventory.
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    if let Err(e) = state.inv.grant(&uid, &sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "grant",
+            Some(&server_id_str),
+            Some(&serde_json::json!({ "user": user_id_str })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for grant — mutation already committed"
+        );
+    }
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/users/{id}/grants/{server_id}/revoke` — revoke the
+/// grant. Idempotent like `grant`; revoking a non-existent grant is
+/// a no-op at the SQL layer but still audited (the operator's
+/// intent is recorded regardless of pre-state).
+pub(crate) async fn user_revoke_server(
+    State(state): State<AppState>,
+    Path((user_id_str, server_id_str)): Path<(String, String)>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    if let Err(e) = state.inv.revoke(&uid, &sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "revoke",
+            Some(&server_id_str),
+            Some(&serde_json::json!({ "user": user_id_str })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for revoke — mutation already committed"
+        );
+    }
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
     ))
     .into_response()
 }

@@ -1799,6 +1799,176 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+//  Phase C-3.3 — grant + revoke per-(user, server)
+//
+//  Pin the contract end-to-end: per-row grant/revoke buttons on the
+//  user-detail page POST to dedicated endpoints; both are idempotent
+//  at SQL but audited every time; bad ids → 404 with unified prefix.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_user_grant_server_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await; // s0 + u0, no grants yet
+    assert_eq!(
+        s.inv
+            .servers_for_user(&UserId("u0".into()))
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s0"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/admin/users/u0"
+    );
+
+    let granted = inv.servers_for_user(&UserId("u0".into())).await.unwrap();
+    assert_eq!(granted.len(), 1, "u0 must have 1 grant after POST");
+    assert_eq!(granted[0].id.0, "s0");
+
+    let entries = inv.recent_audit(10).await.unwrap();
+    let g = entries
+        .iter()
+        .find(|e| e.action == "grant")
+        .expect("grant audit row missing");
+    assert_eq!(g.actor, "admin");
+    assert_eq!(g.target.as_deref(), Some("s0"));
+    assert_eq!(
+        g.payload.as_ref().unwrap()["user"],
+        serde_json::Value::String("u0".into())
+    );
+}
+
+#[tokio::test]
+async fn admin_user_revoke_server_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // pre-granted u0→s0
+    assert_eq!(
+        s.inv
+            .servers_for_user(&UserId("u0".into()))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s0/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    assert_eq!(
+        inv.servers_for_user(&UserId("u0".into()))
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "grant must be removed after revoke"
+    );
+
+    let entries = inv.recent_audit(10).await.unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.action == "revoke" && e.target.as_deref() == Some("s0")),
+        "revoke audit row missing"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_grant_unknown_user_404() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // s0 only, no users
+    let body = body_of(
+        router(s),
+        "POST",
+        "/admin/users/no-such/grants/s0",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: no such user 'no-such'\n");
+}
+
+#[tokio::test]
+async fn admin_user_grant_unknown_server_404() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await; // u0 only, no servers
+    let body = body_of(
+        router(s),
+        "POST",
+        "/admin/users/u0/grants/no-such-server",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: no such server 'no-such-server'\n");
+}
+
+#[tokio::test]
+async fn admin_user_detail_renders_grant_revoke_buttons() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // 2 servers (s0, s1), 1 user (u0), one pre-granted to s0.
+    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    let app = router(s);
+
+    let html = fetch_html(app, "/admin/users/u0").await;
+
+    // Granted row: revoke form + ✓ access marker.
+    assert!(
+        html.contains(r#"action="/admin/users/u0/grants/s0/revoke""#),
+        "revoke form for granted server s0 must render"
+    );
+    assert!(
+        html.contains("✓ access"),
+        "✓ access marker for granted row missing"
+    );
+    assert!(html.contains(">revoke<"), "revoke button label drifted");
+
+    // Ungranted row: grant form, no ✓ marker for s1's row.
+    assert!(
+        html.contains(r#"action="/admin/users/u0/grants/s1""#),
+        "grant form for ungranted server s1 must render"
+    );
+    assert!(html.contains(">grant<"), "grant button label drifted");
+}
+
+// ────────────────────────────────────────────────────────────────────────
 //  Phase Track-1 (back-pressure) — bounded mpsc + writer task
 //
 //  Caught by retroactive review-agent (review #3) AND security-review
