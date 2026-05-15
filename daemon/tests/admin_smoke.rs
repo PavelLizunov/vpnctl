@@ -2101,3 +2101,184 @@ async fn admin_csrf_referer_fallback_when_origin_absent() {
         resp.status()
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase C-3.2 — web add-user form (POST /admin/users)
+//
+//  Pin the contract: form-only id, server mints UUID + tuic_password +
+//  sub_token, audit row with actor=admin/action=user.add, redirects to
+//  /admin/users/<id>. Bad input → 400 with vpnctl admin: prefix.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Happy path: POST /admin/users with id=alice → 303 to detail page,
+/// user lands in inventory with mint'd UUID + tuic_password +
+/// sub_token, audit row appears.
+#[tokio::test]
+async fn admin_user_create_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // No users yet.
+    assert_eq!(s.inv.list_users().await.unwrap().len(), 0);
+
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=alice"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "expected 303 redirect after create, got {:?}",
+        resp.status()
+    );
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/admin/users/alice",
+        "redirect target must be the new user's detail page"
+    );
+
+    let user = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .expect("user must be in inventory after create");
+    // UUID minted (length matches uuid v4 hex+dashes = 36).
+    assert_eq!(user.uuid.len(), 36, "uuid must be standard 36 chars");
+    assert!(user.tuic_password.is_some(), "tuic_password must be minted");
+    assert!(user.sub_token.is_some(), "sub_token backfilled by add_user");
+
+    let entries = inv.recent_audit(10).await.unwrap();
+    let add = entries
+        .iter()
+        .find(|e| e.action == "user.add")
+        .expect("audit row for user.add missing");
+    assert_eq!(add.actor, "admin");
+    assert_eq!(add.target.as_deref(), Some("alice"));
+    let payload = add.payload.as_ref().expect("payload must contain uuid");
+    assert_eq!(
+        payload["uuid"],
+        serde_json::Value::String(user.uuid.clone())
+    );
+}
+
+/// Validation: bad id chars → 400 with the unified error prefix.
+#[tokio::test]
+async fn admin_user_create_rejects_bad_id() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for bad in [
+        "alice with space",
+        "alice/slash",
+        "alice?query",
+        "",        // empty
+        "русский", // non-ASCII
+    ] {
+        // Use raw body; we want to exercise the server-side validator,
+        // not the URL-decoder. Spaces in body need to be `+` or `%20` to
+        // survive form parsing; we test both forms end-to-end so the
+        // validator handles whatever the browser sends.
+        let body = format!("id={}", bad.replace(' ', "+"));
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/users")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "id {bad:?} must be rejected, got {:?}",
+            resp.status()
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(
+            text.starts_with("vpnctl admin: invalid user id"),
+            "400 body must start with the unified prefix, got: {text:?}"
+        );
+    }
+}
+
+/// Duplicate id → 400 "already exists" (operator-friendly), NOT 500.
+#[tokio::test]
+async fn admin_user_create_rejects_duplicate_id() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await; // creates u0
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=u0"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "duplicate id must be 400, got {:?}",
+        resp.status()
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("already exists"),
+        "duplicate body should mention 'already exists', got: {text:?}"
+    );
+    assert!(
+        text.contains("pick a different id"),
+        "duplicate body should suggest the fix, got: {text:?}"
+    );
+}
+
+/// The /admin/users page renders the form so a fresh operator can
+/// create their first user without touching the CLI.
+#[tokio::test]
+async fn admin_users_page_renders_create_form() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/users").await;
+    assert!(
+        html.contains(r#"action="/admin/users""#),
+        "form must POST to /admin/users"
+    );
+    assert!(
+        html.contains(r#"name="id""#),
+        "form must have a name=id input"
+    );
+    assert!(
+        html.contains(">create<"),
+        "submit button label drifted from 'create'"
+    );
+    assert!(
+        html.contains("UUID, tuic password and sub-token are minted server-side"),
+        "form deck copy drifted"
+    );
+}

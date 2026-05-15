@@ -772,13 +772,41 @@ pub(crate) async fn users(
             "sing-box client a fresh config covering every server they're granted on. "
             "Open a row for the QR you'll point a phone at."
         }
+
+        // Phase C-3.2 — add-user form. UUID + tuic_password + sub_token
+        // are all mint-on-server; the operator only types the human-
+        // readable id. Grants come later via the user-detail page (G).
+        div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
+            form method="post" action="/admin/users"
+                 style="display: flex; gap: 10px; align-items: baseline;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "add user"
+                }
+                input type="text" name="id" required="required"
+                      placeholder="alice"
+                      pattern="[A-Za-z0-9._-]+"
+                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
+                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                button type="submit"
+                       title="Mint UUID + tuic_password + sub_token, then redirect to the user-detail page"
+                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "create"
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                    "id only — UUID, tuic password and sub-token are minted server-side"
+                }
+            }
+        }
+
         @if users_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
-                "No users yet. Run "
+                "No users yet. Type an id above and hit "
+                span.ed-mono { "create" }
+                ", or use "
                 span.ed-mono { "vpnctl user create <id>" }
-                " then "
+                " from the CLI. Then grant server access via "
                 span.ed-mono { "vpnctl grant <user> <server>" }
-                "."
+                " (web UI lands in C-3.3)."
             }
         } @else {
             div {
@@ -1207,6 +1235,157 @@ pub(crate) async fn user_regen_sub_token(
         path_segment_encode(&user_id_str)
     ))
     .into_response()
+}
+
+/// Validate a candidate user id from the web form. The HTML5 `pattern`
+/// attribute already filters most input client-side, but we re-validate
+/// server-side because (a) browsers can be bypassed and (b) the CLI
+/// has no client-side filter, so the rule should live in one place.
+///
+/// Permitted: ASCII letters, digits, `.`, `_`, `-`. Length 1..=64.
+/// Rejected: spaces, slashes, `?`, `#`, percent-escapes, anything
+/// non-ASCII. Same set as `path_segment_encode`'s "unreserved" with
+/// the additional constraint of bounded length.
+fn valid_user_id(id: &str) -> bool {
+    let len = id.len();
+    if !(1..=64).contains(&len) {
+        return false;
+    }
+    id.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// `POST /admin/users` — create a new user from the form on
+/// `/admin/users`. Form body is `id=<text>` (the only field — UUID,
+/// tuic_password and sub_token are all minted server-side).
+///
+/// Outcomes:
+///   * happy path → 303 to `/admin/users/<id>` (which re-renders the
+///     fresh user with QR + share-links).
+///   * empty / invalid id → 400 with the canonical error body.
+///   * duplicate id → 400 with "already exists".
+///   * inventory error → 500 via `internal_error`.
+///
+/// CSRF: handled by `csrf::require_same_origin` middleware on the
+/// admin router (Origin must match Host). Audit row written on
+/// success only.
+pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> Response {
+    // Parse `id=<value>` from the form body. Same minimal parser as
+    // `set_tweak_cookie` — no need for a full form-decoder when there's
+    // exactly one field.
+    let id_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("id="))
+        .unwrap_or("")
+        .trim();
+
+    // URL-decode the simplest cases (the form sends `+` for space and
+    // `%XX` escapes). For our valid id charset (ASCII unreserved) the
+    // browser shouldn't escape anything, so a malformed escape just
+    // means a bad id — `valid_user_id` rejects either way. Tiny
+    // hand-rolled decoder beats a new dep for this single field.
+    let id_decoded = decode_form_value(id_raw);
+
+    if !valid_user_id(&id_decoded) {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "invalid user id '{id_decoded}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+            )),
+        )
+            .into_response();
+    }
+
+    // Mint the secrets. UUID is straightforward; tuic_password is 24
+    // bytes of entropy, base64'd by `gen_password`. sub_token is left
+    // as None — the inventory's `add_user` generates it (single source
+    // of truth for sub_token entropy).
+    const TUIC_PW_BYTES: usize = 24;
+    let tuic_password = match vpnctl_crypto::gen_password(TUIC_PW_BYTES) {
+        Ok(pw) => pw,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let user = vpnctl_core::User {
+        id: vpnctl_core::UserId(id_decoded.clone()),
+        uuid: vpnctl_crypto::gen_uuid(),
+        tuic_password: Some(tuic_password),
+        wireguard_pubkey: None,
+        sub_token: None,
+    };
+
+    // Mutation. `AlreadyExists` (UNIQUE violation) gets a 400 with
+    // the "already exists" body — operator's typical fix is to pick a
+    // different id, no need to surface a generic 500.
+    if let Err(e) = state.inv.add_user(&user).await {
+        return match e {
+            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => (
+                StatusCode::BAD_REQUEST,
+                error_text(&format!("{what} already exists — pick a different id")),
+            )
+                .into_response(),
+            other => internal_error(anyhow::Error::new(other)),
+        };
+    }
+
+    // Audit (best-effort; see module convention).
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "user.add",
+            Some(&id_decoded),
+            Some(&serde_json::json!({ "uuid": user.uuid })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %id_decoded,
+            error = %e,
+            "audit write failed for user.add — mutation already committed"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&id_decoded)
+    ))
+    .into_response()
+}
+
+/// Tiny URL-decoder for form values. Replaces `+` with space and
+/// `%XX` with the byte. Invalid escapes pass through verbatim — the
+/// validator above will reject them. Avoids pulling a percent-decode
+/// dep for one form field.
+fn decode_form_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(h) = hex {
+                    if let Ok(byte) = u8::from_str_radix(h, 16) {
+                        out.push(byte as char);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push('%');
+                i += 1;
+            }
+            other => {
+                out.push(other as char);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 pub(crate) async fn audit(headers: HeaderMap) -> Markup {

@@ -20,6 +20,8 @@ vpnctl-core = { path = "../crates/core" }
 vpnctl-protocols = { path = "../crates/protocols" }
 vpnctl-kernels = { path = "../crates/kernels" }
 vpnctl-inventory = { path = "../crates/inventory" }
+# Phase C-3.2: web add-user form needs UUID + tuic-password generators.
+vpnctl-crypto = { path = "../crates/crypto" }
 
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

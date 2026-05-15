@@ -287,6 +287,11 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/servers/", get(admin::servers))
         .route("/admin/users", get(admin::users))
         .route("/admin/users/", get(admin::users))
+        // Phase C-3.2: web add-user form posts here. Form has one
+        // field (`id`); the rest of the user (UUID, tuic_password,
+        // sub_token) is minted server-side.
+        .route("/admin/users", post(admin::user_create))
+        .route("/admin/users/", post(admin::user_create))
         // User detail: `/admin/users/<id>` (with and without trailing
         // slash). Path param doesn't capture an empty segment, so
         // `/admin/users/` continues to hit the list above.
