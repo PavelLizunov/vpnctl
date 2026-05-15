@@ -180,7 +180,7 @@ brief reason. Pavel reviews this in the morning.)*
 
 session-started: 2026-05-15T15:59:45Z
 
-2026-05-15T16:35:00Z | <pending-review-then-commit> | task#1 | Track-2 chunk 2 backend (migration 0005, Ban API, handler escalation, cleanup task) | tests 167→177 (+10: 9 spec_sub_rate_bans via test-writer-agent + 1 e2e ban) | live: yes (5×200 → 15×429 → ban row "ip|192.168.0.200|10 consecutive 429s" → 21st req body "rate limited (ip-ban); retry in 86385s")
+2026-05-15T16:50:00Z | 555fd5a | task#1 | Track-2 chunk 2 backend (migration 0005 + Ban API + handler escalation at == K + audit row + cleanup task) | tests 167→177 (+10: 9 spec_sub_rate_bans via test-writer-agent + 1 e2e ban) | live: yes (15 429s → 1 ban row, audit landed, 21st req returns ip-ban body) | review-agent: 3 important fixed inline (audit gap, conditional reset, ==K dedupe)
 
 ---
 
