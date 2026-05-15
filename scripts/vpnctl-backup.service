@@ -1,0 +1,29 @@
+[Unit]
+Description=vpnctl daily encrypted backup snapshot
+Documentation=https://github.com/PavelLizunov/vpnctl
+# Don't fight with vpnctld restarts during backup — sqlite3 .backup
+# uses the WAL backup API which tolerates a running daemon, but
+# strict ordering is cleaner.
+After=vpnctld.service
+
+[Service]
+Type=oneshot
+User=user
+Group=user
+# The script is read-only on the production state (snap → archive → scp).
+# It needs write access to /tmp (mkdir staging) and read access to
+# /var/lib/vpnctl, /etc/vpnctl, /opt/vpnctl/assets.
+ExecStart=/usr/local/bin/vpnctl-backup.sh
+# Hardening: minimal capabilities. The script runs sqlite3 + tar + zstd
+# + age + scp; none need elevated privileges if the inv.db is readable
+# by `user` (which it is — see /var/lib/vpnctl perms in CLAUDE.md).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp
+ReadOnlyPaths=/var/lib/vpnctl /etc/vpnctl /opt/vpnctl
+PrivateTmp=true
+# Surface failures to journalctl with a reasonable timeout.
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
