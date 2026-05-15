@@ -113,16 +113,27 @@ impl DiffEngine {
         }
 
         // Per-user rows. For each user in the new snapshot:
-        //   * If prior had them → emit the delta (with restart
-        //     detection per-user, since a single user's connection
-        //     might have closed and reopened independently of a
-        //     full sing-box restart).
+        //   * If prior had them → emit `new.saturating_sub(prior)` —
+        //     i.e. 0 when the new sum is LESS than the prior sum.
+        //     This is conservative on purpose: per-user totals ARE
+        //     a sum across currently-active connections, so a
+        //     legitimate "one connection closed, another opened
+        //     smaller" scenario would (with a per-user restart
+        //     heuristic) DOUBLE-COUNT — the closed connection's
+        //     bytes were already credited on a prior tick, AND the
+        //     new sum would get credited again as a "fresh start".
+        //     Better to under-attribute on a connection-cycle than
+        //     to lie. Real sing-box restarts are caught at the
+        //     server-wide level above; per-user attribution simply
+        //     resumes from the new baseline on the next tick.
+        //     (Caught by review-agent on the burst review of
+        //     cd61838^..492fdeb.)
         //   * If prior didn't have them → this is a NEW user this
         //     tick; emit the new totals as the delta (their session
         //     started since the prior tick).
         for (user, &(new_up, new_dn)) in &new_totals.per_user {
             let (up_d, dn_d) = match prior.per_user.get(user) {
-                Some(&(p_up, p_dn)) => (delta(p_up, new_up), delta(p_dn, new_dn)),
+                Some(&(p_up, p_dn)) => (new_up.saturating_sub(p_up), new_dn.saturating_sub(p_dn)),
                 None => (new_up, new_dn),
             };
             let active = u32::try_from(
@@ -148,11 +159,16 @@ impl DiffEngine {
         deltas
     }
 
-    /// Drop one server's tracked totals (e.g. after the server gets
-    /// removed from inventory). Lazy alternative: prune unknown
-    /// servers on each tick — but the poller already iterates the
-    /// inventory list, so a removed server simply stops getting
-    /// `tick()` calls and its entry sits dormant.
+    /// Drop one server's tracked totals.
+    ///
+    /// **Call-site contract for chunk 4 (poller wiring):** after
+    /// every `inv.list_servers()` pass, the poller MUST call
+    /// `forget(&id)` for any `ServerId` that was previously tracked
+    /// but is no longer in the inventory result. Without this, the
+    /// in-memory `state` map grows monotonically as servers are
+    /// removed from inventory — slow leak in a long-running daemon.
+    /// (Caught by review-agent on the burst review of
+    /// cd61838^..492fdeb; pinned here so chunk 4 can't forget.)
     pub fn forget(&mut self, server_id: &ServerId) {
         self.state.remove(server_id);
     }
@@ -248,26 +264,91 @@ mod tests {
     }
 
     #[test]
-    fn restart_detected_uses_new_total_as_delta_no_negative_overflow() {
+    fn restart_detected_uses_new_total_as_delta_at_server_level() {
+        // sing-box restart resets the server-wide totals to ~0; the
+        // diff engine MUST surface the new total (not wrap to a
+        // billion-byte u64 underflow) on the server-wide row.
+        // Per-user rows use saturating_sub instead and emit 0 on
+        // a smaller-than-prior new total — see the next test for why.
         let mut e = DiffEngine::new();
         e.tick(
             &sid("srv-1"),
             &snap(10_000, 20_000, vec![("alice", 5_000, 10_000)]),
         );
-        // sing-box restarted on the node — totals reset to small values.
         let out = e.tick(&sid("srv-1"), &snap(50, 100, vec![("alice", 30, 60)]));
         let server_row = out.iter().find(|d| d.user_id.is_none()).unwrap();
         assert_eq!(
             server_row.upload_bytes, 50,
-            "restart must surface NEW total as delta, not wrap"
+            "restart must surface NEW total as delta on server-wide row"
         );
         assert_eq!(server_row.download_bytes, 100);
         let alice_row = out
             .iter()
             .find(|d| d.user_id.as_ref().map(|u| u.0.as_str()) == Some("alice"))
             .unwrap();
-        assert_eq!(alice_row.upload_bytes, 30);
-        assert_eq!(alice_row.download_bytes, 60);
+        // Conservative per-user under-attribution: new<prior ⇒ delta=0
+        // (see next test for the bug this prevents).
+        assert_eq!(
+            alice_row.upload_bytes, 0,
+            "per-user delta MUST be 0 when new<prior; restart attribution is server-wide-only"
+        );
+        assert_eq!(alice_row.download_bytes, 0);
+        // active_connections still reflects what was actually seen.
+        assert_eq!(alice_row.active_connections, 1);
+    }
+
+    /// Connection-cycle bug guard (review-agent finding on
+    /// cd61838^..492fdeb): if alice has one TCP conn that uploaded
+    /// 1000B and it CLOSES while a fresh conn opens at 200B, the
+    /// per-user sum drops 1000→200. Per-user restart-detection
+    /// would emit 200 as a fresh delta on top of the 1000 already
+    /// credited — DOUBLE-COUNT. Saturating-sub prevents that.
+    #[test]
+    fn per_user_smaller_total_emits_zero_no_double_count() {
+        let mut e = DiffEngine::new();
+        // Tick 1: alice has one connection, 1000 up / 2000 down.
+        e.tick(
+            &sid("srv-1"),
+            &snap(1000, 2000, vec![("alice", 1000, 2000)]),
+        );
+        // Tick 2: that connection closed, alice opened a fresh small
+        // one at 100 up / 200 down. Server total grew (sing-box still
+        // remembers the closed connection's bytes), but the per-user
+        // sum (across active conns only) shrank.
+        let out = e.tick(&sid("srv-1"), &snap(2000, 4000, vec![("alice", 100, 200)]));
+        let alice_row = out
+            .iter()
+            .find(|d| d.user_id.as_ref().map(|u| u.0.as_str()) == Some("alice"))
+            .expect("alice row should still appear (active_connections > 0)");
+        assert_eq!(
+            alice_row.upload_bytes, 0,
+            "shrinking per-user sum MUST emit 0 — anything else double-counts"
+        );
+        assert_eq!(alice_row.download_bytes, 0);
+        assert_eq!(alice_row.active_connections, 1);
+    }
+
+    /// Negative test (review-agent #3): pin behaviour against an
+    /// inverted impl. A `tick()` that always returned `Vec::new()`
+    /// would pass `quiet_tick_emits_nothing` AND
+    /// `first_snapshot_emits_no_rows_just_seeds`; this test fires
+    /// only when the engine actually computes deltas, so the
+    /// always-empty implementation FAILS here.
+    #[test]
+    fn engine_actually_computes_deltas_not_always_empty() {
+        let mut e = DiffEngine::new();
+        e.tick(&sid("srv-1"), &snap(0, 0, vec![]));
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap(123_456, 789_012, vec![("alice", 100, 200)]),
+        );
+        assert!(
+            !out.is_empty(),
+            "second snapshot with movement MUST produce at least one row"
+        );
+        let server_row = out.iter().find(|d| d.user_id.is_none()).unwrap();
+        assert_eq!(server_row.upload_bytes, 123_456);
+        assert_eq!(server_row.download_bytes, 789_012);
     }
 
     #[test]

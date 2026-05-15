@@ -109,7 +109,14 @@ impl Protocol for Hysteria2 {
         // rather than silently ignoring the directive.
         //
         // Activation rule: emit the `realm` block IFF
-        // `hysteria2.realm.server_url` is set in `RenderCtx::secrets`.
+        // `hysteria2.realm.server_url` is set in `RenderCtx::secrets`
+        // **AND non-empty after trim**. An empty-string secret would
+        // otherwise activate the block with `realm.server_url=""`,
+        // which sing-box rejects only at deploy-time during
+        // `sing-box check` — failing loud is good, but we'd rather
+        // catch it at config-render time. (Caught by review-agent on
+        // cd61838^..492fdeb burst.)
+        //
         // The other realm fields fall back to sensible defaults:
         //   - `hysteria2.realm.realm_id`   → server.id (one node, one realm)
         //   - `hysteria2.realm.token`      → "" (anonymous register; OK
@@ -122,7 +129,11 @@ impl Protocol for Hysteria2 {
         // active — sing-box accepts both transports concurrently, so
         // clients on a flat network can connect directly while clients
         // behind NAT use the realm path. No-op cost on a public-IP node.
-        if let Some(server_url) = ctx.secrets.get("hysteria2.realm.server_url") {
+        if let Some(server_url) = ctx
+            .secrets
+            .get("hysteria2.realm.server_url")
+            .filter(|s| !s.trim().is_empty())
+        {
             let realm_id = ctx
                 .secrets
                 .get("hysteria2.realm.realm_id")

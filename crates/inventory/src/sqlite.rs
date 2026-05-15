@@ -997,6 +997,20 @@ impl SqliteInventory {
     //
     // All deltas for one tick land in a single transaction so a poller
     // crash mid-write doesn't yield a half-attributed snapshot.
+    //
+    // **Audit-log exemption.** The "every inventory mutation gets one
+    // audit_log row" invariant from CLAUDE.md is INTENTIONALLY waived
+    // for `vpn_connection_stats`. Rationale: at homelab scale (5
+    // servers × 60s tick × 24h × 30d = ~216K poller writes per month
+    // before user multiplication), per-tick audit rows would dwarf
+    // every other audit entry by 4 orders of magnitude and bury the
+    // human-driven mutations the timeline is designed to surface. The
+    // table itself IS the audit trail for poller activity (timestamps
+    // + per-server + per-user breakdown); a chunk-3 retrospective on
+    // /admin/audit can join in a derived "vpn-stats activity" entry
+    // if operators ever need it. (Reviewed by independent review-agent
+    // on cd61838^..492fdeb burst; documented exemption rather than
+    // letting the invariant erode silently.)
     // ──────────────────────────────────────────────────────────────────
 
     /// Persist one tick's deltas. Empty `deltas` is a no-op (the

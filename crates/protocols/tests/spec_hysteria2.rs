@@ -446,3 +446,24 @@ fn h7_stun_servers_csv_is_parsed_into_json_array() {
         "stun_servers must trim whitespace + drop empty entries"
     );
 }
+
+/// Empty / whitespace-only `server_url` MUST NOT activate the realm
+/// block — otherwise sing-box rejects the config only at deploy-time
+/// during `sing-box check`. We catch it at config-render. (Review-agent
+/// finding on cd61838^..492fdeb burst.)
+#[test]
+fn h7_empty_server_url_does_not_activate_realm() {
+    for empty in ["", "   ", "\t\n"] {
+        let s = srv();
+        let mut secrets = HashMap::new();
+        secrets.insert("hysteria2.realm.server_url".into(), empty.into());
+        let ctx = ctx_with(&s, &secrets);
+        let v = Hysteria2::new()
+            .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+            .unwrap();
+        assert!(
+            v.get("realm").is_none(),
+            "empty/whitespace server_url={empty:?} must NOT activate realm; got {v}"
+        );
+    }
+}
