@@ -50,8 +50,12 @@ pub(crate) async fn get(
     // explode the cardinality of "distinct IPs". Both v4 and v6 land as
     // `IpAddr::to_string()` (192.0.2.1 / fe80::1) — same shape SQLite
     // can index without a separate column.
-    let ip = match request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        Some(ConnectInfo(addr)) => addr.ip().to_string(),
+    let peer_ip: Option<std::net::IpAddr> = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    let ip = match peer_ip {
+        Some(addr) => addr.to_string(),
         None => {
             // Production rigs MUST install ConnectInfo via
             // `into_make_service_with_connect_info::<SocketAddr>()`. If
@@ -72,8 +76,26 @@ pub(crate) async fn get(
         }
     };
 
+    // Phase Track-2 rate limit: per-IP gate runs FIRST, BEFORE the
+    // token is resolved. This way unknown-token probing also gets
+    // throttled (a probing attacker can't keep hitting random tokens
+    // for free). Per-token gate runs AFTER the token resolves to
+    // bound the by_token map size by the user count, not by attacker
+    // creativity. Both gates issue HTTP 429 with `Retry-After`.
+    if let Some(addr) = peer_ip {
+        if let Err(retry) = state.rate_limiter.try_acquire_ip(addr) {
+            return rate_limited(retry, "ip");
+        }
+    }
+
     match resolve(&state, &token).await {
         Ok((user_id, cfg)) => {
+            // Per-token gate runs only on successful resolve so the
+            // by_token map is bounded by user count.
+            if let Err(retry) = state.rate_limiter.try_acquire_token(&token) {
+                return rate_limited(retry, "token");
+            }
+
             let body = cfg.to_string();
             // 32-bit defensive — `body.len()` is `usize`; on a 32-bit
             // build `as u64` would silently truncate if it ever exceeded
@@ -110,6 +132,23 @@ pub(crate) async fn get(
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
         }
     }
+}
+
+/// Build the 429 response with `Retry-After` (seconds). The `gate`
+/// argument identifies which axis (ip / token) tripped — it ends up
+/// in the response body so an operator running curl during incident
+/// response can tell whether they're hitting their own per-IP limit
+/// (legit traffic) or a per-token limit (URL-shared scenario).
+fn rate_limited(retry_after_secs: u64, gate: &'static str) -> axum::response::Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            ("retry-after", retry_after_secs.to_string()),
+            ("content-type", "text/plain; charset=utf-8".to_string()),
+        ],
+        format!("rate limited ({gate}); retry in {retry_after_secs}s\n"),
+    )
+        .into_response()
 }
 
 #[derive(Debug)]

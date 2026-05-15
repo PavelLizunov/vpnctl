@@ -22,19 +22,28 @@ use crate::handlers::auth::BasicAuth;
 use crate::access_log::{self, AccessLogRecord};
 use crate::config::DaemonConfig;
 use crate::handlers;
+use crate::rate_limit::RateLimiter;
 use vpnctl_core::Registry;
 use vpnctl_inventory::SqliteInventory;
 
-/// Per-process state cloned into every handler. The `access_log_tx`
-/// is the producer side of the bounded mpsc that backs Phase Track-1
-/// (see `crate::access_log` module docs for the full rationale).
-/// Cloning `AppState` clones the `Sender` — channel stays open as
-/// long as ANY clone of the state lives.
+/// Per-process state cloned into every handler.
+///
+/// * `access_log_tx` — Phase Track-1 producer side of the bounded
+///   mpsc that drains into `sub_access_log` (see `crate::access_log`
+///   for the full rationale).
+/// * `rate_limiter` — Phase Track-2 token-bucket limiter for `/sub`,
+///   throttles abuse before the daemon spends meaningful work (see
+///   `crate::rate_limit` for the design).
+///
+/// Cloning `AppState` clones the `Sender` and bumps the `Arc`s — the
+/// channel stays open and the limiter stays shared across all
+/// per-request clones.
 #[derive(Clone)]
 pub struct AppState {
     pub inv: SqliteInventory,
     pub registry: Arc<Registry>,
     pub access_log_tx: mpsc::Sender<AccessLogRecord>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -68,10 +77,21 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // tokio task per request.
     let (access_log_tx, _writer_handle) = access_log::spawn_writer(inv.clone());
 
+    // Phase Track-2 rate limiter: token bucket per (IP, token).
+    // Defaults give 5-burst then 1 token / 30 sec. See `rate_limit`
+    // module docs for the design rationale.
+    let rate_limiter = Arc::new(RateLimiter::default());
+
+    // Periodic cleanup of idle bucket entries (otherwise the per-IP
+    // map grows unbounded over time). 10-minute cadence is plenty —
+    // the idle TTL is 1 hour by default.
+    drop(spawn_rate_limit_cleanup(Arc::clone(&rate_limiter)));
+
     let state = AppState {
         inv,
         registry,
         access_log_tx,
+        rate_limiter,
     };
     Ok(router(state))
 }
@@ -82,9 +102,26 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
 /// at teardown (the task otherwise lives until all senders drop, which
 /// happens when the state goes out of scope — usually fine, but tests
 /// that want to inspect the writer's behavior need the explicit handle).
+///
+/// The rate limiter is built with `RateLimiter::default()` (production
+/// capacity). Tests that want to exercise throttling can build their
+/// own state with a tighter limiter; see
+/// `make_app_state_with_rate_limiter` for that path.
 pub fn make_app_state_for_tests(
     inv: SqliteInventory,
     registry: Arc<Registry>,
+) -> (AppState, tokio::task::JoinHandle<()>) {
+    make_app_state_with_rate_limiter(inv, registry, Arc::new(RateLimiter::default()))
+}
+
+/// Test-only: like `make_app_state_for_tests` but takes a custom
+/// `RateLimiter` so tests can exercise throttling against a
+/// deterministically-tuned limiter (e.g. capacity=2, refill=0/sec)
+/// without waiting for production-rate refills.
+pub fn make_app_state_with_rate_limiter(
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    rate_limiter: Arc<RateLimiter>,
 ) -> (AppState, tokio::task::JoinHandle<()>) {
     let (access_log_tx, handle) = access_log::spawn_writer(inv.clone());
     (
@@ -92,9 +129,41 @@ pub fn make_app_state_for_tests(
             inv,
             registry,
             access_log_tx,
+            rate_limiter,
         },
         handle,
     )
+}
+
+/// Spawn the rate-limiter cleanup task. Returns the `JoinHandle`
+/// (production discards; tests can abort to confirm spawn worked).
+/// Without periodic cleanup the per-IP map would accumulate one
+/// entry per source IP forever.
+pub(crate) fn spawn_rate_limit_cleanup(limiter: Arc<RateLimiter>) -> tokio::task::JoinHandle<()> {
+    use tokio::time::{MissedTickBehavior, interval};
+
+    /// 10-minute cadence — the bucket idle-TTL is 1 hour by default,
+    /// so we sweep 6× per TTL window. Cheap (HashMap retain is
+    /// O(n) but n is bounded by active source IPs in the last hour).
+    const TICK: Duration = Duration::from_secs(600);
+
+    tokio::spawn(async move {
+        let mut tick = interval(TICK);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tick.tick().await; // drop the immediate first fire (startup hot)
+        loop {
+            tick.tick().await;
+            let (ip, token) = limiter.cleanup();
+            if ip > 0 || token > 0 {
+                tracing::debug!(
+                    target = "vpnctld::rate_limit",
+                    ip_dropped = ip,
+                    token_dropped = token,
+                    "swept idle rate-limit buckets"
+                );
+            }
+        }
+    })
 }
 
 /// Spawn the access-log retention purger. Returns the `JoinHandle` so

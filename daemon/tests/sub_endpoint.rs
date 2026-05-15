@@ -196,3 +196,134 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
     assert_eq!(outbounds[0]["type"], "direct");
     assert_eq!(outbounds[1]["type"], "block");
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase Track-2 — rate limit on /sub/<token>
+//
+//  Pin the throttle contract end-to-end through the public router:
+//  given a tight bucket (capacity=2, no refill), the 3rd request
+//  inside the burst window must come back 429 with `Retry-After`.
+//  The 1st and 2nd must succeed normally.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sub_rate_limit_returns_429_after_burst() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vpnctl_inventory::SqliteInventory;
+    use vpnctl_kernels::SingBox;
+    use vpnctl_protocols::{TuicV5, VlessReality};
+    use vpnctld::rate_limit::RateLimiter;
+
+    // Build the same inventory shape as `seed()` but with a custom
+    // rate limiter (capacity=2, refill=0/sec → no recovery during
+    // the test window). Also need a deterministic token.
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = vpnctl_core::Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(TuicV5::new())).unwrap();
+
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("srv".into()),
+        address: "10.0.0.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernel: vpnctl_core::KernelId("sing-box".into()),
+        enabled_protocols: vec![
+            vpnctl_core::ProtocolId("vless+reality".into()),
+            vpnctl_core::ProtocolId("tuic-v5".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    let user = vpnctl_core::User {
+        id: vpnctl_core::UserId("alice".into()),
+        uuid: "uuid-alice".into(),
+        tuic_password: Some("pw-alice".into()),
+        wireguard_pubkey: None,
+        sub_token: None,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    // Tight limiter: capacity=2, refill=0/sec → 3rd request in the
+    // burst window MUST be denied. Idle TTL doesn't matter for the
+    // test (we don't wait that long).
+    let limiter = Arc::new(RateLimiter::new(2.0, 0.0, Duration::from_secs(60)));
+    let (state, _writer) = vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(reg), limiter);
+    let app = router(state);
+
+    // First two requests succeed (200) — they fill the per-IP and
+    // per-token buckets each from cap=2 to 0.
+    for n in 1..=2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sub/{token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "request {n} must succeed (within burst)"
+        );
+    }
+
+    // Third request: per-IP bucket is empty → 429 + Retry-After.
+    // (Per-token bucket is also empty, but per-IP is checked first.)
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "3rd request must be throttled (cap=2 burst exhausted)"
+    );
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .expect("Retry-After header missing on 429")
+        .to_str()
+        .unwrap();
+    assert!(
+        retry_after.parse::<u64>().is_ok(),
+        "Retry-After must be a u64 second count, got {retry_after:?}"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = std::str::from_utf8(&body).unwrap();
+    assert!(
+        body_str.contains("rate limited"),
+        "429 body must say 'rate limited', got {body_str:?}"
+    );
+}

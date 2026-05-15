@@ -10,8 +10,11 @@ pub mod access_log;
 pub mod app;
 pub mod config;
 pub mod handlers;
+pub mod rate_limit;
 
-pub use app::{AppState, build, make_app_state_for_tests, router};
+pub use app::{
+    AppState, build, make_app_state_for_tests, make_app_state_with_rate_limiter, router,
+};
 pub use config::DaemonConfig;
 
 /// Test-only re-export of the retention purger spawner so integration
