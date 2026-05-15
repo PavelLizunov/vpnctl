@@ -2452,3 +2452,226 @@ async fn admin_users_page_renders_create_form() {
         "form deck copy drifted"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase D — audit timeline UI
+//
+//  Pin the contract end-to-end: empty state, filtered rows, pagination
+//  links, CSV export shape + Content-Disposition.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Empty audit log → friendly nudge, NOT a blank page or "0 rows".
+#[tokio::test]
+async fn admin_audit_empty_state_renders_nudge() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/audit").await;
+    assert!(
+        html.contains("No audit rows yet"),
+        "empty-state nudge missing"
+    );
+    // Filter form must still render so operator can come back later.
+    assert!(
+        html.contains(r#"action="/admin/audit""#),
+        "filter form action drifted"
+    );
+    assert!(html.contains(">filter<"), "filter button label drifted");
+    assert!(html.contains(">export csv<"), "csv export link missing");
+}
+
+/// With rows from two actors, the actor=admin filter narrows. Pinned
+/// via the response HTML: a row with action `user.sub_token.regen`
+/// (cli-actor) seeded in the inventory must NOT appear when filter
+/// is actor=admin.
+#[tokio::test]
+async fn admin_audit_filter_by_actor_narrows() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .audit("admin", "user.add", Some("alice"), None)
+        .await
+        .unwrap();
+    s.inv
+        .audit("cli", "server.deploy", Some("stg"), None)
+        .await
+        .unwrap();
+    let app = router(s);
+
+    // Unfiltered: both rows.
+    let html = fetch_html(app.clone(), "/admin/audit").await;
+    assert!(html.contains("user.add"));
+    assert!(html.contains("server.deploy"));
+
+    // actor=admin: only the user.add row.
+    let html = fetch_html(app, "/admin/audit?actor=admin").await;
+    assert!(
+        html.contains("user.add"),
+        "admin actor's row must remain after filter"
+    );
+    assert!(
+        !html.contains("server.deploy"),
+        "cli actor's row must be filtered out"
+    );
+}
+
+/// Action prefix filter: `?action=user.` matches `user.add` and
+/// `user.sub_token.regen` but NOT `grant` or `server.deploy`.
+#[tokio::test]
+async fn admin_audit_filter_by_action_prefix_narrows() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .audit("admin", "user.add", Some("alice"), None)
+        .await
+        .unwrap();
+    s.inv
+        .audit("admin", "user.sub_token.regen", Some("alice"), None)
+        .await
+        .unwrap();
+    s.inv
+        .audit("admin", "grant", Some("stg"), None)
+        .await
+        .unwrap();
+    let app = router(s);
+
+    let html = fetch_html(app, "/admin/audit?action=user.").await;
+    assert!(html.contains("user.add"));
+    assert!(html.contains("user.sub_token.regen"));
+    assert!(
+        !html.contains(">grant<"),
+        "grant action must be filtered out by user. prefix"
+    );
+}
+
+/// Pagination: with > PAGE_SIZE rows seeded, the prev/next links
+/// render in the right enabled/disabled states. Pinning behavior
+/// rather than the exact PAGE_SIZE constant so changing the cap
+/// later doesn't break this test.
+#[tokio::test]
+async fn admin_audit_pagination_links_render_correctly() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // 60 audit rows ensures we cross the default 50/page boundary.
+    for i in 0..60 {
+        s.inv
+            .audit("admin", "user.add", Some(&format!("u{i}")), None)
+            .await
+            .unwrap();
+    }
+    let app = router(s);
+
+    // Page 0 (default): 50 rows visible, prev disabled, next enabled.
+    let html = fetch_html(app.clone(), "/admin/audit").await;
+    assert!(
+        html.contains(r#"href="/admin/audit?page=1""#),
+        "page 0 must link forward to page=1"
+    );
+    assert!(
+        !html.contains("page=-1"),
+        "disabled prev must not produce a page=-1 link"
+    );
+    // Row-count assertion (per review-agent finding): without this an
+    // impl that ignored OFFSET and returned all 60 rows on every page
+    // would still pass the link-presence checks above.
+    let row_count_p0 = html.matches("class=\"ed-time-row\"").count();
+    assert_eq!(
+        row_count_p0, 50,
+        "page 0 must show exactly PAGE_SIZE=50 rows, got {row_count_p0}"
+    );
+
+    // Page 1: prev enabled (back to 0), next disabled (60 rows fit
+    // in 2 pages of 50: page 1 has 10 rows, no next).
+    let html = fetch_html(app, "/admin/audit?page=1").await;
+    assert!(
+        html.contains(r#"href="/admin/audit?page=0""#),
+        "page 1 must link back to page=0"
+    );
+    assert!(
+        !html.contains(r#"href="/admin/audit?page=2""#),
+        "page 1 (last) must NOT have a page=2 link"
+    );
+    let row_count_p1 = html.matches("class=\"ed-time-row\"").count();
+    assert_eq!(
+        row_count_p1, 10,
+        "page 1 must show the remaining 10 rows, got {row_count_p1}"
+    );
+}
+
+/// CSV export: 200 + Content-Disposition attachment + RFC 4180 header
+/// row + at least one body row that escapes a payload field with
+/// embedded comma + double-quote.
+#[tokio::test]
+async fn admin_audit_csv_export_returns_well_formed_csv() {
+    use http_body_util::BodyExt;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .audit(
+            "admin",
+            "user.add",
+            Some("alice"),
+            Some(&serde_json::json!({"uuid": "uuid-with-\"quote\", and-comma"})),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/audit.csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.starts_with("text/csv"),
+        "content-type must be text/csv*, got {ct:?}"
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        cd.starts_with("attachment; filename=\"vpnctl-audit-"),
+        "Content-Disposition must trigger download with stamped filename, got {cd:?}"
+    );
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+
+    let mut lines = s.lines();
+    assert_eq!(
+        lines.next(),
+        Some("ts,actor,action,target,payload"),
+        "header row drifted"
+    );
+    let row = lines.next().expect("at least one body row");
+    assert!(
+        row.contains(",admin,user.add,alice,"),
+        "row body shape drifted"
+    );
+    // Payload must be quoted because it contains both `"` and `,`.
+    // The expected form layers two escapings: serde_json escapes the
+    // operator's literal `"` as `\"` inside its JSON string, then
+    // csv_field RFC-4180-doubles the JSON string's `"` chars to `""`.
+    // The single expected literal pins exactly that output — no
+    // alternation, so a divergent impl can't slip through (per the
+    // review-agent finding that the previous `||` masked ambiguity).
+    let expected_payload = r#""{""uuid"":""uuid-with-\""quote\"", and-comma""}""#;
+    assert!(
+        row.contains(expected_payload),
+        "payload not RFC4180-escaped as expected;\n  expected to contain: {expected_payload}\n  got row:             {row}"
+    );
+}

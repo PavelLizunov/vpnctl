@@ -1556,10 +1556,305 @@ fn decode_form_value(s: &str) -> String {
     out
 }
 
-pub(crate) async fn audit(headers: HeaderMap) -> Markup {
+/// Phase D — paginated, filterable audit timeline. Replaces the
+/// Phase A placeholder body. Reads `?actor=`, `?action=`, `?page=`
+/// from the query string; renders a filter form, sticky-date
+/// section headers (Today / Yesterday / `<YYYY-MM-DD>`), and
+/// prev/next pagination links. CSV export lives at a separate
+/// endpoint (`/admin/audit.csv`) keyed by the same query params.
+pub(crate) async fn audit(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Result<Markup, Response> {
     let (theme, accent, tw) = theme_accent(&headers);
-    let body = section_placeholder_body("Audit");
-    shell("audit", &theme, &accent, tw, body)
+
+    let actor = q.actor.as_deref().filter(|s| !s.is_empty());
+    let action = q.action.as_deref().filter(|s| !s.is_empty());
+    /// Hard cap so `?page=99999...` can't overflow `page * PAGE_SIZE`.
+    /// 1M pages × 50/page = 50M rows — way past any plausible audit
+    /// history; clamping there is friendlier than panicking on overflow.
+    const MAX_PAGE: i64 = 1_000_000;
+    let page = q.page.unwrap_or(0).clamp(0, MAX_PAGE);
+
+    /// Page size — small enough that even a busy operator scans
+    /// each page quickly, large enough that 99% of audit history
+    /// lookups don't need pagination at all.
+    const PAGE_SIZE: i64 = 50;
+
+    // Fetch one extra row to detect "is there a next page?".
+    // `saturating_mul` belt-and-braces — `page` is already clamped to
+    // MAX_PAGE so this can't actually saturate, but the explicit op
+    // makes the overflow story visible at the call site.
+    let offset = page.saturating_mul(PAGE_SIZE);
+    let entries = state
+        .inv
+        .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    let has_next = entries.len() as i64 > PAGE_SIZE;
+    let visible: Vec<&vpnctl_inventory::AuditEntry> =
+        entries.iter().take(PAGE_SIZE as usize).collect();
+    let has_prev = page > 0;
+
+    let body = html! {
+        div.ed-art-eyebrow { "Audit" }
+        h1.ed-art-h1 {
+            "every "
+            em { "mutation" }
+            " on file"
+        }
+        p.ed-art-deck {
+            "Append-only stream of every state change the daemon or CLI has made to "
+            span.ed-mono { "/var/lib/vpnctl/inv.db" }
+            ". Use the filters to narrow by actor or action prefix; the CSV button "
+            "exports the same filtered slice."
+        }
+
+        // Filter form. GET so the URL itself encodes the filter
+        // (operator can bookmark / share). All three inputs are
+        // empty-tolerant — empty string = no filter on that axis.
+        form method="get" action="/admin/audit"
+             style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 16px 0 24px; font-family: var(--mono); font-size: 11px;" {
+            label { "actor" }
+            select name="actor"
+                   style="padding: 3px 6px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;" {
+                option value="" { "(any)" }
+                @for opt in ["admin", "cli", "daemon"] {
+                    @if Some(opt) == actor {
+                        option value=(opt) selected="selected" { (opt) }
+                    } @else {
+                        option value=(opt) { (opt) }
+                    }
+                }
+            }
+            label { "action prefix" }
+            input type="text" name="action"
+                  value=(action.unwrap_or(""))
+                  placeholder="user. / server. / grant"
+                  style="padding: 3px 6px; max-width: 220px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
+            button type="submit"
+                   style="padding: 3px 10px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                "filter"
+            }
+            // Reset button — empty params clear all filters.
+            a href="/admin/audit"
+              style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "reset"
+            }
+            // CSV export uses the same query string.
+            a href=(audit_url("/admin/audit.csv", actor, action, None))
+              style="margin-left: auto; padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "export csv"
+            }
+        }
+
+        // Date-grouped timeline. We walk visible rows once, emitting
+        // a sticky-date header whenever the day changes from the
+        // previous row. Entries are already newest-first by id.
+        @if visible.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
+                @if actor.is_some() || action.is_some() {
+                    "No audit rows match the current filter."
+                } @else {
+                    "No audit rows yet — this stream fills as the daemon does work."
+                }
+            }
+        } @else {
+            (audit_timeline_grouped(&visible))
+        }
+
+        // Pagination links. URLs preserve the active filters.
+        div style="display: flex; gap: 16px; padding: 16px 0; font-family: var(--mono); font-size: 12px;" {
+            @if has_prev {
+                a href=(audit_url("/admin/audit", actor, action, Some(page - 1)))
+                  style="color: var(--ink); text-decoration: none;" {
+                    "← prev"
+                }
+            } @else {
+                span style="color: var(--mute);" { "← prev" }
+            }
+            span style="color: var(--mute);" {
+                "page " (page + 1)
+            }
+            @if has_next {
+                a href=(audit_url("/admin/audit", actor, action, Some(page + 1)))
+                  style="color: var(--ink); text-decoration: none;" {
+                    "next →"
+                }
+            } @else {
+                span style="color: var(--mute);" { "next →" }
+            }
+        }
+    };
+    Ok(shell("audit", &theme, &accent, tw, body))
+}
+
+/// Query-string args for the audit timeline. All optional; empty
+/// string is treated as "no filter on this axis" by the handler.
+#[derive(serde::Deserialize, Debug, Default)]
+pub(crate) struct AuditQuery {
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub page: Option<i64>,
+}
+
+/// Build a `/admin/audit*` URL preserving the current filter query.
+/// Pass `Some(page)` for paginated HTML targets, `None` for the CSV
+/// export endpoint (which doesn't paginate). Single helper avoids the
+/// near-duplicate URL builders that the previous chunk had.
+fn audit_url(base: &str, actor: Option<&str>, action: Option<&str>, page: Option<i64>) -> String {
+    let mut q = String::from(base);
+    let mut sep = '?';
+    if let Some(a) = actor {
+        q.push(sep);
+        q.push_str(&format!("actor={}", path_segment_encode(a)));
+        sep = '&';
+    }
+    if let Some(a) = action {
+        q.push(sep);
+        q.push_str(&format!("action={}", path_segment_encode(a)));
+        sep = '&';
+    }
+    if let Some(p) = page {
+        q.push(sep);
+        q.push_str(&format!("page={p}"));
+    }
+    q
+}
+
+/// Render the entries grouped by date with sticky `Today / Yesterday
+/// / <date>` section headers. Reuses the existing `dashboard_audit`
+/// row markup so the visual style stays consistent.
+fn audit_timeline_grouped(entries: &[&vpnctl_inventory::AuditEntry]) -> Markup {
+    use chrono::{Duration, Utc};
+    let today = Utc::now().date_naive();
+    let yesterday = today - Duration::days(1);
+    let mut current_label: Option<String> = None;
+    html! {
+        div.ed-time {
+            @for e in entries {
+                @let day = e.ts.date_naive();
+                @let label = if day == today {
+                    "Today".to_string()
+                } else if day == yesterday {
+                    "Yesterday".to_string()
+                } else {
+                    day.format("%Y-%m-%d").to_string()
+                };
+                @if Some(&label) != current_label.as_ref() {
+                    div style="margin: 18px 0 6px; padding: 4px 0; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); border-bottom: 1px solid var(--rule);" {
+                        (label)
+                    }
+                }
+                div.ed-time-row {
+                    span.ed-time-row__t { (clip_ts(&e.ts.to_rfc3339())) }
+                    span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
+                        (e.action)
+                    }
+                    span.ed-time-row__tgt {
+                        @match &e.target {
+                            Some(t) => (t),
+                            None => "—",
+                        }
+                    }
+                    span.ed-time-row__pl {
+                        "by " (e.actor)
+                    }
+                }
+                @let _ = current_label.replace(label);
+            }
+        }
+    }
+}
+
+/// `GET /admin/audit.csv?actor=...&action=...` — same filter set as
+/// the HTML timeline but returns a CSV body with `Content-Disposition:
+/// attachment; filename="vpnctl-audit-<YYYYMMDD>.csv"`. Limit is high
+/// (10000 rows) — operator running a yearly export shouldn't have to
+/// page; if they need more they bump the limit query.
+pub(crate) async fn audit_csv(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Response {
+    let actor = q.actor.as_deref().filter(|s| !s.is_empty());
+    let action = q.action.as_deref().filter(|s| !s.is_empty());
+
+    /// Generous cap; the operator can re-export with ?limit= once we
+    /// add that to AuditQuery in a follow-up.
+    const CSV_LIMIT: i64 = 10_000;
+
+    let entries = match state
+        .inv
+        .recent_audit_paginated(CSV_LIMIT, 0, actor, action)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    // Build CSV manually — adding the `csv` crate for one writer
+    // would be over-engineering for 4 columns. Quote any field
+    // containing `"`, `,` or newline; double-up internal quotes.
+    let mut out = String::from("ts,actor,action,target,payload\n");
+    for e in &entries {
+        out.push_str(&csv_field(&e.ts.to_rfc3339()));
+        out.push(',');
+        out.push_str(&csv_field(&e.actor));
+        out.push(',');
+        out.push_str(&csv_field(&e.action));
+        out.push(',');
+        out.push_str(&csv_field(e.target.as_deref().unwrap_or("")));
+        out.push(',');
+        // serde_json::to_string on a Value should never fail, but if
+        // it ever did the row would silently lose its payload column.
+        // Log instead of swallowing so the operator notices.
+        let payload_str = match &e.payload {
+            None => String::new(),
+            Some(v) => match serde_json::to_string(v) {
+                Ok(s) => s,
+                Err(err) => {
+                    tracing::warn!(
+                        target = "vpnctld::admin::audit_csv",
+                        audit_id = e.id,
+                        error = %err,
+                        "audit payload failed to serialize for CSV; emitting empty cell"
+                    );
+                    String::new()
+                }
+            },
+        };
+        out.push_str(&csv_field(&payload_str));
+        out.push('\n');
+    }
+
+    let stamp = chrono::Utc::now().format("%Y%m%d");
+    let filename = format!("vpnctl-audit-{stamp}.csv");
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "text/csv; charset=utf-8".to_string()),
+            (
+                "content-disposition",
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
+/// Quote a single CSV field per RFC 4180. If the field contains
+/// `"`, `,`, `\n`, or `\r` we wrap it in double-quotes and double
+/// any internal quotes; otherwise return the field verbatim.
+fn csv_field(s: &str) -> String {
+    let needs_quote = s.contains(['"', ',', '\n', '\r']);
+    if !needs_quote {
+        return s.to_string();
+    }
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 pub(crate) async fn settings(headers: HeaderMap) -> Markup {

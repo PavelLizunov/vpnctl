@@ -340,6 +340,10 @@ fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
+        // Phase D — CSV export uses the same filter query string as
+        // the HTML timeline. Distinct path so browsers + curl can
+        // hit it directly without a form submission.
+        .route("/admin/audit.csv", get(admin::audit_csv))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
         .route("/admin/tweak/{kind}", post(admin::set_tweak))

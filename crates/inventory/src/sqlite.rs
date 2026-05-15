@@ -512,6 +512,76 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Paginated + filterable audit query — backs Phase D timeline UI.
+    ///
+    /// Both filter args are optional substrings: `actor_filter = Some("admin")`
+    /// matches rows where `actor = 'admin'` (exact match); `action_filter
+    /// = Some("user.")` matches rows where `action LIKE 'user.%'`. Pass
+    /// `None` to skip a filter axis.
+    ///
+    /// `limit` and `offset` drive the pagination — caller computes them
+    /// from a page number (typically `offset = page * limit`). Newest-
+    /// first order matches `recent_audit`.
+    ///
+    /// Returns at most `limit` rows. The caller decides "is there a next
+    /// page?" by asking for one extra row (`limit+1`) and checking the
+    /// returned length, OR by issuing a separate `count_audit_filtered`
+    /// query (we don't expose one yet — the +1 trick is enough).
+    pub async fn recent_audit_paginated(
+        &self,
+        limit: i64,
+        offset: i64,
+        actor_filter: Option<&str>,
+        action_prefix: Option<&str>,
+    ) -> Result<Vec<AuditEntry>> {
+        // Build the WHERE clause incrementally. SQLite uses positional
+        // `?` placeholders so we don't number them — the bind() calls
+        // below run in the same order as the WHERE conditions.
+        let mut where_parts: Vec<&str> = Vec::with_capacity(2);
+        if actor_filter.is_some() {
+            where_parts.push(if where_parts.is_empty() {
+                "actor = ?"
+            } else {
+                "AND actor = ?"
+            });
+        }
+        if action_prefix.is_some() {
+            where_parts.push(if where_parts.is_empty() {
+                "action LIKE ? ESCAPE '\\'"
+            } else {
+                "AND action LIKE ? ESCAPE '\\'"
+            });
+        }
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_parts.join(" "))
+        };
+        let sql = format!(
+            "SELECT id, ts, actor, action, target, payload
+             FROM audit_log
+             {where_clause}
+             ORDER BY id DESC
+             LIMIT ? OFFSET ?"
+        );
+        let mut q = sqlx::query(&sql);
+        if let Some(a) = actor_filter {
+            q = q.bind(a);
+        }
+        if let Some(p) = action_prefix {
+            // Append `%` for prefix match — caller passes `"user."` and
+            // we turn it into `"user.%"`. LIKE metacharacters in `p`
+            // (`%` `_` `\`) are escaped first so an operator typing
+            // `?action=user_` matches LITERAL `user_`, not `user.`,
+            // and `?action=%` matches literal `%`, not "everything".
+            // Pairs with the `ESCAPE '\\'` clause above.
+            q = q.bind(format!("{}%", escape_like(p)));
+        }
+        q = q.bind(limit).bind(offset);
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
     pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>> {
         let rows = sqlx::query(
             "SELECT id, ts, actor, action, target, payload
@@ -520,29 +590,7 @@ impl SqliteInventory {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|r| {
-                let ts_str: String = r.try_get("ts")?;
-                let ts = DateTime::parse_from_rfc3339(&ts_str)
-                    .map(|d| d.with_timezone(&Utc))
-                    .map_err(|e| {
-                        SqliteInventoryError::Invalid(format!("ts not RFC3339 ({ts_str}): {e}"))
-                    })?;
-                let payload_opt: Option<String> = r.try_get("payload")?;
-                let payload = match payload_opt {
-                    Some(s) => Some(serde_json::from_str(&s)?),
-                    None => None,
-                };
-                Ok(AuditEntry {
-                    id: r.try_get("id")?,
-                    ts,
-                    actor: r.try_get("actor")?,
-                    action: r.try_get("action")?,
-                    target: r.try_get("target")?,
-                    payload,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_audit_entry).collect()
     }
 
     // ── Subscription access log (Phase Track-1) ─────────────────────────
@@ -743,6 +791,51 @@ impl SqliteInventory {
         .await?;
         Ok(res.rows_affected())
     }
+}
+
+/// Escape SQLite LIKE metacharacters (`\`, `%`, `_`) so user-supplied
+/// substrings match LITERALLY rather than as patterns. Caller MUST
+/// pair this with `ESCAPE '\\'` in the LIKE clause. Without escaping,
+/// a filter input of `user_` would match `user.` (the `.` slot is
+/// any char per `_`) and `%` would match everything.
+pub(crate) fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Shared row decoder for audit rows. Used by both `recent_audit` and
+/// `recent_audit_paginated` so the field-by-field parsing logic lives
+/// in exactly one place.
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_audit_entry(r: sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
+    let ts_str: String = r.try_get("ts")?;
+    let ts = DateTime::parse_from_rfc3339(&ts_str)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!("audit ts not RFC3339 ({ts_str}): {e}"))
+        })?;
+    let payload_opt: Option<String> = r.try_get("payload")?;
+    let payload = match payload_opt {
+        Some(s) => Some(serde_json::from_str(&s)?),
+        None => None,
+    };
+    Ok(AuditEntry {
+        id: r.try_get("id")?,
+        ts,
+        actor: r.try_get("actor")?,
+        action: r.try_get("action")?,
+        target: r.try_get("target")?,
+        payload,
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]

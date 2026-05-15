@@ -23,7 +23,7 @@ vpnctl-inventory = { path = "../crates/inventory" }
 # Phase C-3.2: web add-user form needs UUID + tuic-password generators.
 vpnctl-crypto = { path = "../crates/crypto" }
 
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = { version = "0.5", default-features = false }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout", "fs", "set-header"] }
@@ -38,6 +38,9 @@ serde_json = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 # Inline-SVG QR codes for /admin/users/<id> share-links.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Phase D audit timeline: date-grouping (Today/Yesterday/<date>) +
+# CSV export filename stamp.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
