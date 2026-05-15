@@ -953,11 +953,16 @@ impl SqliteInventory {
     /// admin UI's "Active bans" surface. Sorted newest-first by
     /// `created_at` so the most recent abuse pops to the top.
     pub async fn active_bans(&self) -> Result<Vec<Ban>> {
+        // ORDER BY created_at DESC, id DESC — `id DESC` is the stable
+        // tiebreaker for inserts that land in the same millisecond
+        // (caught by `spec_sub_rate_bans::active_bans_lists_all_kinds_newest_first`
+        // flaking on CI). `id` is monotonic on insert (SQLite ROWID),
+        // so id DESC == insert-order DESC for ties.
         let rows = sqlx::query(
             "SELECT id, created_at, until_ts, kind, key, reason
              FROM sub_rate_bans
              WHERE until_ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             ORDER BY created_at DESC",
+             ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
