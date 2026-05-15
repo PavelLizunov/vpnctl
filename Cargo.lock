@@ -4637,6 +4637,7 @@ name = "vpnctld"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -4648,6 +4649,7 @@ dependencies = [
  "serde_json",
  "subtle",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tower-http",
@@ -4658,6 +4660,7 @@ dependencies = [
  "vpnctl-inventory",
  "vpnctl-kernels",
  "vpnctl-protocols",
+ "vpnctl-ssh",
 ]
 
 [[package]]
