@@ -259,9 +259,18 @@ async fn distinct_ips_window_filter_includes_fresh_excludes_old() {
         .execute(&raw)
         .await
         .unwrap();
+    // Use the SAME ISO-format timestamp the production `log_sub_access`
+    // writes (the column DEFAULT). Using legacy `datetime('now', ...)`
+    // here was a TEST bug that only surfaced near midnight UTC: when
+    // the aged row's date prefix happened to match the ISO cutoff's
+    // date prefix, the string comparison diverged at the separator
+    // (space < T) and the row was wrongly excluded. The impl was
+    // correct (both query sides use strftime/T after fix `fad0adf`);
+    // it was the TEST injection that drifted from production format.
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
-         VALUES (datetime('now', '-25 hours'), 'alice', '2.2.2.2', 200, 100)",
+         VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-25 hours'),
+                 'alice', '2.2.2.2', 200, 100)",
     )
     .execute(&raw)
     .await
