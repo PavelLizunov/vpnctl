@@ -9,6 +9,7 @@
 pub mod access_log;
 pub mod app;
 pub mod clash_api;
+pub mod clash_poller;
 pub mod config;
 pub mod handlers;
 pub mod rate_limit;

@@ -129,6 +129,35 @@ pub struct Ban {
     pub reason: String,
 }
 
+/// One row in `vpn_connection_stats` (Track-3 chunk 2). The poller
+/// writes deltas (not totals) per (server, user) on every tick where
+/// the delta is non-zero.
+///
+/// `user_id = None` is the server-wide row for that snapshot — sum
+/// of all per-user deltas plus any unattributed traffic from
+/// connections that didn't carry a `metadata.user`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VpnStatsRow {
+    pub ts: DateTime<Utc>,
+    pub server_id: ServerId,
+    pub user_id: Option<UserId>,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub active_connections: u32,
+}
+
+/// One delta the poller wants to write — produced by the in-memory
+/// diff engine in `daemon::clash_poller`. Bundled into a single
+/// transaction by `record_vpn_stats` so a tick lands atomically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnStatsDelta {
+    /// `None` = server-wide row.
+    pub user_id: Option<UserId>,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub active_connections: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pool: SqlitePool,
@@ -947,6 +976,113 @@ impl SqliteInventory {
         .await?;
         Ok(res.rows_affected())
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Track-3 chunk 2 — VPN connection stats (clash-api poller sink)
+    //
+    // The poller in `daemon::clash_poller` (separate iter / chunk) calls
+    // `record_vpn_stats(server_id, deltas)` once per tick. The read
+    // surfaces — `recent_vpn_stats_for_user` and
+    // `recent_vpn_stats_for_server` — power chunk 3's UI on
+    // `/admin/users/<id>` and `/admin/servers/<id>`.
+    //
+    // Server-wide rows are persisted under `user_id = NULL` so the
+    // server-detail page can render bandwidth-vs-time without joining
+    // across every per-user row.
+    //
+    // All deltas for one tick land in a single transaction so a poller
+    // crash mid-write doesn't yield a half-attributed snapshot.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Persist one tick's deltas. Empty `deltas` is a no-op (the
+    /// poller may decide a quiet node doesn't deserve a row).
+    /// Timestamp is `now` on the daemon, NOT pulled from the snapshot
+    /// — clash-api doesn't carry a snapshot timestamp, and the
+    /// daemon's clock is the only source we trust on the read side.
+    pub async fn record_vpn_stats(
+        &self,
+        server_id: &ServerId,
+        deltas: &[VpnStatsDelta],
+    ) -> Result<()> {
+        if deltas.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for d in deltas {
+            sqlx::query(
+                "INSERT INTO vpn_connection_stats
+                 (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(&server_id.0)
+            .bind(d.user_id.as_ref().map(|u| u.0.as_str()))
+            .bind(i64::try_from(d.upload_bytes).unwrap_or(i64::MAX))
+            .bind(i64::try_from(d.download_bytes).unwrap_or(i64::MAX))
+            .bind(i64::from(d.active_connections))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Recent per-user rows across ALL servers in the look-back
+    /// window. Newest-first. The UI joins these by server_id to
+    /// render a per-server breakdown if needed.
+    pub async fn recent_vpn_stats_for_user(
+        &self,
+        user_id: &UserId,
+        since_hours: u32,
+    ) -> Result<Vec<VpnStatsRow>> {
+        let rows = sqlx::query(
+            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
+             FROM vpn_connection_stats
+             WHERE user_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             ORDER BY ts DESC",
+        )
+        .bind(&user_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
+    /// Recent server-wide + per-user rows for one server in the
+    /// look-back window. Newest-first. The server-detail UI uses
+    /// the `user_id IS NULL` rows for the bandwidth sparkline and
+    /// the rest for the per-user breakdown.
+    pub async fn recent_vpn_stats_for_server(
+        &self,
+        server_id: &ServerId,
+        since_hours: u32,
+    ) -> Result<Vec<VpnStatsRow>> {
+        let rows = sqlx::query(
+            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
+             FROM vpn_connection_stats
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             ORDER BY ts DESC",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
+    /// Drop rows older than `days`. Mirrors `purge_sub_access_older_than`
+    /// — chunk 3 will wire this into the existing retention scheduler.
+    pub async fn purge_vpn_stats_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM vpn_connection_stats
+             WHERE ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 /// Extract the `/16` network prefix from a v4 IP literal as a
@@ -1085,6 +1221,29 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         tuic_password: r.try_get("tuic_password")?,
         wireguard_pubkey: r.try_get("wireguard_pubkey")?,
         sub_token: r.try_get("sub_token")?,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_vpn_stats(r: sqlx::sqlite::SqliteRow) -> Result<VpnStatsRow> {
+    let ts_s: String = r.try_get("ts")?;
+    let ts = DateTime::parse_from_rfc3339(&ts_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!("vpn_connection_stats.ts malformed: {ts_s}: {e}"))
+        })?;
+    let server_id: String = r.try_get("server_id")?;
+    let user_id_opt: Option<String> = r.try_get("user_id")?;
+    let upload_i: i64 = r.try_get("upload_bytes")?;
+    let download_i: i64 = r.try_get("download_bytes")?;
+    let conns_i: i64 = r.try_get("active_connections")?;
+    Ok(VpnStatsRow {
+        ts,
+        server_id: ServerId(server_id),
+        user_id: user_id_opt.map(UserId),
+        upload_bytes: u64::try_from(upload_i).unwrap_or(0),
+        download_bytes: u64::try_from(download_i).unwrap_or(0),
+        active_connections: u32::try_from(conns_i).unwrap_or(0),
     })
 }
 

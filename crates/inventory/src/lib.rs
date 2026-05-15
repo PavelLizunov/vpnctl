@@ -11,5 +11,6 @@ pub mod sqlite;
 
 pub use mem::InMemoryInventory;
 pub use sqlite::{
-    AccessBucket, AuditEntry, Ban, SqliteInventory, SqliteInventoryError, SubAccessEntry, UaCluster,
+    AccessBucket, AuditEntry, Ban, SqliteInventory, SqliteInventoryError, SubAccessEntry,
+    UaCluster, VpnStatsDelta, VpnStatsRow,
 };
