@@ -548,10 +548,199 @@ fn section_placeholder_body(section_label: &str) -> Markup {
     }
 }
 
-pub(crate) async fn monitoring(headers: HeaderMap) -> Markup {
+/// Phase F monitoring page. Pulls hourly + daily access buckets from
+/// `sub_access_log`, gap-fills, renders two inline-SVG sparklines
+/// (hits + distinct IPs) plus headline KPIs. No JS — pure SSR.
+pub(crate) async fn monitoring(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
     let (theme, accent, tw) = theme_accent(&headers);
-    let body = section_placeholder_body("Monitoring");
-    shell("monitoring", &theme, &accent, tw, body)
+
+    let hourly = state
+        .inv
+        .sub_access_buckets("hour", 24)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let daily = state
+        .inv
+        .sub_access_buckets("day", 24 * 7)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Gap-fill the 24-hour window so the sparkline x-axis is even.
+    let hour_filled = fill_hourly_gaps(&hourly, 24);
+    let day_filled = fill_daily_gaps(&daily, 7);
+
+    // Headline KPIs from the unfilled buckets (gap-filling adds zero
+    // entries which would skew "peak" downward).
+    let total_hits_24h: u64 = hourly.iter().map(|b| b.hits).sum();
+    let peak_ips_hour: u64 = hourly.iter().map(|b| b.distinct_ips).max().unwrap_or(0);
+    let total_hits_7d: u64 = daily.iter().map(|b| b.hits).sum();
+
+    let body = html! {
+        div.ed-art-eyebrow { "Monitoring" }
+        h1.ed-art-h1 {
+            (total_hits_24h) " "
+            @if total_hits_24h == 1 { em { "hit" } } @else { em { "hits" } }
+            " in the last 24h"
+        }
+        p.ed-art-deck {
+            "Aggregate sub-access counters straight from "
+            span.ed-mono { "sub_access_log" }
+            ". Reads are server-side aggregated; no JavaScript on the "
+            "page — re-render on reload."
+        }
+
+        div style="display: flex; gap: 36px; padding: 12px 0 24px; font-family: var(--serif);" {
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (total_hits_24h) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "hits · 24h"
+                }
+            }
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (peak_ips_hour) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "peak distinct IPs / hour"
+                }
+            }
+            div {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (total_hits_7d) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    "hits · 7 days"
+                }
+            }
+        }
+
+        div.ed-rule {}
+        div.ed-art-eyebrow style="margin-top: 18px;" { "Hourly hits · last 24h" }
+        (sparkline_svg(&hour_filled.iter().map(|b| b.hits as f64).collect::<Vec<_>>(), 720, 60))
+        div.ed-art-eyebrow style="margin-top: 18px;" { "Hourly distinct IPs · last 24h" }
+        (sparkline_svg(&hour_filled.iter().map(|b| b.distinct_ips as f64).collect::<Vec<_>>(), 720, 60))
+        div.ed-art-eyebrow style="margin-top: 18px;" { "Daily hits · last 7 days" }
+        (sparkline_svg(&day_filled.iter().map(|b| b.hits as f64).collect::<Vec<_>>(), 720, 60))
+
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 18px;" {
+            "Same data is curl-able as JSON at "
+            span.ed-mono { "/api/v1/stats/sub-access?bucket=hour&since_hours=24" }
+            " (no auth — only aggregate counts, no per-IP details)."
+        }
+    };
+    Ok(shell("monitoring", &theme, &accent, tw, body))
+}
+
+/// Fill the last `n_hours` hourly buckets with zero where the input
+/// (oldest-first, with gaps) has no entry. Caller passes the result
+/// from the inventory; this turns a sparse list into a dense one
+/// suitable for sparkline rendering.
+fn fill_hourly_gaps(
+    input: &[vpnctl_inventory::AccessBucket],
+    n_hours: usize,
+) -> Vec<vpnctl_inventory::AccessBucket> {
+    use chrono::{Duration, Timelike, Utc};
+    // Build a HashMap keyed by (year-month-day-hour) for fast lookup.
+    use std::collections::HashMap;
+    let key = |b: &vpnctl_inventory::AccessBucket| b.bucket_start.format("%Y-%m-%dT%H").to_string();
+    let by_hour: HashMap<String, &vpnctl_inventory::AccessBucket> =
+        input.iter().map(|b| (key(b), b)).collect();
+    let now = Utc::now()
+        .with_minute(0)
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or_else(Utc::now);
+    let mut out = Vec::with_capacity(n_hours);
+    for h in (0..n_hours).rev() {
+        let ts = now - Duration::hours(h as i64);
+        let k = ts.format("%Y-%m-%dT%H").to_string();
+        out.push(match by_hour.get(&k) {
+            Some(b) => (*b).clone(),
+            None => vpnctl_inventory::AccessBucket {
+                bucket_start: ts,
+                hits: 0,
+                distinct_ips: 0,
+            },
+        });
+    }
+    out
+}
+
+/// Same as `fill_hourly_gaps` but for daily buckets over `n_days`.
+fn fill_daily_gaps(
+    input: &[vpnctl_inventory::AccessBucket],
+    n_days: usize,
+) -> Vec<vpnctl_inventory::AccessBucket> {
+    use chrono::{Duration, Utc};
+    use std::collections::HashMap;
+    let key = |b: &vpnctl_inventory::AccessBucket| b.bucket_start.format("%Y-%m-%d").to_string();
+    let by_day: HashMap<String, &vpnctl_inventory::AccessBucket> =
+        input.iter().map(|b| (key(b), b)).collect();
+    let today = Utc::now().date_naive();
+    let mut out = Vec::with_capacity(n_days);
+    for d in (0..n_days).rev() {
+        let day = today - Duration::days(d as i64);
+        let k = day.format("%Y-%m-%d").to_string();
+        out.push(match by_day.get(&k) {
+            Some(b) => (*b).clone(),
+            None => vpnctl_inventory::AccessBucket {
+                bucket_start: day.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc(),
+                hits: 0,
+                distinct_ips: 0,
+            },
+        });
+    }
+    out
+}
+
+/// Inline-SVG sparkline. Pure SSR — width/height pinned, no JS,
+/// stroke uses `var(--acc)` so the accent toggle in the Tweaks panel
+/// recolours every chart on the page consistently.
+fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
+    if values.is_empty() {
+        return html! {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 6px 0;" {
+                "(no data in window)"
+            }
+        };
+    }
+    let max = values.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+    let n = values.len();
+    let stride = if n > 1 {
+        (width as f64 - 4.0) / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let h = height as f64 - 4.0;
+    let points: String = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = 2.0 + (i as f64) * stride;
+            let y = 2.0 + h - (v / max) * h;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Filled area under the curve — same points + close-down to baseline.
+    let area_points = format!(
+        "2,{baseline} {points} {last_x:.1},{baseline}",
+        baseline = height as f64 - 2.0,
+        last_x = 2.0 + (n - 1) as f64 * stride
+    );
+    html! {
+        svg width=(width) height=(height) viewBox=(format!("0 0 {width} {height}"))
+            xmlns="http://www.w3.org/2000/svg"
+            style="display: block; margin: 8px 0;" {
+            polygon points=(area_points) fill="var(--acc)" opacity="0.10" {}
+            polyline points=(points) fill="none" stroke="var(--acc)" stroke-width="1.5" {}
+            // Right-side max-value label so operator can read the peak.
+            text x=(width - 4) y="14"
+                 text-anchor="end"
+                 style="font-family: var(--mono); font-size: 10px; fill: var(--mute);" {
+                "max " (max as u64)
+            }
+        }
+    }
 }
 
 /// Editorial server card — one per row, matches `.ed-server` from the

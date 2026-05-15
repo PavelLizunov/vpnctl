@@ -69,6 +69,19 @@ pub struct AuditEntry {
     pub payload: Option<serde_json::Value>,
 }
 
+/// One time-bucket of `sub_access_log` aggregated for the Phase F
+/// monitoring sparklines. `ts` is the bucket start (ISO-8601, UTC),
+/// `hits` is the count of requests in the bucket, `distinct_ips` is
+/// `COUNT(DISTINCT ip)` in the bucket. Buckets with zero hits are
+/// NOT returned by the query — the renderer fills gaps with zero so
+/// the sparkline x-axis stays evenly spaced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccessBucket {
+    pub bucket_start: DateTime<Utc>,
+    pub hits: u64,
+    pub distinct_ips: u64,
+}
+
 /// One row of `sub_access_log` (Phase Track-1) — emitted by the daemon
 /// every time `/sub/<token>` is hit, after the token has been resolved.
 /// The token itself is never stored, only the resolved `user_id`, so a
@@ -693,6 +706,68 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
+    }
+
+    /// Aggregate `sub_access_log` into time buckets for the Phase F
+    /// monitoring sparklines. `bucket = "hour"` groups by hourly
+    /// truncation, `bucket = "day"` by date. `since_hours` is the
+    /// look-back window from now.
+    ///
+    /// Returns ONE row per bucket that had at least one hit; the
+    /// caller fills gaps with zero so the sparkline x-axis stays
+    /// evenly spaced. Newest-first sort is NOT used — buckets come
+    /// back oldest-first (ASC) so the renderer can walk them
+    /// chronologically without re-sorting.
+    pub async fn sub_access_buckets(
+        &self,
+        bucket: &str,
+        since_hours: u32,
+    ) -> Result<Vec<AccessBucket>> {
+        // Bucket grouping format. We REJECT unknown bucket strings
+        // rather than silently default — an operator typo should
+        // surface as an error, not as a meaningless aggregate.
+        let group_fmt = match bucket {
+            "hour" => "%Y-%m-%dT%H:00:00.000Z",
+            "day" => "%Y-%m-%dT00:00:00.000Z",
+            other => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "sub_access_buckets: unknown bucket kind '{other}' (allowed: hour, day)"
+                )));
+            }
+        };
+        let rows = sqlx::query(
+            "SELECT
+                strftime(?1, ts) AS bucket_start,
+                COUNT(*) AS hits,
+                COUNT(DISTINCT ip) AS distinct_ips
+             FROM sub_access_log
+             WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY bucket_start
+             ORDER BY bucket_start ASC",
+        )
+        .bind(group_fmt)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let ts_str: String = r.try_get("bucket_start")?;
+                let ts = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .map_err(|e| {
+                        SqliteInventoryError::Invalid(format!(
+                            "bucket_start not RFC3339 ({ts_str}): {e}"
+                        ))
+                    })?;
+                let hits_i: i64 = r.try_get("hits")?;
+                let ips_i: i64 = r.try_get("distinct_ips")?;
+                Ok(AccessBucket {
+                    bucket_start: ts,
+                    hits: u64::try_from(hits_i).unwrap_or(0),
+                    distinct_ips: u64::try_from(ips_i).unwrap_or(0),
+                })
+            })
+            .collect()
     }
 
     // ── Persistent rate-limit bans (Phase Track-2 chunk 2) ──────────────

@@ -2675,3 +2675,127 @@ async fn admin_audit_csv_export_returns_well_formed_csv() {
         "payload not RFC4180-escaped as expected;\n  expected to contain: {expected_payload}\n  got row:             {row}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase F — monitoring page + stats JSON endpoint
+//
+//  Pin the SSR shape (KPIs + sparkline SVG dimensions) and the JSON
+//  endpoint response shape. Sparkline content depends on inventory
+//  state at test time, so we assert shape (svg width/height/stroke,
+//  KPI labels) rather than pixel values.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_monitoring_renders_kpis_and_sparklines() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Seed a couple of access rows so the sparklines have non-zero
+    // peaks (the KPIs read from these).
+    s.inv
+        .log_sub_access(&UserId("u0".into()), "1.1.1.1", None, 200, 500)
+        .await
+        .unwrap();
+    s.inv
+        .log_sub_access(&UserId("u0".into()), "2.2.2.2", None, 200, 500)
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/monitoring").await;
+
+    // KPI labels (the trio of headline counters).
+    assert!(html.contains("hits · 24h"), "24h hits KPI label missing");
+    assert!(
+        html.contains("peak distinct IPs / hour"),
+        "peak-IPs KPI label missing"
+    );
+    assert!(html.contains("hits · 7 days"), "7d hits KPI label missing");
+
+    // Sparkline section eyebrows.
+    assert!(html.contains("Hourly hits · last 24h"));
+    assert!(html.contains("Hourly distinct IPs · last 24h"));
+    assert!(html.contains("Daily hits · last 7 days"));
+
+    // SVG shape pin: width=720, height=60, stroke uses var(--acc).
+    assert!(
+        html.contains(r#"width="720""#),
+        "sparkline width pinned to 720px"
+    );
+    assert!(
+        html.contains(r#"height="60""#),
+        "sparkline height pinned to 60px"
+    );
+    assert!(
+        html.contains(r#"stroke="var(--acc)""#),
+        "sparkline stroke must use accent variable"
+    );
+
+    // Footer hint to the JSON endpoint.
+    assert!(
+        html.contains("/api/v1/stats/sub-access"),
+        "footer hint to JSON endpoint missing"
+    );
+}
+
+#[tokio::test]
+async fn api_stats_sub_access_returns_well_formed_json() {
+    use http_body_util::BodyExt;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    s.inv
+        .log_sub_access(&UserId("u0".into()), "1.1.1.1", None, 200, 500)
+        .await
+        .unwrap();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stats/sub-access")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.starts_with("application/json"), "ct: {ct}");
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bucket"], "hour", "default bucket=hour");
+    assert_eq!(v["since_hours"], 24, "default since_hours=24");
+    let buckets = v["buckets"].as_array().expect("buckets array");
+    assert!(!buckets.is_empty(), "should have at least one bucket");
+    assert_eq!(buckets[0]["hits"], 1);
+    assert_eq!(buckets[0]["distinct_ips"], 1);
+    assert!(buckets[0]["ts"].is_string(), "ts must be ISO-8601 string");
+}
+
+#[tokio::test]
+async fn api_stats_sub_access_rejects_invalid_bucket() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stats/sub-access?bucket=fortnight")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown bucket kind must be 400"
+    );
+}

@@ -10,4 +10,6 @@ pub mod mem;
 pub mod sqlite;
 
 pub use mem::InMemoryInventory;
-pub use sqlite::{AuditEntry, Ban, SqliteInventory, SqliteInventoryError, SubAccessEntry};
+pub use sqlite::{
+    AccessBucket, AuditEntry, Ban, SqliteInventory, SqliteInventoryError, SubAccessEntry,
+};

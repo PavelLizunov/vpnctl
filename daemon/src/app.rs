@@ -255,6 +255,12 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/api/v1/health", get(handlers::health::get))
+        // Phase F monitoring stats (NOT behind admin auth — exposes
+        // only aggregate counts, no per-IP/per-token details).
+        .route(
+            "/api/v1/stats/sub-access",
+            get(handlers::stats::sub_access),
+        )
         .route("/sub/{token}", get(handlers::sub::get))
         .with_state(state)
         .merge(admin_router)
