@@ -808,14 +808,29 @@ pub(crate) async fn servers(
             " in inventory"
         }
         p.ed-art-deck {
-            "Read straight from the SQLite inventory. Add a server with "
-            span.ed-mono { "vpnctl bootstrap" } " then "
-            span.ed-mono { "vpnctl deploy" }
-            " — the wizard UI is on the Phase D roadmap."
+            "Read straight from the SQLite inventory. Add a server through the "
+            a href="/admin/servers/new" style="color: var(--ink); text-decoration: underline;" {
+                "wizard"
+            }
+            " (paste IP + root password, the daemon does the rest), or use "
+            span.ed-mono { "vpnctl bootstrap" } " then " span.ed-mono { "vpnctl deploy" }
+            " from the CLI."
         }
+
+        // Phase E sub-iter 4a — wizard CTA. Sits above the list so a
+        // fresh inventory finds the affordance immediately.
+        div style="margin: 16px 0 24px;" {
+            a href="/admin/servers/new"
+              style="display: inline-block; padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "add server →"
+            }
+        }
+
         @if server_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
-                "No servers yet. Run "
+                "No servers yet. Click "
+                span.ed-mono { "add server →" }
+                " above, or run "
                 span.ed-mono { "vpnctl bootstrap <id> <address> <ssh-user> <ssh-port>" }
                 " on a fresh node and refresh."
             }
@@ -2387,4 +2402,230 @@ pub(crate) async fn set_tweak(
         )
             .into_response(),
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase E — add-server wizard.
+//
+//  Sub-iter 4a (this commit): step-1 form + submit + step-2 stub.
+//  Sub-iter 4b: SSE handler streaming `vpnctl bootstrap` + `vpnctl deploy`.
+//  Sub-iter 4c: completion page + audit + return to /admin/servers.
+//
+//  The wizard is the operator's main reason for the admin UI to exist
+//  per CLAUDE.md "Strategic context" — paste IP+root password and the
+//  daemon does the rest. Sub-iter 4a establishes the session plumbing
+//  so 4b can focus on the SSE plumbing without also designing input
+//  validation and cookie schemes.
+//
+//  Security model: the session cookie is HttpOnly, SameSite=Strict,
+//  Path=/admin/servers/new, and Max-Age=600s. The CSRF middleware
+//  already requires a same-origin Origin header on POST; this stack
+//  means a cross-origin attacker can neither read the cookie nor
+//  forge a wizard step. The 32-byte random session id is opaque
+//  outside the daemon process.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Pull a single named cookie's value out of the `Cookie` header.
+/// Returns `None` if the header is absent or the cookie name isn't
+/// present. Does no URL-decoding — wizard ids are base64-url and
+/// don't contain anything that would need decoding.
+///
+/// Hand-rolled rather than pulling `cookie` crate as a dep — the only
+/// existing cookie reader in this module is in `theme_accent`, which
+/// also walks the header by hand. Two readers, same pattern.
+fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for piece in raw.split(';') {
+        let kv = piece.trim();
+        if let Some(rest) = kv.strip_prefix(name)
+            && let Some(value) = rest.strip_prefix('=')
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Parse a single named field out of an `application/x-www-form-urlencoded`
+/// body. Returns the URL-decoded value (`+` → space, `%XX` → byte).
+/// Returns `None` if the field isn't present. Same minimal-parser
+/// pattern as `user_create` — no need for a full form-decoder when the
+/// wizard step has exactly two fields.
+fn form_field(body: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    body.split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix))
+        .map(decode_form_value)
+}
+
+/// `GET /admin/servers/new` — render the wizard's step-1 form.
+///
+/// Two fields: server address (IP or hostname) and root password.
+/// Submit POSTs to the same URL; success goes to `/admin/servers/new/step-2`.
+/// Cancel link leads back to `/admin/servers`.
+pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
+    let (theme, accent, tw) = theme_accent(&headers);
+    let body = html! {
+        div.ed-art-eyebrow { "Add server · step 1 of 3" }
+        h1.ed-art-h1 {
+            "Paste an " em { "IP" } " and the " em { "root password" }
+        }
+        p.ed-art-deck {
+            "The daemon will SSH in as " span.ed-mono { "root" } ", push its key, "
+            "create a non-root user, harden " span.ed-mono { "sshd_config" } ", "
+            "install fail2ban + sing-box, render the config, and prove the service "
+            "is live — all on the next screen."
+        }
+
+        form method="post" action="/admin/servers/new"
+             style="margin: 24px 0; padding: 18px 20px; border: 1px solid var(--rule); background: var(--paper); display: flex; flex-direction: column; gap: 14px;" {
+            div style="display: flex; flex-direction: column; gap: 4px;" {
+                label for="address"
+                      style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "address"
+                }
+                input id="address" name="address" type="text" required="required"
+                      placeholder="198.51.100.42 or vpn-de1.example.org"
+                      autocomplete="off" autocapitalize="none" spellcheck="false"
+                      pattern="[A-Za-z0-9.:_-]+"
+                      title="IPv4, IPv6 or hostname — no shell metacharacters"
+                      style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
+                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                    "DigitalOcean droplets must keep SSH on port 22 (Cloud Firewall blocks the rest); other hosters get the harden-to-2222 step automatically on the next screen."
+                }
+            }
+            div style="display: flex; flex-direction: column; gap: 4px;" {
+                label for="root_password"
+                      style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "root password"
+                }
+                input id="root_password" name="root_password" type="password" required="required"
+                      autocomplete="new-password"
+                      style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
+                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                    "Used once to push our SSH key, then password auth gets disabled. Held in daemon memory for 10 minutes; nothing is written to disk."
+                }
+            }
+            div style="display: flex; gap: 12px; align-items: center; margin-top: 6px;" {
+                button type="submit"
+                       title="Validate inputs and continue to the bootstrap log"
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "continue →"
+                }
+                a href="/admin/servers"
+                  style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none; padding: 6px 8px;" {
+                    "cancel"
+                }
+            }
+        }
+    };
+    shell("servers", &theme, &accent, tw, body)
+}
+
+/// `POST /admin/servers/new` — validate the step-1 input, stash it in
+/// the wizard session store, set the session cookie, redirect to
+/// step 2.
+///
+/// On validation failure returns 400 with the canonical
+/// `vpnctl admin: …` body — the operator fixes the offending field
+/// without consulting source. Success redirects to step 2 (303 so a
+/// browser refresh lands on step 2, not a duplicate POST).
+pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: String) -> Response {
+    let address_raw = form_field(&body, "address").unwrap_or_default();
+    let password_raw = form_field(&body, "root_password").unwrap_or_default();
+
+    let address = match crate::wizard::validate_address(&address_raw) {
+        Ok(s) => s.to_string(),
+        Err(why) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                error_text(&format!("invalid address — {why}")),
+            )
+                .into_response();
+        }
+    };
+    if let Err(why) = crate::wizard::validate_password(&password_raw) {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!("invalid root password — {why}")),
+        )
+            .into_response();
+    }
+
+    let session_id = state.wizard.insert(address, password_raw);
+
+    // Cookie scope: only the wizard endpoints. Path=/admin/servers/new
+    // means the browser doesn't ship the session id to /admin/users,
+    // /admin/audit, etc.
+    let cookie = format!(
+        "{name}={id}; HttpOnly; SameSite=Strict; Path=/admin/servers/new; Max-Age=600",
+        name = crate::wizard::COOKIE_NAME,
+        id = session_id,
+    );
+    let mut resp = Redirect::to("/admin/servers/new/step-2").into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// `GET /admin/servers/new/step-2` — stub for sub-iter 4a. Reads the
+/// session cookie, looks up the stashed step-1 input, and renders a
+/// short page confirming the address. Sub-iter 4b replaces this with
+/// the real SSE-streaming bootstrap log.
+///
+/// On missing/expired session redirects back to step 1 with a 303 +
+/// short message — the operator's session has timed out and there's
+/// nothing actionable on this screen without it.
+pub(crate) async fn wizard_step2_stub(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let (theme, accent, tw) = theme_accent(&headers);
+    let session =
+        read_cookie(&headers, crate::wizard::COOKIE_NAME).and_then(|id| state.wizard.get(id));
+
+    let session = match session {
+        Some(s) => s,
+        None => {
+            // No session = direct hit on step-2 without going through
+            // step-1, OR the session expired (10-min TTL). Either way
+            // the operator needs to start over.
+            return (
+                StatusCode::BAD_REQUEST,
+                error_text(
+                    "wizard session expired or missing — start over from /admin/servers/new",
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let body = html! {
+        div.ed-art-eyebrow { "Add server · step 2 of 3" }
+        h1.ed-art-h1 {
+            "Bootstrapping " span.ed-mono { (session.address) }
+        }
+        p.ed-art-deck {
+            "The next screen will stream " span.ed-mono { "vpnctl bootstrap" }
+            " + " span.ed-mono { "vpnctl deploy" } " line-by-line over Server-Sent Events. "
+            em { "Sub-iter 4b ships that part" } " — for now this is a stub that just confirms "
+            "your step-1 input survived the round-trip."
+        }
+        div style="margin: 24px 0; padding: 14px 18px; border: 1px solid var(--rule); background: var(--paper);" {
+            dl style="margin: 0; display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; font-family: var(--mono); font-size: 12px;" {
+                dt style="color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "address" }
+                dd style="margin: 0; color: var(--ink);" { (session.address) }
+                dt style="color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "root password" }
+                dd style="margin: 0; color: var(--mute); font-style: italic;" {
+                    "(held in daemon memory — never echoed to the page)"
+                }
+            }
+        }
+        a href="/admin/servers"
+          style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
+            "← back to servers"
+        }
+    };
+    shell("servers", &theme, &accent, tw, body).into_response()
 }

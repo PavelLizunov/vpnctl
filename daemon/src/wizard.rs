@@ -1,0 +1,240 @@
+//! Phase E — add-server wizard session store.
+//!
+//! The wizard collects the IP + root password on step 1, then streams
+//! `vpnctl bootstrap` + `vpnctl deploy` output on step 2 (SSE), then
+//! offers a first-grant prompt on step 3. Between steps the operator's
+//! input has to live somewhere; the choices are:
+//!
+//!   1. **Server-side in-memory store keyed by a random session id**
+//!      (this module). Pros: secrets never leave the daemon process.
+//!      Cons: state lost on restart — but the wizard is a 5-minute
+//!      flow, not a multi-day one, so restart-loss is acceptable.
+//!   2. HMAC-signed cookie carrying the secrets directly. Pros:
+//!      stateless, restart-safe. Cons: root password sitting in the
+//!      browser cookie jar even with HttpOnly+SameSite is a wider
+//!      blast radius than a process-memory dict.
+//!
+//! We pick (1). The session id is 32 bytes of base64-url, set as an
+//! HttpOnly + SameSite=Strict cookie scoped to `Path=/admin/servers/new`
+//! so it never goes anywhere else in the admin UI.
+//!
+//! TTL is 10 minutes — long enough for a deliberate operator filling
+//! out the form, short enough that an abandoned session times out
+//! before the Tweaks panel does. Lazy purge on access avoids a
+//! background sweep task for what is at most a handful of entries on
+//! a single-operator homelab.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// One in-flight wizard session — the operator's step-1 input.
+///
+/// `root_password` is intentionally NOT hashed/encrypted at rest in
+/// the store: the daemon is single-tenant on the homelab, and the
+/// SSE step uses the password verbatim to bootstrap the new node.
+/// Storing a hash would just mean the operator has to re-type before
+/// step 2, defeating the wizard.
+#[derive(Clone, Debug)]
+pub struct WizardSession {
+    pub address: String,
+    pub root_password: String,
+    /// Wall-clock instant the session was created. Used by `get` to
+    /// expire stale sessions on access.
+    pub created: Instant,
+}
+
+/// In-memory session store with lazy TTL expiry. Cloning is cheap
+/// (Arc-wrapped at the call site).
+#[derive(Debug, Default)]
+pub struct WizardStore {
+    inner: Mutex<HashMap<String, WizardSession>>,
+}
+
+/// Session lifetime. 10 minutes is the longest a sane operator should
+/// take to read step 1 + paste credentials + click submit. After that
+/// the assumption is they walked away and the session is stale.
+pub const SESSION_TTL: Duration = Duration::from_secs(600);
+
+/// Cookie name. Scoped via `Path=/admin/servers/new` so it never
+/// leaks to other admin endpoints — the operator's session id has no
+/// reason to ride along on `/admin/users` traffic.
+pub const COOKIE_NAME: &str = "vpnctl_wizard";
+
+impl WizardStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a fresh session and return its id. The id is 32 bytes of
+    /// crypto random, base64-url encoded (43 ASCII chars). Collisions
+    /// are statistically impossible at homelab scale.
+    pub fn insert(&self, address: String, root_password: String) -> String {
+        let id = vpnctl_crypto::gen_password(32).unwrap_or_else(|_| {
+            // gen_password's only failure mode is OS RNG starvation,
+            // which on Linux means /dev/urandom is broken — at that
+            // point the daemon has bigger problems. Fallback to a
+            // timestamp-keyed id so we still respond, even if weakly:
+            // the cookie is HttpOnly+SameSite=Strict so guessing it
+            // requires admin-side access already.
+            format!("fallback-{}", Instant::now().elapsed().as_nanos())
+        });
+        let session = WizardSession {
+            address,
+            root_password,
+            created: Instant::now(),
+        };
+        if let Ok(mut g) = self.inner.lock() {
+            g.insert(id.clone(), session);
+        }
+        id
+    }
+
+    /// Fetch a session by id, returning `Some` only if it exists AND
+    /// hasn't expired. Expired entries are dropped on access (lazy
+    /// purge) so the map doesn't grow unbounded.
+    pub fn get(&self, id: &str) -> Option<WizardSession> {
+        let Ok(mut g) = self.inner.lock() else {
+            return None;
+        };
+        // Drop the expired one if present, then look up.
+        if let Some(s) = g.get(id) {
+            if s.created.elapsed() > SESSION_TTL {
+                g.remove(id);
+                return None;
+            }
+        }
+        g.get(id).cloned()
+    }
+
+    /// Drop a session explicitly (e.g. after successful step-3
+    /// completion or operator cancel). No-op if the id is unknown.
+    pub fn remove(&self, id: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.remove(id);
+        }
+    }
+
+    /// Number of currently-stored sessions. Used by integration tests
+    /// to assert the store side-effect of step-1 submit; in
+    /// production the lazy TTL purge keeps this bounded so it's
+    /// uninteresting to the hot path. Returns 0 on lock-poisoning
+    /// rather than panicking — same convention as `get` / `remove`.
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// Convenience predicate: `true` when no sessions are stored.
+    /// Mirrors the standard `len` / `is_empty` pair (clippy nudges on
+    /// `len() == 0` checks).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Validate a server address (IP or hostname). Returns `Err` with a
+/// short reason on rejection. The wizard's step 1 calls this BEFORE
+/// stashing the input — invalid input never reaches the session store.
+///
+/// We don't try to parse as `IpAddr` because the operator should also
+/// be able to type a hostname (`vpn-de1.example.org`). Charset gate
+/// is the practical guard: anything matching `[A-Za-z0-9.:_-]` is a
+/// reasonable IP/hostname candidate; anything else is either junk or
+/// a shell-injection attempt and we bounce it.
+pub fn validate_address(input: &str) -> Result<&str, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("address is empty");
+    }
+    if trimmed.len() > 255 {
+        return Err("address is too long (>255 chars)");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '-'))
+    {
+        return Err("address contains characters outside [A-Za-z0-9.:_-]");
+    }
+    Ok(trimmed)
+}
+
+/// Validate a root password. Returns `Err` on empty/oversize. We do
+/// NOT validate complexity — operators who type weak passwords here
+/// are bootstrapping the node, after which the wizard disables
+/// password auth entirely.
+pub fn validate_password(input: &str) -> Result<&str, &'static str> {
+    if input.is_empty() {
+        return Err("password is empty");
+    }
+    if input.len() > 256 {
+        return Err("password is too long (>256 chars)");
+    }
+    Ok(input)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_then_get_roundtrips_payload() {
+        let store = WizardStore::new();
+        let id = store.insert("198.51.100.42".into(), "hunter2".into());
+        let s = store.get(&id).expect("session must be retrievable");
+        assert_eq!(s.address, "198.51.100.42");
+        assert_eq!(s.root_password, "hunter2");
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn get_unknown_id_returns_none() {
+        let store = WizardStore::new();
+        assert!(store.get("nope").is_none());
+    }
+
+    #[test]
+    fn remove_drops_session() {
+        let store = WizardStore::new();
+        let id = store.insert("a".into(), "b".into());
+        store.remove(&id);
+        assert!(store.get(&id).is_none());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn validate_address_accepts_ipv4_ipv6_and_hostname() {
+        assert!(validate_address("192.0.2.1").is_ok());
+        assert!(validate_address("2001:db8::1").is_ok());
+        assert!(validate_address("vpn-de1.example.org").is_ok());
+    }
+
+    #[test]
+    fn validate_address_rejects_empty_and_garbage() {
+        assert!(validate_address("").is_err());
+        assert!(validate_address("   ").is_err());
+        assert!(validate_address("198.51.100.1; rm -rf /").is_err());
+        assert!(validate_address("hostname with space").is_err());
+    }
+
+    #[test]
+    fn validate_address_trims_whitespace() {
+        assert_eq!(validate_address("  10.0.0.1  ").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn validate_password_rejects_empty() {
+        assert!(validate_password("").is_err());
+    }
+
+    #[test]
+    fn validate_password_accepts_arbitrary_bytes_within_limit() {
+        // Operators on minimal Debian VPSes get whatever the hoster
+        // gives them; common formats include `Aa1!` plus whitespace,
+        // unicode-quoted passwords from copy-paste, etc. We don't
+        // judge — just length-cap.
+        assert!(validate_password("p@$$ word with space").is_ok());
+        assert!(validate_password(&"x".repeat(256)).is_ok());
+        assert!(validate_password(&"x".repeat(257)).is_err());
+    }
+}

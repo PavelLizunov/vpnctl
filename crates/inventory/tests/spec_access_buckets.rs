@@ -75,8 +75,13 @@ async fn two_rows_in_same_hour_collapse_into_one_bucket_same_ip() {
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
     let raw = raw_pool(&dir).await;
-    inject_at(&raw, "alice", "1.1.1.1", "-5 minutes").await;
-    inject_at(&raw, "alice", "1.1.1.1", "-10 minutes").await;
+    // Sub-second offsets: with `-5 minutes` / `-10 minutes` this test
+    // flaked any time it ran in the first 10 minutes of an hour
+    // (caught at 20:08 UTC: -5m=20:03, -10m=19:58 → two hours, not
+    // one). The spec is "two rows in the same hour"; sub-second
+    // offsets honour that without depending on which minute we run.
+    inject_at(&raw, "alice", "1.1.1.1", "-1 seconds").await;
+    inject_at(&raw, "alice", "1.1.1.1", "-2 seconds").await;
     raw.close().await;
 
     let buckets = inv.sub_access_buckets("hour", 24).await.unwrap();

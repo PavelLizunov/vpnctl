@@ -3011,6 +3011,293 @@ async fn admin_user_detail_track4_ua_section_renders_likely_shared() {
     );
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Phase E sub-iter 4a — add-server wizard step 1 + step-2 stub.
+//
+// The wizard is the marquee differentiator over the bash project
+// (per CLAUDE.md "Strategic context"). Sub-iter 4a's contract:
+//   * GET /admin/servers/new renders a form with `address` +
+//     `root_password` fields and the editorial chrome.
+//   * POST validates input, stashes it server-side keyed by an
+//     HttpOnly+SameSite=Strict cookie, and 303s to step 2.
+//   * GET step-2 either reads the session cookie and shows the
+//     stashed address, or 400s if the session is missing/expired.
+//   * /admin/servers list links to /admin/servers/new (the CLI
+//     nudge alone leaves operators stranded).
+
+#[tokio::test]
+async fn admin_servers_index_links_to_wizard() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/servers").await;
+    assert!(
+        html.contains("/admin/servers/new"),
+        "servers list must link to the wizard; got {}",
+        &html[..html.len().min(800)]
+    );
+    // The "add server →" CTA is the editorial-voice prompt.
+    assert!(
+        html.contains("add server"),
+        "wizard CTA copy missing on /admin/servers"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_new_renders_form_with_required_fields() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/servers/new").await;
+    // Form posts back to the same URL.
+    assert!(
+        html.contains(r#"action="/admin/servers/new""#),
+        "form action missing"
+    );
+    // Both fields present, both required.
+    assert!(html.contains(r#"name="address""#), "address field missing");
+    assert!(
+        html.contains(r#"name="root_password""#),
+        "root_password field missing"
+    );
+    // Password input must be type=password (no echo to the page).
+    assert!(
+        html.contains(r#"id="root_password" name="root_password" type="password""#),
+        "root_password must be type=password"
+    );
+    // Headline + step indicator (copy contract).
+    assert!(
+        html.contains("Add server · step 1 of 3"),
+        "step indicator missing"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_rejects_empty_address_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("address=&root_password=hunter2"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.starts_with("vpnctl admin: invalid address"),
+        "expected canonical 'vpnctl admin: invalid address …' body, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_rejects_shell_injection_in_address() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            // %3B is `;`, %20 is space — these are exactly what a
+            // browser form would send for `; rm -rf /`.
+            .body(Body::from(
+                "address=10.0.0.1%3B%20rm%20-rf%20%2F&root_password=hunter2",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "shell metacharacters in address must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_rejects_empty_password_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("address=192.0.2.1&root_password="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.starts_with("vpnctl admin: invalid root password"),
+        "expected canonical 'vpnctl admin: invalid root password …' body, got {text:?}"
+    );
+}
+
+/// Happy path: valid input → 303 to step-2 + HttpOnly session cookie.
+/// The cookie's Path scope MUST be limited to the wizard so the
+/// session id never rides along on /admin/users/* etc.
+#[tokio::test]
+async fn admin_wizard_submit_happy_path_sets_scoped_cookie_and_redirects() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    assert_eq!(s.wizard.len(), 0, "store starts empty");
+    let app = router(s.clone());
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("address=198.51.100.42&root_password=hunter2"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "/admin/servers/new/step-2",
+        "redirect must go to step-2"
+    );
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    assert!(
+        cookie.starts_with("vpnctl_wizard="),
+        "wrong cookie name: {cookie}"
+    );
+    // Security flags: path-scope, HttpOnly, SameSite=Strict.
+    assert!(
+        cookie.contains("Path=/admin/servers/new"),
+        "cookie path must be wizard-scoped, got: {cookie}"
+    );
+    assert!(
+        cookie.contains("HttpOnly"),
+        "cookie must be HttpOnly, got: {cookie}"
+    );
+    assert!(
+        cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict, got: {cookie}"
+    );
+    // Server-side state has the row.
+    assert_eq!(s.wizard.len(), 1, "session must be stashed server-side");
+}
+
+#[tokio::test]
+async fn admin_wizard_step2_renders_address_with_valid_session() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let session_id = s
+        .wizard
+        .insert("vpn-de1.example.org".into(), "secret".into());
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2")
+                .header("cookie", format!("vpnctl_wizard={session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // Address echoed back; password MUST NOT be in the page.
+    assert!(
+        html.contains("vpn-de1.example.org"),
+        "address must echo on step-2"
+    );
+    assert!(
+        !html.contains("secret"),
+        "root password must NEVER appear in step-2 HTML"
+    );
+    // Step indicator.
+    assert!(
+        html.contains("Add server · step 2 of 3"),
+        "step indicator missing on step-2"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_step2_rejects_missing_session_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "step-2 must 400 without a session"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.starts_with("vpnctl admin: wizard session expired"),
+        "canonical missing-session body required, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_step2_rejects_bogus_cookie_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2")
+                .header("cookie", "vpnctl_wizard=not-a-real-session-id")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown session ids must 400 (no session enumeration leak)"
+    );
+}
+
 #[tokio::test]
 async fn admin_user_detail_track4_ua_section_detects_roaming() {
     let dir = TempDir::new().unwrap();

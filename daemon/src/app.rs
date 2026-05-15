@@ -23,6 +23,7 @@ use crate::access_log::{self, AccessLogRecord};
 use crate::config::DaemonConfig;
 use crate::handlers;
 use crate::rate_limit::RateLimiter;
+use crate::wizard::WizardStore;
 use vpnctl_core::Registry;
 use vpnctl_inventory::SqliteInventory;
 
@@ -44,6 +45,11 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub access_log_tx: mpsc::Sender<AccessLogRecord>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Phase E — add-server wizard's in-flight session store. Holds
+    /// the operator's step-1 input (IP + root password) between the
+    /// step-1 POST and the step-2 SSE handler. See `crate::wizard`
+    /// for TTL + key schema.
+    pub wizard: Arc<WizardStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -95,6 +101,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         registry,
         access_log_tx,
         rate_limiter,
+        wizard: Arc::new(WizardStore::new()),
     };
     Ok(router(state))
 }
@@ -133,6 +140,7 @@ pub fn make_app_state_with_rate_limiter(
             registry,
             access_log_tx,
             rate_limiter,
+            wizard: Arc::new(WizardStore::new()),
         },
         handle,
     )
@@ -312,6 +320,23 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/monitoring/", get(admin::monitoring))
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
+        // Phase E sub-iter 4a: add-server wizard step 1.
+        // GET renders the form (IP + root password); POST validates,
+        // stashes to a server-side session keyed by HttpOnly cookie,
+        // and 303s to the step-2 stub. Sub-iter 4b will replace the
+        // step-2 stub with the SSE-streamed bootstrap log.
+        .route("/admin/servers/new", get(admin::wizard_new))
+        .route("/admin/servers/new/", get(admin::wizard_new))
+        .route("/admin/servers/new", post(admin::wizard_new_submit))
+        .route("/admin/servers/new/", post(admin::wizard_new_submit))
+        .route(
+            "/admin/servers/new/step-2",
+            get(admin::wizard_step2_stub),
+        )
+        .route(
+            "/admin/servers/new/step-2/",
+            get(admin::wizard_step2_stub),
+        )
         .route("/admin/users", get(admin::users))
         .route("/admin/users/", get(admin::users))
         // Phase C-3.2: web add-user form posts here. Form has one

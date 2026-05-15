@@ -11,6 +11,7 @@ pub mod app;
 pub mod config;
 pub mod handlers;
 pub mod rate_limit;
+pub mod wizard;
 
 pub use app::{
     AppState, build, make_app_state_for_tests, make_app_state_with_rate_limiter, router,
