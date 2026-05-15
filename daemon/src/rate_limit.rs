@@ -44,7 +44,7 @@
 //! auto-bans (after K consecutive 429s, ban for 24h, stored in
 //! inventory) is Track-2 chunk 2; this chunk is the foundation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -63,6 +63,19 @@ pub const DEFAULT_REFILL_PER_SEC: f64 = 1.0 / 30.0;
 /// doesn't get a fresh full bucket every time, short enough that
 /// the per-IP map can't grow without bound from one-shot probes.
 pub const DEFAULT_BUCKET_IDLE_TTL: Duration = Duration::from_secs(3600);
+
+/// Phase Track-2 chunk 2: how many consecutive 429s for the same
+/// (axis, key) trip a persistent ban. 10 is conservative — a normal
+/// client trying to refresh past the bucket cap would have to be
+/// hammering the URL deliberately to reach this. The ban TTL is
+/// `DEFAULT_BAN_TTL_SECS`.
+pub const K_DENIALS_TO_BAN: u32 = 10;
+
+/// 24 hours in seconds. Default ban TTL when the handler escalates
+/// after `K_DENIALS_TO_BAN` consecutive 429s. Long enough to be a
+/// real penalty; short enough that a misconfigured legit client
+/// recovers within a day without admin intervention.
+pub const DEFAULT_BAN_TTL_SECS: u64 = 24 * 3600;
 
 /// Single token bucket. Refills lazily on each `try_consume` based
 /// on wall-clock time elapsed since the last refill.
@@ -127,10 +140,21 @@ impl TokenBucket {
 /// Two-axis rate limiter: one bucket per source IP, one per token.
 /// Both buckets must allow the request for it to proceed; the first
 /// to deny picks the `Retry-After`.
+///
+/// Tracks consecutive denials per axis (Phase Track-2 chunk 2) so the
+/// `/sub` handler can escalate to a persistent ban after `K` 429s in
+/// a row. The counter resets on a successful acquire — a single legit
+/// request clears the escalation. Counters live alongside the buckets
+/// in their own `Mutex<HashMap>` (cheap, same shape).
 #[derive(Debug)]
 pub struct RateLimiter {
     by_ip: Mutex<HashMap<IpAddr, TokenBucket>>,
     by_token: Mutex<HashMap<String, TokenBucket>>,
+    /// Consecutive-denial counters — number of `try_acquire_ip` calls
+    /// in a row that returned `Err` since the last `Ok`. Reset to 0
+    /// when a request succeeds.
+    denials_by_ip: Mutex<HashMap<IpAddr, u32>>,
+    denials_by_token: Mutex<HashMap<String, u32>>,
     capacity: f64,
     refill_per_sec: f64,
     idle_ttl: Duration,
@@ -151,6 +175,8 @@ impl RateLimiter {
         Self {
             by_ip: Mutex::new(HashMap::new()),
             by_token: Mutex::new(HashMap::new()),
+            denials_by_ip: Mutex::new(HashMap::new()),
+            denials_by_token: Mutex::new(HashMap::new()),
             capacity,
             refill_per_sec,
             idle_ttl,
@@ -158,10 +184,12 @@ impl RateLimiter {
     }
 
     /// Try to acquire one token from the per-IP bucket. Returns
-    /// `Ok(())` on success or `Err(retry_after_seconds)` on throttle.
-    /// Mutex contention is negligible (HashMap lookup + bucket math
-    /// is microseconds; std::sync::Mutex doesn't need to be tokio's).
-    pub fn try_acquire_ip(&self, ip: IpAddr) -> Result<(), u64> {
+    /// `Ok(())` on success (and resets the consecutive-denial
+    /// counter for this IP) or `Err((retry_after_seconds,
+    /// consecutive_denial_count))` on throttle. The handler uses the
+    /// denial count to decide whether to escalate to a persistent
+    /// ban after K consecutive 429s.
+    pub fn try_acquire_ip(&self, ip: IpAddr) -> Result<(), (u64, u32)> {
         let mut map = self
             .by_ip
             .lock()
@@ -170,17 +198,30 @@ impl RateLimiter {
             .entry(ip)
             .or_insert_with(|| TokenBucket::new(self.capacity));
         if bucket.try_consume(self.capacity, self.refill_per_sec) {
+            // Success path: drop the lock first so the counter map
+            // doesn't need both held simultaneously.
+            drop(map);
+            self.denials_by_ip
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&ip);
             Ok(())
         } else {
-            Err(bucket.seconds_until_one_token(self.refill_per_sec))
+            let retry = bucket.seconds_until_one_token(self.refill_per_sec);
+            drop(map);
+            let mut denials = self
+                .denials_by_ip
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = denials.entry(ip).or_insert(0);
+            *count = count.saturating_add(1);
+            Err((retry, *count))
         }
     }
 
     /// Try to acquire one token from the per-token bucket. Same
-    /// semantics as `try_acquire_ip`. Pass the resolved subscription
-    /// token string — the bucket is keyed by the token so a leaked
-    /// URL hitting from many IPs still gets throttled cumulatively.
-    pub fn try_acquire_token(&self, token: &str) -> Result<(), u64> {
+    /// semantics as `try_acquire_ip` — see that method's doc.
+    pub fn try_acquire_token(&self, token: &str) -> Result<(), (u64, u32)> {
         let mut map = self
             .by_token
             .lock()
@@ -189,15 +230,52 @@ impl RateLimiter {
             .entry(token.to_owned())
             .or_insert_with(|| TokenBucket::new(self.capacity));
         if bucket.try_consume(self.capacity, self.refill_per_sec) {
+            drop(map);
+            self.denials_by_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(token);
             Ok(())
         } else {
-            Err(bucket.seconds_until_one_token(self.refill_per_sec))
+            let retry = bucket.seconds_until_one_token(self.refill_per_sec);
+            drop(map);
+            let mut denials = self
+                .denials_by_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = denials.entry(token.to_owned()).or_insert(0);
+            *count = count.saturating_add(1);
+            Err((retry, *count))
         }
+    }
+
+    /// Reset the consecutive-denial counter for a key after the
+    /// handler escalates to a persistent ban. Without this, the
+    /// counter would keep climbing past K and the handler would keep
+    /// trying to (re-)write a ban row each subsequent 429.
+    pub fn reset_denials_ip(&self, ip: IpAddr) {
+        self.denials_by_ip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ip);
+    }
+
+    pub fn reset_denials_token(&self, token: &str) {
+        self.denials_by_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(token);
     }
 
     /// Drop bucket entries that haven't been touched in `idle_ttl`.
     /// Called periodically by the cleanup task in `app::build()`.
     /// Returns `(ip_dropped, token_dropped)` for telemetry.
+    ///
+    /// Also drops the corresponding denial-counter entries — they
+    /// piggyback on the bucket's idle TTL because both indicate
+    /// "this key hasn't been seen in a while". An orphaned denial
+    /// counter without its bucket would never reset the next time
+    /// the key reappeared.
     pub fn cleanup(&self) -> (usize, usize) {
         let now = Instant::now();
         let cutoff = now - self.idle_ttl;
@@ -209,7 +287,13 @@ impl RateLimiter {
         let before_ip = ip_map.len();
         ip_map.retain(|_, b| b.last_refill > cutoff);
         let after_ip = ip_map.len();
+        // Snapshot live keys before releasing the bucket map's lock.
+        let live_ips: HashSet<IpAddr> = ip_map.keys().copied().collect();
         drop(ip_map);
+        self.denials_by_ip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|k, _| live_ips.contains(k));
 
         let mut token_map = self
             .by_token
@@ -218,6 +302,12 @@ impl RateLimiter {
         let before_token = token_map.len();
         token_map.retain(|_, b| b.last_refill > cutoff);
         let after_token = token_map.len();
+        let live_tokens: HashSet<String> = token_map.keys().cloned().collect();
+        drop(token_map);
+        self.denials_by_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|k, _| live_tokens.contains(k));
 
         (before_ip - after_ip, before_token - after_token)
     }

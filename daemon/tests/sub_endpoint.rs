@@ -327,3 +327,151 @@ async fn sub_rate_limit_returns_429_after_burst() {
         "429 body must say 'rate limited', got {body_str:?}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase Track-2 chunk 2 — persistent auto-ban after K consecutive 429s
+//
+//  E2E pin: with capacity=1, refill=0/sec, K=10, the 1st request
+//  succeeds, the next 10 are 429 (filling the denial counter to 10),
+//  and AT THAT POINT a row lands in `sub_rate_bans` for the source IP.
+//  Subsequent requests now get ip-ban responses, not bucket-ip 429.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vpnctl_inventory::SqliteInventory;
+    use vpnctl_kernels::SingBox;
+    use vpnctl_protocols::{TuicV5, VlessReality};
+    use vpnctld::rate_limit::{K_DENIALS_TO_BAN, RateLimiter};
+
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = vpnctl_core::Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(TuicV5::new())).unwrap();
+
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("srv".into()),
+        address: "10.0.0.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernel: vpnctl_core::KernelId("sing-box".into()),
+        enabled_protocols: vec![vpnctl_core::ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    let user = vpnctl_core::User {
+        id: vpnctl_core::UserId("alice".into()),
+        uuid: "uuid-alice".into(),
+        tuic_password: Some("pw-alice".into()),
+        wireguard_pubkey: None,
+        sub_token: None,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    // Tight limiter: capacity=1, refill=0 → 1 burst, then every
+    // subsequent request 429s. `oneshot()` rigs do NOT install
+    // ConnectInfo, so the per-IP gate is skipped (handler's
+    // `if let Some(addr) = peer_ip` branch is false); the per-TOKEN
+    // gate runs and is what we actually exercise here. The ban
+    // therefore lands as kind="token", key=<token>.
+    let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
+    let inv_clone = inv.clone();
+    let (state, _writer) = vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(reg), limiter);
+    let app = router(state);
+
+    // 1st request: 200 (cap=1).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "first request must succeed");
+
+    // Drive the next K_DENIALS_TO_BAN requests — all should 429. The
+    // K-th 429 is what triggers the ban write inside the handler.
+    for n in 1..=K_DENIALS_TO_BAN {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sub/{token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "denial #{n} must be 429"
+        );
+    }
+
+    // After K consecutive 429s the ban table MUST contain a row for
+    // this token with kind=token and a 24h-ish TTL.
+    let bans = inv_clone.active_bans().await.unwrap();
+    let tok_ban = bans
+        .iter()
+        .find(|b| b.kind == "token" && b.key == token)
+        .expect("persistent ban row missing after K consecutive 429s");
+    let ttl_secs = (tok_ban.until_ts - chrono::Utc::now()).num_seconds();
+    assert!(
+        ttl_secs > 23 * 3600 && ttl_secs <= 24 * 3600,
+        "ban TTL must be ~24h, got {ttl_secs}s"
+    );
+    assert!(
+        tok_ban.reason.contains("consecutive 429"),
+        "ban reason should mention escalation cause, got {:?}",
+        tok_ban.reason
+    );
+
+    // Subsequent request now hits the ban check (BEFORE the bucket).
+    // The body should identify the gate as "token-ban", not "token" —
+    // a different gate name lets the operator distinguish bucket-
+    // throttle from persistent-ban during incident response.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        s.contains("token-ban"),
+        "post-ban response body must say 'token-ban', got {s:?}"
+    );
+}

@@ -44,6 +44,8 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Track-2 chunk 2 e2e test asserts ban TTL within ~24h tolerance.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [lints]
 workspace = true

@@ -76,6 +76,24 @@ pub(crate) async fn get(
         }
     };
 
+    // Phase Track-2 chunk 2: persistent ban check runs BEFORE the
+    // bucket math — a banned IP is rejected without spending any
+    // bucket tokens. The ban table is indexed on (kind, key,
+    // until_ts) so the lookup is sub-millisecond.
+    if let Some(addr) = peer_ip {
+        let ip_str = addr.to_string();
+        match state.inv.is_banned("ip", &ip_str).await {
+            Ok(Some(secs)) => return rate_limited(secs, "ip-ban"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                target = "vpnctld::sub",
+                ip = %ip_str,
+                error = %e,
+                "is_banned(ip) failed; falling through to bucket"
+            ),
+        }
+    }
+
     // Phase Track-2 rate limit: per-IP gate runs FIRST, BEFORE the
     // token is resolved. This way unknown-token probing also gets
     // throttled (a probing attacker can't keep hitting random tokens
@@ -83,16 +101,146 @@ pub(crate) async fn get(
     // bound the by_token map size by the user count, not by attacker
     // creativity. Both gates issue HTTP 429 with `Retry-After`.
     if let Some(addr) = peer_ip {
-        if let Err(retry) = state.rate_limiter.try_acquire_ip(addr) {
+        if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr) {
+            // Phase Track-2 chunk 2: escalate to a persistent ban EXACTLY
+            // when the denial counter crosses K. Using `==` (not `>=`)
+            // closes the parallel-request race the review-agent caught:
+            // under load, multiple in-flight requests could otherwise
+            // each see `count >= K` and each write a duplicate ban row.
+            // The Mutex serializes counter increments, so exactly one
+            // request observes the K-crossing transition.
+            if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
+                let ip_str = addr.to_string();
+                let reason = format!("{denial_count} consecutive 429s on /sub");
+                match state
+                    .inv
+                    .add_ban(
+                        "ip",
+                        &ip_str,
+                        crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                        &reason,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::warn!(
+                            target = "vpnctld::sub",
+                            ip = %ip_str,
+                            denials = denial_count,
+                            ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                            "escalated to 24h persistent ban after consecutive 429s"
+                        );
+                        // Audit row — every inventory write must be
+                        // auditable per CLAUDE.md invariant. Mirrors
+                        // CLI patterns ("cli", "user.add", …).
+                        if let Err(e) = state
+                            .inv
+                            .audit(
+                                "daemon",
+                                "rate.ban.add",
+                                Some(&ip_str),
+                                Some(&serde_json::json!({
+                                    "kind": "ip",
+                                    "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                                    "reason": reason,
+                                })),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                target = "vpnctld::sub",
+                                ip = %ip_str,
+                                error = %e,
+                                "audit row for rate.ban.add(ip) failed; ban already persisted"
+                            );
+                        }
+                        // Reset counter only on SUCCESSFUL ban write.
+                        // If add_ban errored, leave the counter at K
+                        // so the very next denial retries the
+                        // escalation immediately (instead of waiting
+                        // K more denials).
+                        state.rate_limiter.reset_denials_ip(addr);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target = "vpnctld::sub",
+                            ip = %ip_str,
+                            error = %e,
+                            "add_ban(ip) failed; counter held at K, will retry on next denial"
+                        );
+                    }
+                }
+            }
             return rate_limited(retry, "ip");
         }
     }
 
     match resolve(&state, &token).await {
         Ok((user_id, cfg)) => {
+            // Per-token ban check (mirror of the per-IP path above).
+            match state.inv.is_banned("token", &token).await {
+                Ok(Some(secs)) => return rate_limited(secs, "token-ban"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::sub",
+                    error = %e,
+                    "is_banned(token) failed; falling through to bucket"
+                ),
+            }
+
             // Per-token gate runs only on successful resolve so the
             // by_token map is bounded by user count.
-            if let Err(retry) = state.rate_limiter.try_acquire_token(&token) {
+            if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_token(&token) {
+                if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
+                    let reason = format!("{denial_count} consecutive 429s on /sub");
+                    match state
+                        .inv
+                        .add_ban(
+                            "token",
+                            &token,
+                            crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                            &reason,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::warn!(
+                                target = "vpnctld::sub",
+                                denials = denial_count,
+                                ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                                "escalated to 24h persistent ban after consecutive 429s"
+                            );
+                            if let Err(e) = state
+                                .inv
+                                .audit(
+                                    "daemon",
+                                    "rate.ban.add",
+                                    Some(&token),
+                                    Some(&serde_json::json!({
+                                        "kind": "token",
+                                        "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                                        "reason": reason,
+                                    })),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    target = "vpnctld::sub",
+                                    error = %e,
+                                    "audit row for rate.ban.add(token) failed; ban already persisted"
+                                );
+                            }
+                            state.rate_limiter.reset_denials_token(&token);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target = "vpnctld::sub",
+                                error = %e,
+                                "add_ban(token) failed; counter held at K, will retry on next denial"
+                            );
+                        }
+                    }
+                }
                 return rate_limited(retry, "token");
             }
 

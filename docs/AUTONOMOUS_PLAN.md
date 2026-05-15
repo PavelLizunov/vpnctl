@@ -151,7 +151,7 @@ naturally).
 
 | # | Status | Task | Spec / scope | Est. lines |
 |---|---|---|---|---|
-| 1 | open | **Track-2 chunk 2 — persistent auto-ban** | New migration `0005_sub_rate_bans` (table: id, key TEXT, kind TEXT 'ip'\|'token', until_ts TEXT, reason TEXT). After K=10 consecutive 429s for the same key in the in-memory limiter, write a ban row valid for 24h. `RateLimiter` checks bans before bucket. Ban list visible on `/admin/users/{id}` (per-IP bans only) and a small "Active bans" tile on `/admin/`. Cleanup task drops expired bans. Tests: ban after K denials, ban survives daemon restart, ban auto-expires. | ~250 |
+| 1 | [shipped backend] | **Track-2 chunk 2 — persistent auto-ban** | Backend SHIPPED in iteration 1: migration 0005, Ban API, handler escalation after K=10 429s, cleanup task. UI surface (admin tile + per-user view) deferred to Phase D / a later iteration since it's purely cosmetic on top of the ban table. | ~250 |
 | 2 | open | **Phase D — audit timeline UI** | `/admin/audit` currently shows the "placeholder" body. Replace with a paginated timeline reading `inventory.recent_audit(limit, offset)` (offset is a NEW inventory method to add — see prerequisite). Filters: by actor (admin\|cli), by action (kebab-case dropdown). Sticky-date headers ("Today", "Yesterday", "2026-05-14"). Export-as-CSV button (POST → 200 with `Content-Disposition: attachment`). Tests: filter narrows, pagination shows N+1th page, CSV roundtrip. **Prerequisite**: add `inventory.recent_audit_paginated(limit, offset, filter)` first as a separate sub-task. | ~300 (incl. inventory) |
 | 3 | open | **Phase F — monitoring sparklines** | New endpoint `/api/v1/stats/sub-access?bucket=hour&since=24h` returns JSON `{buckets: [{ts, hits, distinct_ips}]}`. New section on `/admin/monitoring` (currently placeholder) renders inline-SVG sparkline per metric. Reads from `sub_access_log` aggregated server-side. No JS — pure SSR. Tests: stats endpoint shape, sparkline svg width/height pinned. | ~250 |
 | 4 | open | **Phase E — add-server wizard (THE feature)** | Multi-step form on `/admin/servers/new`. Step 1: IP + root password. Step 2: SSE-streamed log of `vpnctl bootstrap` + `vpnctl deploy` operations (push pubkey, harden SSH, install fail2ban, install sing-box, render config, start, prove live). Step 3: completion screen with the new server's id + first-grant prompt. **This is the largest item; expect 3 sub-iterations.** Sub-iteration 4a: form + `/admin/servers/new` GET handler + step-1 submit handler that validates IP+password and stashes to a session cookie (signed). Sub-iteration 4b: SSE handler that streams `vpnctl bootstrap` output via `tokio::process::Command`. Sub-iteration 4c: completion + audit + integration with existing `/admin/servers` list. | ~600 (3 sub-commits) |
@@ -178,7 +178,9 @@ brief reason. Pavel reviews this in the morning.)*
 *(One line per shipped commit. Format: `YYYY-MM-DDTHH:MM:SSZ |
 <hash> | <task #> | <one-line summary> | tests N→M | live: yes/no`)*
 
-session-started: 2026-05-15T<UTC> (filled by first iteration)
+session-started: 2026-05-15T15:59:45Z
+
+2026-05-15T16:35:00Z | <pending-review-then-commit> | task#1 | Track-2 chunk 2 backend (migration 0005, Ban API, handler escalation, cleanup task) | tests 167→177 (+10: 9 spec_sub_rate_bans via test-writer-agent + 1 e2e ban) | live: yes (5×200 → 15×429 → ban row "ip|192.168.0.200|10 consecutive 429s" → 21st req body "rate limited (ip-ban); retry in 86385s")
 
 ---
 

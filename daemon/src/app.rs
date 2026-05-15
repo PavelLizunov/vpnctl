@@ -85,7 +85,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // Periodic cleanup of idle bucket entries (otherwise the per-IP
     // map grows unbounded over time). 10-minute cadence is plenty —
     // the idle TTL is 1 hour by default.
-    drop(spawn_rate_limit_cleanup(Arc::clone(&rate_limiter)));
+    drop(spawn_rate_limit_cleanup(
+        Arc::clone(&rate_limiter),
+        inv.clone(),
+    ));
 
     let state = AppState {
         inv,
@@ -137,14 +140,19 @@ pub fn make_app_state_with_rate_limiter(
 
 /// Spawn the rate-limiter cleanup task. Returns the `JoinHandle`
 /// (production discards; tests can abort to confirm spawn worked).
-/// Without periodic cleanup the per-IP map would accumulate one
-/// entry per source IP forever.
-pub(crate) fn spawn_rate_limit_cleanup(limiter: Arc<RateLimiter>) -> tokio::task::JoinHandle<()> {
+/// Sweeps both the in-memory bucket maps AND the persistent
+/// `sub_rate_bans` table (Phase Track-2 chunk 2 — expired bans
+/// would otherwise accumulate forever).
+pub(crate) fn spawn_rate_limit_cleanup(
+    limiter: Arc<RateLimiter>,
+    inv: SqliteInventory,
+) -> tokio::task::JoinHandle<()> {
     use tokio::time::{MissedTickBehavior, interval};
 
     /// 10-minute cadence — the bucket idle-TTL is 1 hour by default,
     /// so we sweep 6× per TTL window. Cheap (HashMap retain is
     /// O(n) but n is bounded by active source IPs in the last hour).
+    /// The persistent-ban purge is one indexed DELETE — also cheap.
     const TICK: Duration = Duration::from_secs(600);
 
     tokio::spawn(async move {
@@ -161,6 +169,19 @@ pub(crate) fn spawn_rate_limit_cleanup(limiter: Arc<RateLimiter>) -> tokio::task
                     token_dropped = token,
                     "swept idle rate-limit buckets"
                 );
+            }
+            match inv.purge_expired_bans().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::rate_limit",
+                    bans_dropped = n,
+                    "swept expired persistent bans"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::rate_limit",
+                    error = %e,
+                    "purge_expired_bans failed; retry next tick"
+                ),
             }
         }
     })
