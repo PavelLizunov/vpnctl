@@ -467,3 +467,137 @@ fn h7_empty_server_url_does_not_activate_realm() {
         );
     }
 }
+
+// ── H8: Salamander obfs (anti-DPI XOR scrambling) ───────────────────────
+//
+// Activation rule: emit the `obfs` block on BOTH server_inbound and
+// client_config IFF `hysteria2.obfs.password` is set (and non-empty
+// after trim). Type is hardcoded to `salamander` (only kind sing-box
+// + upstream Hysteria 2 ship). Share-link encodes via the official
+// `obfs=salamander&obfs-password=<pct-encoded>` query parameters.
+
+#[test]
+fn h8_no_obfs_secret_means_no_obfs_key_anywhere() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw1"));
+    let inbound = Hysteria2::new()
+        .server_inbound(&ctx, std::slice::from_ref(&u))
+        .unwrap();
+    let outbound = Hysteria2::new().client_config(&ctx, &u).unwrap();
+    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
+    assert!(inbound.get("obfs").is_none(), "inbound back-compat");
+    assert!(outbound.get("obfs").is_none(), "outbound back-compat");
+    assert!(
+        !link.contains("obfs="),
+        "share_link back-compat must not carry &obfs= query; got: {link}"
+    );
+}
+
+#[test]
+fn h8_inbound_renders_obfs_when_password_set() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert("hysteria2.obfs.password".into(), "my-obfs-secret".into());
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+        .unwrap();
+    let obfs = v.get("obfs").expect("obfs block must be emitted");
+    assert_eq!(
+        obfs.get("type").and_then(Value::as_str),
+        Some("salamander"),
+        "obfs.type must be hardcoded to salamander (only supported kind)"
+    );
+    assert_eq!(
+        obfs.get("password").and_then(Value::as_str),
+        Some("my-obfs-secret")
+    );
+}
+
+#[test]
+fn h8_client_config_mirrors_server_obfs_password() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert("hysteria2.obfs.password".into(), "shared-secret".into());
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .client_config(&ctx, &user("alice", Some("pw1")))
+        .unwrap();
+    let obfs = v.get("obfs").expect("client config must mirror obfs");
+    assert_eq!(obfs.get("type").and_then(Value::as_str), Some("salamander"));
+    assert_eq!(
+        obfs.get("password").and_then(Value::as_str),
+        Some("shared-secret"),
+        "client + server MUST share the obfs password (it's the QUIC-handshake key)"
+    );
+}
+
+#[test]
+fn h8_share_link_obfs_query_format() {
+    let s = srv();
+    let mut secrets = HashMap::new();
+    // Include a `+` and a space to verify percent-encoding (USERINFO set).
+    secrets.insert("hysteria2.obfs.password".into(), "salt+pepper sea".into());
+    let ctx = ctx_with(&s, &secrets);
+    let link = Hysteria2::new()
+        .share_link(&ctx, &user("alice", Some("pw1")))
+        .unwrap();
+    assert!(
+        link.contains("&obfs=salamander&obfs-password="),
+        "official URI scheme requires &obfs=salamander&obfs-password=; got: {link}"
+    );
+    // Spec: `obfs-password` (with hyphen), NOT `obfsParam` or `obfs_password`.
+    assert!(
+        !link.contains("obfsParam") && !link.contains("obfs_password"),
+        "wrong query parameter name: {link}"
+    );
+    // Percent-encoding: space → %20 (NOT `+` per USERINFO set), `+` → %2B.
+    assert!(
+        link.contains("salt%2Bpepper%20sea"),
+        "obfs-password must be percent-encoded with USERINFO charset; got: {link}"
+    );
+}
+
+#[test]
+fn h8_empty_obfs_password_does_not_activate_obfs() {
+    for empty in ["", "   ", "\t\n"] {
+        let s = srv();
+        let mut secrets = HashMap::new();
+        secrets.insert("hysteria2.obfs.password".into(), empty.into());
+        let ctx = ctx_with(&s, &secrets);
+        let v = Hysteria2::new()
+            .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+            .unwrap();
+        assert!(
+            v.get("obfs").is_none(),
+            "empty/whitespace obfs.password={empty:?} must NOT activate obfs; got {v}"
+        );
+    }
+}
+
+#[test]
+fn h8_realm_and_obfs_can_coexist() {
+    // The two anti-censorship layers compose: Realm (anti-IP-block)
+    // + Salamander (anti-DPI-fingerprint). Must produce both blocks.
+    let s = srv();
+    let mut secrets = HashMap::new();
+    secrets.insert(
+        "hysteria2.realm.server_url".into(),
+        "https://r.example".into(),
+    );
+    secrets.insert("hysteria2.obfs.password".into(), "obfs-pw".into());
+    let ctx = ctx_with(&s, &secrets);
+    let v = Hysteria2::new()
+        .server_inbound(&ctx, &[user("alice", Some("pw1"))])
+        .unwrap();
+    assert!(
+        v.get("realm").is_some(),
+        "realm block must coexist with obfs"
+    );
+    assert!(
+        v.get("obfs").is_some(),
+        "obfs block must coexist with realm"
+    );
+}

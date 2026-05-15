@@ -60,6 +60,24 @@ const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'?');
 
+/// Strict set for percent-encoding values that land in a URL query
+/// string (after `?`, between `&`s). Includes everything FRAGMENT
+/// does PLUS the application/x-www-form-urlencoded triple
+/// (`+`, `&`, `=`) — `+` is read as a space by lenient form
+/// decoders, and `&`/`=` would split the query.
+const QUERY: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?')
+    .add(b'+')
+    .add(b'&')
+    .add(b'=');
+
 impl Protocol for Hysteria2 {
     fn id(&self) -> ProtocolId {
         ProtocolId("hysteria2".to_string())
@@ -169,18 +187,58 @@ impl Protocol for Hysteria2 {
             }
         }
 
+        // Salamander obfuscation — XOR-based wire-level scrambling of
+        // QUIC packets so DPI can't fingerprint the Hysteria 2 protocol.
+        // This is the **anti-DPI** layer (Realm above is the
+        // anti-IP-block layer; together they form the Hysteria
+        // anti-censorship stack — Realm alone leaves the wire pattern
+        // recognisable).
+        //
+        // Per https://hysteria.network/docs/advanced/Obfuscation/ +
+        // https://sing-box.sagernet.org/configuration/inbound/hysteria2/.
+        // Both inbound (server) AND outbound (client) MUST set the
+        // SAME obfs password — it's a server-wide secret, not per-user
+        // (the obfuscation happens BEFORE per-user auth in the QUIC
+        // handshake). `client_config` and `share_link` mirror the
+        // password automatically.
+        //
+        // Activation rule: emit IFF `hysteria2.obfs.password` is set
+        // and non-empty after trim. We currently only support
+        // `salamander` (the only type sing-box / upstream Hysteria 2
+        // ships); the type field is hardcoded.
+        if let Some(obfs_pw) = obfs_password(ctx) {
+            if let Some(map) = inbound.as_object_mut() {
+                map.insert(
+                    "obfs".to_string(),
+                    json!({ "type": "salamander", "password": obfs_pw }),
+                );
+            }
+        }
+
         Ok(inbound)
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
-        Ok(json!({
+        let mut out = json!({
             "type": "hysteria2",
             "tag": "hy2-out",
             "server": ctx.server.address,
             "server_port": 8444,
             "password": user.tuic_password.clone().unwrap_or_default(),
             "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
-        }))
+        });
+        // Mirror the server-side obfs config — without it the client
+        // can't even open the QUIC handshake against an obfs-enabled
+        // server. Same secret, same ctx.
+        if let Some(obfs_pw) = obfs_password(ctx) {
+            if let Some(map) = out.as_object_mut() {
+                map.insert(
+                    "obfs".to_string(),
+                    json!({ "type": "salamander", "password": obfs_pw }),
+                );
+            }
+        }
+        Ok(out)
     }
 
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
@@ -195,14 +253,43 @@ impl Protocol for Hysteria2 {
         })?;
         // Official URI scheme (https://hysteria.network/docs/developers/URI-Scheme/):
         //   hysteria2://<auth>@<host>:<port>/?sni=<sni>&insecure=1
+        //   [&obfs=salamander&obfs-password=<pct-encoded>]
         // ALPN is negotiated at TLS handshake regardless; we skip it here.
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
+        // Build the obfs query suffix when the server has it configured.
+        // The query parameter name is `obfs-password` (with hyphen) per
+        // the official URI scheme — NOT `obfsParam` or `obfs_password`.
+        // Pinned by `h8_share_link_obfs_query_format`.
+        let obfs_suffix = match obfs_password(ctx) {
+            Some(opw) => {
+                // QUERY set (not USERINFO) — values in URL query
+                // position MUST escape `+` (form-decoders read as
+                // space), `&` (would split into a new param), `=`
+                // (would re-key). Pinned by `h8_share_link_obfs_query_format`.
+                let opw_enc = utf8_percent_encode(opw, QUERY);
+                format!("&obfs=salamander&obfs-password={opw_enc}")
+            }
+            None => String::new(),
+        };
         Ok(format!(
-            "hysteria2://{pw}@{addr}:8444/?sni={addr}&insecure=1#{name}",
+            "hysteria2://{pw}@{addr}:8444/?sni={addr}&insecure=1{obfs_suffix}#{name}",
             pw = pw,
             addr = ctx.server.address,
             name = name,
+            obfs_suffix = obfs_suffix,
         ))
     }
+}
+
+/// Read + trim the optional Salamander obfs password from
+/// `RenderCtx::secrets`. Returns `None` for an absent OR
+/// empty/whitespace-only secret — matches the realm-empty contract
+/// (we don't activate optional features on a blank secret because
+/// sing-box would only complain at deploy time).
+fn obfs_password<'a>(ctx: &'a RenderCtx<'a>) -> Option<&'a str> {
+    ctx.secrets
+        .get("hysteria2.obfs.password")
+        .map(String::as_str)
+        .filter(|s| !s.trim().is_empty())
 }
