@@ -609,6 +609,16 @@ ssh user@192.168.0.236 '
   (Debian trixie, glibc 2.41) и деплое на bookworm (2.36) проверь
   `objdump -T <binary> | grep GLIBC_ | sort -u` — нужно ≤ 2.36. Сейчас
   максимум — 2.34, но новая dep может затащить 2.38+.
+- **SSH-pulling deps = glibc upgrade hazard** — добавление `vpnctl-ssh` /
+  `russh` / любого async-runtime / native-crypto dep в `[dependencies]`
+  (а не `[dev-dependencies]`) пропулит glibc 2.38 syscalls и daemon
+  на bookworm моментально упадёт в crash-loop с "GLIBC_2.38 not found".
+  Caught 2026-05-16: D.5 poller wire shipped, vpnctld crash-looped 30+
+  раз за минуту, revert + feature-gate fix (`polling` flag, default-off).
+  **Правило:** любой такой dep — за Cargo feature flag (default-off),
+  ИЛИ `glibc` upgrade хоста, ИЛИ musl-static build. Verify max GLIBC
+  symbol **до push** через `objdump -T target/release/<binary> | grep
+  GLIBC_ | sort -u | tail -3` — должно быть ≤ 2.36.
 - **`MemoryDenyWriteExecute=true`** в systemd unit — может сломать future
   JIT (если когда-то добавим V8/wasmtime). Сейчас OK.
 - **Креды в EnvironmentFile**, не в `Environment=` — `systemctl cat`

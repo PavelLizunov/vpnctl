@@ -415,6 +415,56 @@ This is consistent with the Phase C-2 lesson in CLAUDE.md
 "Methodology for the admin SITE (six layers, post-Phase-C-2)"
 which is EXACTLY what I rediscovered today the hard way.
 
+# === 2026-05-16T22:00Z+ — Pavel autonomous Backlog burst ===
+# Pavel: «Делай b-Правильный fix а затем весь Backlog а я пока отойду»
+# (после ad-hoc UX-фидбэка по серверам/grants/search/traffic).
+
+2026-05-16T22:30:00Z | 3e483c4 | iter B1 multi-kernel arch | Server.kernel: KernelId → Server.kernels: Vec<KernelId>. Migration 0009 (new server_kernels table + drop kernel column). Inventory: add/remove_server_kernel methods + list_server_kernels. Core: Registry::validate_server now multi-kernel (each protocol needs ≥1 supporting kernel). CLI: deploy/render/status loop over kernels; render emits per-kernel blocks. Web: new Kernels section on server-detail (mirrors Protocols section); enable/disable POST handlers. 25 files changed, 775+/111-. +4 admin_smoke tests including the end-to-end «add amneziawg → wireguard becomes enable-able» scenario Pavel hit on main-brat. Live deploy ✅, migration ✅, server_kernels populated correctly.
+
+2026-05-16T22:45:00Z | 05383ea | A2 + B + C2 in one commit | A2 quick-add server form on /admin/servers (id+address+ssh_port → registered with kernel=sing-box + ALL sing-box protocols enabled; tweaks on detail). B server-side grants on server-detail (table of ALL users with per-row grant/revoke; new POST /admin/servers/{sid}/grants/{uid}[/revoke] routes that redirect back to server). C2 search+sort on /admin/users (UsersQuery extractor, GET-based search/sort URL, hidden-input preservation, "showing N of M" counter, empty-state for zero-results). +6 admin_smoke tests. C1 confirmed already shipped earlier. 3 files / 747+ / 21-.
+
+2026-05-16T23:15:00Z | 85f3c1a | D.5 poller wiring (BAD — glibc regression) | spawn_clash_poller tokio task + spawn from app::build + vpnctl-ssh promoted to regular deps. CI green. But production redeploy: vpnctld crash-looped 30+ times with "GLIBC_2.38 not found" — russh pulled syscalls newer than bookworm-2.36 supports. CAUGHT BY: post-redeploy `systemctl is-active` check + journalctl tail.
+2026-05-16T23:18:00Z | 3764ab4 | revert 85f3c1a | git revert to restore working binary; redeployed; vpnctld back to active + /api/v1/health=200.
+2026-05-16T23:19:00Z | 473b2e4 | reapply D.5 code | git revert of the revert (Reapply commit). Code restored — still glibc-broken — but staged for the gating fix that follows.
+2026-05-16T23:22:00Z | 54ee77f | D.5 final fix — feature-gate `polling` | Cargo feature `polling` (default-off) gates `dep:vpnctl-ssh` + `spawn_clash_poller` + `poll_one_server`. Default build stays glibc-2.30-max (bookworm-compatible). Enable via `--features polling` when host glibc ≥ 2.38 OR for musl static build. Live redeploy: ✅ active, health 200.
+
+## Lessons learned (post-burst)
+
+### Lesson 5 — production-linked SSH = glibc upgrade hazard
+
+`vpnctl-ssh` → `russh` → modern Rust async I/O → glibc 2.38
+syscalls (statx/getrandom via newer code paths). Adding this dep
+to a `[dependencies]` section, even behind a "never called"
+function pointer, is enough to break a glibc-2.36 host with
+"GLIBC_2.38 not found" on every startup.
+
+**New rule:** any new dep that pulls SSH / async-runtime / native
+crypto (russh, reqwest with rustls, sqlx with non-sqlite backends,
+etc) MUST go behind a Cargo `[features]` flag, default-off, until
+the production host's glibc is verified compatible. Verify with
+`objdump -T target/release/<binary> | grep GLIBC_ | sort -u | tail -3`
+**before push**. Add to CLAUDE.md "Грабли деплоя на 192.168.0.236"
+in a follow-up.
+
+**Caught how:** post-redeploy `systemctl is-active vpnctld`
+returned `activating` (not `active`), followed by
+`journalctl -u vpnctld -n 20` showing the crash loop. Without
+that check I'd have gone on to the next iter assuming it was
+fine. The "live-deploy + verify" methodology layer (CLAUDE.md
+Workflow rule "Protocol/Kernel/handler fix → vpnctld redeploy
+обязателен") is what saved the daemon — it took ~30 seconds of
+crash-looping to realise + 90 seconds to revert.
+
+### Lesson 6 — revert + reapply + gate is cleaner than amend
+
+When a shipped commit needs to be gated retroactively, the clean
+pattern is: `git revert <bad>` (restores prod), `git revert
+<revert>` (restores code in HEAD), then a third commit that adds
+the gate. Each step is independently reviewable, the production
+binary works between step 1 and step 3, and the audit log shows
+the full story. Better than force-pushing an amended version
+which destroys the "we shipped this and it broke" history.
+
 ## Status of deferred review-agent findings
 
 Three of the 4 IMPORTANT findings on db3998c stayed deferred,
