@@ -17,7 +17,7 @@ use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{Protocol, RenderCtx, ServerId, SshTransport};
-use vpnctl_crypto::{gen_short_id, gen_x25519_keypair};
+use vpnctl_crypto::{gen_short_id, gen_wireguard_keypair, gen_x25519_keypair};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_ssh::RusshTransportBuilder;
 
@@ -113,6 +113,30 @@ pub(crate) async fn run(
         secrets.insert("vless.private_key".into(), priv_key);
         secrets.insert("vless.public_key".into(), pub_key);
         secrets.insert("vless.short_id".into(), short_id);
+    }
+
+    // WireGuard / AmneziaWG SERVER keypair (NOT per-user — those are
+    // user.wireguard_pubkey / user.wireguard_private already). The
+    // server's keypair is what each client's [Peer] block references
+    // as `PublicKey =`; without these the `WireGuard::share_link`
+    // fails with `MissingSecret(wireguard.server_public_key)` and
+    // Flow B on user-detail shows "share-link render failed".
+    // (Caught 2026-05-16 when Pavel enabled wireguard on stg and
+    // main-brat's Flow B kept showing the missing-secret error
+    // despite the protocol being enabled.)
+    let needs_wireguard = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
+    if needs_wireguard
+        && (!secrets.contains_key("wireguard.server_public_key")
+            || !secrets.contains_key("wireguard.server_private_key"))
+    {
+        println!("→ generating WireGuard server keypair (first wireguard deploy)");
+        let (priv_key, pub_key) = gen_wireguard_keypair();
+        inv.set_server_secret(&sid, "wireguard.server_private_key", &priv_key)
+            .await?;
+        inv.set_server_secret(&sid, "wireguard.server_public_key", &pub_key)
+            .await?;
+        secrets.insert("wireguard.server_private_key".into(), priv_key);
+        secrets.insert("wireguard.server_public_key".into(), pub_key);
     }
 
     let needs_tuic = server.enabled_protocols.iter().any(|p| p.0 == "tuic-v5");

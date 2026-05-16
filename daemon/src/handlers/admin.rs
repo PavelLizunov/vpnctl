@@ -435,12 +435,76 @@ fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry]) -> Markup {
                         }
                         span.ed-time-row__pl {
                             "by " (e.actor)
+                            // Show key payload fields so the row tells
+                            // the operator WHAT was enabled, granted,
+                            // etc. Without this they had to crack
+                            // `audit_log.payload` open by hand to
+                            // disambiguate "server.protocol.enable
+                            // stg" from "server.kernel.enable stg".
+                            // (Caught 2026-05-16 by Pavel: «в дашборде
+                            // логах не очень понятно что конкретно я
+                            // включил».)
+                            @if let Some(p) = &e.payload {
+                                @let summary = summarize_audit_payload(p);
+                                @if !summary.is_empty() {
+                                    " · " span.ed-mono { (summary) }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// Pull human-relevant fields out of an audit row's JSON payload
+/// for the timeline display. Targets the high-frequency mutations
+/// (protocol/kernel enable+disable, grant/revoke, regen, etc.) and
+/// emits a compact `key=value` summary. Keys not in the explicit
+/// allowlist are skipped (audit payloads sometimes include large
+/// arrays we don't want to render inline). Returns empty string
+/// when nothing useful surfaces — caller suppresses the separator.
+///
+/// **NEVER expose secrets** — the allowlist is positive (only the
+/// names we explicitly want to render); raw token/password fields
+/// stay invisible by default. Pinned by
+/// `audit_summary_never_leaks_secret_fields`.
+fn summarize_audit_payload(payload: &serde_json::Value) -> String {
+    let Some(map) = payload.as_object() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    // Whitelist of fields safe to render inline. Order = display order.
+    // `protocol`, `kernel`, `user`, `from`, `wg_keypair_provenance`,
+    // `new_pubkey`, `newly_added`, `was_present`, `address`,
+    // `ssh_port`, `users` (count), `kernels_rendered`,
+    // `config_bytes_total`, `protocols` (count).
+    const SAFE_KEYS: &[&str] = &[
+        "protocol",
+        "kernel",
+        "user",
+        "from",
+        "wg_keypair_provenance",
+        "newly_added",
+        "was_present",
+        "address",
+        "ssh_port",
+    ];
+    for k in SAFE_KEYS {
+        if let Some(v) = map.get(*k) {
+            // Render as plain string/number/bool — no nested objects
+            // (those usually carry secrets). Lists too (could be long).
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            parts.push(format!("{k}={s}"));
+        }
+    }
+    parts.join(" ")
 }
 
 /// Map an audit action like "server.deploy" to a CSS modifier matching
@@ -3277,6 +3341,12 @@ fn audit_timeline_grouped(entries: &[&vpnctl_inventory::AuditEntry]) -> Markup {
                     }
                     span.ed-time-row__pl {
                         "by " (e.actor)
+                        @if let Some(p) = &e.payload {
+                            @let summary = summarize_audit_payload(p);
+                            @if !summary.is_empty() {
+                                " · " span.ed-mono { (summary) }
+                            }
+                        }
                     }
                 }
                 @let _ = current_label.replace(label);

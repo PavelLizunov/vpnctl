@@ -4745,3 +4745,74 @@ async fn admin_users_sort_servers_orders_by_grants_count_desc() {
         "sort=servers must render alice<bob<carol; got positions a={pos_alice} b={pos_bob} c={pos_carol}"
     );
 }
+
+// Audit timeline payload summary — Pavel UX bug 2026-05-16: row
+// said "server.protocol.enable stg by admin" with no hint that
+// the protocol was wireguard. Summary now renders key=value.
+
+#[tokio::test]
+async fn admin_audit_timeline_shows_payload_summary_with_protocol() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .audit(
+            "admin",
+            "server.protocol.enable",
+            Some("stg"),
+            Some(&serde_json::json!({
+                "protocol": "wireguard",
+                "newly_added": true,
+            })),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/audit").await;
+    assert!(
+        html.contains("protocol=wireguard"),
+        "timeline must show what protocol was enabled"
+    );
+    assert!(
+        html.contains("newly_added=true"),
+        "timeline must show added flag"
+    );
+}
+
+#[tokio::test]
+async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Simulate a payload that contains BOTH whitelisted keys AND
+    // hypothetical secret fields the summary must NOT render.
+    s.inv
+        .audit(
+            "admin",
+            "user.add",
+            Some("alice"),
+            Some(&serde_json::json!({
+                "uuid": "aaa-bbb",
+                "wg_keypair_provenance": "server-generated",
+                // Hypothetical leak vectors — MUST NOT appear in summary
+                "tuic_password": "PW_SECRET_LEAK_CHECK",
+                "wireguard_private": "PRIV_SECRET_LEAK_CHECK",
+                "sub_token": "TOKEN_SECRET_LEAK_CHECK",
+            })),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/audit").await;
+    // Whitelisted key visible
+    assert!(html.contains("wg_keypair_provenance=server-generated"));
+    // Secrets MUST NOT leak via the summary rendering path
+    for leak in [
+        "PW_SECRET_LEAK_CHECK",
+        "PRIV_SECRET_LEAK_CHECK",
+        "TOKEN_SECRET_LEAK_CHECK",
+    ] {
+        assert!(
+            !html.contains(leak),
+            "audit summary leaked {leak} into HTML"
+        );
+    }
+}
