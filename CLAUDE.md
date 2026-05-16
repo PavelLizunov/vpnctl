@@ -35,8 +35,17 @@ Confirmed by Pavel 2026-05-14:
       control must reflect this.
     * Any future protocol designed assuming user-side key generation
       MUST add a server-generated default unless explicitly waived.
-- **Web is the primary surface; CLI stays as escape hatch / scripting.**
-  Anything done via CLI must also be doable via the admin UI by v1.0.
+- **Web is the ONLY operator surface; CLI is implementation detail**
+  (strengthened by Pavel 2026-05-16: «упровления CLI же должно
+  происходить через web морду, то есть на вебе я жму кнопку, и
+  дальше происходит магия не видная оператору»). The operator
+  NEVER needs to open a terminal — every action they can take has
+  a button in the admin UI. CLI commands are kept as automation /
+  scripting / disaster-recovery hooks; documenting an operator
+  task as "run `vpnctl X` from a shell" is a UX bug, not the spec.
+  Implication for every new feature: a CLI command is not done
+  shipping until the web equivalent exists, even if it temporarily
+  shells out to the CLI binary internally.
 - **Add-server wizard is THE core differentiator over the bash project.**
   Operator pastes IP + root password → admin does ALL the magic
   automatically: push pubkey, create non-root user, disable password

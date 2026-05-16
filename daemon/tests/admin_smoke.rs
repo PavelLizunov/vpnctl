@@ -4816,3 +4816,175 @@ async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
         );
     }
 }
+
+// ─── Operator-facing Deploy button (CLAUDE.md "Web is the ONLY
+//     operator surface" — Pavel must never open a terminal).
+
+#[tokio::test]
+async fn admin_server_detail_shows_deploy_button() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/sb").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/sb/deploy""#),
+        "deploy form must POST to /admin/servers/<id>/deploy"
+    );
+    assert!(html.contains(">deploy →<"), "submit button label drifted");
+}
+
+#[tokio::test]
+async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("wg-node".into()),
+            address: "198.51.100.5".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("amneziawg".into())],
+            enabled_protocols: vec![ProtocolId("wireguard".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    // Pre-deploy: no WG keys.
+    let before = inv
+        .list_server_secrets(&ServerId("wg-node".into()))
+        .await
+        .unwrap();
+    assert!(!before.contains_key("wireguard.server_public_key"));
+    assert!(!before.contains_key("wireguard.server_private_key"));
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/wg-node/deploy"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // Post-deploy: WG server keypair minted.
+    let after = inv
+        .list_server_secrets(&ServerId("wg-node".into()))
+        .await
+        .unwrap();
+    let pub_ = after.get("wireguard.server_public_key").expect("pubkey");
+    let priv_ = after.get("wireguard.server_private_key").expect("private");
+    assert_eq!(pub_.len(), 44, "WG pubkey is 44 b64 chars");
+    assert_eq!(priv_.len(), 44);
+    assert!(pub_.ends_with('='));
+    assert!(priv_.ends_with('='));
+    assert_ne!(pub_, priv_, "pub != priv");
+
+    // Audit recorded.
+    let audit = inv.recent_audit(5).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|a| a.action == "server.deploy")
+        .expect("audit row");
+    let payload = row
+        .payload
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(payload.contains("wireguard server keypair"));
+}
+
+#[tokio::test]
+async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("wg-node".into()),
+            address: "198.51.100.5".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("amneziawg".into())],
+            enabled_protocols: vec![ProtocolId("wireguard".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+
+    // First click.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/wg-node/deploy"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let first_pub = inv
+        .list_server_secrets(&ServerId("wg-node".into()))
+        .await
+        .unwrap()
+        .get("wireguard.server_public_key")
+        .unwrap()
+        .clone();
+
+    // Second click — keys must NOT change (idempotent).
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/wg-node/deploy"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let second_pub = inv
+        .list_server_secrets(&ServerId("wg-node".into()))
+        .await
+        .unwrap()
+        .get("wireguard.server_public_key")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        first_pub, second_pub,
+        "deploy must be idempotent — re-clicking when keys exist must NOT rotate them"
+    );
+}

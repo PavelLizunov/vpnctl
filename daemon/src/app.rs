@@ -368,6 +368,16 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/quick-add",
             post(admin::server_quick_add),
         )
+        // The operator-facing Deploy button (per CLAUDE.md "Web is
+        // the ONLY operator surface"). Bootstraps every missing
+        // server-secret + audits. SSH-touching parts (install kernel
+        // + apply config) are tracked separately as web-deploy-apply
+        // TODO — gated until the daemon ships with a working SSH
+        // path on bookworm-2.36.
+        .route(
+            "/admin/servers/{id}/deploy",
+            post(admin::server_deploy),
+        )
         // Server-side grant mutations (Pavel iter B). Identical mutation
         // to /admin/users/{id}/grants/{server_id} but the redirect goes
         // to the server detail page so the operator stays where they

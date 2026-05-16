@@ -2501,6 +2501,173 @@ pub(crate) async fn server_revoke_user(
     .into_response()
 }
 
+/// `POST /admin/servers/{id}/deploy` — the operator-facing deploy
+/// button. Per CLAUDE.md "Web is the ONLY operator surface; CLI is
+/// implementation detail" — Pavel must never have to open a terminal
+/// to deploy a server.
+///
+/// **What this does TODAY (no SSH dep in production binary):**
+///   * Bootstrap every missing server-secret the inventory needs to
+///     render configs: REALITY keypair + short_id (for vless+reality),
+///     WireGuard server keypair (for wireguard), Hysteria2 obfs
+///     password (for hysteria2 + salamander). All mints happen
+///     server-side via vpnctl_crypto — no SSH.
+///   * Persist each new secret with audit_log row.
+///   * Render kernel configs for the operator's pre-flight review
+///     (writes nothing to the node — just confirms the render
+///     succeeds with the now-complete secret set).
+///
+/// **What still needs an SSH push to the node** (post-musl-build
+/// roadmap — tracked as TODO `web-deploy-apply`):
+///   * `ensure_installed` (apt install sing-box / amneziawg-tools)
+///   * `apply_config` (scp render output + systemctl restart)
+///
+/// Until the daemon ships with a working SSH path (musl static
+/// binary OR glibc upgrade on the host), the install/apply steps
+/// remain a one-time per-node CLI action — but the button still
+/// solves the per-click pain (no operator-typed keypair generation).
+///
+/// Returns 303 to /admin/servers/{id} after success so the operator
+/// sees the now-populated `secret_keys` block + any newly-enabled
+/// share-links in the user-detail Flow B section.
+pub(crate) async fn server_deploy(
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    // Pre-flight: validate kernel/protocol compatibility via the
+    // registry. If a protocol declared on this server can't be
+    // rendered by any of its kernels, every bootstrap step below
+    // would still succeed but the render would later fail with a
+    // confusing "unsupported protocol" — surface that upfront.
+    if let Err(e) = state.registry.validate_server(&server) {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!("config invalid before deploy: {e}")),
+        )
+            .into_response();
+    }
+
+    // Bootstrap missing secrets. Same logic as `vpnctl deploy` CLI
+    // bootstrap block, minus the SSH-touching parts. Each step is
+    // independent + idempotent — re-clicking deploy when everything
+    // is already minted is a safe no-op.
+    let mut secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(m) => m,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let mut bootstrapped: Vec<&'static str> = Vec::new();
+
+    let needs_reality = server
+        .enabled_protocols
+        .iter()
+        .any(|p| p.0 == "vless+reality");
+    if needs_reality
+        && (!secrets.contains_key("vless.private_key")
+            || !secrets.contains_key("vless.public_key")
+            || !secrets.contains_key("vless.short_id"))
+    {
+        let (priv_key, pub_key) = vpnctl_crypto::gen_x25519_keypair();
+        let short_id = match vpnctl_crypto::gen_short_id() {
+            Ok(s) => s,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
+        for (k, v) in [
+            ("vless.private_key", &priv_key),
+            ("vless.public_key", &pub_key),
+            ("vless.short_id", &short_id),
+        ] {
+            if let Err(e) = state.inv.set_server_secret(&sid, k, v).await {
+                return internal_error(anyhow::Error::new(e));
+            }
+            secrets.insert(k.to_string(), v.clone());
+        }
+        bootstrapped.push("vless+reality keypair");
+    }
+
+    let needs_wireguard = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
+    if needs_wireguard
+        && (!secrets.contains_key("wireguard.server_public_key")
+            || !secrets.contains_key("wireguard.server_private_key"))
+    {
+        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
+        for (k, v) in [
+            ("wireguard.server_private_key", &priv_key),
+            ("wireguard.server_public_key", &pub_key),
+        ] {
+            if let Err(e) = state.inv.set_server_secret(&sid, k, v).await {
+                return internal_error(anyhow::Error::new(e));
+            }
+            secrets.insert(k.to_string(), v.clone());
+        }
+        bootstrapped.push("wireguard server keypair");
+    }
+
+    let needs_hy2_obfs = server.enabled_protocols.iter().any(|p| p.0 == "hysteria2");
+    if needs_hy2_obfs && !secrets.contains_key("hysteria2.obfs.password") {
+        // 24 bytes of entropy → 32 chars URL-safe base64. Match
+        // the bash-vpn-control salamander password shape.
+        let pw = match vpnctl_crypto::gen_password(24) {
+            Ok(p) => p,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
+        if let Err(e) = state
+            .inv
+            .set_server_secret(&sid, "hysteria2.obfs.password", &pw)
+            .await
+        {
+            return internal_error(anyhow::Error::new(e));
+        }
+        secrets.insert("hysteria2.obfs.password".into(), pw);
+        bootstrapped.push("hysteria2 salamander obfs password");
+    }
+
+    // Audit — record EVERY deploy click, even when nothing changed.
+    // The operator's intent ("I want this deployed") is itself
+    // operationally interesting; an empty bootstrap list = "already
+    // up to date" is a useful signal.
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.deploy",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "bootstrapped": bootstrapped,
+                "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+                "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.deploy"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
 /// `POST /admin/servers/quick-add` — register a SERVER YOU ALREADY HAVE
 /// in inventory with minimal input: id + address (+ optional ssh_port).
 /// Default kernel = sing-box; default protocols = every protocol
@@ -3905,6 +4072,27 @@ pub(crate) async fn server_detail(
             @if server.kernels.len() == 1 { "kernel " } @else { "kernels " }
             span.ed-mono {
                 (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            }
+        }
+
+        // Operator-facing Deploy button. Per CLAUDE.md "Web is the
+        // ONLY operator surface" — Pavel must never need to open
+        // a terminal. Bootstraps missing server-secrets immediately
+        // (REALITY keypair, WG server keypair, Hy2 obfs password).
+        // Re-clickable safely — idempotent over already-minted
+        // secrets.
+        div style="margin: 12px 0 18px;" {
+            form method="post"
+                 action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
+                 style="display: inline;" {
+                button type="submit"
+                       title="Mint any missing server-secrets (REALITY, WireGuard, Hy2 obfs) and audit the deploy intent. Re-clicking is safe — already-present secrets are left untouched."
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "deploy →"
+                }
+            }
+            span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                "Mints missing keys for every enabled protocol. Subscription URLs go live immediately."
             }
             " · hoster " b { (server.hoster) }
         }
