@@ -441,7 +441,7 @@ fn admin_router(state: AppState) -> Router {
 /// callers.
 fn build_registry() -> anyhow::Result<Registry> {
     use vpnctl_kernels::{AmneziaWg, SingBox};
-    use vpnctl_protocols::{Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
+    use vpnctl_protocols::{AnyTls, Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
 
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new()))?;
@@ -451,5 +451,6 @@ fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(Hysteria2::new()))?;
     reg.register_protocol(Box::new(Shadowsocks2022::new()))?;
     reg.register_protocol(Box::new(WireGuard::new()))?;
+    reg.register_protocol(Box::new(AnyTls::new()))?;
     Ok(reg)
 }

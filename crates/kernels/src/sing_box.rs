@@ -42,6 +42,11 @@ impl Kernel for SingBox {
             ProtocolId("tuic-v5".to_string()),
             ProtocolId("hysteria2".to_string()),
             ProtocolId("shadowsocks-2022".to_string()),
+            // AnyTLS — sing-box ≥ 1.12. ensure_installed pulls the
+            // SagerNet stable channel which currently ships 1.13.x;
+            // on a stale-version node `sing-box check` would reject
+            // an `anytls` inbound and apply_config fails loud.
+            ProtocolId("anytls".to_string()),
         ]
     }
 

@@ -1,12 +1,14 @@
 //! Реализации `Protocol`. Каждый протокол — отдельный файл-модуль.
 //! Добавить новый = новый файл + строка регистрации в `cli`.
 
+mod anytls;
 mod hysteria2;
 mod shadowsocks2022;
 mod tuic_v5;
 mod vless_reality;
 mod wireguard;
 
+pub use anytls::{ANYTLS_PORT, AnyTls};
 pub use hysteria2::Hysteria2;
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
 pub use tuic_v5::TuicV5;

@@ -2447,9 +2447,12 @@ async fn admin_users_page_renders_create_form() {
         html.contains(">create<"),
         "submit button label drifted from 'create'"
     );
+    // Form was restructured in the wg-pubkey commit to a 2-row layout;
+    // pin the new helper copy that lives below the wg-pubkey field
+    // (replaces the old single-line deck about server-side mint).
     assert!(
-        html.contains("UUID, tuic password and sub-token are minted server-side"),
-        "form deck copy drifted"
+        html.contains("private key stays on the device"),
+        "form copy drifted — wg-pubkey helper missing"
     );
 }
 

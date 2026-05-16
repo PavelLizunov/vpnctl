@@ -3,7 +3,7 @@
 
 use vpnctl_core::Registry;
 use vpnctl_kernels::{AmneziaWg, SingBox};
-use vpnctl_protocols::{Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
+use vpnctl_protocols::{AnyTls, Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
 
 /// Build the canonical Registry. Add new kernels/protocols here.
 pub(crate) fn build() -> anyhow::Result<Registry> {
@@ -27,6 +27,9 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // WireGuard wire-format — served by AmneziaWg today, future
     // WireGuardKernel (vanilla wg-quick) too.
     reg.register_protocol(Box::new(WireGuard::new()))?;
+    // AnyTLS — REALITY successor; different TLS fingerprint, useful
+    // as fallback channel when REALITY gets DPI'd. Sing-box ≥ 1.12.
+    reg.register_protocol(Box::new(AnyTls::new()))?;
 
     Ok(reg)
 }
