@@ -4447,3 +4447,301 @@ async fn admin_multi_kernel_server_enables_wireguard_protocol() {
         "wireguard should be in enabled_protocols after enable"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Pavel iter A2 — quick-add server inline form on /admin/servers.
+// Single-action UX matching the one-input user-create form: id +
+// address + ssh_port → server registered with default kernel=sing-box
+// and EVERY sing-box-supported protocol enabled. Per-knob tuning
+// lives on the detail page.
+
+#[tokio::test]
+async fn admin_server_quick_add_registers_with_default_protocols() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/quick-add")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=fra-01&address=203.0.113.7&ssh_port=2222"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let srv = inv
+        .get_server(&vpnctl_core::ServerId("fra-01".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(srv.address, "203.0.113.7");
+    assert_eq!(srv.ssh_port, 2222);
+    assert_eq!(srv.kernels.len(), 1);
+    assert_eq!(srv.kernels[0].0, "sing-box");
+    // Default protocols = every protocol the kernel supports. Spot-check
+    // a few that sing-box implements in the workspace registry.
+    let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
+    assert!(
+        pids.contains(&"vless+reality"),
+        "default protocols: {pids:?}"
+    );
+    assert!(pids.contains(&"tuic-v5"));
+    assert!(pids.contains(&"hysteria2"));
+    // wireguard must NOT be in defaults — different kernel.
+    assert!(!pids.contains(&"wireguard"));
+}
+
+#[tokio::test]
+async fn admin_server_quick_add_rejects_duplicate_id() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("dup".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/quick-add")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=dup&address=198.51.100.5&ssh_port=22"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("already exists"),
+        "duplicate id must surface 'already exists' wording"
+    );
+}
+
+// Pavel iter B — server-side grant/revoke (centralised view on
+// server detail). Same mutation as user-side, but redirect lands
+// back on the server page so the operator stays where they started.
+
+#[tokio::test]
+async fn admin_server_detail_lists_all_users_with_grant_buttons() {
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    for uid in ["alice", "bob"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+            })
+            .await
+            .unwrap();
+    }
+    // Grant alice but not bob.
+    s.inv
+        .grant(&UserId("alice".into()), &ServerId("sb".into()))
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/sb").await;
+    // Alice = granted → revoke form
+    assert!(
+        html.contains("/admin/servers/sb/grants/alice/revoke"),
+        "granted user must have revoke form on server detail"
+    );
+    // Bob = ungranted → grant form
+    assert!(
+        html.contains("/admin/servers/sb/grants/bob"),
+        "ungranted user must have grant form on server detail"
+    );
+    // Counter pin (1 of 2)
+    assert!(html.contains("1 of 2"), "X of N counter missing");
+}
+
+#[tokio::test]
+async fn admin_server_grant_user_persists_and_redirects_to_server() {
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "uuid-a".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/sb/grants/alice"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Redirect target should be the SERVER page, not the user page.
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(loc, "/admin/servers/sb");
+    // Mutation landed.
+    let users_on_server = inv.users_for_server(&ServerId("sb".into())).await.unwrap();
+    assert!(users_on_server.iter().any(|u| u.id.0 == "alice"));
+}
+
+// Pavel iter C2 — search + sort on /admin/users.
+
+#[tokio::test]
+async fn admin_users_search_filters_by_id_substring() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for uid in ["alice", "bob", "alicia", "carol"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+            })
+            .await
+            .unwrap();
+    }
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users?q=ali").await;
+    // alice + alicia match; bob + carol do not.
+    assert!(html.contains(">alice<"), "alice should appear");
+    assert!(html.contains(">alicia<"), "alicia should appear");
+    assert!(!html.contains(">bob<"), "bob must be filtered out");
+    assert!(!html.contains(">carol<"), "carol must be filtered out");
+    assert!(html.contains("showing 2 of 4"), "subset counter missing");
+}
+
+#[tokio::test]
+async fn admin_users_sort_servers_orders_by_grants_count_desc() {
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for sid in ["s1", "s2", "s3"] {
+        s.inv
+            .add_server(&Server {
+                id: ServerId(sid.into()),
+                address: "203.0.113.7".into(),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernels: vec![KernelId("sing-box".into())],
+                enabled_protocols: vec![],
+                trusted_host_fingerprint: None,
+                hoster: "generic".into(),
+                jump_via: None,
+                usage_coefficient: 1.0,
+            })
+            .await
+            .unwrap();
+    }
+    for uid in ["alice", "bob", "carol"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+            })
+            .await
+            .unwrap();
+    }
+    // alice on 3 servers, bob on 1, carol on 0
+    for sid in ["s1", "s2", "s3"] {
+        s.inv
+            .grant(&UserId("alice".into()), &ServerId(sid.into()))
+            .await
+            .unwrap();
+    }
+    s.inv
+        .grant(&UserId("bob".into()), &ServerId("s1".into()))
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users?sort=servers").await;
+    // Find positions of the three user names in the body — alice
+    // (3 grants) MUST appear before bob (1) MUST appear before carol (0).
+    let pos_alice = html.find(">alice<").expect("alice rendered");
+    let pos_bob = html.find(">bob<").expect("bob rendered");
+    let pos_carol = html.find(">carol<").expect("carol rendered");
+    assert!(
+        pos_alice < pos_bob && pos_bob < pos_carol,
+        "sort=servers must render alice<bob<carol; got positions a={pos_alice} b={pos_bob} c={pos_carol}"
+    );
+}

@@ -828,12 +828,48 @@ pub(crate) async fn servers(
             " from the CLI."
         }
 
-        // Phase E sub-iter 4a — wizard CTA. Sits above the list so a
-        // fresh inventory finds the affordance immediately.
-        div style="margin: 16px 0 24px;" {
+        // Quick-add inline form — mirrors the users page one-input-
+        // one-button shape. Server gets default kernel=sing-box +
+        // ALL sing-box-supported protocols enabled; operator tweaks
+        // on detail-page right after. The big "wizard" CTA below is
+        // for the SSE-streamed bootstrap (Phase E in progress);
+        // this inline path is for "I already have a deployed VPS,
+        // just register it in inventory."
+        div style="margin: 16px 0 16px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
+            form method="post" action="/admin/servers/quick-add"
+                 style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "add server"
+                }
+                input type="text" name="id" required="required"
+                      placeholder="e.g. fra-01"
+                      pattern="[A-Za-z0-9._-]+"
+                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
+                      style="max-width: 160px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                input type="text" name="address" required="required"
+                      placeholder="ip or hostname"
+                      style="max-width: 220px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                input type="number" name="ssh_port" value="22" min="1" max="65535"
+                      title="SSH port — 22 (DO) or 2222 (Cloudzy)"
+                      style="max-width: 72px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                button type="submit"
+                       title="Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after."
+                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "register"
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); flex-basis: 100%;" {
+                    "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page."
+                }
+            }
+        }
+
+        // Phase E sub-iter 4a — wizard CTA. For fresh nodes that need
+        // bootstrap (push our SSH key, install kernel, etc). Use the
+        // quick-add above if you already have a working node.
+        div style="margin: 0 0 24px;" {
             a href="/admin/servers/new"
-              style="display: inline-block; padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                "add server →"
+              style="display: inline-block; padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "wizard → bootstrap a fresh node from scratch"
             }
         }
 
@@ -946,9 +982,22 @@ fn user_row(idx: usize, u: &vpnctl_core::User, grants_count: usize) -> Markup {
     }
 }
 
+/// Query params for the user list: search + sort. Both optional;
+/// defaults preserve the historic alphabetic-by-id ordering.
+/// Sort kinds: "id" (default), "id-desc", "servers" (most grants
+/// first), "servers-desc" (least first). Search `q` is a case-
+/// insensitive substring match on user.id.0 — no fancy fuzzy
+/// matching, just enough to cut a 30+ user list down.
+#[derive(serde::Deserialize, Default, Debug)]
+pub(crate) struct UsersQuery {
+    pub q: Option<String>,
+    pub sort: Option<String>,
+}
+
 pub(crate) async fn users(
     headers: HeaderMap,
     State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<UsersQuery>,
 ) -> Result<Markup, Response> {
     let (theme, accent, tw) = theme_accent(&headers);
 
@@ -974,6 +1023,44 @@ pub(crate) async fn users(
             .map_err(|e| internal_error(anyhow::Error::new(e)))?;
         grants_per_user.push(n);
     }
+
+    // Apply Pavel iter C2: search filter + sort. We build a sortable
+    // (user, grants_count, original_index) tuple list so the row
+    // numbering stays stable for the visible subset.
+    let q_lower = query
+        .q
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut pairs: Vec<(usize, &vpnctl_core::User, usize)> = users_list
+        .iter()
+        .zip(grants_per_user.iter().copied())
+        .enumerate()
+        .map(|(i, (u, g))| (i, u, g))
+        .filter(|(_, u, _)| {
+            q_lower.is_empty() || u.id.0.to_ascii_lowercase().contains(q_lower.as_str())
+        })
+        .collect();
+    let sort_kind = query.sort.as_deref().unwrap_or("id");
+    match sort_kind {
+        "id-desc" => pairs.sort_by(|a, b| b.1.id.0.cmp(&a.1.id.0)),
+        "servers" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
+        "servers-desc" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
+        _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)), // "id" default
+    }
+    // Helper to build a sort link that preserves the search.
+    let make_sort_href = |kind: &str| -> String {
+        if q_lower.is_empty() {
+            format!("/admin/users?sort={kind}")
+        } else {
+            format!(
+                "/admin/users?sort={kind}&q={}",
+                path_segment_encode(&q_lower)
+            )
+        }
+    };
+    let total_users = users_list.len();
+    let visible_users = pairs.len();
 
     let body = html! {
         div.ed-art-eyebrow { "Users" }
@@ -1019,6 +1106,57 @@ pub(crate) async fn users(
             }
         }
 
+        // Pavel iter C2: search + sort. Search is a GET form so the
+        // resulting URL is shareable / bookmarkable. Sort links live
+        // next to the search and pin the current direction.
+        @if !users_list.is_empty() {
+            div style="display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; margin: 0 0 14px;" {
+                form method="get" action="/admin/users"
+                     style="display: flex; gap: 6px; align-items: baseline;" {
+                    label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                        "search"
+                    }
+                    input type="text" name="q" value=(q_lower)
+                          placeholder="user id substring"
+                          style="max-width: 200px; padding: 3px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                    @if !sort_kind.is_empty() && sort_kind != "id" {
+                        input type="hidden" name="sort" value=(sort_kind);
+                    }
+                    button type="submit"
+                           style="padding: 3px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                        "go"
+                    }
+                    @if !q_lower.is_empty() {
+                        a href=(make_sort_href(sort_kind))
+                          style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-left: 4px;" {
+                            "× clear"
+                        }
+                    }
+                }
+                div style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    "sort: "
+                    @let sort_link = |kind: &str, label: &str| -> Markup {
+                        let active = sort_kind == kind;
+                        html! {
+                            a href=(make_sort_href(kind))
+                              style=(if active { "color: var(--ink); text-decoration: underline; margin-right: 8px;" } else { "color: var(--mute); margin-right: 8px;" }) {
+                                (label)
+                            }
+                        }
+                    };
+                    (sort_link("id", "id ↑"))
+                    (sort_link("id-desc", "id ↓"))
+                    (sort_link("servers", "servers ↓"))
+                    (sort_link("servers-desc", "servers ↑"))
+                }
+                @if visible_users != total_users {
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                        "showing " (visible_users) " of " (total_users)
+                    }
+                }
+            }
+        }
+
         @if users_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 "No users yet. Type an id above and hit "
@@ -1029,10 +1167,18 @@ pub(crate) async fn users(
                 span.ed-mono { "vpnctl grant <user> <server>" }
                 " (web UI lands in C-3.3)."
             }
+        } @else if pairs.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
+                "No users match "
+                span.ed-mono { "q=" (q_lower) }
+                ". Loosen the search above or "
+                a href="/admin/users" style="color: var(--ink);" { "clear it" }
+                "."
+            }
         } @else {
             div {
-                @for (idx, (u, g)) in users_list.iter().zip(grants_per_user.iter()).enumerate() {
-                    (user_row(idx, u, *g))
+                @for (display_idx, (_orig_idx, u, g)) in pairs.iter().enumerate() {
+                    (user_row(display_idx, u, *g))
                 }
             }
         }
@@ -2190,6 +2336,226 @@ pub(crate) async fn server_disable_protocol(
         path_segment_encode(&server_id_str)
     ))
     .into_response()
+}
+
+/// `POST /admin/servers/{sid}/grants/{uid}` — grant the user access
+/// from the SERVER side. Identical mutation to `user_grant_server`
+/// (same `inv.grant` call), but the redirect target is the SERVER
+/// detail page so the operator stays where they started. Mirror
+/// pair: `server_revoke_user`.
+pub(crate) async fn server_grant_user(
+    State(state): State<AppState>,
+    Path((server_id_str, user_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    // Existence checks — explicit 404 for both, otherwise the FK
+    // violation surfaces as a generic 500.
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    if let Err(e) = state.inv.grant(&uid, &sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "grant",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "user": user_id_str,
+                "from": "server-detail",
+            })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for grant");
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{sid}/grants/{uid}/revoke` — revoke from the
+/// SERVER side. Mirror of `server_grant_user`.
+pub(crate) async fn server_revoke_user(
+    State(state): State<AppState>,
+    Path((server_id_str, user_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    if let Err(e) = state.inv.revoke(&uid, &sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "revoke",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "user": user_id_str,
+                "from": "server-detail",
+            })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for revoke");
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/quick-add` — register a SERVER YOU ALREADY HAVE
+/// in inventory with minimal input: id + address (+ optional ssh_port).
+/// Default kernel = sing-box; default protocols = every protocol
+/// sing-box supports. Operator tweaks on the detail page right after.
+///
+/// This is the inline path on `/admin/servers`. The fancy Phase-E
+/// SSE-streamed bootstrap wizard at `/admin/servers/new` is a
+/// DIFFERENT flow (it ssh-pushes our key and installs the kernel from
+/// scratch — only useful for fresh nodes).
+pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String) -> Response {
+    // Tiny form parser — same shape as the other admin POST handlers.
+    let id_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("id="))
+        .unwrap_or("")
+        .trim();
+    let id = decode_form_value(id_raw);
+    if !valid_user_id(&id) {
+        // Reuse user-id validator — same allowed alphabet (alphanumerics,
+        // . _ -). Length cap 64 is reasonable for server ids too.
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+            )),
+        )
+            .into_response();
+    }
+
+    let address_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("address="))
+        .unwrap_or("")
+        .trim();
+    let address = decode_form_value(address_raw);
+    if address.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text("address must not be empty (IPv4, IPv6 or hostname)"),
+        )
+            .into_response();
+    }
+    // Shallow address shape check — full IP/hostname validation lives
+    // in the bootstrap path; here we just reject obvious garbage so a
+    // typo doesn't get persisted.
+    if address.contains(' ') || address.len() > 253 {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!("address looks malformed: {address:?}")),
+        )
+            .into_response();
+    }
+
+    let ssh_port: u16 = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("ssh_port="))
+        .and_then(|s| decode_form_value(s).parse().ok())
+        .unwrap_or(22);
+
+    // Default kernel = sing-box; protocols = ALL it supports. This
+    // mirrors the "users are low-tech" one-action ceiling for the
+    // operator: register the server, then enable/disable on the
+    // detail page (a single click each).
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let kernel_id = KernelId("sing-box".into());
+    let default_protocols: Vec<ProtocolId> = state
+        .registry
+        .kernel(&kernel_id)
+        .map(|k| k.supported_protocols())
+        .unwrap_or_default();
+
+    let server = Server {
+        id: ServerId(id.clone()),
+        address: address.clone(),
+        ssh_port,
+        ssh_user: "root".into(),
+        kernels: vec![kernel_id],
+        enabled_protocols: default_protocols.clone(),
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+
+    if let Err(e) = state.inv.add_server(&server).await {
+        return match e {
+            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => (
+                StatusCode::BAD_REQUEST,
+                error_text(&format!("{what} already exists — pick a different id")),
+            )
+                .into_response(),
+            other => internal_error(anyhow::Error::new(other)),
+        };
+    }
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.quick-add",
+            Some(&id),
+            Some(&serde_json::json!({
+                "address": address,
+                "ssh_port": ssh_port,
+                "kernels": ["sing-box"],
+                "protocols": default_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %id,
+            error = %e,
+            "audit write failed for server.quick-add"
+        );
+    }
+
+    Redirect::to(&format!("/admin/servers/{}", path_segment_encode(&id))).into_response()
 }
 
 /// `POST /admin/servers/{id}/kernels/{kernel}/enable` — add a kernel
@@ -3402,6 +3768,16 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
     let user_count = users.len();
+    // Pavel iter B: centralised grants — also load the full user list
+    // so the operator can grant access to non-granted users without
+    // navigating to each user's page.
+    let all_users = state
+        .inv
+        .list_users()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let granted_user_ids: std::collections::HashSet<vpnctl_core::UserId> =
+        users.iter().map(|u| u.id.clone()).collect();
 
     let latest = state
         .inv
@@ -3484,27 +3860,59 @@ pub(crate) async fn server_detail(
         // without operator-initiated deploy).
         (server_detail_protocols_section(&server, &state.registry))
 
-        // Grants
+        // Grants — centralised per-server view (Pavel iter B).
+        // Lists EVERY user with a per-row grant/revoke form, so the
+        // operator doesn't have to bounce through each user's page
+        // to manage access on a node. Same shape as the per-user
+        // Server-access section, just transposed.
         div.ed-rule {}
         div.ed-art-eyebrow { "Grants" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (user_count) " "
-            @if user_count == 1 { "user" } @else { "users" }
-            " granted access on this server."
+            (user_count) " of " (all_users.len()) " "
+            @if all_users.len() == 1 { "user" } @else { "users" }
+            " have access on this server. Toggle below — POST returns 303 here."
         }
-        @if users.is_empty() {
+        @if all_users.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-                "No grants yet. Use "
-                span.ed-mono { "vpnctl grant <user> " (server.id.0) }
-                " to add."
+                "No users in the inventory yet. Create one on "
+                a href="/admin/users" style="color: var(--ink);" { "/admin/users" }
+                " — then come back to grant access."
             }
         } @else {
-            ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
-                @for u in &users {
-                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        a href=(format!("/admin/users/{}", path_segment_encode(&u.id.0)))
-                          style="color: var(--ink); text-decoration: none;" {
-                            (u.id.0)
+            ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
+                @for u in &all_users {
+                    @let sid_enc = path_segment_encode(&server.id.0);
+                    @let uid_enc = path_segment_encode(&u.id.0);
+                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        span style="flex: 1;" {
+                            a href=(format!("/admin/users/{uid_enc}"))
+                              style="color: var(--ink); text-decoration: none;" {
+                                b { (u.id.0) }
+                            }
+                        }
+                        @if granted_user_ids.contains(&u.id) {
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
+                            // Server-side route — redirect back HERE.
+                            form method="post"
+                                 action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}/revoke"))
+                                 style="margin: 0; padding: 0;" {
+                                button type="submit"
+                                       title=(format!("Revoke {}'s access on {}", u.id.0, server.id.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                    "revoke"
+                                }
+                            }
+                        } @else {
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
+                            form method="post"
+                                 action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}"))
+                                 style="margin: 0; padding: 0;" {
+                                button type="submit"
+                                       title=(format!("Grant {} access on {}", u.id.0, server.id.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                    "grant"
+                                }
+                            }
                         }
                     }
                 }

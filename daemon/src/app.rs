@@ -349,6 +349,26 @@ fn admin_router(state: AppState) -> Router {
         // empty-state until chunk 4 wires the periodic poller.
         .route("/admin/servers/{id}", get(admin::server_detail))
         .route("/admin/servers/{id}/", get(admin::server_detail))
+        // Quick-add — register an existing server in inventory with
+        // default kernel + protocols. Distinct from the
+        // Phase-E wizard at `/admin/servers/new` (which bootstraps a
+        // fresh node from scratch).
+        .route(
+            "/admin/servers/quick-add",
+            post(admin::server_quick_add),
+        )
+        // Server-side grant mutations (Pavel iter B). Identical mutation
+        // to /admin/users/{id}/grants/{server_id} but the redirect goes
+        // to the server detail page so the operator stays where they
+        // started. URL shape mirrors the user-side equivalents.
+        .route(
+            "/admin/servers/{sid}/grants/{uid}",
+            post(admin::server_grant_user),
+        )
+        .route(
+            "/admin/servers/{sid}/grants/{uid}/revoke",
+            post(admin::server_revoke_user),
+        )
         // Server protocols toggle — inventory-only mutation; the
         // operator runs `vpnctl deploy <server>` from the CLI to
         // push. Routes are split into enable/disable rather than
