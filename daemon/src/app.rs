@@ -343,6 +343,12 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/monitoring/", get(admin::monitoring))
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
+        // Phase H chunk 3: server detail page with live telemetry +
+        // declared-vs-observed drift section. Reads
+        // `inv.latest_node_health` + `inv.recent_node_health_for_server`;
+        // empty-state until chunk 4 wires the periodic poller.
+        .route("/admin/servers/{id}", get(admin::server_detail))
+        .route("/admin/servers/{id}/", get(admin::server_detail))
         // Phase E sub-iter 4a: add-server wizard step 1.
         // GET renders the form (IP + root password); POST validates,
         // stashes to a server-side session keyed by HttpOnly cookie,

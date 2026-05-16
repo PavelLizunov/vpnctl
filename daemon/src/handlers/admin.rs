@@ -764,11 +764,20 @@ fn server_card(idx: usize, s: &vpnctl_core::Server, user_count: i64) -> Markup {
         .trusted_host_fingerprint
         .as_deref()
         .unwrap_or("(unverified)");
+    let detail_href = format!("/admin/servers/{}", path_segment_encode(&s.id.0));
     html! {
         article.ed-server {
             div.ed-server__no { (format!("№ {:02}", idx + 1)) }
             div {
-                h2.ed-server__h { (s.id.0) }
+                // Phase H chunk 3: server id is now a link to the
+                // detail page (which carries live telemetry + drift
+                // info). Clickable headline matches the user-list
+                // pattern from C-1.
+                h2.ed-server__h {
+                    a href=(detail_href) style="color: var(--ink); text-decoration: none;" {
+                        (s.id.0)
+                    }
+                }
                 div.ed-server__addr {
                     (s.address) ":" (s.ssh_port)
                     " · " (s.ssh_user) "@"
@@ -2764,4 +2773,329 @@ pub(crate) async fn wizard_step2_stub(
         }
     };
     shell("servers", &theme, &accent, tw, body).into_response()
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase H chunk 3 — server detail page with live telemetry surface.
+//
+//  Reads:
+//    * `inv.get_server(id)` — declared state
+//    * `inv.users_for_server(id)` — grants count
+//    * `inv.latest_node_health(id)` — most recent probe (live)
+//    * `inv.recent_node_health_for_server(id, 24)` — 24h window
+//
+//  Drift detection: parses the latest probe's `listening_ports_json`,
+//  cross-references against `server.enabled_protocols` (mapping protocol
+//  → expected ports), highlights mismatch in orange (--acc).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Map a protocol id → set of (proto, port) we EXPECT it to be
+/// listening on. Single source of truth for the drift check —
+/// matches what each `Protocol::server_inbound` emits.
+fn expected_ports_for_protocol(pid: &str) -> &'static [(&'static str, u16)] {
+    match pid {
+        "vless+reality" => &[("tcp", 443)],
+        "tuic-v5" => &[("udp", 8443)],
+        "hysteria2" => &[("udp", 8444)],
+        "shadowsocks-2022" => &[("tcp", 8388), ("udp", 8388)],
+        "wireguard" => &[("udp", 51820)],
+        _ => &[],
+    }
+}
+
+pub(crate) async fn server_detail(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+) -> Result<Markup, Response> {
+    let (theme, accent, tw) = theme_accent(&headers);
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response());
+        }
+        Err(e) => return Err(internal_error(anyhow::Error::new(e))),
+    };
+
+    let users = state
+        .inv
+        .users_for_server(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let user_count = users.len();
+
+    let latest = state
+        .inv
+        .latest_node_health(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Compute drift: declared vs observed ports.
+    let observed: std::collections::BTreeSet<(String, u16)> = latest
+        .as_ref()
+        .and_then(|h| h.listening_ports_json.as_deref())
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+        .map(|v| {
+            v.into_iter()
+                .filter_map(|s| {
+                    let mut p = s.splitn(2, '/');
+                    let proto = p.next()?.to_string();
+                    let port: u16 = p.next()?.parse().ok()?;
+                    Some((proto, port))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let expected: std::collections::BTreeSet<(String, u16)> = server
+        .enabled_protocols
+        .iter()
+        .flat_map(|p| {
+            expected_ports_for_protocol(&p.0)
+                .iter()
+                .map(|(pr, pt)| ((*pr).to_string(), *pt))
+        })
+        .collect();
+
+    let missing: Vec<_> = expected.difference(&observed).cloned().collect();
+    let extra: Vec<_> = observed
+        .difference(&expected)
+        .filter(|(_, port)| *port != 22) // SSH is always listening, never "extra"
+        .cloned()
+        .collect();
+
+    let body = html! {
+        nav style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 12px;" {
+            a href="/admin/servers" style="color: var(--mute); text-decoration: none;" {
+                "← all servers"
+            }
+        }
+        div.ed-art-eyebrow { "Server detail" }
+        h1.ed-art-h1 { (server.id.0) }
+        p.ed-art-deck {
+            span.ed-mono { (server.address) ":" (server.ssh_port) }
+            " · ssh as " span.ed-mono { (server.ssh_user) }
+            " · kernel " span.ed-mono { (server.kernel.0) }
+            " · hoster " b { (server.hoster) }
+        }
+
+        // Hero: current state (live or empty-state)
+        (server_detail_hero(&latest, &server))
+
+        // Declared vs observed drift
+        (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some()))
+
+        // Grants
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Grants" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (user_count) " "
+            @if user_count == 1 { "user" } @else { "users" }
+            " granted access on this server."
+        }
+        @if users.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+                "No grants yet. Use "
+                span.ed-mono { "vpnctl grant <user> " (server.id.0) }
+                " to add."
+            }
+        } @else {
+            ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
+                @for u in &users {
+                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        a href=(format!("/admin/users/{}", path_segment_encode(&u.id.0)))
+                          style="color: var(--ink); text-decoration: none;" {
+                            (u.id.0)
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(shell("servers", &theme, &accent, tw, body))
+}
+
+/// Hero block — most-recent probe at-a-glance KPIs, OR an empty state
+/// pointing at chunk 4 (the not-yet-shipped poller) so the operator
+/// knows WHY the box is empty.
+fn server_detail_hero(
+    latest: &Option<vpnctl_inventory::NodeHealthRow>,
+    server: &vpnctl_core::Server,
+) -> Markup {
+    let Some(h) = latest else {
+        return html! {
+            div.ed-rule {}
+            div.ed-art-eyebrow { "Live status" }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                "No probes yet. The node-telemetry poller is scheduled for "
+                em { "Phase H chunk 4" }
+                " — it'll SSH " span.ed-mono { (server.address) }
+                " every 5 min and persist disk/mem/load + listening-port observations. "
+                "Until then this section reads as blank."
+            }
+        };
+    };
+    let sb = h
+        .sing_box_active
+        .map(|b| if b { "active" } else { "down" })
+        .unwrap_or("?");
+    let f2b = h
+        .fail2ban_active
+        .map(|b| if b { "active" } else { "down" })
+        .unwrap_or("?");
+    let disk_pct = h
+        .disk_used_mib
+        .zip(h.disk_total_mib)
+        .filter(|(_, t)| *t > 0)
+        .map(|(u, t)| format!("{}%", (u * 100 / t).min(100)))
+        .unwrap_or("?".into());
+    let mem_pct = h
+        .mem_available_mib
+        .zip(h.mem_total_mib)
+        .filter(|(_, t)| *t > 0)
+        .map(|(a, t)| format!("{}%", 100u64.saturating_sub(a * 100 / t)))
+        .unwrap_or("?".into());
+    let load = h
+        .load_1min_x100
+        .map(|l| format!("{:.2}", f64::from(l) / 100.0))
+        .unwrap_or("?".into());
+    let log_size = h
+        .sing_box_log_bytes
+        .map(humanize_bytes)
+        .unwrap_or("?".into());
+
+    let sb_color = match h.sing_box_active {
+        Some(true) => "var(--soft)",
+        Some(false) => "var(--acc)",
+        None => "var(--mute)",
+    };
+    let f2b_color = match h.fail2ban_active {
+        Some(true) => "var(--soft)",
+        Some(false) => "var(--acc)",
+        None => "var(--mute)",
+    };
+    let log_alert_color = match h.sing_box_log_bytes {
+        Some(b) if b > 500 * 1024 * 1024 => "var(--acc)",
+        _ => "var(--ink)",
+    };
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Live status · last probe " span style="color: var(--mute);" {
+            (h.ts.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        } }
+        div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
+            (status_tile("sing-box", sb, sb_color))
+            (status_tile("fail2ban", f2b, f2b_color))
+            (status_tile("disk used", &disk_pct, "var(--ink)"))
+            (status_tile("memory used", &mem_pct, "var(--ink)"))
+            (status_tile("1-min load", &load, "var(--ink)"))
+            (status_tile("sing-box log", &log_size, log_alert_color))
+        }
+    }
+}
+
+fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
+    html! {
+        div style="border: 1px solid var(--rule); padding: 10px 12px; background: var(--paper);" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" { (label) }
+            div style=(format!("font-family: var(--serif); font-size: 22px; color: {value_color}; margin-top: 2px;")) { (value) }
+        }
+    }
+}
+
+/// Drift section — what does inventory THINK is listening vs what
+/// IS listening. Orange highlights when sets disagree.
+fn server_detail_drift_section(
+    server: &vpnctl_core::Server,
+    observed: &std::collections::BTreeSet<(String, u16)>,
+    missing: &[(String, u16)],
+    extra: &[(String, u16)],
+    have_probe: bool,
+) -> Markup {
+    let declared: Vec<String> = server
+        .enabled_protocols
+        .iter()
+        .map(|p| p.0.clone())
+        .collect();
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Declared vs observed" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Inventory says this server runs the protocols below; the latest probe sees the listening sockets on the right. Drift in orange."
+        }
+        div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;" {
+            div {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
+                    "declared protocols"
+                }
+                @if declared.is_empty() {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                        "(none in inventory)"
+                    }
+                } @else {
+                    ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
+                        @for p in &declared {
+                            li style="padding: 2px 0;" { (p) }
+                        }
+                    }
+                }
+            }
+            div {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
+                    "observed listening sockets"
+                }
+                @if !have_probe {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                        "(no probe — chunk 4 pending)"
+                    }
+                } @else if observed.is_empty() {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                        "(probe ran but no sockets listed)"
+                    }
+                } @else {
+                    ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
+                        @for (proto, port) in observed {
+                            li style="padding: 2px 0;" { (proto) "/" (port) }
+                        }
+                    }
+                }
+            }
+        }
+        @if have_probe && (!missing.is_empty() || !extra.is_empty()) {
+            div style="margin-top: 14px; padding: 10px 12px; border: 1px solid var(--acc); background: var(--paper);" {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--acc); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px;" {
+                    "drift detected"
+                }
+                @if !missing.is_empty() {
+                    p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
+                        "Declared but " b { "NOT listening" } ": "
+                        @for (i, (proto, port)) in missing.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            span.ed-mono { (proto) "/" (port) }
+                        }
+                    }
+                }
+                @if !extra.is_empty() {
+                    p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
+                        "Listening but " b { "NOT declared" } ": "
+                        @for (i, (proto, port)) in extra.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            span.ed-mono { (proto) "/" (port) }
+                        }
+                    }
+                }
+            }
+        } @else if have_probe {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 10px;" {
+                "Declared and observed match. No drift."
+            }
+        }
+    }
 }

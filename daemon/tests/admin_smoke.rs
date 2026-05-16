@@ -3458,3 +3458,158 @@ async fn admin_user_detail_track3_does_not_leak_other_users_stats() {
         "u1 must show empty state when only u0 has data"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase H chunk 3 — server detail page (/admin/servers/{id})
+//
+// Covers:
+//   * Unknown server → 404 with canonical body
+//   * Known server, no probes → empty-state mentions "chunk 4"
+//   * Known server WITH a probe row → KPI tiles render with real numbers
+//   * Drift highlight when declared protocols disagree with observed
+//     listening ports
+//   * Servers-list page links to the detail page (clickable headline)
+
+#[tokio::test]
+async fn admin_server_detail_unknown_id_returns_404() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/no-such")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.starts_with("vpnctl admin: no such server"));
+}
+
+#[tokio::test]
+async fn admin_server_detail_no_probe_shows_chunk4_empty_state() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // server s0 only
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(html.contains("Live status"));
+    assert!(
+        html.contains("No probes yet"),
+        "empty-state copy must mention 'No probes yet'"
+    );
+    assert!(
+        html.contains("Phase H chunk 4"),
+        "must point at chunk 4 so operator knows what's missing"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_detail_with_probe_renders_kpis() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    // Insert a probe row matching what node_probe would produce
+    s.inv
+        .record_node_health(
+            &ServerId("s0".into()),
+            Some(true),
+            Some(true),
+            Some(9876),
+            Some(20480),
+            Some(483),
+            Some(960),
+            Some(4),
+            Some(r#"["tcp/443","tcp/8388","udp/8388","udp/8443"]"#),
+            Some(308_432),
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    // Hero block visible
+    assert!(html.contains("Live status"));
+    assert!(html.contains("active"), "sing-box active visible");
+    assert!(html.contains("48%"), "disk pct visible (9876/20480)");
+    assert!(html.contains("50%"), "mem pct visible (1 - 483/960 = 50)");
+    // No empty-state once we have data
+    assert!(!html.contains("No probes yet"));
+}
+
+#[tokio::test]
+async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Server declares vless+reality + tuic-v5 in inventory
+    s.inv
+        .add_server(&vpnctl_core::Server {
+            id: ServerId("driftnode".into()),
+            address: "10.0.0.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("sing-box".into()),
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("tuic-v5".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // But the probe sees vless (tcp/443) AND an EXTRA hysteria2 (udp/8444),
+    // and NO tuic (no udp/8443). Two drifts: missing tuic, extra hy2.
+    s.inv
+        .record_node_health(
+            &ServerId("driftnode".into()),
+            Some(true),
+            Some(true),
+            Some(1000),
+            Some(10000),
+            Some(500),
+            Some(1000),
+            Some(10),
+            Some(r#"["tcp/22","tcp/443","udp/8444"]"#),
+            Some(1000),
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers/driftnode").await;
+    assert!(
+        html.contains("drift detected"),
+        "must surface drift banner; got: {}",
+        &html[..html.len().min(400)]
+    );
+    assert!(
+        html.contains("udp/8443"),
+        "missing tuic udp/8443 must be listed"
+    );
+    assert!(
+        html.contains("udp/8444"),
+        "extra hysteria2 udp/8444 must be listed"
+    );
+    // SSH port 22 must NOT be flagged as "extra" (always-listening).
+    let drift_section = html.split("drift detected").nth(1).unwrap_or("");
+    assert!(
+        !drift_section.contains("tcp/22"),
+        "ssh port must be excluded from drift; got drift section: {}",
+        &drift_section[..drift_section.len().min(400)]
+    );
+}
+
+#[tokio::test]
+async fn admin_servers_list_link_to_detail_page() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers").await;
+    assert!(
+        html.contains(r#"href="/admin/servers/s0""#),
+        "server card headline must link to detail page"
+    );
+}
