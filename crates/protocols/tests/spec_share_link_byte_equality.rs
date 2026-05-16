@@ -66,11 +66,19 @@ fn vless_secrets() -> HashMap<String, String> {
 // ── VLESS ───────────────────────────────────────────────────────────────
 
 #[test]
-fn vless_happy_path_byte_equal() {
-    // Post-fix 2026-05-16: link now includes `&flow=xtls-rprx-vision` —
-    // pinned because the live vps-is-01 (and every bash-vpn-control
-    // REALITY deploy) use Vision flow, and modern sing-box rejects
-    // sessions whose client-flow doesn't match the user-record flow.
+fn vless_happy_path_byte_equal_with_bash_scripts() {
+    // Post-fix 2026-05-16 (commit AFTER db3998c): link layout now
+    // matches `scripts/get-vless.sh` from the bash vpn-control project
+    // BYTE-FOR-BYTE — same param ORDER + same param SET (encryption=none
+    // is included; was missing in db3998c). Verified against:
+    //   $ grep get-vless.sh vless://...
+    //   vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision
+    //                                   &security=reality&sni=www.microsoft.com
+    //                                   &fp=chrome&pbk=${REALITY_PUBLIC}
+    //                                   &sid=${SHORT_ID}&type=tcp#${USERNAME}
+    // Honours CLAUDE.md "Migration from bash — seamless preservation"
+    // requirement: phones holding bash-issued vless:// links keep
+    // working byte-for-byte after the vpnctl cutover.
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -78,14 +86,15 @@ fn vless_happy_path_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#alice",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
     );
 }
 
 #[test]
 fn vless_fragment_percent_encodes_space_byte_equal() {
     // user.id "alice cool" — space is NOT in the FRAGMENT unreserved set,
-    // so it MUST become %20. Everything else stays verbatim.
+    // so it MUST become %20. Everything else stays verbatim. Param
+    // order matches `vless_happy_path_byte_equal_with_bash_scripts`.
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -93,7 +102,7 @@ fn vless_fragment_percent_encodes_space_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#alice%20cool",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
     );
 }
 

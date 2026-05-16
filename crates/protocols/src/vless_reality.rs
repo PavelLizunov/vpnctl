@@ -128,11 +128,17 @@ impl Protocol for VlessReality {
         // `#`, ` `, `/` would corrupt the link or open a new component.
         // Percent-encode defensively even though server/CLI validate ids.
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
-        // `flow=xtls-rprx-vision` query param matches the Xray/v2ray-NG
-        // de-facto URI scheme. Clients without flow support ignore it
-        // gracefully; clients WITH flow support REQUIRE it to handshake.
+        // Parameter order + included params are pinned to match the
+        // legacy bash `vpn-control/scripts/get-vless.sh` byte-for-byte:
+        //   `?encryption=none&flow=xtls-rprx-vision&security=reality&sni=...&fp=chrome&pbk=...&sid=...&type=tcp`
+        // (caught by Pavel's methodology check on db3998c — comparison
+        // against the actual bash script showed mine was missing
+        // `encryption=none` AND used a different param order, both
+        // breaking the "Migration from bash — seamless preservation"
+        // requirement in CLAUDE.md). The seven query params are pinned
+        // verbatim in `vless_happy_path_byte_equal`.
         Ok(format!(
-            "vless://{uuid}@{addr}:443?type=tcp&security=reality&pbk={pbk}&sid={sid}&sni={sni}&fp=chrome&flow=xtls-rprx-vision#{name}",
+            "vless://{uuid}@{addr}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp#{name}",
             uuid = user.uuid,
             addr = ctx.server.address,
             pbk = public_key,
