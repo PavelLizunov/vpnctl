@@ -12,6 +12,29 @@ Confirmed by Pavel 2026-05-14:
 - **Users are operator-managed, NOT self-service.** No "request access"
   flow, no user-facing portal. Notifications cover *infrastructure*
   events only (server down, sing-box crash-loop, fail2ban banned-self).
+- **Users are assumed maximally low-tech** (confirmed by Pavel
+  2026-05-16). One action ceiling — «ctrl+c is already too much»;
+  the realistic user can press exactly one button: scan QR / tap
+  share-link / import file. Therefore for EVERY protocol the operator
+  must be able to hand them a **single artefact** (one QR / one URL /
+  one `.conf`) that works on import without ANY further user action,
+  including filling in fields, choosing parameters, or generating
+  keys. This is the design north-star for all `share_link` and `/sub`
+  output:
+    * Symmetric-secret protocols (VLESS, TUIC, Hy2, Trojan, AnyTLS,
+      SS-2022): already trivially compliant — secret is server-side,
+      embedded into the link.
+    * WireGuard / AmneziaWG: the operator-provided `--wireguard-pubkey`
+      flow violates this — user must generate keys on-device first.
+      The default UX for WG must be `--gen-wireguard` (server generates
+      Curve25519 pair, stores BOTH halves, hands user a complete
+      ready-to-import config). Operator-provided pubkey stays as
+      opt-in for security-paranoid sub-cases (sole operator can pick
+      per user). Implication: the `users.wireguard_private` column is
+      a SECRET that lives in inv.db; backup encryption and access
+      control must reflect this.
+    * Any future protocol designed assuming user-side key generation
+      MUST add a server-generated default unless explicitly waived.
 - **Web is the primary surface; CLI stays as escape hatch / scripting.**
   Anything done via CLI must also be doable via the admin UI by v1.0.
 - **Add-server wizard is THE core differentiator over the bash project.**
