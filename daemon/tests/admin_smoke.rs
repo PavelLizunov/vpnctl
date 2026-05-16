@@ -3801,12 +3801,155 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         html.contains("Flow B — AmneziaVPN / WireGuard app"),
         "user-detail must teach the WG-native recipient flow"
     );
-    // No WG-native link yet (no granted server with wireguard enabled
-    // in this fixture). The empty-state copy MUST point at how to
-    // unlock the QR (grant a server with wireguard in enabled_protocols).
+    // No grants → Case A empty state ("grant a server"). Pinned
+    // so the no-grant message can't drift into the case-B/C wording.
     assert!(
-        html.contains("No WG-native link yet"),
-        "empty-state copy must walk the operator to the grant action"
+        html.contains("No servers granted to this user yet"),
+        "case A empty-state (no grants) copy missing"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Pavel's "main-brat" confusion: user HAS WG keys, granted to a server
+// that does NOT declare wireguard → empty-state must say so explicitly
+// rather than the misleading "grant a server with WG" wording.
+
+#[tokio::test]
+async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // Seed: a server that explicitly does NOT run wireguard (mimics
+    // vps-is-01 post-bash-import: vless+reality, tuic-v5, hysteria2
+    // only).
+    inv.add_server(&Server {
+        id: ServerId("nowg".into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernel: KernelId("sing-box".into()),
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("tuic-v5".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    // Create user via the auto-gen path → WG keypair populated.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=brat"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Grant to the non-WG server.
+    inv.grant(&UserId("brat".into()), &ServerId("nowg".into()))
+        .await
+        .unwrap();
+
+    let html = fetch_html(app, "/admin/users/brat").await;
+    // The misleading message MUST NOT appear (case A copy).
+    assert!(
+        !html.contains("No servers granted to this user yet"),
+        "case A wording leaked into case B — user IS granted but to a non-WG server"
+    );
+    // The actually-correct case-B explanation MUST be present.
+    assert!(
+        html.contains("Keys exist, but no granted server runs WireGuard"),
+        "case B headline missing — operator won't understand why no QR"
+    );
+    // The granted server's id must be name-dropped so the operator
+    // knows WHICH server needs the protocol added.
+    assert!(
+        html.contains("nowg"),
+        "case B body must name the actually-granted servers"
+    );
+    // No WG-capable server in inventory either → tail message points
+    // at the CLI workaround.
+    assert!(
+        html.contains("vpnctl server add"),
+        "case B must point at the CLI when inventory has zero WG-capable nodes"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // Two servers: one without WG (granted), one WITH WG (not granted).
+    // Case-B copy should point at the second as a suggestion.
+    inv.add_server(&Server {
+        id: ServerId("nowg".into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernel: KernelId("sing-box".into()),
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.add_server(&Server {
+        id: ServerId("wg-de-01".into()),
+        address: "198.51.100.5".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernel: KernelId("amneziawg".into()),
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=brat"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    inv.grant(&UserId("brat".into()), &ServerId("nowg".into()))
+        .await
+        .unwrap();
+
+    let html = fetch_html(app, "/admin/users/brat").await;
+    assert!(
+        html.contains("WG-capable servers in the inventory you could grant"),
+        "suggestion line missing"
+    );
+    assert!(
+        html.contains("wg-de-01"),
+        "the WG-capable server id must be name-dropped: {html:.300}"
     );
 }
 

@@ -1174,6 +1174,33 @@ pub(crate) async fn user_detail(
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
 
+    // WireGuard "Flow B" diagnostics — without these the empty-state
+    // copy can't tell the operator WHY no WG link rendered. Three
+    // distinct cases, each with a different action:
+    //   * No grants at all → "grant a server with WG"
+    //   * Grants exist, none declares wireguard → name them, say
+    //     "enable wireguard in <server>.enabled_protocols OR grant
+    //      a different server that runs WG"
+    //   * Some granted server DOES declare WG but share_link failed
+    //     → fall through to the existing "missing secret / unregistered
+    //       protocol" guidance with a journalctl pointer.
+    // Servers granted to this user whose enabled_protocols list
+    // contains "wireguard". Used by the empty-state classifier.
+    let wg_capable_granted: Vec<&vpnctl_core::ServerId> = servers
+        .iter()
+        .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wireguard"))
+        .map(|s| &s.id)
+        .collect();
+    // Servers in the WHOLE inventory (not just granted) that DO
+    // declare wireguard — useful as a name-drop when no granted
+    // server runs WG. Cheap O(servers * protocols) scan; servers
+    // list is already loaded.
+    let wg_capable_inventory: Vec<&vpnctl_core::ServerId> = all_servers
+        .iter()
+        .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wireguard"))
+        .map(|s| &s.id)
+        .collect();
+
     // Phase Track-1 abuse-detection signal: how many distinct IPs hit
     // this user's /sub URL in the last 24h / 7d, plus the recent
     // access rows themselves. Failures here log a warn but DON'T block
@@ -1331,12 +1358,80 @@ pub(crate) async fn user_detail(
                                 .filter(|(_, pid, _)| pid.0 == "wireguard")
                                 .collect();
                             @if wg_links.is_empty() {
-                                p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                    "No WG-native link yet — grant the user a server whose "
-                                    span.ed-mono { "enabled_protocols" }
-                                    " includes "
-                                    span.ed-mono { "wireguard" }
-                                    " (AmneziaWG kernel). Each granted server appears here as a separate QR + link."
+                                // Three-way classifier so the operator's
+                                // next action is unambiguous.
+                                @if servers.is_empty() {
+                                    // Case A — user has zero grants.
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "No servers granted to this user yet. Grant a server in the "
+                                        b { "Server access" }
+                                        " section below — if it runs WireGuard, the QR appears here."
+                                    }
+                                } @else if wg_capable_granted.is_empty() {
+                                    // Case B — granted servers exist but
+                                    // NONE declare wireguard. Most
+                                    // common case for bash-imported
+                                    // users (vps-is-01 et al. run
+                                    // VLESS/TUIC/Hy2, not WG).
+                                    p style="font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink); margin: 0 0 8px;" {
+                                        b { "Keys exist, but no granted server runs WireGuard." }
+                                        " The user has a WG keypair (see pubkey above), so the moment a WG-capable server is granted — or "
+                                        span.ed-mono { "wireguard" }
+                                        " is added to an existing server's "
+                                        span.ed-mono { "enabled_protocols" }
+                                        " — the QR will appear here."
+                                    }
+                                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 6px;" {
+                                        "Currently granted: "
+                                        @for (i, s) in servers.iter().enumerate() {
+                                            @if i > 0 { ", " }
+                                            span.ed-mono { (s.id.0) }
+                                        }
+                                        " — none have "
+                                        span.ed-mono { "wireguard" }
+                                        " in their protocol list."
+                                    }
+                                    @if !wg_capable_inventory.is_empty() {
+                                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                                            "WG-capable servers in the inventory you could grant: "
+                                            @for (i, sid) in wg_capable_inventory.iter().enumerate() {
+                                                @if i > 0 { ", " }
+                                                span.ed-mono { (sid.0) }
+                                            }
+                                            "."
+                                        }
+                                    } @else {
+                                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                                            "No WG-capable server in the entire inventory. The "
+                                            span.ed-mono { "amneziawg" }
+                                            " kernel + "
+                                            span.ed-mono { "wireguard" }
+                                            " protocol need to be enabled on a node first (CLI: "
+                                            span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
+                                            ")."
+                                        }
+                                    }
+                                } @else {
+                                    // Case C — at least one granted
+                                    // server DOES declare wireguard but
+                                    // share_link failed (most likely:
+                                    // missing wireguard.server_public_key
+                                    // secret). Existing journalctl
+                                    // pointer remains the right action.
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "Granted servers "
+                                        @for (i, sid) in wg_capable_granted.iter().enumerate() {
+                                            @if i > 0 { ", " }
+                                            span.ed-mono { (sid.0) }
+                                        }
+                                        " declare wireguard but the share-link render failed. Likely missing "
+                                        span.ed-mono { "wireguard.server_public_key" }
+                                        " / "
+                                        span.ed-mono { "wireguard.server_private_key" }
+                                        " server secret — check "
+                                        span.ed-mono { "journalctl -u vpnctld" }
+                                        "."
+                                    }
                                 }
                             } @else {
                                 @for (sid, _pid, link) in &wg_links {
