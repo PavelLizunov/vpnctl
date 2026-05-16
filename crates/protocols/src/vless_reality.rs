@@ -57,8 +57,8 @@ impl Protocol for VlessReality {
         // either gets a 400-style handshake reject ("flow not match") or
         // falls back to plain TLS proxying, defeating the REALITY
         // anti-DPI cover. Pinned to a string so a typo here surfaces in
-        // `vlr_server_inbound_pins_xtls_vision_flow` — caught during
-        // vps-is-01 import (the bash-vpn-control deploys all set
+        // `vless_server_inbound_user_carries_xtls_vision_flow` — caught
+        // during vps-is-01 import (the bash-vpn-control deploys all set
         // `xtls-rprx-vision` and migrated clients would handshake-fail
         // without it).
         let users_json: Vec<_> = users

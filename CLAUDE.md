@@ -117,8 +117,53 @@ contradicts a confirmed answer above.
 
 - **Чисто docs/README/CLAUDE.md правки** — пункты 1-2 пропускаем,
   пункт 3 (`just ci`) обязателен (fmt-check всё равно).
-- **Hotfix < 5 строк** — review-agent можно пропустить, test-writer —
-  по контексту.
+- **Hotfix** — review-agent можно пропустить ТОЛЬКО если ВСЕ ТРИ
+  условия выполнены одновременно:
+  1. impl ≤ 5 строк,
+  2. изменение трогает РОВНО ОДИН surface (не 3 sympathy edit'а как
+     в db3998c: server_inbound + client_config + share_link),
+  3. изменение НЕ меняет ни один output, который запинен
+     byte-equality тестом (`*_byte_equal*`).
+
+  Уточнено 2026-05-16 после methodology check session: db3998c
+  формально проходил по строке 1, но завалил 2 и 3, и review-agent
+  retroactively нашёл 4 important findings (3064903).
+
+### gh run watch — НЕ optional (правило #4 выше)
+
+После каждого `git push` обязателен `gh run watch <id> --exit-status`
+ЛИБО до конца текущего conversation turn, ЛИБО при batch-серии —
+для head-коммита. Если CI красное → `gh run view --log-failed` →
+fix → push. Пропуск `watch` ≠ методология; красные CI просто
+сидят незамеченными.
+
+Caught 2026-05-16: `4d7ad63` flake-fail просидел ~50 минут без
+обнаружения, пока Pavel не попросил «проверь методологию» —
+тогда `gh run list` показал red и я пофиксил в `7040a0c`.
+
+### Protocol / Kernel / handler fix → vpnctld redeploy обязателен
+
+Изменение в `crates/protocols/`, `crates/kernels/`, или
+`daemon/src/handlers/` меняет поведение **только** после redeploy
+бинаря на 192.168.0.236. Локальный `cargo test` пройдёт зелёно,
+CI пройдёт зелёно, но `/sub/<token>` (и любой live endpoint) будет
+продолжать отдавать **старые** байты пока vpnctld не пересобран и
+рестартован. Делать в той же сессии:
+
+```bash
+cargo build --release -p vpnctld
+scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
+ssh user@192.168.0.236 'sudo install -o root -g root -m 0755 \
+  /tmp/vpnctld /opt/vpnctl/vpnctld && rm /tmp/vpnctld && \
+  sudo systemctl restart vpnctld'
+# Verify the new behaviour with a curl that exercises the changed code path.
+```
+
+Caught 2026-05-16: db3998c пофиксил VLESS flow в коде, но
+`/sub/<token>` на 236 ещё ~25 минут возвращал outbound без flow,
+потому что бинарь был от 11:28 UTC (до фикса). После redeploy
+`/sub/<tester-token>` сразу начал возвращать `flow: 'xtls-rprx-vision'`
+— fix landed end-to-end.
 
 ## Agent prompt templates
 
