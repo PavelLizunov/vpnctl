@@ -13,7 +13,7 @@ fn srv() -> Server {
         address: "203.0.113.7".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: vec![ProtocolId("trojan".into())],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),

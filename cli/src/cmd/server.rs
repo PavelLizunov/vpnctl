@@ -91,7 +91,10 @@ pub(crate) async fn run(
                 address,
                 ssh_port,
                 ssh_user,
-                kernel: KernelId(kernel),
+                // `server add` keeps the single `--kernel` flag for
+                // backward compat; multi-kernel additions go through
+                // `vpnctl server kernel-add` (queued) or the admin UI.
+                kernels: vec![KernelId(kernel)],
                 enabled_protocols: protocols.into_iter().map(ProtocolId).collect(),
                 trusted_host_fingerprint: trusted_fingerprint,
                 hoster,
@@ -108,7 +111,7 @@ pub(crate) async fn run(
                 "address": server.address,
                 "ssh_port": server.ssh_port,
                 "ssh_user": server.ssh_user,
-                "kernel": server.kernel.0,
+                "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
                 "hoster": server.hoster,
                 "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
             });
@@ -132,7 +135,11 @@ pub(crate) async fn run(
                         s.id.0.clone(),
                         s.address.clone(),
                         s.ssh_port.to_string(),
-                        s.kernel.0.clone(),
+                        s.kernels
+                            .iter()
+                            .map(|k| k.0.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
                         s.hoster.clone(),
                         s.enabled_protocols
                             .iter()
@@ -168,7 +175,15 @@ pub(crate) async fn run(
                 println!("id            : {}", server.id.0);
                 println!("address       : {}:{}", server.address, server.ssh_port);
                 println!("ssh_user      : {}", server.ssh_user);
-                println!("kernel        : {}", server.kernel.0);
+                println!(
+                    "kernels       : {}",
+                    server
+                        .kernels
+                        .iter()
+                        .map(|k| k.0.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 println!("hoster        : {}", server.hoster);
                 println!(
                     "protocols     : {}",

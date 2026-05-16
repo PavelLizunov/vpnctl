@@ -224,14 +224,13 @@ impl SqliteInventory {
     pub async fn add_server(&self, s: &Server) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query(
-            "INSERT INTO servers (id, address, ssh_port, ssh_user, kernel, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO servers (id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&s.id.0)
         .bind(&s.address)
         .bind(i64::from(s.ssh_port))
         .bind(&s.ssh_user)
-        .bind(&s.kernel.0)
         .bind(&s.hoster)
         .bind(s.jump_via.as_ref().map(|v| v.0.clone()))
         .bind(&s.trusted_host_fingerprint)
@@ -239,6 +238,14 @@ impl SqliteInventory {
         .execute(&mut *tx)
         .await;
         map_unique(res, format!("server {}", s.id.0))?;
+
+        for kid in &s.kernels {
+            sqlx::query("INSERT INTO server_kernels (server_id, kernel_id) VALUES (?1, ?2)")
+                .bind(&s.id.0)
+                .bind(&kid.0)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         for proto in &s.enabled_protocols {
             sqlx::query("INSERT INTO server_protocols (server_id, protocol_id) VALUES (?1, ?2)")
@@ -254,7 +261,7 @@ impl SqliteInventory {
 
     pub async fn get_server(&self, id: &ServerId) -> Result<Option<Server>> {
         let row_opt = sqlx::query(
-            "SELECT id, address, ssh_port, ssh_user, kernel, hoster, jump_via, trusted_host_fingerprint, usage_coefficient
+            "SELECT id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient
              FROM servers WHERE id = ?1",
         )
         .bind(&id.0)
@@ -267,13 +274,16 @@ impl SqliteInventory {
         let protocols = self
             .list_server_protocols(&ServerId(server_id.clone()))
             .await?;
+        let kernels = self
+            .list_server_kernels(&ServerId(server_id.clone()))
+            .await?;
         let s = Server {
             id: ServerId(server_id),
             address: row.try_get("address")?,
             ssh_port: u16::try_from(row.try_get::<i64, _>("ssh_port")?)
                 .map_err(|_| SqliteInventoryError::Invalid("ssh_port out of u16 range".into()))?,
             ssh_user: row.try_get("ssh_user")?,
-            kernel: KernelId(row.try_get("kernel")?),
+            kernels,
             enabled_protocols: protocols,
             trusted_host_fingerprint: row.try_get("trusted_host_fingerprint")?,
             hoster: row.try_get("hoster")?,
@@ -328,6 +338,50 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// All kernels this server runs, sorted alphabetically for stable
+    /// rendering. Empty Vec is legal in the DB but `validate_server`
+    /// rejects it before deploy — see `Registry::validate_server`.
+    pub async fn list_server_kernels(&self, id: &ServerId) -> Result<Vec<KernelId>> {
+        let rows = sqlx::query(
+            "SELECT kernel_id FROM server_kernels WHERE server_id = ?1 ORDER BY kernel_id",
+        )
+        .bind(&id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kernel_id").map(KernelId))
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Add a single kernel to a server's runtime set. Idempotent (`ON
+    /// CONFLICT DO NOTHING`). Mirrors `add_server_protocol`.
+    /// FK constraint on `server_id` surfaces as `Invalid` for unknown
+    /// server; kernel id is opaque to the DB (registry validation
+    /// happens at deploy time).
+    pub async fn add_server_kernel(&self, server: &ServerId, kernel: &KernelId) -> Result<u64> {
+        let res = sqlx::query(
+            "INSERT INTO server_kernels (server_id, kernel_id) VALUES (?1, ?2)
+             ON CONFLICT(server_id, kernel_id) DO NOTHING",
+        )
+        .bind(&server.0)
+        .bind(&kernel.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Remove a kernel from a server. Idempotent. Mirrors
+    /// `remove_server_protocol`.
+    pub async fn remove_server_kernel(&self, server: &ServerId, kernel: &KernelId) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM server_kernels WHERE server_id = ?1 AND kernel_id = ?2")
+            .bind(&server.0)
+            .bind(&kernel.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
     }
 
     /// Add a single protocol to a server's `enabled_protocols`.
@@ -1568,7 +1622,7 @@ mod tests {
             address: "1.2.3.4".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![
                 ProtocolId("vless+reality".into()),
                 ProtocolId("tuic-v5".into()),

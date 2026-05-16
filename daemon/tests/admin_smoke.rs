@@ -512,7 +512,7 @@ async fn seed(
             address: format!("10.0.0.{i}"),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![ProtocolId("vless+reality".into())],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
@@ -3573,7 +3573,7 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
             address: "10.0.0.99".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![
                 ProtocolId("vless+reality".into()),
                 ProtocolId("tuic-v5".into()),
@@ -3849,7 +3849,7 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
         address: "203.0.113.7".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: vec![
             ProtocolId("vless+reality".into()),
             ProtocolId("tuic-v5".into()),
@@ -3921,7 +3921,7 @@ async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
         address: "203.0.113.7".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: vec![ProtocolId("vless+reality".into())],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),
@@ -3935,7 +3935,7 @@ async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
         address: "198.51.100.5".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("amneziawg".into()),
+        kernels: vec![KernelId("amneziawg".into())],
         enabled_protocols: vec![ProtocolId("wireguard".into())],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),
@@ -4049,7 +4049,7 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
             address: "203.0.113.7".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![ProtocolId("vless+reality".into())],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
@@ -4113,7 +4113,7 @@ async fn admin_server_enable_protocol_persists_and_audits() {
             address: "198.51.100.5".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("amneziawg".into()),
+            kernels: vec![KernelId("amneziawg".into())],
             enabled_protocols: vec![], // start empty
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
@@ -4173,7 +4173,7 @@ async fn admin_server_enable_protocol_rejects_unregistered_protocol_id() {
             address: "203.0.113.7".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
@@ -4214,7 +4214,7 @@ async fn admin_server_disable_protocol_removes_row_and_audits() {
             address: "203.0.113.7".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![
                 ProtocolId("vless+reality".into()),
                 ProtocolId("tuic-v5".into()),
@@ -4256,5 +4256,194 @@ async fn admin_server_disable_protocol_removes_row_and_audits() {
             .enabled_protocols
             .contains(&ProtocolId("vless+reality".into())),
         "other protocols must stay untouched"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Multi-kernel server (Pavel: «а что на 1 сервере не может быть 2 ядра?»).
+// Server.kernels is now Vec<KernelId>; server detail gains a Kernels
+// section with enable/disable mirroring the Protocols section.
+
+#[tokio::test]
+async fn admin_server_detail_kernels_section_shows_every_registered_kernel() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb-only".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/sb-only").await;
+    assert!(html.contains("Kernels"), "Kernels heading missing");
+    // sing-box is registered AND enabled → disable form
+    assert!(
+        html.contains("/admin/servers/sb-only/kernels/sing-box/disable"),
+        "enabled kernel must have disable form"
+    );
+    // amneziawg is registered but NOT enabled → enable form
+    assert!(
+        html.contains("/admin/servers/sb-only/kernels/amneziawg/enable"),
+        "disabled kernel must have enable form"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_enable_kernel_persists_and_audits() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hybrid".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/hybrid/kernels/amneziawg/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let server = inv
+        .get_server(&ServerId("hybrid".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let kids: Vec<&str> = server.kernels.iter().map(|k| k.0.as_str()).collect();
+    assert!(
+        kids.contains(&"sing-box") && kids.contains(&"amneziawg"),
+        "hybrid server must run both kernels post-enable, got: {kids:?}"
+    );
+    let audit = inv.recent_audit(5).await.unwrap();
+    assert!(
+        audit.iter().any(|a| a.action == "server.kernel.enable"),
+        "audit row for kernel enable missing"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_enable_kernel_rejects_unregistered_id() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/sb/kernels/totally-fake/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("unknown kernel"));
+}
+
+#[tokio::test]
+async fn admin_multi_kernel_server_enables_wireguard_protocol() {
+    // The end-to-end scenario Pavel raised: add amneziawg kernel
+    // to a sing-box node → wireguard protocol becomes enable-able
+    // (not "incompatible") on the same server.
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("dual".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into()), KernelId("amneziawg".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/servers/dual").await;
+    // wireguard MUST now show an enable form (previously was
+    // "incompatible" under the sing-box-only kernel).
+    assert!(
+        html.contains("/admin/servers/dual/protocols/wireguard/enable"),
+        "wireguard must be enable-able once amneziawg kernel is on the server"
+    );
+    // Validate end-to-end: actually enable wireguard, then assert
+    // it lands in the row.
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/dual/protocols/wireguard/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let server = inv
+        .get_server(&ServerId("dual".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        server.enabled_protocols.iter().any(|p| p.0 == "wireguard"),
+        "wireguard should be in enabled_protocols after enable"
     );
 }

@@ -362,6 +362,17 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/protocols/{proto}/disable",
             post(admin::server_disable_protocol),
         )
+        // Multi-kernel: same enable/disable shape for kernels.
+        // Adding amneziawg to a sing-box node = first step before
+        // enabling wireguard protocol.
+        .route(
+            "/admin/servers/{id}/kernels/{kernel}/enable",
+            post(admin::server_enable_kernel),
+        )
+        .route(
+            "/admin/servers/{id}/kernels/{kernel}/disable",
+            post(admin::server_disable_kernel),
+        )
         // Phase E sub-iter 4a: add-server wizard step 1.
         // GET renders the form (IP + root password); POST validates,
         // stashes to a server-side session keyed by HttpOnly cookie,

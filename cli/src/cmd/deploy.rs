@@ -41,9 +41,22 @@ pub(crate) async fn run(
     let registry = crate::registry::build()?;
     registry.validate_server(&server)?;
 
-    let kernel = registry
-        .kernel(&server.kernel)
-        .ok_or_else(|| anyhow::anyhow!("kernel not registered: {}", server.kernel))?;
+    // Multi-kernel: resolve every declared kernel up front. validate_server
+    // already verified each is registered + each protocol has at least one
+    // kernel that supports it; the unwrap-ish lookup below is now just
+    // construction of the dispatch loop.
+    if server.kernels.is_empty() {
+        anyhow::bail!("server '{}' has no kernels declared", server.id);
+    }
+    let kernels: Vec<&dyn vpnctl_core::Kernel> = server
+        .kernels
+        .iter()
+        .map(|kid| {
+            registry
+                .kernel(kid)
+                .ok_or_else(|| anyhow::anyhow!("kernel not registered: {kid}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
 
     // ─── 1. SSH ──────────────────────────────────────────────────────────
     let key_path = resolve_key_path(ssh_key)?;
@@ -70,9 +83,11 @@ pub(crate) async fn run(
         }
     }
 
-    // ─── 2. Install kernel if needed ─────────────────────────────────────
-    println!("→ ensuring kernel '{}' is installed", kernel.id());
-    kernel.ensure_installed(&ssh).await?;
+    // ─── 2. Install every declared kernel if needed ──────────────────────
+    for k in &kernels {
+        println!("→ ensuring kernel '{}' is installed", k.id());
+        k.ensure_installed(&ssh).await?;
+    }
 
     // ─── 3. Bootstrap missing secrets ────────────────────────────────────
     let mut secrets = inv.list_server_secrets(&sid).await?;
@@ -133,30 +148,53 @@ pub(crate) async fn run(
         }
     }
 
-    // ─── 4. Resolve protocols and users ──────────────────────────────────
-    let mut protocols: Vec<&dyn Protocol> = Vec::with_capacity(server.enabled_protocols.len());
-    for pid in &server.enabled_protocols {
-        let p = registry
-            .protocol(pid)
-            .ok_or_else(|| anyhow::anyhow!("protocol not registered: {pid}"))?;
-        protocols.push(p);
-    }
+    // ─── 4. Resolve users + per-kernel protocol partition ────────────────
     let users = inv.users_for_server(&sid).await?;
-    println!(
-        "→ rendering config ({} users × {} protocols)",
-        users.len(),
-        protocols.len()
-    );
-
-    // ─── 5. Render + apply ───────────────────────────────────────────────
     let ctx = RenderCtx::new(&server, &secrets);
-    let config = kernel.render_config(&ctx, &users, &protocols)?;
-    println!(
-        "→ uploading and restarting {} ({} bytes)",
-        kernel.id(),
-        config.len()
-    );
-    kernel.apply_config(&ssh, &config).await?;
+
+    // ─── 5. Render + apply, one kernel at a time ─────────────────────────
+    // Each kernel renders ONLY the protocols it supports. A protocol
+    // landing on multiple kernels (currently impossible — no overlap
+    // in registered supported_protocols, but trait allows it) would
+    // be rendered twice, once per kernel; sing-box/amneziawg topology
+    // makes this a non-issue today.
+    let mut total_config_bytes = 0usize;
+    let mut rendered_kernels: Vec<String> = Vec::new();
+    for k in &kernels {
+        let supported = k.supported_protocols();
+        let protocols_for_k: Vec<&dyn Protocol> = server
+            .enabled_protocols
+            .iter()
+            .filter(|pid| supported.contains(pid))
+            .map(|pid| {
+                registry
+                    .protocol(pid)
+                    .ok_or_else(|| anyhow::anyhow!("protocol not registered: {pid}"))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        if protocols_for_k.is_empty() {
+            println!(
+                "→ skipping {} (no enabled_protocols this kernel can render)",
+                k.id()
+            );
+            continue;
+        }
+        println!(
+            "→ rendering config for {} ({} users × {} protocols)",
+            k.id(),
+            users.len(),
+            protocols_for_k.len()
+        );
+        let config = k.render_config(&ctx, &users, &protocols_for_k)?;
+        println!(
+            "→ uploading and restarting {} ({} bytes)",
+            k.id(),
+            config.len()
+        );
+        k.apply_config(&ssh, &config).await?;
+        total_config_bytes += config.len();
+        rendered_kernels.push(k.id().0);
+    }
 
     // ─── 6. Audit ────────────────────────────────────────────────────────
     inv.audit(
@@ -166,7 +204,8 @@ pub(crate) async fn run(
         Some(&json!({
             "users": users.len(),
             "protocols": server.enabled_protocols.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
-            "config_bytes": config.len(),
+            "kernels_rendered": rendered_kernels,
+            "config_bytes_total": total_config_bytes,
         })),
     )
     .await?;

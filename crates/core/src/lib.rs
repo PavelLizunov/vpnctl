@@ -78,7 +78,15 @@ pub struct Server {
     pub address: String,
     pub ssh_port: u16,
     pub ssh_user: String,
-    pub kernel: KernelId,
+    /// Какие ядра крутятся на этом сервере. Чаще всего один (исторически
+    /// поле было `kernel: KernelId`), но один физический VPS может
+    /// одновременно держать несколько демонов на разных портах
+    /// (sing-box на 443/TCP + amneziawg на 51820/UDP). Каждое ядро
+    /// independent: own systemd unit, own config file, own `ensure_installed`
+    /// / `apply_config` cycle. Deploy итерирует `kernels` и запускает
+    /// каждое с теми `enabled_protocols` которые это ядро supports.
+    /// Renamed 2026-05-16 from singular `kernel`.
+    pub kernels: Vec<KernelId>,
     /// Какие протоколы мы хотим поднять на этом сервере.
     pub enabled_protocols: Vec<ProtocolId>,
     /// SHA256-fingerprint SSH host key, который мы доверяем.
@@ -431,14 +439,34 @@ impl Registry {
     }
 
     pub fn validate_server(&self, server: &Server) -> Result<()> {
-        let kernel = self
-            .kernel(&server.kernel)
-            .ok_or_else(|| CoreError::Render(format!("unknown kernel {}", server.kernel)))?;
-        let supported = kernel.supported_protocols();
+        if server.kernels.is_empty() {
+            return Err(CoreError::Render(format!(
+                "server '{}' has no kernels assigned — assign at least one (sing-box, amneziawg, …)",
+                server.id
+            )));
+        }
+        // Resolve every declared kernel id. Unknown kernel = config error.
+        let mut resolved = Vec::with_capacity(server.kernels.len());
+        for kid in &server.kernels {
+            let k = self
+                .kernel(kid)
+                .ok_or_else(|| CoreError::Render(format!("unknown kernel {kid}")))?;
+            resolved.push((kid.clone(), k.supported_protocols()));
+        }
+        // Each declared protocol must be supported by AT LEAST ONE of the
+        // server's kernels. Weaker than single-kernel "kernel must support
+        // every protocol" — that one becomes physically impossible for
+        // mixed deployments (sing-box does VLESS, amneziawg does WG;
+        // neither supports the other). The new rule: every protocol has
+        // SOMEONE to render it.
         for proto in &server.enabled_protocols {
-            if !supported.contains(proto) {
+            if !resolved.iter().any(|(_, sup)| sup.contains(proto)) {
                 return Err(CoreError::UnsupportedProtocol {
-                    kernel: server.kernel.clone(),
+                    // Attribute the error to the first kernel as the
+                    // canonical "I'm the one who can't run this"
+                    // displayed in the message. For exhaustive
+                    // diagnostics the caller can re-walk `server.kernels`.
+                    kernel: server.kernels[0].clone(),
                     protocol: proto.clone(),
                 });
             }

@@ -26,7 +26,7 @@ fn srv(id: &str) -> Server {
         address: "1.1.1.1".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: vec![],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),

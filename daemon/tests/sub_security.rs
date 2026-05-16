@@ -109,7 +109,7 @@ fn mk_server(id: &str, addr: &str, fp: Option<&str>, protos: &[&str]) -> Server 
         address: addr.into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: protos.iter().map(|p| ProtocolId((*p).into())).collect(),
         trusted_host_fingerprint: fp.map(String::from),
         hoster: "generic".into(),

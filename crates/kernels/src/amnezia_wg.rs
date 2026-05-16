@@ -323,7 +323,7 @@ mod tests {
             address: "203.0.113.7".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("amneziawg".into()),
+            kernels: vec![KernelId("amneziawg".into())],
             enabled_protocols: vec![ProtocolId("wireguard".into())],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),

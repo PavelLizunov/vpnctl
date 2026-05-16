@@ -22,7 +22,7 @@ fn srv() -> Server {
         address: "203.0.113.7".to_string(),
         ssh_port: 22,
         ssh_user: "root".to_string(),
-        kernel: KernelId("sing-box".to_string()),
+        kernels: vec![KernelId("sing-box".to_string())],
         enabled_protocols: vec![],
         trusted_host_fingerprint: None,
         hoster: "generic".to_string(),

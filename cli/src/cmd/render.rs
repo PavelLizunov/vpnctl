@@ -40,33 +40,50 @@ pub(crate) async fn run(server: &str, db_flag: Option<PathBuf>) -> anyhow::Resul
         .await?
         .ok_or_else(|| anyhow::anyhow!("server not in inventory: {server}"))?;
 
-    let kernel = reg
-        .kernel(&server_row.kernel)
-        .ok_or_else(|| anyhow::anyhow!("kernel not registered: {}", server_row.kernel))?;
     // Same protocol-vs-kernel validation `deploy` does pre-SSH — fail
     // here too so operators don't get a surprise from `sing-box check`
     // on the rendered output.
     reg.validate_server(&server_row)?;
 
-    let mut protocols: Vec<&dyn Protocol> = Vec::with_capacity(server_row.enabled_protocols.len());
-    for pid in &server_row.enabled_protocols {
-        let p = reg
-            .protocol(pid)
-            .ok_or_else(|| anyhow::anyhow!("protocol not registered: {pid}"))?;
-        protocols.push(p);
-    }
     let users = inv.users_for_server(&sid).await?;
     let secrets = inv.list_server_secrets(&sid).await?;
     let ctx = RenderCtx::new(&server_row, &secrets);
-    let bytes = kernel.render_config(&ctx, &users, &protocols)?;
-    // Stdout, write-all to avoid Unicode-boundary truncation if the
-    // output has non-ASCII (AmneziaWG header uses an em-dash).
+
+    // Multi-kernel: render each declared kernel's config separately,
+    // delimited by a kernel-id header line so the operator can tell
+    // them apart when piping through `less`. Single-kernel servers
+    // (the historic 1:1 case) get a single block with the same header
+    // — keeps the output shape uniform.
     use std::io::Write;
-    std::io::stdout().write_all(&bytes)?;
-    // Trailing newline only if the kernel didn't include one — keep
-    // consumers like `wc -l` and pipe-into-jq happy.
-    if !bytes.ends_with(b"\n") {
-        println!();
+    for kid in &server_row.kernels {
+        let kernel = reg
+            .kernel(kid)
+            .ok_or_else(|| anyhow::anyhow!("kernel not registered: {kid}"))?;
+        let supported = kernel.supported_protocols();
+        let protocols: Vec<&dyn Protocol> = server_row
+            .enabled_protocols
+            .iter()
+            .filter(|pid| supported.contains(pid))
+            .map(|pid| {
+                reg.protocol(pid)
+                    .ok_or_else(|| anyhow::anyhow!("protocol not registered: {pid}"))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        if protocols.is_empty() {
+            // Kernel declared but no protocols for it — still print a
+            // header so the operator notices the dead kernel.
+            writeln!(
+                std::io::stdout(),
+                "# === kernel: {kid} (no enabled_protocols this kernel can render — skipped) ==="
+            )?;
+            continue;
+        }
+        writeln!(std::io::stdout(), "# === kernel: {kid} ===")?;
+        let bytes = kernel.render_config(&ctx, &users, &protocols)?;
+        std::io::stdout().write_all(&bytes)?;
+        if !bytes.ends_with(b"\n") {
+            println!();
+        }
     }
     Ok(())
 }

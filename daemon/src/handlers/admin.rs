@@ -781,7 +781,9 @@ fn server_card(idx: usize, s: &vpnctl_core::Server, user_count: i64) -> Markup {
                 div.ed-server__addr {
                     (s.address) ":" (s.ssh_port)
                     " · " (s.ssh_user) "@"
-                    " · " span.ed-mono { (s.kernel.0) }
+                    " · " span.ed-mono {
+                        (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+                    }
                 }
                 p.ed-server__lede {
                     "Hoster " b { (s.hoster) }
@@ -1511,7 +1513,9 @@ pub(crate) async fn user_detail(
                     li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                         span style="flex: 1;" {
                             b { (s.id.0) }
-                            " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", " (s.kernel.0) ")"
+                            " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
+                            (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+                            ")"
                         }
                         @if granted_ids.contains(&s.id) {
                             span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
@@ -2178,6 +2182,133 @@ pub(crate) async fn server_disable_protocol(
             server = %server_id_str,
             error = %e,
             "audit write failed for server.protocol.disable"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/kernels/{kernel}/enable` — add a kernel
+/// to a server's runtime set. Mirrors `server_enable_protocol`.
+pub(crate) async fn server_enable_kernel(
+    State(state): State<AppState>,
+    Path((server_id_str, kernel_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let kid = vpnctl_core::KernelId(kernel_id_str.clone());
+
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    // Reject unregistered kernel id — same posture as
+    // server_enable_protocol: persisting a typo would silently no-op
+    // every deploy.
+    if state.registry.kernel(&kid).is_none() {
+        let known: Vec<String> = state
+            .registry
+            .kernel_ids()
+            .into_iter()
+            .map(|k| k.0)
+            .collect();
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "unknown kernel '{kernel_id_str}' — registered: {}",
+                known.join(", ")
+            )),
+        )
+            .into_response();
+    }
+
+    let inserted = match state.inv.add_server_kernel(&sid, &kid).await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.kernel.enable",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "kernel": kernel_id_str,
+                "newly_added": inserted == 1,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.kernel.enable"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/kernels/{kernel}/disable` — remove a
+/// kernel. Mirrors `server_disable_protocol`.
+pub(crate) async fn server_disable_kernel(
+    State(state): State<AppState>,
+    Path((server_id_str, kernel_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let kid = vpnctl_core::KernelId(kernel_id_str.clone());
+
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let removed = match state.inv.remove_server_kernel(&sid, &kid).await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.kernel.disable",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "kernel": kernel_id_str,
+                "was_present": removed == 1,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.kernel.disable"
         );
     }
 
@@ -3324,7 +3455,11 @@ pub(crate) async fn server_detail(
         p.ed-art-deck {
             span.ed-mono { (server.address) ":" (server.ssh_port) }
             " · ssh as " span.ed-mono { (server.ssh_user) }
-            " · kernel " span.ed-mono { (server.kernel.0) }
+            " · "
+            @if server.kernels.len() == 1 { "kernel " } @else { "kernels " }
+            span.ed-mono {
+                (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            }
             " · hoster " b { (server.hoster) }
         }
 
@@ -3333,6 +3468,13 @@ pub(crate) async fn server_detail(
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some()))
+
+        // Kernels — multi-kernel runtime selection. Mirrors the
+        // Protocols section right below; same enable/disable shape.
+        // Adding wireguard support to a node that today runs only
+        // sing-box now means: enable amneziawg kernel here →
+        // enable wireguard protocol below → `vpnctl deploy`.
+        (server_detail_kernels_section(&server, &state.registry))
 
         // Enabled protocols — checkbox list of every registered protocol
         // with current enable state. Toggle posts back to this same
@@ -3463,6 +3605,81 @@ fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
 
 /// Drift section — what does inventory THINK is listening vs what
 /// IS listening. Orange highlights when sets disagree.
+/// Kernels editor — one row per kernel registered in the registry,
+/// with enable/disable form. Mirrors the protocols section directly
+/// below it. Per CLAUDE.md architectural principle (Kernel ×
+/// Protocol orthogonality), adding a new kernel here is the first
+/// step before enabling protocols that only that kernel supports
+/// (e.g. amneziawg → then wireguard).
+fn server_detail_kernels_section(
+    server: &vpnctl_core::Server,
+    registry: &vpnctl_core::Registry,
+) -> Markup {
+    let enabled: std::collections::HashSet<&vpnctl_core::KernelId> =
+        server.kernels.iter().collect();
+    let all_kernels = registry.kernel_ids();
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Kernels" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Daemons running on this node. One physical VPS can host multiple "
+            "(sing-box on 443/TCP + amneziawg on 51820/UDP cohabit cleanly). "
+            "Each kernel installs/restarts independently; "
+            span.ed-mono { "vpnctl deploy " (server.id.0) }
+            " loops through every enabled kernel."
+        }
+        ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
+            @for kid in &all_kernels {
+                @let is_on = enabled.contains(kid);
+                @let supported = registry.kernel(kid)
+                    .map(|k| k.supported_protocols()
+                        .into_iter()
+                        .map(|p| p.0)
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default();
+                li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                    span style="flex: 1;" {
+                        (kid.0)
+                        " "
+                        span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
+                            "(runs: " (supported) ")"
+                        }
+                    }
+                    @if is_on {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
+                            "✓ on"
+                        }
+                        form method="post"
+                             action=(format!("/admin/servers/{}/kernels/{}/disable", sid_enc, path_segment_encode(&kid.0)))
+                             style="margin: 0; padding: 0;" {
+                            button type="submit"
+                                   title=(format!("Remove {} from {}.kernels. Takes effect on next deploy.", kid.0, server.id.0))
+                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "disable"
+                            }
+                        }
+                    } @else {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-right: 4px;" {
+                            "—"
+                        }
+                        form method="post"
+                             action=(format!("/admin/servers/{}/kernels/{}/enable", sid_enc, path_segment_encode(&kid.0)))
+                             style="margin: 0; padding: 0;" {
+                            button type="submit"
+                                   title=(format!("Add {} to {}.kernels. Takes effect on next deploy.", kid.0, server.id.0))
+                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                "enable"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Enabled-protocols editor — one row per protocol registered in the
 /// registry, each with a `[on|off]` form that toggles the (server,
 /// protocol) row in the inventory. Compatibility against the
@@ -3479,10 +3696,27 @@ fn server_detail_protocols_section(
     let enabled: std::collections::HashSet<&vpnctl_core::ProtocolId> =
         server.enabled_protocols.iter().collect();
     let all_protocols = registry.protocol_ids();
-    let kernel_supports: std::collections::HashSet<vpnctl_core::ProtocolId> = registry
-        .kernel(&server.kernel)
-        .map(|k| k.supported_protocols().into_iter().collect())
-        .unwrap_or_default();
+    // Multi-kernel: protocol is "compatible" if ANY of the server's
+    // declared kernels supports it. Annotation below tells the operator
+    // WHICH kernel handles it (resolves "wireguard runs on amneziawg,
+    // tuic on sing-box" disambiguation that matters once a node has
+    // multiple kernels).
+    let kernel_supports_map: Vec<(
+        vpnctl_core::KernelId,
+        std::collections::HashSet<vpnctl_core::ProtocolId>,
+    )> = server
+        .kernels
+        .iter()
+        .filter_map(|kid| {
+            registry
+                .kernel(kid)
+                .map(|k| (kid.clone(), k.supported_protocols().into_iter().collect()))
+        })
+        .collect();
+    let kernel_supports: std::collections::HashSet<vpnctl_core::ProtocolId> = kernel_supports_map
+        .iter()
+        .flat_map(|(_, sup)| sup.iter().cloned())
+        .collect();
     let sid_enc = path_segment_encode(&server.id.0);
     html! {
         div.ed-rule {}
@@ -3502,7 +3736,13 @@ fn server_detail_protocols_section(
                         @if !compatible {
                             " "
                             span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
-                                "(not supported by kernel " (server.kernel.0) ")"
+                                "(not supported by "
+                                @if server.kernels.len() == 1 { "kernel " (server.kernels[0].0) }
+                                @else {
+                                    "any kernel on this server: "
+                                    (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join(", "))
+                                }
+                                ")"
                             }
                         }
                     }

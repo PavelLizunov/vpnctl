@@ -34,7 +34,7 @@ async fn seed(dir: &TempDir) -> (AppState, String) {
         address: "10.0.0.1".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: KernelId("sing-box".into()),
+        kernels: vec![KernelId("sing-box".into())],
         enabled_protocols: vec![
             ProtocolId("vless+reality".into()),
             ProtocolId("tuic-v5".into()),
@@ -235,7 +235,7 @@ async fn sub_rate_limit_returns_429_after_burst() {
         address: "10.0.0.1".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: vpnctl_core::KernelId("sing-box".into()),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
         enabled_protocols: vec![
             vpnctl_core::ProtocolId("vless+reality".into()),
             vpnctl_core::ProtocolId("tuic-v5".into()),
@@ -364,7 +364,7 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         address: "10.0.0.1".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernel: vpnctl_core::KernelId("sing-box".into()),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
         enabled_protocols: vec![vpnctl_core::ProtocolId("vless+reality".into())],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),

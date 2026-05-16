@@ -171,7 +171,11 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         address: args.address.clone(),
         ssh_port: args.ssh_port,
         ssh_user: args.ssh_user.clone(),
-        kernel: KernelId(args.kernel.clone()),
+        // Bootstrap creates the server with the single kernel the
+        // operator chose; multi-kernel can be added later from the
+        // admin UI or `vpnctl server kernel-add`. Pre-multi-kernel
+        // this was `kernel: KernelId(...)`.
+        kernels: vec![KernelId(args.kernel.clone())],
         enabled_protocols: args.protocols.iter().cloned().map(ProtocolId).collect(),
         trusted_host_fingerprint: Some(observed_fp.clone()),
         hoster: args.hoster.clone(),

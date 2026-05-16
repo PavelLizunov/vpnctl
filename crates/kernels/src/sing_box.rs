@@ -230,7 +230,7 @@ mod tests {
             address: "10.0.0.1".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernel: KernelId("sing-box".into()),
+            kernels: vec![KernelId("sing-box".into())],
             enabled_protocols: vec![],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),

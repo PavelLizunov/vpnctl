@@ -26,7 +26,7 @@ fn server(id: &str) -> Server {
         address: format!("{id}.example.com"),
         ssh_port: 22,
         ssh_user: "root".to_string(),
-        kernel: KernelId("sing-box".to_string()),
+        kernels: vec![KernelId("sing-box".to_string())],
         enabled_protocols: vec![ProtocolId("vless+reality".to_string())],
         trusted_host_fingerprint: None,
         hoster: "generic".to_string(),
