@@ -989,24 +989,40 @@ pub(crate) async fn users(
         // Phase C-3.2 — add-user form. UUID + tuic_password + sub_token
         // are all mint-on-server; the operator only types the human-
         // readable id. Grants come later via the user-detail page (G).
+        // Phase H follow-up — optional `wireguard_pubkey` field so the
+        // operator can mint a WireGuard/AmneziaWG-ready user in one
+        // step. The PUBLIC key is supplied (operator generated it on
+        // the device); vpnctl never sees the private one.
         div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
             form method="post" action="/admin/users"
-                 style="display: flex; gap: 10px; align-items: baseline;" {
-                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "add user"
+                 style="display: flex; flex-direction: column; gap: 10px;" {
+                div style="display: flex; gap: 10px; align-items: baseline;" {
+                    label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                        "add user"
+                    }
+                    input type="text" name="id" required="required"
+                          placeholder="alice"
+                          pattern="[A-Za-z0-9._-]+"
+                          title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
+                          style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                    button type="submit"
+                           title="Mint UUID + tuic_password + sub_token, then redirect to the user-detail page"
+                           style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        "create"
+                    }
                 }
-                input type="text" name="id" required="required"
-                      placeholder="alice"
-                      pattern="[A-Za-z0-9._-]+"
-                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
-                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                button type="submit"
-                       title="Mint UUID + tuic_password + sub_token, then redirect to the user-detail page"
-                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "create"
-                }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    "id only — UUID, tuic password and sub-token are minted server-side"
+                div style="display: flex; gap: 10px; align-items: baseline;" {
+                    label for="wireguard_pubkey" style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                        "wg pubkey"
+                    }
+                    input type="text" id="wireguard_pubkey" name="wireguard_pubkey"
+                          placeholder="(optional, base64 44 chars ending '=')"
+                          pattern="[A-Za-z0-9+/]{43}="
+                          title="WireGuard PUBLIC key — 44 base64 chars ending '='. Leave blank if user won't use WG/AmneziaWG."
+                          style="flex: 1; max-width: 480px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink);";
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                        "private key stays on the device"
+                    }
                 }
             }
         }
@@ -1790,20 +1806,11 @@ fn valid_user_id(id: &str) -> bool {
 /// admin router (Origin must match Host). Audit row written on
 /// success only.
 pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> Response {
-    // Parse `id=<value>` from the form body. Same minimal parser as
-    // `set_tweak_cookie` — no need for a full form-decoder when there's
-    // exactly one field.
     let id_raw = body
         .split('&')
         .find_map(|kv| kv.strip_prefix("id="))
         .unwrap_or("")
         .trim();
-
-    // URL-decode the simplest cases (the form sends `+` for space and
-    // `%XX` escapes). For our valid id charset (ASCII unreserved) the
-    // browser shouldn't escape anything, so a malformed escape just
-    // means a bad id — `valid_user_id` rejects either way. Tiny
-    // hand-rolled decoder beats a new dep for this single field.
     let id_decoded = decode_form_value(id_raw);
 
     if !valid_user_id(&id_decoded) {
@@ -1815,6 +1822,37 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         )
             .into_response();
     }
+
+    // Optional `wireguard_pubkey` from the form. Empty → None.
+    // Shape-check: 44 base64 chars ending '=' (same contract as
+    // `vpnctl_protocols::wireguard::is_valid_wg_pubkey`). Reject
+    // at write time so a typo doesn't sit in inventory until a
+    // future `vpnctl deploy` tries to render WG/AmneziaWG config.
+    let wg_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("wireguard_pubkey="))
+        .unwrap_or("")
+        .trim();
+    let wg_decoded = decode_form_value(wg_raw);
+    let wg_pubkey: Option<String> = if wg_decoded.is_empty() {
+        None
+    } else {
+        let ok = wg_decoded.len() == 44
+            && wg_decoded.ends_with('=')
+            && wg_decoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+        if !ok {
+            return (
+                StatusCode::BAD_REQUEST,
+                error_text(&format!(
+                    "invalid wireguard_pubkey (must be 44 base64 chars ending '='): {wg_decoded:?}"
+                )),
+            )
+                .into_response();
+        }
+        Some(wg_decoded)
+    };
 
     // Mint the secrets. UUID is straightforward; tuic_password is 24
     // bytes of entropy, base64'd by `gen_password`. sub_token is left
@@ -1829,7 +1867,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         id: vpnctl_core::UserId(id_decoded.clone()),
         uuid: vpnctl_crypto::gen_uuid(),
         tuic_password: Some(tuic_password),
-        wireguard_pubkey: None,
+        wireguard_pubkey: wg_pubkey,
         sub_token: None,
     };
 
@@ -1854,7 +1892,10 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             "admin",
             "user.add",
             Some(&id_decoded),
-            Some(&serde_json::json!({ "uuid": user.uuid })),
+            Some(&serde_json::json!({
+                "uuid": user.uuid,
+                "wg_pubkey_set": user.wireguard_pubkey.is_some(),
+            })),
         )
         .await
     {

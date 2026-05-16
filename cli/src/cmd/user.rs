@@ -21,6 +21,12 @@ pub(crate) enum UserCmd {
         /// Use this TUIC password instead of generating one.
         #[arg(long)]
         tuic_password: Option<String>,
+        /// WireGuard PUBLIC key (44 base64 chars ending '='). The
+        /// matching PRIVATE key stays on the operator's client
+        /// device — vpnctl never sees it. Optional: omit if the
+        /// user won't use WireGuard / AmneziaWG protocols.
+        #[arg(long)]
+        wireguard_pubkey: Option<String>,
     },
 
     /// List all users.
@@ -58,12 +64,31 @@ pub(crate) async fn run(
             id,
             uuid,
             tuic_password,
+            wireguard_pubkey,
         } => {
+            // Validate shape if provided so an obvious typo doesn't
+            // sit in inventory until a `vpnctl deploy` tries to render
+            // a wg config and fails (much later, much harder to
+            // diagnose). 44 base64 chars ending '=' is the WG
+            // contract — same check as `vpnctl_protocols::wireguard`.
+            if let Some(ref pk) = wireguard_pubkey {
+                let ok = pk.len() == 44
+                    && pk.ends_with('=')
+                    && pk
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+                if !ok {
+                    anyhow::bail!(
+                        "--wireguard-pubkey must be 44 base64 chars ending '=' (got {} chars)",
+                        pk.len()
+                    );
+                }
+            }
             let user = User {
                 id: UserId(id.clone()),
                 uuid: uuid.unwrap_or_else(gen_uuid),
                 tuic_password: Some(tuic_password.unwrap_or(gen_password(TUIC_PASSWORD_BYTES)?)),
-                wireguard_pubkey: None,
+                wireguard_pubkey,
                 // None → inventory generates one. Don't pre-gen here so the
                 // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
@@ -73,14 +98,20 @@ pub(crate) async fn run(
                 "cli",
                 "user.add",
                 Some(&id),
-                Some(&json!({ "uuid": user.uuid })),
+                Some(&json!({
+                    "uuid": user.uuid,
+                    "wg_pubkey_set": user.wireguard_pubkey.is_some(),
+                })),
             )
             .await?;
             ui::print(format, &user, |u| {
                 println!("user '{id}' added");
-                println!("  uuid          : {}", u.uuid);
+                println!("  uuid             : {}", u.uuid);
                 if let Some(pw) = &u.tuic_password {
-                    println!("  tuic_password : {pw}");
+                    println!("  tuic_password    : {pw}");
+                }
+                if let Some(wpk) = &u.wireguard_pubkey {
+                    println!("  wireguard_pubkey : {wpk}");
                 }
                 Ok(())
             })

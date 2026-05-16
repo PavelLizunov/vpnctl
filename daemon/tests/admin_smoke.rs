@@ -3613,3 +3613,100 @@ async fn admin_servers_list_link_to_detail_page() {
         "server card headline must link to detail page"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// CLI/web `--wireguard-pubkey` plumbing (closes the AmneziaWG follow-up).
+
+#[tokio::test]
+async fn admin_user_create_with_wireguard_pubkey() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let body = "id=alice&wireguard_pubkey=qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks%3D";
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(body))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        u.wireguard_pubkey.as_deref(),
+        Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=")
+    );
+}
+
+#[tokio::test]
+async fn admin_user_create_without_wireguard_pubkey_keeps_none() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    // Empty wireguard_pubkey field → None (back-compat).
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=bob&wireguard_pubkey="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = inv.get_user(&UserId("bob".into())).await.unwrap().unwrap();
+    assert!(u.wireguard_pubkey.is_none());
+}
+
+#[tokio::test]
+async fn admin_user_create_rejects_malformed_wireguard_pubkey() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "id=eve&wireguard_pubkey=not-a-base64-pubkey-at-all",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.starts_with("vpnctl admin: invalid wireguard_pubkey"));
+}
+
+#[tokio::test]
+async fn admin_users_page_form_has_wireguard_pubkey_field() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/users").await;
+    assert!(
+        html.contains(r#"name="wireguard_pubkey""#),
+        "user-create form must expose wireguard_pubkey input"
+    );
+    assert!(html.contains("private key stays on the device"));
+}
