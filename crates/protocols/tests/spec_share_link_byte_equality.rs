@@ -51,6 +51,14 @@ fn vless_secrets() -> HashMap<String, String> {
         "vless.public_key".to_string(),
         "PUBKEY_TEST_BASE64URL".to_string(),
     );
+    // Added 2026-05-16 for the new server_inbound flow-pinning test:
+    // share_link only consults public_key, but server_inbound requires
+    // private_key. Adding both here is a strict super-set — every
+    // existing share_link test still passes.
+    m.insert(
+        "vless.private_key".to_string(),
+        "PRIVKEY_TEST_BASE64URL".to_string(),
+    );
     m.insert("vless.short_id".to_string(), "deadbeef".to_string());
     m
 }
@@ -59,6 +67,10 @@ fn vless_secrets() -> HashMap<String, String> {
 
 #[test]
 fn vless_happy_path_byte_equal() {
+    // Post-fix 2026-05-16: link now includes `&flow=xtls-rprx-vision` —
+    // pinned because the live vps-is-01 (and every bash-vpn-control
+    // REALITY deploy) use Vision flow, and modern sing-box rejects
+    // sessions whose client-flow doesn't match the user-record flow.
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -66,7 +78,7 @@ fn vless_happy_path_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome#alice",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#alice",
     );
 }
 
@@ -81,7 +93,50 @@ fn vless_fragment_percent_encodes_space_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome#alice%20cool",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?type=tcp&security=reality&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#alice%20cool",
+    );
+}
+
+#[test]
+fn vless_server_inbound_user_carries_xtls_vision_flow() {
+    // Spec: every user record in the sing-box vless inbound MUST set
+    // `flow: "xtls-rprx-vision"` so REALITY handshakes succeed.
+    // Empty / wrong flow → silent handshake failure for the client,
+    // worst kind. Pinned to detect a regression to the old buggy
+    // `flow: ""` immediately.
+    let s = srv();
+    let secrets = vless_secrets();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+    let inbound = VlessReality::new().server_inbound(&ctx, &[u]).unwrap();
+    let first_user = inbound
+        .pointer("/users/0")
+        .expect("inbound must have at least one user");
+    assert_eq!(
+        first_user
+            .pointer("/flow")
+            .and_then(serde_json::Value::as_str),
+        Some("xtls-rprx-vision"),
+        "VLESS user record must carry xtls-rprx-vision flow (vps-is-01 import bug)",
+    );
+}
+
+#[test]
+fn vless_client_outbound_carries_xtls_vision_flow() {
+    // Mirror of the inbound check: outbound MUST also set flow at the
+    // top level (sing-box outbound vless schema), or the client/server
+    // flow mismatch causes handshake-reject.
+    let s = srv();
+    let secrets = vless_secrets();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+    let outbound = VlessReality::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(
+        outbound
+            .pointer("/flow")
+            .and_then(serde_json::Value::as_str),
+        Some("xtls-rprx-vision"),
+        "VLESS outbound must carry xtls-rprx-vision flow at top level",
     );
 }
 

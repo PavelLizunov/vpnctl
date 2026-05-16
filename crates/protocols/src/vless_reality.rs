@@ -52,9 +52,24 @@ impl Protocol for VlessReality {
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
 
+        // XTLS-Vision sub-protocol is the **required** flow for VLESS +
+        // REALITY in modern sing-box (≥ 1.4): without it the client
+        // either gets a 400-style handshake reject ("flow not match") or
+        // falls back to plain TLS proxying, defeating the REALITY
+        // anti-DPI cover. Pinned to a string so a typo here surfaces in
+        // `vlr_server_inbound_pins_xtls_vision_flow` — caught during
+        // vps-is-01 import (the bash-vpn-control deploys all set
+        // `xtls-rprx-vision` and migrated clients would handshake-fail
+        // without it).
         let users_json: Vec<_> = users
             .iter()
-            .map(|u| json!({ "uuid": u.uuid, "name": u.id.0, "flow": "" }))
+            .map(|u| {
+                json!({
+                    "uuid": u.uuid,
+                    "name": u.id.0,
+                    "flow": "xtls-rprx-vision",
+                })
+            })
             .collect();
 
         Ok(json!({
@@ -81,12 +96,17 @@ impl Protocol for VlessReality {
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
 
+        // Mirror the server's `xtls-rprx-vision` flow — server REJECTS
+        // sessions whose flow doesn't match the user-record's flow.
+        // In sing-box outbound the `flow` field sits at the top level
+        // next to `uuid` (per https://sing-box.sagernet.org/configuration/outbound/vless/).
         Ok(json!({
             "type": "vless",
             "tag": "vless-out",
             "server": ctx.server.address,
             "server_port": 443,
             "uuid": user.uuid,
+            "flow": "xtls-rprx-vision",
             "tls": {
                 "enabled": true,
                 "server_name": sni,
@@ -108,8 +128,11 @@ impl Protocol for VlessReality {
         // `#`, ` `, `/` would corrupt the link or open a new component.
         // Percent-encode defensively even though server/CLI validate ids.
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
+        // `flow=xtls-rprx-vision` query param matches the Xray/v2ray-NG
+        // de-facto URI scheme. Clients without flow support ignore it
+        // gracefully; clients WITH flow support REQUIRE it to handshake.
         Ok(format!(
-            "vless://{uuid}@{addr}:443?type=tcp&security=reality&pbk={pbk}&sid={sid}&sni={sni}&fp=chrome#{name}",
+            "vless://{uuid}@{addr}:443?type=tcp&security=reality&pbk={pbk}&sid={sid}&sni={sni}&fp=chrome&flow=xtls-rprx-vision#{name}",
             uuid = user.uuid,
             addr = ctx.server.address,
             pbk = public_key,
