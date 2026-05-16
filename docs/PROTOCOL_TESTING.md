@@ -458,28 +458,101 @@ requires multi-host testing.
 
 ### What's needed for a complete Realm validation
 
+Two distinct validation tiers — both have value, but they prove
+different things and CANNOT be conflated.
+
+#### Tier 1 — "proof of mechanic" test (LAN-bridged)
+
 | Resource | Status |
 |---|---|
 | Rendezvous on public-IP VPS | ✅ have (84.19.3.104) |
-| Hysteria server on behind-NAT host | ⏳ need — homelab `192.168.0.236` would work (it's behind Pavel's home router NAT) |
-| Hysteria client on another host (any) | ⏳ need — Pavel's laptop or phone |
+| Hysteria server on behind-NAT host | ⏳ homelab `192.168.0.236` (behind Pavel's home-router NAT — external IP = Pavel's home WAN address) |
+| Hysteria client on another host | ⏳ Pavel's phone on the SAME home WiFi |
 
-Estimated time for the full validation: 30–45 min Claude wall-clock
-+ ~15 min Pavel attention (real client on phone). Blocker is
-non-technical: choose between (a) install hysteria on `192.168.0.236`
-in autonomous mode (writes to homelab — needs Pavel-OK per safety
-rail), or (b) defer until next Pavel-present session.
+**What this proves:** Realm wire protocol + control plane survives
+a real (consumer-grade) NAT in front of the server. STUN discovery
+works through the home router. Rendezvous → hole-punch sequence
+actually opens a UDP mapping.
+
+**What this does NOT prove:** the test is still degenerate on the
+client side — phone on the SAME home WiFi has the SAME external
+WAN IP as the homelab. Hole-punching is largely bypassed because
+both endpoints sit behind the same NAT (most home routers do
+"hairpinning" or just LAN-direct-route at this point). For an
+internet-side client this remains untested.
+
+**Cost:** 30–45 min Claude + 15 min Pavel (phone scan + tap "connect"
+in AmneziaVPN / hysteria mobile app). Blocker: needs Pavel-OK to
+install `hysteria` server on `192.168.0.236` per safety rail.
+
+#### Tier 2 — "prod-equivalent" test (3 distinct external IPs)
+
+Required for any conclusion about how Realm actually behaves
+under ТСПУ-style constraints against real censored networks.
+
+| Resource | Status |
+|---|---|
+| Rendezvous on public-IP VPS, country A | ✅ have (84.19.3.104) |
+| Hysteria server on residential / CGNAT'd host, country B (ideally a target country with users) | ❌ don't have — no residential ISP under our control outside Pavel's home |
+| Hysteria client on a third external network (mobile data is fine, or another residential ISP) | ⏳ Pavel switches phone to mobile data instead of WiFi |
+
+**What only this proves:** real-world NAT traversal across two
+unrelated NATs + the data path actually flows directly between
+peers (not via rendezvous) + UDP throughput on the hole-punched
+flow is acceptable for VPN use + the obfuscated handshake survives
+a hostile DPI between the peers.
+
+**Why homelab + LAN phone DOESN'T substitute for Tier 2:**
+- Homelab + phone share the WAN-side public IP. NAT traversal is
+  degenerate even though there's a router in front of the homelab.
+- ТСПУ-class DPI lives ONLY at country-border ISPs. A LAN-bridged
+  test sees no DPI.
+- Latency, packet loss, MTU edge cases that real-world transit
+  exposes don't show up on a 1-ms loopback to the home gateway.
+
+**Cost:** ~2 hours total once a second residential VPS is
+provisioned somewhere. The blocker is procurement, not engineering.
+
+#### What the doc treats as "Realm validated"
+
+For project-internal status: Tier 1 = "Realm shipped, mechanically
+sound, ready for trial". Tier 2 = "Realm production-validated, can
+be recommended to users in censored networks". Don't confuse the
+two in status reports — Tier 1 is roughly half of the actual proof.
+
+#### Recommended sequencing
+
+1. **Now:** treat 2026-05-16 staging session as "control plane
+   validated only" (current state). Don't claim more.
+2. **Next Pavel-present session:** run Tier 1 (homelab + phone).
+   ~1 hour. Promotes status to "shipped, trial-ready".
+3. **When Pavel acquires a residential VPS in a censored region**
+   (or buys a regional VPS for the purpose): run Tier 2.
+   Status promotes to "prod-validated".
 
 ### New lesson for the methodology
 
 **Lesson #4 (Realm/NAT-traversal class):** any P2P/NAT-traversal
-feature MUST be tested across at least two distinct external IPs.
-Loopback testing validates the control plane only — the actual
-hole-punching is degenerate when both endpoints share an external
-address. Add this to the per-protocol checklist when a new protocol
-involves rendezvous + STUN + UDP hole-punching (Hysteria Realm
-today; Tailscale-style DERP / Cloudflare WARP-style anycast in the
-future).
+feature MUST be tested across at least two distinct external IPs
+to prove the data plane. Loopback testing validates the control
+plane only — the actual hole-punching is degenerate when both
+endpoints share an external address. Add this to the per-protocol
+checklist when a new protocol involves rendezvous + STUN + UDP
+hole-punching (Hysteria Realm today; Tailscale-style DERP /
+Cloudflare WARP-style anycast in the future).
+
+**Lesson #4-bis (homelab nuance, 2026-05-16 Pavel clarification):**
+"behind NAT" alone is insufficient as a tier-2 (prod-equivalent)
+test if the client is on the SAME network. A LAN-bridged
+homelab-vs-WiFi-phone test still has both endpoints sharing the
+WAN-side public IP — hole-punching degenerates into LAN
+hairpinning, and no ТСПУ-class DPI sits between them. Tier 2
+requires THREE distinct external networks (rendezvous + server +
+client all on different ISPs/ASes), ideally with the server on
+the same kind of consumer/CGNAT'd network real production users
+would deploy on. The methodology now distinguishes "Tier 1
+mechanic test" (LAN-bridged is fine) from "Tier 2 prod-equivalent
+test" (3 distinct external IPs) — see the validation tiers above.
 
 Artifacts preserved on `84.19.3.104:/opt/realm-test/`:
 - `hysteria-realm-server` binary
