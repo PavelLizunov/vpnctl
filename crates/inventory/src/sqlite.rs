@@ -430,6 +430,41 @@ impl SqliteInventory {
         row.map(row_to_user).transpose()
     }
 
+    /// Overwrite the user's WireGuard / AmneziaWG keypair atomically.
+    /// Both halves set together — guarantees the
+    /// `private = Some && public = None` inconsistent state can
+    /// never appear via this code path.
+    ///
+    /// Caller produces the standard-base64 strings (typically via
+    /// `vpnctl_crypto::gen_wireguard_keypair()`). No shape validation
+    /// here — caller's responsibility (web `user_regen_wireguard`
+    /// uses the crypto helper directly; no operator-typed input).
+    ///
+    /// Returns `Invalid` when no such user (mirrors
+    /// `regenerate_sub_token` semantics).
+    pub async fn set_user_wireguard_keypair(
+        &self,
+        id: &UserId,
+        pubkey: &str,
+        private: &str,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            "UPDATE users SET wireguard_pubkey = ?1, wireguard_private = ?2 WHERE id = ?3",
+        )
+        .bind(pubkey)
+        .bind(private)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}",
+                id.0
+            )));
+        }
+        Ok(())
+    }
+
     /// Regenerate the sub_token for an existing user (rotation). Returns the
     /// new token. Old URL stops working immediately.
     pub async fn regenerate_sub_token(&self, id: &UserId) -> Result<String> {

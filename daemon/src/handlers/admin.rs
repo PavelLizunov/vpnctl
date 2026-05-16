@@ -988,57 +988,31 @@ pub(crate) async fn users(
 
         // Phase C-3.2 — add-user form. UUID + tuic_password + sub_token
         // are all mint-on-server; the operator only types the human-
-        // readable id. Grants come later via the user-detail page (G).
-        // Phase H follow-up — optional `wireguard_pubkey` field so the
-        // operator can mint a WireGuard/AmneziaWG-ready user in one
-        // step. The PUBLIC key is supplied (operator generated it on
-        // the device); vpnctl never sees the private one.
+        // readable id. **All secrets — UUID, tuic_password, sub_token,
+        // AND the WireGuard keypair — are generated unconditionally**
+        // (per CLAUDE.md "users are assumed maximally low-tech" one-
+        // action ceiling: creation = type id + Enter, no checkboxes
+        // for the operator either). Per-key management (rotate WG,
+        // replace with operator-provided pubkey, etc.) lives on the
+        // user-detail page.
         div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
             form method="post" action="/admin/users"
-                 style="display: flex; flex-direction: column; gap: 10px;" {
-                div style="display: flex; gap: 10px; align-items: baseline;" {
-                    label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                        "add user"
-                    }
-                    input type="text" name="id" required="required"
-                          placeholder="alice"
-                          pattern="[A-Za-z0-9._-]+"
-                          title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
-                          style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                    button type="submit"
-                           title="Mint UUID + tuic_password + sub_token, then redirect to the user-detail page"
-                           style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        "create"
-                    }
+                 style="display: flex; gap: 10px; align-items: baseline;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "add user"
                 }
-                div style="display: flex; gap: 10px; align-items: baseline;" {
-                    label for="wireguard_pubkey" style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                        "wg pubkey"
-                    }
-                    input type="text" id="wireguard_pubkey" name="wireguard_pubkey"
-                          placeholder="(operator-paranoid: paste pubkey, user keygens locally)"
-                          pattern="[A-Za-z0-9+/]{43}="
-                          title="WireGuard PUBLIC key — 44 base64 chars ending '='. Leave blank if you want vpnctl to generate the pair (recommended for low-tech users)."
-                          style="flex: 1; max-width: 480px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink);";
-                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                        "OR leave blank ↓"
-                    }
+                input type="text" name="id" required="required"
+                      placeholder="alice"
+                      pattern="[A-Za-z0-9._-]+"
+                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
+                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                button type="submit"
+                       title="Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible"
+                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "create"
                 }
-                // Server-side keypair option — per CLAUDE.md "users are
-                // assumed maximally low-tech" rule. Default-off so the
-                // operator-paranoid path stays one form-submit; when
-                // checked, vpnctl mints both halves and the
-                // /sub/<token> response will carry a ready-to-import
-                // WG conf with no additional user action.
-                div style="display: flex; gap: 10px; align-items: baseline;" {
-                    label for="gen_wireguard" style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                        "wg keygen"
-                    }
-                    input type="checkbox" id="gen_wireguard" name="gen_wireguard" value="1"
-                          style="margin: 0;";
-                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                        "let vpnctl generate the keypair (recommended for low-tech users — one-tap import)"
-                    }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                    "→ all keys are auto-generated and shown on the user page"
                 }
             }
         }
@@ -1284,6 +1258,77 @@ pub(crate) async fn user_detail(
                                style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                                 "mint sub-token"
                             }
+                    }
+                }
+            }
+        }
+
+        // WireGuard / AmneziaWG key material. Always shows the pubkey
+        // verbatim (it's public — needed in the server [Peer] block
+        // and visible to anyone who has a granted server's config
+        // anyway). Private key marker is shown but the value is NOT
+        // rendered here — the actual private only flows through
+        // /sub/<token>. Per CLAUDE.md "users are low-tech" creation
+        // path auto-generates both halves; this section is the
+        // post-creation management surface.
+        div.ed-rule {}
+        div.ed-art-eyebrow { "WireGuard keypair" }
+        @match (&user.wireguard_pubkey, &user.wireguard_private) {
+            (Some(pub_b64), Some(_priv_marker)) => {
+                div style="padding: 12px 0;" {
+                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                        div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
+                        div {
+                            span style="color: var(--mute);" { "private " }
+                            span.ed-mono style="color: var(--acc);" { "✓ stored — served via /sub/<token> only" }
+                        }
+                    }
+                    p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
+                        "Both halves were generated when the user was created. The recipient one-tap imports a complete config via the subscription URL above — no keygen step on their device."
+                    }
+                    form method="post"
+                         action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                         style="margin-top: 12px;" {
+                        button type="submit"
+                               title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
+                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                            "rotate WG keypair"
+                        }
+                    }
+                }
+            }
+            (Some(pub_b64), None) => {
+                // Operator-paranoid path (CLI `--wireguard-pubkey`): only
+                // pubkey present, private stays on the user device. No
+                // rotate button — that'd overwrite the user's privkey
+                // pairing. Operator can `vpnctl user remove` + `add`
+                // to switch flows.
+                div style="padding: 12px 0;" {
+                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                        div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
+                        div {
+                            span style="color: var(--mute);" { "private " }
+                            span.ed-mono style="color: var(--mute);" { "on user device (operator-paranoid path)" }
+                        }
+                    }
+                }
+            }
+            (None, _) => {
+                // Should be impossible for users created via the web
+                // form (always auto-gens both). Falls through for
+                // legacy users imported pre-2026-05-16 — show a
+                // self-heal button.
+                div style="padding: 12px 0;" {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                        "No WireGuard keypair on this user. Imported from the legacy bash project, or created before the auto-gen default."
+                    }
+                    form method="post"
+                         action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                         style="margin-top: 8px;" {
+                        button type="submit"
+                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                            "generate WG keypair"
+                        }
                     }
                 }
             }
@@ -1789,6 +1834,70 @@ pub(crate) async fn user_regen_sub_token(
     .into_response()
 }
 
+/// `POST /admin/users/{id}/wireguard/regenerate` — mint a fresh
+/// Curve25519 pair, overwrite both `wireguard_pubkey` and
+/// `wireguard_private` on the user row, audit, redirect to the
+/// detail page (which shows the new pubkey + the "✓ stored" marker
+/// for private). Every device using the OLD config stops working
+/// after the next /sub/<token> re-fetch — the old pubkey is no
+/// longer in the server's [Peer] list (will land on next
+/// `vpnctl deploy <server>`).
+///
+/// Same CSRF/audit/404 posture as `user_regen_sub_token`.
+pub(crate) async fn user_regen_wireguard(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+
+    // Existence check — explicit 404 if no such user.
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    // Mutate.
+    let (priv_b64, pub_b64) = vpnctl_crypto::gen_wireguard_keypair();
+    if let Err(e) = state
+        .inv
+        .set_user_wireguard_keypair(&uid, &pub_b64, &priv_b64)
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+
+    // Audit — pin provenance + new pubkey for traceability. Private
+    // value never enters the log (key VALUES never do — only
+    // provenance + the pubkey, which is itself public).
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "user.wireguard.regen",
+            Some(&user_id_str),
+            Some(&serde_json::json!({
+                "wg_keypair_provenance": "server-generated",
+                "new_pubkey": pub_b64,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "audit write failed for user.wireguard.regen — mutation already committed"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
+}
+
 /// Validate a candidate user id from the web form. The HTML5 `pattern`
 /// attribute already filters most input client-side, but we re-validate
 /// server-side because (a) browsers can be bypassed and (b) the CLI
@@ -1839,77 +1948,25 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             .into_response();
     }
 
-    // Two mutually-exclusive WG flows from the form (per CLAUDE.md
-    // "users are assumed maximally low-tech" — the default web flow
-    // for non-paranoid operators is to tick `gen_wireguard`):
-    //   * `wireguard_pubkey=<44b64>` — operator-provided pubkey
-    //     (security-paranoid path; user keygen's on-device).
-    //   * `gen_wireguard=1` — server mints the pair and stores both
-    //     halves; user gets a single ready-to-import artefact via
-    //     /sub/<token>.
-    // Reject both-at-once explicitly so the operator's intent is
-    // unambiguous — matches the `clap conflicts_with` rule on the CLI.
-    let wg_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("wireguard_pubkey="))
-        .unwrap_or("")
-        .trim();
-    let wg_decoded = decode_form_value(wg_raw);
-    // Form-encoded checkbox parser — must accept any "truthy" value
-    // because different proxies / form libraries serialize a checked
-    // box differently: `=1` (our HTML), `=on` (default HTML default),
-    // `=true` (some JS frameworks). Treat ANY non-empty / non-"0" /
-    // non-"false" / non-"off" value as ticked. (Review-agent finding:
-    // previous matches!(kv, "=1" | "=on") would silently flip if
-    // an upstream proxy normalised to `=true` or added whitespace.)
-    let gen_wireguard = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("gen_wireguard="))
-        .map(|raw| {
-            let decoded = decode_form_value(raw);
-            let v = decoded.trim().to_ascii_lowercase();
-            !v.is_empty() && v != "0" && v != "false" && v != "off"
-        })
-        .unwrap_or(false);
-    if !wg_decoded.is_empty() && gen_wireguard {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text("cannot combine wireguard_pubkey with gen_wireguard — pick one"),
-        )
-            .into_response();
-    }
-    let (wg_pubkey, wg_private): (Option<String>, Option<String>) = if gen_wireguard {
-        let (priv_b64, pub_b64) = vpnctl_crypto::gen_wireguard_keypair();
-        (Some(pub_b64), Some(priv_b64))
-    } else if wg_decoded.is_empty() {
-        (None, None)
-    } else if !vpnctl_protocols::is_valid_wg_pubkey(&wg_decoded) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "invalid wireguard_pubkey (must be 44 base64 chars ending '='): {wg_decoded:?}"
-            )),
-        )
-            .into_response();
-    } else {
-        (Some(wg_decoded), None)
-    };
-
-    // Mint the secrets. UUID is straightforward; tuic_password is 24
-    // bytes of entropy, base64'd by `gen_password`. sub_token is left
-    // as None — the inventory's `add_user` generates it (single source
-    // of truth for sub_token entropy).
+    // Mint ALL secrets unconditionally — UUID, tuic_password, WG
+    // keypair, sub_token. The form has only one field (`id`) so the
+    // operator does ONE action (per CLAUDE.md "users are assumed
+    // maximally low-tech" one-action ceiling — applies to the
+    // operator UX too, not just the end user). Per-key management
+    // (rotate WG keypair, replace pubkey with operator-provided, etc.)
+    // lives on the user-detail page; creation is intentionally minimal.
     const TUIC_PW_BYTES: usize = 24;
     let tuic_password = match vpnctl_crypto::gen_password(TUIC_PW_BYTES) {
         Ok(pw) => pw,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    let (wg_priv, wg_pub) = vpnctl_crypto::gen_wireguard_keypair();
     let user = vpnctl_core::User {
         id: vpnctl_core::UserId(id_decoded.clone()),
         uuid: vpnctl_crypto::gen_uuid(),
         tuic_password: Some(tuic_password),
-        wireguard_pubkey: wg_pubkey,
-        wireguard_private: wg_private,
+        wireguard_pubkey: Some(wg_pub),
+        wireguard_private: Some(wg_priv),
         sub_token: None,
     };
 
@@ -1936,12 +1993,10 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             Some(&id_decoded),
             Some(&serde_json::json!({
                 "uuid": user.uuid,
-                "wg_pubkey_set": user.wireguard_pubkey.is_some(),
-                // Pin which provenance the pubkey had; pubkey/private
-                // values themselves never enter the audit log.
-                "wg_keypair_provenance": if user.wireguard_private.is_some() { "server-generated" }
-                    else if user.wireguard_pubkey.is_some() { "operator-provided" }
-                    else { "absent" },
+                // Web creation always server-generates the WG pair;
+                // pinned so a future regression to optional flag
+                // surfaces here. Key VALUES never enter audit_log.
+                "wg_keypair_provenance": "server-generated",
             })),
         )
         .await

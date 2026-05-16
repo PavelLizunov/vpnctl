@@ -2449,13 +2449,12 @@ async fn admin_users_page_renders_create_form() {
         html.contains(">create<"),
         "submit button label drifted from 'create'"
     );
-    // Form has 3 rows now (id, wg pubkey, wg keygen checkbox) after
-    // the "users are low-tech" rule landed. Pin a sentence from the
-    // helper text below the gen_wireguard checkbox so future drift
-    // surfaces immediately.
+    // Single-field creation form post-2026-05-16 — id input + create
+    // button + helper sentence. WG keypair management lives on the
+    // user-detail page now, not in the creation form.
     assert!(
-        html.contains("recommended for low-tech users"),
-        "form copy drifted — gen_wireguard helper missing"
+        html.contains("all keys are auto-generated"),
+        "form helper drifted — should promise auto-gen so the operator doesn't go hunting"
     );
 }
 
@@ -3621,15 +3620,69 @@ async fn admin_servers_list_link_to_detail_page() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// CLI/web `--wireguard-pubkey` plumbing (closes the AmneziaWG follow-up).
+// Post-2026-05-16 WireGuard contract for the web layer:
+//
+//   * Creation form has ONE field (`id`); no wg-related inputs.
+//   * `POST /admin/users` ALWAYS mints a server-generated WG keypair,
+//     IGNORING any wireguard_pubkey / gen_wireguard form fields that
+//     a stale client might send. Both halves land in the row atomically.
+//   * Operator-paranoid path (paste pubkey) moves to the CLI and to
+//     a dedicated control on the user-detail page (queued).
+//
+// This block pins those guarantees as anti-regression net.
 
 #[tokio::test]
-async fn admin_user_create_with_wireguard_pubkey() {
+async fn admin_user_create_always_mints_server_generated_wireguard_pair() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
     let app = router(s);
-    let body = "id=alice&wireguard_pubkey=qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks%3D";
+    // Bare `id=alice` — no wg-related field. Used to be the
+    // "keeps None" branch; now MUST result in both halves set.
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=alice"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let pk = u.wireguard_pubkey.as_deref().expect("pubkey auto-set");
+    let priv_ = u.wireguard_private.as_deref().expect("private auto-set");
+    assert_eq!(pk.len(), 44, "pubkey must be 44-char standard b64: {pk}");
+    assert_eq!(priv_.len(), 44, "private must be 44-char standard b64");
+    assert!(pk.ends_with('='));
+    assert!(priv_.ends_with('='));
+    assert_ne!(pk, priv_, "pub and priv must differ");
+}
+
+#[tokio::test]
+async fn admin_user_create_ignores_stale_wireguard_pubkey_field() {
+    // A stale browser tab might still POST `wireguard_pubkey=...`
+    // from the old form. The handler must IGNORE that input and
+    // still mint a server-generated pair — sneaking an operator-
+    // supplied pubkey in through a back door would silently
+    // bypass the one-action creation contract.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let attacker_pubkey = "AttackerKkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkAB=";
+    let body = format!(
+        "id=bob&wireguard_pubkey={}",
+        attacker_pubkey.replace('=', "%3D")
+    );
     let resp = app
         .oneshot(
             add_same_origin(
@@ -3644,25 +3697,47 @@ async fn admin_user_create_with_wireguard_pubkey() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let u = inv
-        .get_user(&UserId("alice".into()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        u.wireguard_pubkey.as_deref(),
-        Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=")
+    let u = inv.get_user(&UserId("bob".into())).await.unwrap().unwrap();
+    let pk = u.wireguard_pubkey.as_deref().unwrap();
+    assert_ne!(
+        pk, attacker_pubkey,
+        "stale form field MUST be ignored; got {pk}"
+    );
+    assert!(u.wireguard_private.is_some(), "server-generated pair");
+}
+
+#[tokio::test]
+async fn admin_users_page_form_is_one_field_one_button() {
+    // Single input + single button = one operator action.
+    // Anti-regression: future "let me add one more nice optional
+    // field" PRs surface here.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/users").await;
+    assert!(
+        !html.contains(r#"name="wireguard_pubkey""#),
+        "wireguard_pubkey input MUST NOT be in the creation form"
+    );
+    assert!(
+        !html.contains(r#"name="gen_wireguard""#),
+        "gen_wireguard checkbox MUST NOT be in the creation form"
+    );
+    // Helper copy that pins the new one-action contract.
+    assert!(
+        html.contains("all keys are auto-generated"),
+        "form helper must promise auto-gen so the operator doesn't go hunting for missing options"
     );
 }
 
 #[tokio::test]
-async fn admin_user_create_without_wireguard_pubkey_keeps_none() {
+async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
     let app = router(s);
-    // Empty wireguard_pubkey field → None (back-compat).
+    // Create via the new auto-gen path.
     let resp = app
+        .clone()
         .oneshot(
             add_same_origin(
                 Request::builder()
@@ -3670,21 +3745,60 @@ async fn admin_user_create_without_wireguard_pubkey_keeps_none() {
                     .uri("/admin/users")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from("id=bob&wireguard_pubkey="))
+            .body(Body::from("id=carol"))
             .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let u = inv.get_user(&UserId("bob".into())).await.unwrap().unwrap();
-    assert!(u.wireguard_pubkey.is_none());
+    let pk = inv
+        .get_user(&UserId("carol".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .wireguard_pubkey
+        .unwrap();
+
+    // Detail page must show that pubkey verbatim + a rotate form.
+    let html = fetch_html(app, "/admin/users/carol").await;
+    assert!(html.contains("WireGuard keypair"), "section heading");
+    assert!(
+        html.contains(pk.as_str()),
+        "pubkey must render verbatim — operator wants to see what's deployed"
+    );
+    assert!(
+        html.contains("/admin/users/carol/wireguard/regenerate"),
+        "rotate-keypair form must POST to the regenerate route"
+    );
+    // Private value MUST NOT leak into the HTML — only the marker.
+    // maud escapes `<` → `&lt;` in attribute-free text, so check
+    // the unambiguous substring before the escape.
+    assert!(
+        html.contains("✓ stored — served via /sub/"),
+        "private must be marker-only ('✓ stored'), never the value itself"
+    );
+    // Hard assertion: actual private bytes are NEVER in the HTML.
+    let priv_ = inv
+        .get_user(&UserId("carol".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .wireguard_private
+        .unwrap();
+    assert!(
+        !html.contains(priv_.as_str()),
+        "PRIVATE LEAK: detail HTML contains the raw private bytes"
+    );
 }
 
 #[tokio::test]
-async fn admin_user_create_rejects_malformed_wireguard_pubkey() {
+async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
     let dir = TempDir::new().unwrap();
-    let app = router(state(&dir).await);
-    let resp = app
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    // Seed via creation.
+    app.clone()
         .oneshot(
             add_same_origin(
                 Request::builder()
@@ -3692,42 +3806,47 @@ async fn admin_user_create_rejects_malformed_wireguard_pubkey() {
                     .uri("/admin/users")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from(
-                "id=eve&wireguard_pubkey=not-a-base64-pubkey-at-all",
-            ))
+            .body(Body::from("id=dave"))
             .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = std::str::from_utf8(&body).unwrap();
-    assert!(text.starts_with("vpnctl admin: invalid wireguard_pubkey"));
-}
+    let before = inv.get_user(&UserId("dave".into())).await.unwrap().unwrap();
 
-#[tokio::test]
-async fn admin_users_page_form_has_wireguard_pubkey_field() {
-    let dir = TempDir::new().unwrap();
-    let app = router(state(&dir).await);
-    let html = fetch_html(app, "/admin/users").await;
-    assert!(
-        html.contains(r#"name="wireguard_pubkey""#),
-        "user-create form must expose wireguard_pubkey input"
+    // Rotate.
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/dave/wireguard/regenerate"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let after = inv.get_user(&UserId("dave".into())).await.unwrap().unwrap();
+    assert_ne!(
+        before.wireguard_pubkey, after.wireguard_pubkey,
+        "pubkey must change on rotate"
     );
-    // The form also exposes a `gen_wireguard` checkbox per the
-    // CLAUDE.md "users are low-tech" rule — server generates the
-    // keypair when checked, so the operator can hand the user a
-    // single ready-to-import artefact.
-    assert!(
-        html.contains(r#"name="gen_wireguard""#),
-        "user-create form must expose gen_wireguard checkbox (low-tech default)"
+    assert_ne!(
+        before.wireguard_private, after.wireguard_private,
+        "private must change on rotate"
     );
-    assert!(
-        html.contains("operator-paranoid"),
-        "wg-pubkey placeholder should call out operator-paranoid path"
-    );
-    assert!(
-        html.contains("one-tap import"),
-        "gen_wireguard helper must call out the one-tap import promise"
-    );
+    // Audit row exists with the new pubkey + provenance marker.
+    let audit = inv.recent_audit(5).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|a| a.action == "user.wireguard.regen")
+        .expect("audit row for wireguard.regen");
+    let payload = row
+        .payload
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(payload.contains("server-generated"));
+    assert!(payload.contains(after.wireguard_pubkey.as_deref().unwrap()));
 }

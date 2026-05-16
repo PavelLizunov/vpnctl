@@ -384,6 +384,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/sub-token/regenerate",
             post(admin::user_regen_sub_token),
         )
+        // Rotate the WireGuard keypair. Both halves replaced
+        // atomically; previous pubkey will fall off the server's
+        // [Peer] block on the next `vpnctl deploy`. UI lives on
+        // the user-detail page (see `WireGuard keypair` section).
+        .route(
+            "/admin/users/{id}/wireguard/regenerate",
+            post(admin::user_regen_wireguard),
+        )
         // Phase C-3.3: per-(user, server) grant + revoke. Both POST (HTML
         // forms can't easily DELETE), both idempotent at the SQL layer
         // but audited every time so re-grant attempts show in the
