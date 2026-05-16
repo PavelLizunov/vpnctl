@@ -1,0 +1,438 @@
+//! Phase H chunk 1 — node telemetry probe.
+//!
+//! Same SSH-curl pattern as `clash_api` (Track-3 chunk 1): vpnctld
+//! SSH's into a VPN node and runs a single shell script that emits
+//! a well-defined text format; we parse in Rust.
+//!
+//! # What it collects
+//!
+//! - **systemd:** `systemctl is-active sing-box`, `is-active fail2ban`
+//! - **disk:** `df -BM /` (root filesystem usage; logs/db live here)
+//! - **memory:** `/proc/meminfo` MemTotal + MemAvailable
+//! - **load:** `/proc/loadavg` 1-min average
+//! - **listening sockets:** `ss -tunlp` → set of `(proto, port)` tuples
+//! - **sing-box log size:** `stat -c %s /var/log/sing-box.log` (caught
+//!   real risk Pavel flagged — without logrotate this grows unbounded;
+//!   chunk 4 will surface a "log >500MB" alert)
+//!
+//! # Why a single script (not multiple `exec` calls)
+//!
+//! One round-trip vs six. SSH session setup is the expensive part;
+//! once open, running a 20-line bash script vs one `df` command is
+//! the same wall-clock. We emit a tagged-line format so the parser
+//! can pick fields by prefix regardless of order:
+//!
+//! ```text
+//! SVC sing-box active
+//! SVC fail2ban active
+//! DISK /  9876  20480
+//! MEM  483 960
+//! LOAD 0.04
+//! PORT tcp 443
+//! PORT tcp 8443
+//! PORT udp 8388
+//! LOG_SB 308432
+//! ```
+//!
+//! Numeric values are MiB (memory + disk) or raw counts (load is
+//! float, log_sb is bytes). Anything we can't parse → `Probe`
+//! field stays `None` rather than failing the whole snapshot.
+//!
+//! # No daemon wiring yet
+//!
+//! This chunk is read-only — types + parser + spec tests. Chunk 2
+//! adds the inventory side; chunk 3 wires the periodic poller.
+//! Same gating as Track-3: each chunk independently testable.
+
+use async_trait::async_trait;
+use std::collections::BTreeSet;
+use vpnctl_core::SshTransport;
+
+/// Snapshot of a single node's health at one tick. Fields are
+/// `Option` because partial-success is preferred over a hard
+/// failure when one parser misbehaves — the operator still wants
+/// to see the OTHER metrics if `ss` lacks permission to enumerate
+/// processes or `/proc/meminfo` format drifts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Probe {
+    pub sing_box_active: Option<bool>,
+    pub fail2ban_active: Option<bool>,
+    pub disk_used_mib: Option<u64>,
+    pub disk_total_mib: Option<u64>,
+    pub mem_available_mib: Option<u64>,
+    pub mem_total_mib: Option<u64>,
+    /// 1-minute load average × 100 (so we can store as u32 without
+    /// fractional handling; UI divides by 100 on render).
+    pub load_1min_x100: Option<u32>,
+    /// Listening sockets as `(proto, port)`. `BTreeSet` so the
+    /// rendered set is deterministic (same input → same JSON →
+    /// byte-stable across runs).
+    pub listening: BTreeSet<(String, u16)>,
+    pub sing_box_log_bytes: Option<u64>,
+}
+
+impl Probe {
+    /// Convenience: disk usage as percentage (0–100). Returns `None`
+    /// if either field is `None` or total is 0 (avoid div-by-zero).
+    pub fn disk_pct(&self) -> Option<u8> {
+        let used = self.disk_used_mib?;
+        let total = self.disk_total_mib?;
+        if total == 0 {
+            return None;
+        }
+        // Cap at 100 — partition over-commit could in theory report
+        // used > total (snapshots, sparse files); clamp keeps the UI
+        // sane.
+        let pct = (used.saturating_mul(100) / total).min(100);
+        u8::try_from(pct).ok()
+    }
+
+    /// Memory used percentage = 100 - (avail × 100 / total).
+    pub fn mem_used_pct(&self) -> Option<u8> {
+        let avail = self.mem_available_mib?;
+        let total = self.mem_total_mib?;
+        if total == 0 {
+            return None;
+        }
+        let used_pct = 100u64.saturating_sub(avail.saturating_mul(100) / total);
+        u8::try_from(used_pct.min(100)).ok()
+    }
+}
+
+/// Errors `ProbeClient::snapshot` may return.
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    /// SSH transport layer failed.
+    #[error("ssh transport: {0}")]
+    Transport(String),
+    /// SSH succeeded but the probe script produced output the parser
+    /// couldn't make sense of AT ALL (every line malformed). Partial
+    /// parse failures don't return Err — they just leave individual
+    /// `Probe` fields as `None`.
+    #[error("probe parse: no recognizable lines")]
+    NothingParsed,
+}
+
+/// Single-script probe sent to the node. Self-contained — uses only
+/// busybox-compatible tools, no jq, no awk-3-specific syntax.
+///
+/// Public so chunk 2 can audit-log it verbatim and tests can
+/// build expected-output fixtures.
+pub const PROBE_SCRIPT: &str = r#"
+set -e
+# systemd services we care about
+for s in sing-box fail2ban; do
+    state=$(systemctl is-active "$s" 2>/dev/null || true)
+    echo "SVC $s ${state:-unknown}"
+done
+# root filesystem usage in MiB (avoid -h since human suffix varies)
+df -BM / 2>/dev/null | awk 'NR==2 {gsub(/M/,"",$3); gsub(/M/,"",$2); print "DISK /  " $3 "  " $2}' || true
+# meminfo — MemTotal + MemAvailable in MiB (1 MiB = 1024 kB)
+awk '/^MemTotal:/ {t=int($2/1024)} /^MemAvailable:/ {a=int($2/1024)} END {print "MEM  " a " " t}' /proc/meminfo 2>/dev/null || true
+# loadavg
+awk '{print "LOAD " $1}' /proc/loadavg 2>/dev/null || true
+# listening sockets — ss is in iproute2, ships with every modern Debian
+ss -tunl 2>/dev/null | awk 'NR>1 {
+    proto=$1; sub(/.*:/, "", $5); print "PORT " proto " " $5
+}' | sort -u || true
+# sing-box log file size (bytes); 0 if missing
+sb_log=/var/log/sing-box.log
+if [ -f "$sb_log" ]; then
+    echo "LOG_SB $(stat -c %s "$sb_log" 2>/dev/null || echo 0)"
+fi
+"#;
+
+/// Trait the poller calls. Defined to mirror `ClashClient` for
+/// consistency + so chunk 3 can wrap with retry/metrics layers
+/// without re-implementing the parser.
+#[async_trait]
+pub trait ProbeClient: Send + Sync {
+    async fn snapshot(&self) -> Result<Probe, ProbeError>;
+}
+
+/// Default implementation: SSH-exec to one VPN node.
+#[derive(Debug)]
+pub struct SshProbeClient<'a> {
+    ssh: &'a dyn SshTransport,
+}
+
+impl<'a> SshProbeClient<'a> {
+    pub fn new(ssh: &'a dyn SshTransport) -> Self {
+        Self { ssh }
+    }
+}
+
+#[async_trait]
+impl ProbeClient for SshProbeClient<'_> {
+    async fn snapshot(&self) -> Result<Probe, ProbeError> {
+        let raw = self
+            .ssh
+            .exec(PROBE_SCRIPT)
+            .await
+            .map_err(|e| ProbeError::Transport(e.to_string()))?;
+        parse_probe_output(&raw)
+    }
+}
+
+/// Parse the tagged-line format the script emits.
+pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
+    let mut probe = Probe::default();
+    let mut any_parsed = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let tag = match parts.next() {
+            Some(t) => t,
+            None => continue,
+        };
+        match tag {
+            "SVC" => {
+                let name = parts.next();
+                let state = parts.next();
+                let active = match state {
+                    Some("active") => Some(true),
+                    Some(_) => Some(false),
+                    None => continue,
+                };
+                match name {
+                    Some("sing-box") => {
+                        probe.sing_box_active = active;
+                        any_parsed = true;
+                    }
+                    Some("fail2ban") => {
+                        probe.fail2ban_active = active;
+                        any_parsed = true;
+                    }
+                    _ => continue,
+                }
+            }
+            "DISK" => {
+                // DISK <mount> <used> <total>
+                let _mount = parts.next();
+                if let (Some(u), Some(t)) = (parts.next(), parts.next())
+                    && let (Ok(uu), Ok(tt)) = (u.parse::<u64>(), t.parse::<u64>())
+                {
+                    probe.disk_used_mib = Some(uu);
+                    probe.disk_total_mib = Some(tt);
+                    any_parsed = true;
+                }
+            }
+            "MEM" => {
+                // MEM <avail> <total>
+                if let (Some(a), Some(t)) = (parts.next(), parts.next())
+                    && let (Ok(aa), Ok(tt)) = (a.parse::<u64>(), t.parse::<u64>())
+                {
+                    probe.mem_available_mib = Some(aa);
+                    probe.mem_total_mib = Some(tt);
+                    any_parsed = true;
+                }
+            }
+            "LOAD" => {
+                // LOAD <float>
+                if let Some(l) = parts.next()
+                    && let Ok(f) = l.parse::<f64>()
+                {
+                    // Round-half-away-from-zero into ×100.
+                    let scaled = (f * 100.0).round();
+                    if (0.0..=u32::MAX as f64).contains(&scaled) {
+                        probe.load_1min_x100 = Some(scaled as u32);
+                        any_parsed = true;
+                    }
+                }
+            }
+            "PORT" => {
+                // PORT <proto> <port>
+                if let (Some(p), Some(n)) = (parts.next(), parts.next())
+                    && let Ok(port) = n.parse::<u16>()
+                {
+                    let proto = p.to_ascii_lowercase();
+                    if proto == "tcp" || proto == "udp" {
+                        probe.listening.insert((proto, port));
+                        any_parsed = true;
+                    }
+                }
+            }
+            "LOG_SB" => {
+                if let Some(b) = parts.next()
+                    && let Ok(bytes) = b.parse::<u64>()
+                {
+                    probe.sing_box_log_bytes = Some(bytes);
+                    any_parsed = true;
+                }
+            }
+            _ => continue,
+        }
+    }
+    if any_parsed {
+        Ok(probe)
+    } else {
+        Err(ProbeError::NothingParsed)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use vpnctl_ssh::MockTransport;
+
+    const SAMPLE: &str = "\
+SVC sing-box active
+SVC fail2ban active
+DISK /  9876  20480
+MEM  483 960
+LOAD 0.04
+PORT tcp 22
+PORT tcp 443
+PORT tcp 8443
+PORT udp 8388
+PORT udp 8443
+LOG_SB 308432
+";
+
+    #[test]
+    fn parses_full_probe_output() {
+        let p = parse_probe_output(SAMPLE).unwrap();
+        assert_eq!(p.sing_box_active, Some(true));
+        assert_eq!(p.fail2ban_active, Some(true));
+        assert_eq!(p.disk_used_mib, Some(9876));
+        assert_eq!(p.disk_total_mib, Some(20480));
+        assert_eq!(p.mem_available_mib, Some(483));
+        assert_eq!(p.mem_total_mib, Some(960));
+        assert_eq!(p.load_1min_x100, Some(4));
+        assert_eq!(p.sing_box_log_bytes, Some(308_432));
+        assert_eq!(p.listening.len(), 5);
+        assert!(p.listening.contains(&("tcp".into(), 443)));
+        assert!(p.listening.contains(&("udp".into(), 8443)));
+    }
+
+    #[test]
+    fn disk_pct_calculation() {
+        let p = Probe {
+            disk_used_mib: Some(9876),
+            disk_total_mib: Some(20480),
+            ..Probe::default()
+        };
+        // 9876 / 20480 = 48.22%, floor → 48
+        assert_eq!(p.disk_pct(), Some(48));
+    }
+
+    #[test]
+    fn disk_pct_handles_division_by_zero() {
+        let p = Probe {
+            disk_used_mib: Some(100),
+            disk_total_mib: Some(0),
+            ..Probe::default()
+        };
+        assert_eq!(p.disk_pct(), None);
+    }
+
+    #[test]
+    fn disk_pct_clamps_over_100() {
+        let p = Probe {
+            disk_used_mib: Some(110),
+            disk_total_mib: Some(100),
+            ..Probe::default()
+        };
+        // Overcommit (snapshots, sparse). Clamp to 100, not panic.
+        assert_eq!(p.disk_pct(), Some(100));
+    }
+
+    #[test]
+    fn mem_used_pct_calculation() {
+        let p = Probe {
+            mem_available_mib: Some(483),
+            mem_total_mib: Some(960),
+            ..Probe::default()
+        };
+        // used = 100 - (483 * 100 / 960) = 100 - 50 = 50
+        assert_eq!(p.mem_used_pct(), Some(50));
+    }
+
+    #[test]
+    fn parses_inactive_services() {
+        let raw = "SVC sing-box inactive\nSVC fail2ban failed\n";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.sing_box_active, Some(false));
+        assert_eq!(p.fail2ban_active, Some(false));
+    }
+
+    #[test]
+    fn skips_unknown_tags_quietly() {
+        let raw = "JUNK something\nSVC sing-box active\nMORE junk\n";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.sing_box_active, Some(true));
+    }
+
+    #[test]
+    fn nothing_parsed_returns_err() {
+        let raw = "garbage\nmore garbage\n";
+        let err = parse_probe_output(raw).unwrap_err();
+        assert!(matches!(err, ProbeError::NothingParsed));
+    }
+
+    #[test]
+    fn empty_input_returns_err() {
+        let err = parse_probe_output("").unwrap_err();
+        assert!(matches!(err, ProbeError::NothingParsed));
+    }
+
+    #[test]
+    fn partial_parse_succeeds_with_some_fields_none() {
+        // Only LOAD parses; everything else garbage.
+        let raw = "LOAD 1.23\nDISK garbage data\nMEM also broken\n";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.load_1min_x100, Some(123));
+        assert_eq!(p.disk_used_mib, None);
+        assert_eq!(p.mem_available_mib, None);
+    }
+
+    #[test]
+    fn listening_set_is_deterministic_sort_order() {
+        // BTreeSet → iteration order matches sort order; same input
+        // twice produces same Vec when iterated.
+        let p1 = parse_probe_output(SAMPLE).unwrap();
+        let p2 = parse_probe_output(SAMPLE).unwrap();
+        let v1: Vec<_> = p1.listening.iter().collect();
+        let v2: Vec<_> = p2.listening.iter().collect();
+        assert_eq!(v1, v2);
+    }
+
+    #[tokio::test]
+    async fn snapshot_via_mock_ssh_returns_parsed_probe() {
+        let ssh = MockTransport::new();
+        ssh.expect(PROBE_SCRIPT, SAMPLE);
+        let client = SshProbeClient::new(&ssh);
+        let p = client.snapshot().await.unwrap();
+        assert_eq!(p.sing_box_active, Some(true));
+        assert_eq!(p.disk_pct(), Some(48));
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_garbage_returns_nothing_parsed() {
+        let ssh = MockTransport::new();
+        ssh.expect(PROBE_SCRIPT, "junk\nmore junk\n");
+        let client = SshProbeClient::new(&ssh);
+        let err = client.snapshot().await.unwrap_err();
+        assert!(matches!(err, ProbeError::NothingParsed));
+    }
+
+    #[test]
+    fn probe_script_pins_security_invariants() {
+        // Doesn't curl anywhere (no exfil), uses standard tools only,
+        // doesn't write to stdout from sing-box itself (would leak
+        // user data into our parser). Pin against future edits that
+        // would weaken these.
+        assert!(!PROBE_SCRIPT.contains("curl"), "no outbound HTTP");
+        assert!(!PROBE_SCRIPT.contains("wget"), "no outbound HTTP");
+        assert!(!PROBE_SCRIPT.contains("nc "), "no netcat");
+        assert!(PROBE_SCRIPT.contains("ss -tunl"), "uses ss");
+        assert!(
+            PROBE_SCRIPT.contains("/proc/loadavg"),
+            "uses /proc, not uptime command"
+        );
+    }
+}

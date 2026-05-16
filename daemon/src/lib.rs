@@ -12,6 +12,7 @@ pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
 pub mod handlers;
+pub mod node_probe;
 pub mod rate_limit;
 pub mod wizard;
 
