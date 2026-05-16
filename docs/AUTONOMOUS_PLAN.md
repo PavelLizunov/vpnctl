@@ -263,6 +263,84 @@ test-writer-agent used for the 2 new schemas (node_health, AnyTLS).
 Plan-agent NOT invoked this burst (no new kernel added; AnyTLS +
 Trojan are sibling protocols, copy-paste pattern from Hysteria2).
 
+# === 2026-05-16 Pavel session — vps-is-01 (93.95.226.167) migration ===
+# Triggered by Pavel: "не отключая VPN control, начнем миграцию для
+# 93.95.226.167 на vpnctl" → Stage 1 inventory-only import, NO
+# touching of /etc/sing-box/config.json on the live VPS.
+
+2026-05-16T12:54:00Z | (no commit, ad-hoc CLI ops) | vps-is-01 import | server add + 7 secrets + 32 users w/ preserved VLESS UUIDs + 32 grants. CLI ran locally against `/var/lib/vpnctl/inv.db` pulled from 236 (WAL checkpoint + stop/cp/restart cycle; pre-migration snapshot saved as `/var/lib/vpnctl/inv.db.pre-migration-1778936121`). audit_log carries `cli` actor for every mutation. visible in admin UI: «2 servers in inventory · vps-is-01 · 32 users granted access».
+
+2026-05-16T12:58:00Z | (no commit, direct SQL) | host fingerprint | UPDATE servers SET trusted_host_fingerprint=SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4 (from `ssh-keyscan -t ed25519 | ssh-keygen -lf -`). audit_log row inserted with action `server.set_fingerprint`, payload `{fingerprint, source:"ssh-keyscan"}`. CLI command for this missing — TODO for vpnctl: `vpnctl server set-fingerprint <id>`.
+
+2026-05-16T13:02:00Z | (no commit, direct SQL) | secret key rename | `hysteria2.obfs_password` → `hysteria2.obfs.password`. Stage 1 import script used the wrong key (underscore instead of dot); render didn't pick up Salamander obfs until renamed. audit_log row inserted.
+
+2026-05-16T13:25:00Z | db3998c | bug-fix: VLESS xtls-rprx-vision flow | Pre-fix `VlessReality::server_inbound` hardcoded `flow:""`; `client_config` omitted flow entirely; `share_link` had no `&flow=` param. Result: vpnctl-deployed REALITY would handshake-reject every modern sing-box client (flow mismatch). Discovered comparing `vpnctl render vps-is-01` against the live config.json — 32 users all have `flow:xtls-rprx-vision` in the source-of-truth. Fix: emit flow in all 3 surfaces. Tests +2 (server_inbound + client_config flow pinning); existing 2 byte-equality tests updated. Live-tested: `vpnctl render` now produces semantically identical VLESS users to the live config (sorted users-set equal).
+
+## Stage 1 deliverable status (vps-is-01)
+
+| What | Status |
+|---|---|
+| Server in inventory + 32 users + grants | ✅ |
+| REALITY secrets (priv/pub/short_id) | ✅ |
+| TUIC cert paths | ✅ |
+| Hy2 Salamander obfs password | ✅ (after key rename) |
+| Host fingerprint pinned | ✅ |
+| Audit log complete for every mutation | ✅ |
+| Pre-migration DB backup | ✅ (`/var/lib/vpnctl/inv.db.pre-migration-1778936121`) |
+| `/etc/sing-box/config.json` on VPS UNTOUCHED | ✅ |
+| `vpnctl render vps-is-01` semantically matches live VLESS+REALITY | ✅ |
+| Hy2 inbound matches except port + user-count (architectural) | ✅ |
+| TUIC inbound matches except port + user-count (architectural) | ✅ |
+
+## Stage 2 blockers (architectural — separate iters needed BEFORE deploy)
+
+1. **Per-server protocol port override** — `Hysteria2`, `TuicV5`,
+   `Trojan`, `AnyTls`, `Shadowsocks2022` all hardcode their listen
+   port. vps-is-01 has Hy2 on :9443 and TUIC on :9444 (not the
+   vpnctl defaults :8444 / :8443). Need `RenderCtx`-aware port
+   resolution: read `<proto>.listen_port` from server_secrets,
+   fall back to const. Affects `listen_ports()` trait method too
+   (currently `&'static`; would need a `Vec<(_,u16)>` or accept
+   `RenderCtx` so admin drift detection stays accurate).
+2. **Multi-port-per-protocol** — vps-is-01 has 3 VLESS inbounds
+   (443 / 8443 / 8444). vpnctl's `Protocol` trait emits one
+   inbound per protocol-per-server. Need either: same protocol
+   registered multiple times with distinct port secrets (least
+   intrusive), or `server_inbound` returns `Vec<Value>` (breaking
+   trait change).
+3. **VLESS+gRPC transport** — vps-is-01 has `vless-reality-grpc-8444`
+   inbound. Not supported by `VlessReality` today. Need separate
+   `VlessRealityGrpc` Protocol or `vless.transport` secret toggle.
+4. **Separate per-user TUIC UUID** — vps-is-01 TUIC users have
+   `main-brat`/`ninitux` with DIFFERENT UUIDs from their VLESS
+   records. `User.uuid` is a single field. Need `User.tuic_uuid:
+   Option<String>` (additive schema change).
+5. **Separate per-user Hy2 password** — same as #4 but for
+   `hysteria2.password` vs `tuic_password`. Currently both
+   re-use `tuic_password`. The comment in `hysteria2.rs` already
+   anticipates this: "add `hysteria.password` field to User, prefer
+   it when set, fall back to `tuic_password`".
+6. **Top-level `dns` and `route` sections** — vpnctl's sing-box
+   render emits neither. Live config has both. Need to verify
+   sing-box defaults are acceptable on a node, OR add render
+   contribution from `Kernel::render_config` so the operator can
+   opt in via server secrets.
+
+## Recommended next iters for vpnctl (in priority order)
+
+- iter A (HIGHEST): per-server port override for Hy2/TUIC/Trojan/AnyTls/SS2022
+  (#1 above) — unlocks Stage 2 cleanly for ANY production server with
+  non-default ports. Probably 2-3 commits because `listen_ports()`
+  trait change touches drift detection.
+- iter B: `vpnctl server set-fingerprint <id>` CLI command — closes
+  the direct-SQL TODO from this session.
+- iter C: `User.tuic_uuid` + `User.hysteria_password` additive fields
+  (#4 + #5).
+- iter D: multi-inbound-per-protocol architecture (#2) — biggest
+  trait change; design needed first.
+- iter E: VLESS+gRPC as separate Protocol (#3).
+- iter F: dns/route render contribution from Kernel (#6).
+
 ---
 
 ## Loop prompt to feed `/loop` (copy this verbatim)
