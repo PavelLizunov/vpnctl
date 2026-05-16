@@ -75,6 +75,10 @@ enum Cmd {
     /// once), record the host fingerprint, and add the server to inventory.
     /// After this, `vpnctl deploy <id>` works key-only.
     Bootstrap(cmd::bootstrap::BootstrapArgs),
+    /// Render the kernel-native config for a server to STDOUT without
+    /// touching SSH. Useful for offline review + live-staging tests
+    /// (closes the methodology TODO in docs/PROTOCOL_TESTING.md).
+    Render { server: String },
 }
 
 #[tokio::main]
@@ -95,6 +99,7 @@ async fn main() -> std::process::ExitCode {
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
         Cmd::Sub { user, qr } => cmd::sub::run(&user, qr, cli.db, cli.output).await,
         Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
+        Cmd::Render { server } => cmd::render::run(&server, cli.db).await,
     };
 
     match res {
