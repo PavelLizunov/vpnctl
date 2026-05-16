@@ -158,6 +158,30 @@ pub struct VpnStatsDelta {
     pub active_connections: u32,
 }
 
+/// One row in `node_health` (Phase H chunk 2). Daemon-side poller
+/// writes one per tick per server. Fields are `Option` to mirror
+/// `daemon::node_probe::Probe` — partial-success snapshots
+/// (one parser failed, others succeeded) preserve the working
+/// metrics instead of throwing the whole row away.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeHealthRow {
+    pub ts: DateTime<Utc>,
+    pub server_id: ServerId,
+    pub sing_box_active: Option<bool>,
+    pub fail2ban_active: Option<bool>,
+    pub disk_used_mib: Option<u64>,
+    pub disk_total_mib: Option<u64>,
+    pub mem_available_mib: Option<u64>,
+    pub mem_total_mib: Option<u64>,
+    pub load_1min_x100: Option<u32>,
+    /// JSON array of sorted `"proto/port"` strings (e.g.
+    /// `["tcp/443","udp/8443"]`). Parsed on the UI side via
+    /// `serde_json::from_str`. Stored as a String so SQL
+    /// `LIKE '%/443%'` queries can grep without parsing.
+    pub listening_ports_json: Option<String>,
+    pub sing_box_log_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pool: SqlitePool,
@@ -1102,6 +1126,126 @@ impl SqliteInventory {
         .await?;
         Ok(res.rows_affected())
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Phase H chunk 2 — node telemetry storage (node_probe sink)
+    //
+    // Same shape + lifecycle as `vpn_connection_stats`:
+    //   * Daemon poller calls `record_node_health(server_id, &Probe)`
+    //     once per tick per server (chunk 3).
+    //   * UI reads via `recent_node_health_for_server(id, since_hours)`.
+    //   * Retention purge mirrors the others.
+    //
+    // **Audit exemption** (same rationale as `record_vpn_stats`):
+    // probe writes happen at poller cadence × server count; audit
+    // log volume would drown human-driven mutations. The table IS the
+    // audit trail for telemetry. Documented exemption — not a silent
+    // drift from the "every mutation audited" invariant.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Persist one node probe. `listening_ports_json` is the JSON
+    /// serialization of the sorted `(proto, port)` set — caller
+    /// builds it from `daemon::node_probe::Probe::listening`. Always
+    /// stamps `ts` with daemon-side now; clash-api / probes don't
+    /// carry their own timestamp.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_node_health(
+        &self,
+        server_id: &ServerId,
+        sing_box_active: Option<bool>,
+        fail2ban_active: Option<bool>,
+        disk_used_mib: Option<u64>,
+        disk_total_mib: Option<u64>,
+        mem_available_mib: Option<u64>,
+        mem_total_mib: Option<u64>,
+        load_1min_x100: Option<u32>,
+        listening_ports_json: Option<&str>,
+        sing_box_log_bytes: Option<u64>,
+    ) -> Result<()> {
+        // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
+        let sb = sing_box_active.map(i64::from);
+        let f2b = fail2ban_active.map(i64::from);
+        sqlx::query(
+            "INSERT INTO node_health
+             (ts, server_id, sing_box_active, fail2ban_active,
+              disk_used_mib, disk_total_mib,
+              mem_available_mib, mem_total_mib,
+              load_1min_x100, listening_ports_json, sing_box_log_bytes)
+             VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .bind(&server_id.0)
+        .bind(sb)
+        .bind(f2b)
+        .bind(disk_used_mib.and_then(|n| i64::try_from(n).ok()))
+        .bind(disk_total_mib.and_then(|n| i64::try_from(n).ok()))
+        .bind(mem_available_mib.and_then(|n| i64::try_from(n).ok()))
+        .bind(mem_total_mib.and_then(|n| i64::try_from(n).ok()))
+        .bind(load_1min_x100.map(i64::from))
+        .bind(listening_ports_json)
+        .bind(sing_box_log_bytes.and_then(|n| i64::try_from(n).ok()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Recent rows for one server in the look-back window, newest
+    /// first. UI reads this for the server-detail page (chunk 3).
+    pub async fn recent_node_health_for_server(
+        &self,
+        server_id: &ServerId,
+        since_hours: u32,
+    ) -> Result<Vec<NodeHealthRow>> {
+        let rows = sqlx::query(
+            "SELECT ts, server_id, sing_box_active, fail2ban_active,
+                    disk_used_mib, disk_total_mib,
+                    mem_available_mib, mem_total_mib,
+                    load_1min_x100, listening_ports_json, sing_box_log_bytes
+             FROM node_health
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             ORDER BY ts DESC",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_node_health).collect()
+    }
+
+    /// Most recent single row for a server. Convenience for the
+    /// "current state" hero block on the server-detail page —
+    /// callers that only need the latest snapshot don't have to
+    /// pull a whole 24h Vec just to read the first element.
+    pub async fn latest_node_health(&self, server_id: &ServerId) -> Result<Option<NodeHealthRow>> {
+        let row_opt = sqlx::query(
+            "SELECT ts, server_id, sing_box_active, fail2ban_active,
+                    disk_used_mib, disk_total_mib,
+                    mem_available_mib, mem_total_mib,
+                    load_1min_x100, listening_ports_json, sing_box_log_bytes
+             FROM node_health
+             WHERE server_id = ?1
+             ORDER BY ts DESC
+             LIMIT 1",
+        )
+        .bind(&server_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row_opt.map(row_to_node_health).transpose()
+    }
+
+    /// Drop rows older than `days`. Wired by chunk 3 into the
+    /// existing retention scheduler.
+    pub async fn purge_node_health_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM node_health
+             WHERE ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 /// Extract the `/16` network prefix from a v4 IP literal as a
@@ -1240,6 +1384,39 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         tuic_password: r.try_get("tuic_password")?,
         wireguard_pubkey: r.try_get("wireguard_pubkey")?,
         sub_token: r.try_get("sub_token")?,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
+    let ts_s: String = r.try_get("ts")?;
+    let ts = DateTime::parse_from_rfc3339(&ts_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!("node_health.ts malformed: {ts_s}: {e}"))
+        })?;
+    let server_id: String = r.try_get("server_id")?;
+    let sb_i: Option<i64> = r.try_get("sing_box_active")?;
+    let f2b_i: Option<i64> = r.try_get("fail2ban_active")?;
+    let disk_u: Option<i64> = r.try_get("disk_used_mib")?;
+    let disk_t: Option<i64> = r.try_get("disk_total_mib")?;
+    let mem_a: Option<i64> = r.try_get("mem_available_mib")?;
+    let mem_t: Option<i64> = r.try_get("mem_total_mib")?;
+    let load_i: Option<i64> = r.try_get("load_1min_x100")?;
+    let ports: Option<String> = r.try_get("listening_ports_json")?;
+    let log_b: Option<i64> = r.try_get("sing_box_log_bytes")?;
+    Ok(NodeHealthRow {
+        ts,
+        server_id: ServerId(server_id),
+        sing_box_active: sb_i.map(|n| n != 0),
+        fail2ban_active: f2b_i.map(|n| n != 0),
+        disk_used_mib: disk_u.and_then(|n| u64::try_from(n).ok()),
+        disk_total_mib: disk_t.and_then(|n| u64::try_from(n).ok()),
+        mem_available_mib: mem_a.and_then(|n| u64::try_from(n).ok()),
+        mem_total_mib: mem_t.and_then(|n| u64::try_from(n).ok()),
+        load_1min_x100: load_i.and_then(|n| u32::try_from(n).ok()),
+        listening_ports_json: ports,
+        sing_box_log_bytes: log_b.and_then(|n| u64::try_from(n).ok()),
     })
 }
 
