@@ -108,17 +108,42 @@ fn default_usage_coefficient() -> f64 {
 pub struct User {
     pub id: UserId,
     pub uuid: String,
+    /// SECRET. `Serialize` is `skip` so any `serde_json::to_string(&user)`
+    /// path (CLI `--output json`, future REST API, audit log payload)
+    /// CANNOT leak this value. The DB layer reads/writes the column
+    /// directly, NOT through the derived `Serialize`. (Review-agent
+    /// finding on the wg-keygen commit: previously the derive was
+    /// the leak surface for `wireguard_private` — closing both at
+    /// once for consistency.)
+    #[serde(skip_serializing, default)]
     pub tuic_password: Option<String>,
     pub wireguard_pubkey: Option<String>,
+    /// Server-generated Curve25519 private key for WireGuard /
+    /// AmneziaWG, standard-base64 encoded (44 chars ending `=`).
+    /// Set ONLY when the user was created via
+    /// `vpnctl user add --gen-wireguard` (or the web equivalent);
+    /// stays `None` for the operator-provided `--wireguard-pubkey`
+    /// path. Renders into `[Interface] PrivateKey = …` in client
+    /// `.conf` so the low-tech user can import a single artefact
+    /// (per CLAUDE.md "users are assumed maximally low-tech").
+    ///
+    /// SECRET — `Serialize` is `skip` for the same reason as
+    /// `tuic_password`. Live transport is `/sub/<token>` only.
+    #[serde(skip_serializing, default)]
+    pub wireguard_private: Option<String>,
     /// Opaque token for `vpnctld /sub/<token>` lookup. Populated by
     /// `inventory::add_user` if `None`. Field is `Option` so JSON snapshots
-    /// from before v0.4 still deserialise.
-    #[serde(default)]
+    /// from before v0.4 still deserialise. SECRET — `Serialize` is
+    /// `skip` (token = bearer credential equivalent).
+    #[serde(skip_serializing, default)]
     pub sub_token: Option<String>,
 }
 
-// Manual Debug: derived would print sub_token / tuic_password verbatim,
-// which leaks credential-equivalents into logs / panics / anyhow chains.
+// Manual Debug: derived would print sub_token / tuic_password /
+// wireguard_private verbatim, which leaks credential-equivalents
+// into logs / panics / anyhow chains. Companion to `#[serde(skip_serializing)]`
+// on those three fields — both Debug and Serialize paths are now
+// covered. Pinned by `user_debug_redacts_all_secret_fields` test.
 impl fmt::Debug for User {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("User")
@@ -129,8 +154,69 @@ impl fmt::Debug for User {
                 &self.tuic_password.as_ref().map(|_| "<redacted>"),
             )
             .field("wireguard_pubkey", &self.wireguard_pubkey)
+            .field(
+                "wireguard_private",
+                &self.wireguard_private.as_ref().map(|_| "<redacted>"),
+            )
             .field("sub_token", &self.sub_token.as_ref().map(|_| "<redacted>"))
             .finish()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod user_secret_redaction {
+    use super::*;
+
+    fn loaded_user() -> User {
+        User {
+            id: UserId("alice".into()),
+            uuid: "uuid-public-not-secret".into(),
+            tuic_password: Some("PW_TUIC_MUST_NOT_LEAK".into()),
+            wireguard_pubkey: Some("PUBKEY_OK_TO_PRINT_44CHARS_ENDING_EQ_VALUEAA=".into()),
+            wireguard_private: Some("PRIV_WG_MUST_NOT_LEAK".into()),
+            sub_token: Some("SUB_TOKEN_MUST_NOT_LEAK".into()),
+        }
+    }
+
+    #[test]
+    fn user_debug_redacts_all_secret_fields() {
+        let dbg = format!("{:?}", loaded_user());
+        for forbidden in [
+            "PW_TUIC_MUST_NOT_LEAK",
+            "PRIV_WG_MUST_NOT_LEAK",
+            "SUB_TOKEN_MUST_NOT_LEAK",
+        ] {
+            assert!(!dbg.contains(forbidden), "Debug leaked {forbidden}: {dbg}");
+        }
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+        // Non-secret fields should still be visible.
+        assert!(dbg.contains("alice"));
+        assert!(dbg.contains("PUBKEY_OK_TO_PRINT"));
+    }
+
+    #[test]
+    fn user_serialize_skips_all_secret_fields() {
+        let json = serde_json::to_string(&loaded_user()).unwrap();
+        for forbidden in [
+            "PW_TUIC_MUST_NOT_LEAK",
+            "PRIV_WG_MUST_NOT_LEAK",
+            "SUB_TOKEN_MUST_NOT_LEAK",
+            "tuic_password",
+            "wireguard_private",
+            "sub_token",
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "Serialize leaked {forbidden}: {json}"
+            );
+        }
+        // Non-secret fields should round-trip.
+        assert!(json.contains("alice"));
+        assert!(json.contains("PUBKEY_OK_TO_PRINT"));
     }
 }
 

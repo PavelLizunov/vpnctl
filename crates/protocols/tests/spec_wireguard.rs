@@ -38,6 +38,22 @@ fn user(name: &str, pubkey: Option<&str>) -> User {
         uuid: format!("uuid-{name}"),
         tuic_password: None,
         wireguard_pubkey: pubkey.map(str::to_string),
+        wireguard_private: None,
+        sub_token: None,
+    }
+}
+
+/// Same as `user` but the user was created via `--gen-wireguard`
+/// (server-side keypair generation, both halves stored). Used by
+/// the low-tech-UX spec tests that pin the
+/// no-`<PASTE>`-placeholder contract.
+fn user_with_keypair(name: &str, pubkey: &str, privkey: &str) -> User {
+    User {
+        id: UserId(name.into()),
+        uuid: format!("uuid-{name}"),
+        tuic_password: None,
+        wireguard_pubkey: Some(pubkey.into()),
+        wireguard_private: Some(privkey.into()),
         sub_token: None,
     }
 }
@@ -296,6 +312,80 @@ fn wg_share_link_user_without_pubkey_returns_render_error() {
     assert!(
         msg.contains("Render") && msg.contains("nopubkey"),
         "expected hard-error mentioning user; got {msg}"
+    );
+}
+
+// ── Low-tech-UX contract (CLAUDE.md "users are low-tech"
+//    one-action ceiling): when `wireguard_private` is set on the user
+//    (i.e. created via `--gen-wireguard` / web `gen_wireguard` flow),
+//    rendered configs must contain the REAL private key and NOT the
+//    `<PASTE YOUR PRIVATE KEY HERE>` placeholder. The recipient
+//    imports the artefact as-is in one action.
+
+const CLIENT_PRIV_FOR_TEST: &str = "BBBaaaCCCdddEEEfffGGGhhhIIIjjjKKKlllMMMnnno=";
+
+#[test]
+fn wg_client_conf_uses_server_generated_private_verbatim() {
+    let s = srv();
+    let secrets = server_secrets();
+    let ctx = RenderCtx::new(&s, &secrets);
+    let u = user_with_keypair("alice", PUBKEY_A, CLIENT_PRIV_FOR_TEST);
+    let link = WireGuard::new().share_link(&ctx, &u).unwrap();
+    // share_link wraps a base64(.conf) payload — decode and inspect
+    let b64 = link
+        .strip_prefix("wireguard://?conf=")
+        .and_then(|s| s.split('#').next())
+        .expect("share_link must start with wireguard://?conf=");
+    let bytes = URL_SAFE_NO_PAD.decode(b64).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains(CLIENT_PRIV_FOR_TEST),
+        "conf must embed server-generated private verbatim: {text}"
+    );
+    assert!(
+        !text.contains(CLIENT_PRIVKEY_PLACEHOLDER),
+        "conf must NOT have the <PASTE> placeholder when private is set"
+    );
+}
+
+#[test]
+fn wg_client_config_outbound_uses_server_generated_private_verbatim() {
+    // Mirror of the above on the JSON outbound path that vpnctl
+    // returns via `/sub/<token>`.
+    let s = srv();
+    let secrets = server_secrets();
+    let ctx = RenderCtx::new(&s, &secrets);
+    let u = user_with_keypair("alice", PUBKEY_A, CLIENT_PRIV_FOR_TEST);
+    let out = WireGuard::new().client_config(&ctx, &u).unwrap();
+    let priv_field = out
+        .pointer("/interface/private_key")
+        .and_then(serde_json::Value::as_str)
+        .expect("private_key must be a string");
+    assert_eq!(
+        priv_field, CLIENT_PRIV_FOR_TEST,
+        "outbound must embed user.wireguard_private verbatim, not placeholder"
+    );
+}
+
+#[test]
+fn wg_client_conf_keeps_placeholder_when_private_is_none() {
+    // Operator-paranoid path (legacy `--wireguard-pubkey` only): no
+    // private stored → conf still has `<PASTE>` so the operator knows
+    // to do the editor step. This pins the FALLBACK contract.
+    let s = srv();
+    let secrets = server_secrets();
+    let ctx = RenderCtx::new(&s, &secrets);
+    let u = user("paranoid", Some(PUBKEY_A));
+    let link = WireGuard::new().share_link(&ctx, &u).unwrap();
+    let b64 = link
+        .strip_prefix("wireguard://?conf=")
+        .and_then(|s| s.split('#').next())
+        .unwrap();
+    let bytes = URL_SAFE_NO_PAD.decode(b64).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains(CLIENT_PRIVKEY_PLACEHOLDER),
+        "without server-generated private, placeholder MUST remain"
     );
 }
 

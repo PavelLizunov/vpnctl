@@ -46,6 +46,7 @@ fn user(id: &str) -> User {
         uuid: format!("uuid-of-{id}"),
         tuic_password: None,
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     }
 }

@@ -220,8 +220,31 @@ impl Protocol for WireGuard {
         // Still, omit when not set so the rendered conf stays minimal.
         let amnezia = amneziawg_block(ctx);
 
+        // Server-generated private (low-tech UX) takes precedence;
+        // operator-provided-pubkey path keeps the legacy placeholder.
+        // See `render_client_conf` for the same fallback chain.
+        //
+        // Invariant guard: if private is set, the matching public MUST
+        // also be set — the server's [Peer] block won't authenticate
+        // a client whose pubkey isn't in the server's user list.
+        // This pair is enforced by all write paths (CLI + web both
+        // set both halves atomically), but a direct-SQL operator could
+        // hand-set only one — fail loud here rather than ship a
+        // silently-broken tunnel. (Review-agent finding on wg-keygen.)
+        if user.wireguard_private.is_some() && user.wireguard_pubkey.is_none() {
+            return Err(CoreError::Render(format!(
+                "user '{}' has wireguard_private set but no wireguard_pubkey \
+                 — the server [Peer] block can't authenticate this client; \
+                 fix the inventory row before re-running",
+                user.id.0
+            )));
+        }
+        let client_private = user
+            .wireguard_private
+            .as_deref()
+            .unwrap_or(CLIENT_PRIVKEY_PLACEHOLDER);
         let mut interface = json!({
-            "private_key": CLIENT_PRIVKEY_PLACEHOLDER,
+            "private_key": client_private,
             "address_cidr": client_cidr,
             "dns": ["1.1.1.1"],
         });
@@ -314,6 +337,15 @@ fn amneziawg_block(ctx: &RenderCtx<'_>) -> Option<serde_json::Value> {
 /// LF newlines, opens with a "do-not-edit" warning. Mirrors the conf
 /// the AmneziaWG kernel writes server-side — same obfuscation block,
 /// peer's keys swapped for client perspective.
+///
+/// **Private-key sourcing** (per CLAUDE.md "users are low-tech" rule):
+///   * `user.wireguard_private` set (= server-generated via
+///     `--gen-wireguard`) → conf is ready-to-import, single-action UX;
+///     no editor step needed.
+///   * `user.wireguard_private` is `None` (= operator-provided pubkey
+///     only) → falls back to the legacy `<PASTE YOUR PRIVATE KEY HERE>`
+///     placeholder + the comment block instructing the operator to
+///     swap in the client-side privkey before forwarding to the user.
 fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let server_pub = ctx.require("wireguard.server_public_key")?;
     let listen_port: u16 = ctx
@@ -324,14 +356,24 @@ fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
 
     let mut out = String::with_capacity(512);
     out.push_str("# vpnctl-rendered AmneziaWG client config.\n");
-    out.push_str("# Replace <PASTE YOUR PRIVATE KEY HERE> with the privkey for ");
-    out.push_str(&user.id.0);
-    out.push('\n');
-    out.push_str("# generated locally via `awg genkey`.\n\n");
+    if user.wireguard_private.is_some() {
+        out.push_str("# Private key was server-generated for ");
+        out.push_str(&user.id.0);
+        out.push_str(" — import this file as-is.\n\n");
+    } else {
+        out.push_str("# Replace <PASTE YOUR PRIVATE KEY HERE> with the privkey for ");
+        out.push_str(&user.id.0);
+        out.push('\n');
+        out.push_str("# generated locally via `awg genkey`.\n\n");
+    }
 
     out.push_str("[Interface]\n");
     out.push_str("PrivateKey = ");
-    out.push_str(CLIENT_PRIVKEY_PLACEHOLDER);
+    out.push_str(
+        user.wireguard_private
+            .as_deref()
+            .unwrap_or(CLIENT_PRIVKEY_PLACEHOLDER),
+    );
     out.push('\n');
     out.push_str("Address = 10.66.0.2/32\n");
     out.push_str("DNS = 1.1.1.1\n");

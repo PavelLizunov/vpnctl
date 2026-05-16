@@ -510,6 +510,7 @@ async fn seed(
             uuid: format!("00000000-0000-0000-0000-{i:012}"),
             tuic_password: None,
             wireguard_pubkey: None,
+            wireguard_private: None,
             sub_token: None,
         })
         .await
@@ -927,6 +928,7 @@ async fn admin_users_href_url_encodes_special_chars() {
             uuid: "00000000-0000-0000-0000-000000000099".into(),
             tuic_password: None,
             wireguard_pubkey: None,
+            wireguard_private: None,
             sub_token: None,
         })
         .await
@@ -2447,12 +2449,13 @@ async fn admin_users_page_renders_create_form() {
         html.contains(">create<"),
         "submit button label drifted from 'create'"
     );
-    // Form was restructured in the wg-pubkey commit to a 2-row layout;
-    // pin the new helper copy that lives below the wg-pubkey field
-    // (replaces the old single-line deck about server-side mint).
+    // Form has 3 rows now (id, wg pubkey, wg keygen checkbox) after
+    // the "users are low-tech" rule landed. Pin a sentence from the
+    // helper text below the gen_wireguard checkbox so future drift
+    // surfaces immediately.
     assert!(
-        html.contains("private key stays on the device"),
-        "form copy drifted — wg-pubkey helper missing"
+        html.contains("recommended for low-tech users"),
+        "form copy drifted — gen_wireguard helper missing"
     );
 }
 
@@ -3711,5 +3714,20 @@ async fn admin_users_page_form_has_wireguard_pubkey_field() {
         html.contains(r#"name="wireguard_pubkey""#),
         "user-create form must expose wireguard_pubkey input"
     );
-    assert!(html.contains("private key stays on the device"));
+    // The form also exposes a `gen_wireguard` checkbox per the
+    // CLAUDE.md "users are low-tech" rule — server generates the
+    // keypair when checked, so the operator can hand the user a
+    // single ready-to-import artefact.
+    assert!(
+        html.contains(r#"name="gen_wireguard""#),
+        "user-create form must expose gen_wireguard checkbox (low-tech default)"
+    );
+    assert!(
+        html.contains("operator-paranoid"),
+        "wg-pubkey placeholder should call out operator-paranoid path"
+    );
+    assert!(
+        html.contains("one-tap import"),
+        "gen_wireguard helper must call out the one-tap import promise"
+    );
 }

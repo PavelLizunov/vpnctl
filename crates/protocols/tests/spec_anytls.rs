@@ -33,6 +33,7 @@ fn user(name: &str, pw: Option<&str>) -> User {
         uuid: "uuid-1".to_string(),
         tuic_password: pw.map(str::to_string),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     }
 }

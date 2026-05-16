@@ -44,6 +44,7 @@ fn user(id: &str) -> User {
         uuid: format!("uuid-of-{id}"),
         tuic_password: Some(format!("tuic-{id}")),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None, // inventory generates
     }
 }
@@ -356,5 +357,57 @@ async fn audit_ts_is_rfc3339_utc() {
         row.ts.format("%:z").to_string(),
         "+00:00",
         "ts not UTC: {s}"
+    );
+}
+
+// ── Server-generated WireGuard keypair round-trip (review-agent
+//    finding on wg-keygen commit: each layer was tested in isolation
+//    but the gen→insert→select→render chain was not. A binding-order
+//    bug in INSERT (e.g. swapping wireguard_private with sub_token)
+//    would survive every unit test and only surface in production).
+
+#[tokio::test]
+async fn wireguard_private_roundtrips_through_inventory_verbatim() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    let (priv_b64, pub_b64) = vpnctl_crypto::gen_wireguard_keypair();
+    let u = User {
+        id: UserId("alice".into()),
+        uuid: "uuid-alice".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some(pub_b64.clone()),
+        wireguard_private: Some(priv_b64.clone()),
+        sub_token: None,
+    };
+    inv.add_user(&u).await.unwrap();
+
+    // 1. get_user must return the SAME secret bytes (no
+    //    truncation, no re-encoding, no column swap).
+    let got = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .expect("user exists");
+    assert_eq!(got.wireguard_pubkey.as_deref(), Some(pub_b64.as_str()));
+    assert_eq!(got.wireguard_private.as_deref(), Some(priv_b64.as_str()));
+
+    // 2. list_users must also return them verbatim.
+    let listed = inv.list_users().await.unwrap();
+    let found = listed.iter().find(|x| x.id.0 == "alice").expect("listed");
+    assert_eq!(found.wireguard_private.as_deref(), Some(priv_b64.as_str()));
+
+    // 3. find_user_by_sub_token must also (this is the /sub/<token>
+    //    hot path — if the secret didn't survive THIS query, the
+    //    one-tap-import UX would silently break).
+    let token = got.sub_token.as_deref().expect("sub_token populated");
+    let by_token = inv
+        .find_user_by_sub_token(token)
+        .await
+        .unwrap()
+        .expect("found");
+    assert_eq!(
+        by_token.wireguard_private.as_deref(),
+        Some(priv_b64.as_str())
     );
 }

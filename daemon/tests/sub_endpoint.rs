@@ -57,6 +57,7 @@ async fn seed(dir: &TempDir) -> (AppState, String) {
         uuid: "uuid-alice".into(),
         tuic_password: Some("pw-alice".into()),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     };
     inv.add_user(&user).await.unwrap();
@@ -165,6 +166,7 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
         uuid: "uuid-solo".into(),
         tuic_password: Some("pw".into()),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     };
     inv.add_user(&user).await.unwrap();
@@ -255,6 +257,7 @@ async fn sub_rate_limit_returns_429_after_burst() {
         uuid: "uuid-alice".into(),
         tuic_password: Some("pw-alice".into()),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     };
     inv.add_user(&user).await.unwrap();
@@ -380,6 +383,7 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         uuid: "uuid-alice".into(),
         tuic_password: Some("pw-alice".into()),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     };
     inv.add_user(&user).await.unwrap();

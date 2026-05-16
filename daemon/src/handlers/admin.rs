@@ -1016,12 +1016,28 @@ pub(crate) async fn users(
                         "wg pubkey"
                     }
                     input type="text" id="wireguard_pubkey" name="wireguard_pubkey"
-                          placeholder="(optional, base64 44 chars ending '=')"
+                          placeholder="(operator-paranoid: paste pubkey, user keygens locally)"
                           pattern="[A-Za-z0-9+/]{43}="
-                          title="WireGuard PUBLIC key — 44 base64 chars ending '='. Leave blank if user won't use WG/AmneziaWG."
+                          title="WireGuard PUBLIC key — 44 base64 chars ending '='. Leave blank if you want vpnctl to generate the pair (recommended for low-tech users)."
                           style="flex: 1; max-width: 480px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink);";
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                        "private key stays on the device"
+                        "OR leave blank ↓"
+                    }
+                }
+                // Server-side keypair option — per CLAUDE.md "users are
+                // assumed maximally low-tech" rule. Default-off so the
+                // operator-paranoid path stays one form-submit; when
+                // checked, vpnctl mints both halves and the
+                // /sub/<token> response will carry a ready-to-import
+                // WG conf with no additional user action.
+                div style="display: flex; gap: 10px; align-items: baseline;" {
+                    label for="gen_wireguard" style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                        "wg keygen"
+                    }
+                    input type="checkbox" id="gen_wireguard" name="gen_wireguard" value="1"
+                          style="margin: 0;";
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                        "let vpnctl generate the keypair (recommended for low-tech users — one-tap import)"
                     }
                 }
             }
@@ -1823,19 +1839,50 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             .into_response();
     }
 
-    // Optional `wireguard_pubkey` from the form. Empty → None.
-    // **Validator deliberately reused from `vpnctl_protocols::wireguard`**
-    // — single source of truth so a future tweak to the canonical
-    // validator can't silently drift from the web one (review-agent
-    // finding).
+    // Two mutually-exclusive WG flows from the form (per CLAUDE.md
+    // "users are assumed maximally low-tech" — the default web flow
+    // for non-paranoid operators is to tick `gen_wireguard`):
+    //   * `wireguard_pubkey=<44b64>` — operator-provided pubkey
+    //     (security-paranoid path; user keygen's on-device).
+    //   * `gen_wireguard=1` — server mints the pair and stores both
+    //     halves; user gets a single ready-to-import artefact via
+    //     /sub/<token>.
+    // Reject both-at-once explicitly so the operator's intent is
+    // unambiguous — matches the `clap conflicts_with` rule on the CLI.
     let wg_raw = body
         .split('&')
         .find_map(|kv| kv.strip_prefix("wireguard_pubkey="))
         .unwrap_or("")
         .trim();
     let wg_decoded = decode_form_value(wg_raw);
-    let wg_pubkey: Option<String> = if wg_decoded.is_empty() {
-        None
+    // Form-encoded checkbox parser — must accept any "truthy" value
+    // because different proxies / form libraries serialize a checked
+    // box differently: `=1` (our HTML), `=on` (default HTML default),
+    // `=true` (some JS frameworks). Treat ANY non-empty / non-"0" /
+    // non-"false" / non-"off" value as ticked. (Review-agent finding:
+    // previous matches!(kv, "=1" | "=on") would silently flip if
+    // an upstream proxy normalised to `=true` or added whitespace.)
+    let gen_wireguard = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("gen_wireguard="))
+        .map(|raw| {
+            let decoded = decode_form_value(raw);
+            let v = decoded.trim().to_ascii_lowercase();
+            !v.is_empty() && v != "0" && v != "false" && v != "off"
+        })
+        .unwrap_or(false);
+    if !wg_decoded.is_empty() && gen_wireguard {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text("cannot combine wireguard_pubkey with gen_wireguard — pick one"),
+        )
+            .into_response();
+    }
+    let (wg_pubkey, wg_private): (Option<String>, Option<String>) = if gen_wireguard {
+        let (priv_b64, pub_b64) = vpnctl_crypto::gen_wireguard_keypair();
+        (Some(pub_b64), Some(priv_b64))
+    } else if wg_decoded.is_empty() {
+        (None, None)
     } else if !vpnctl_protocols::is_valid_wg_pubkey(&wg_decoded) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1845,7 +1892,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         )
             .into_response();
     } else {
-        Some(wg_decoded)
+        (Some(wg_decoded), None)
     };
 
     // Mint the secrets. UUID is straightforward; tuic_password is 24
@@ -1862,6 +1909,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         uuid: vpnctl_crypto::gen_uuid(),
         tuic_password: Some(tuic_password),
         wireguard_pubkey: wg_pubkey,
+        wireguard_private: wg_private,
         sub_token: None,
     };
 
@@ -1889,6 +1937,11 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             Some(&serde_json::json!({
                 "uuid": user.uuid,
                 "wg_pubkey_set": user.wireguard_pubkey.is_some(),
+                // Pin which provenance the pubkey had; pubkey/private
+                // values themselves never enter the audit log.
+                "wg_keypair_provenance": if user.wireguard_private.is_some() { "server-generated" }
+                    else if user.wireguard_pubkey.is_some() { "operator-provided" }
+                    else { "absent" },
             })),
         )
         .await

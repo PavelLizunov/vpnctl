@@ -36,6 +36,7 @@ fn user(name: &str) -> User {
         uuid: "00000000-0000-0000-0000-000000000001".to_string(),
         tuic_password: None,
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     }
 }

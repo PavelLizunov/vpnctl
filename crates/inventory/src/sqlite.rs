@@ -390,13 +390,14 @@ impl SqliteInventory {
             _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
         };
         let res = sqlx::query(
-            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, sub_token)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&u.id.0)
         .bind(&u.uuid)
         .bind(&u.tuic_password)
         .bind(&u.wireguard_pubkey)
+        .bind(&u.wireguard_private)
         .bind(&token)
         .execute(&self.pool)
         .await;
@@ -420,7 +421,7 @@ impl SqliteInventory {
     /// invariant by exposing the daemon publicly without Track-2.
     pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
              FROM users WHERE sub_token = ?1",
         )
         .bind(token)
@@ -449,7 +450,7 @@ impl SqliteInventory {
 
     pub async fn get_user(&self, id: &UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
              FROM users WHERE id = ?1",
         )
         .bind(&id.0)
@@ -460,7 +461,7 @@ impl SqliteInventory {
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
              FROM users ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -501,7 +502,7 @@ impl SqliteInventory {
 
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey, u.sub_token
+            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
@@ -1383,6 +1384,7 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         uuid: r.try_get("uuid")?,
         tuic_password: r.try_get("tuic_password")?,
         wireguard_pubkey: r.try_get("wireguard_pubkey")?,
+        wireguard_private: r.try_get("wireguard_private")?,
         sub_token: r.try_get("sub_token")?,
     })
 }
@@ -1506,6 +1508,7 @@ mod tests {
             uuid: format!("uuid-{id}"),
             tuic_password: Some(format!("pw-{id}")),
             wireguard_pubkey: None,
+            wireguard_private: None,
             sub_token: None, // inventory will generate one
         }
     }

@@ -1,0 +1,29 @@
+-- Migration 0008 — add `users.wireguard_private` column.
+--
+-- Stores the Curve25519 private key (standard base64, 44 chars
+-- ending '=') that the SERVER generated for a user via the new
+-- `vpnctl user add --gen-wireguard` flag. Companion to the existing
+-- `wireguard_pubkey` column which can also be operator-provided
+-- (security-paranoid path).
+--
+-- WHY a column and not server_secrets/user_secrets table:
+--   * matches the existing layout where per-user secrets sit next
+--     to `tuic_password` directly on the users row
+--   * keeps the foreign-key story trivial (FK CASCADE on user delete
+--     auto-removes the private with the rest of the user record)
+--   * one fewer JOIN at the `/sub/<token>` hot-path
+--
+-- Backwards compat:
+--   * column is NULL-allowed (existing users have no value)
+--   * legacy `--wireguard-pubkey <pk>` flow still sets pubkey alone
+--     (private stays NULL → `client_config` falls back to the
+--     `<PASTE YOUR PRIVATE KEY HERE>` placeholder for that user)
+--   * new `--gen-wireguard` flow sets BOTH columns at once
+--
+-- SECURITY: this is now SECRET material in inv.db. The vpnctl-backup.sh
+-- pipeline already age-encrypts the snapshot before scp; that property
+-- now becomes load-bearing rather than nice-to-have. Inventory file
+-- mode (0640 user:user) and the systemd unit's MemoryDenyWriteExecute
+-- continue to be the primary at-rest controls.
+
+ALTER TABLE users ADD COLUMN wireguard_private TEXT;

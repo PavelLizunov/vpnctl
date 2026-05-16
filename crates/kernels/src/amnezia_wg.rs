@@ -338,6 +338,7 @@ mod tests {
             uuid: format!("uuid-{name}"),
             tuic_password: None,
             wireguard_pubkey: pubkey.map(str::to_string),
+            wireguard_private: None,
             sub_token: None,
         }
     }

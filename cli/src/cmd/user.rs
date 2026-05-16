@@ -3,7 +3,7 @@ use clap::Subcommand;
 use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{User, UserId};
-use vpnctl_crypto::{gen_password, gen_uuid};
+use vpnctl_crypto::{gen_password, gen_uuid, gen_wireguard_keypair};
 use vpnctl_inventory::SqliteInventory;
 
 const TUIC_PASSWORD_BYTES: usize = 24;
@@ -23,10 +23,21 @@ pub(crate) enum UserCmd {
         tuic_password: Option<String>,
         /// WireGuard PUBLIC key (44 base64 chars ending '='). The
         /// matching PRIVATE key stays on the operator's client
-        /// device — vpnctl never sees it. Optional: omit if the
-        /// user won't use WireGuard / AmneziaWG protocols.
-        #[arg(long)]
+        /// device — vpnctl never sees it. Operator-paranoid flow.
+        /// Mutually exclusive with `--gen-wireguard`.
+        #[arg(long, conflicts_with = "gen_wireguard")]
         wireguard_pubkey: Option<String>,
+        /// Generate a fresh WireGuard / AmneziaWG keypair server-side
+        /// and store BOTH halves (per CLAUDE.md "users are assumed
+        /// maximally low-tech" — the recipient gets a single
+        /// ready-to-import `.conf` via `/sub/<token>` with no
+        /// keygen step on their device). Mutually exclusive with
+        /// `--wireguard-pubkey`. The private key is SECRET; it lives
+        /// in inv.db and is included only in the owning user's
+        /// subscription response. Printed once to stdout for the
+        /// operator to verify; never re-emitted on `vpnctl user show`.
+        #[arg(long, conflicts_with = "wireguard_pubkey")]
+        gen_wireguard: bool,
     },
 
     /// List all users.
@@ -65,6 +76,7 @@ pub(crate) async fn run(
             uuid,
             tuic_password,
             wireguard_pubkey,
+            gen_wireguard,
         } => {
             // Validate shape if provided so an obvious typo doesn't
             // sit in inventory until a `vpnctl deploy` tries to render
@@ -79,11 +91,21 @@ pub(crate) async fn run(
                     pk.len()
                 );
             }
+            // Either operator-provided pubkey, or server-generated
+            // keypair, or neither. clap's `conflicts_with` already
+            // rejects both-at-once at parse time.
+            let (wg_pub, wg_priv) = if gen_wireguard {
+                let (priv_b64, pub_b64) = gen_wireguard_keypair();
+                (Some(pub_b64), Some(priv_b64))
+            } else {
+                (wireguard_pubkey, None)
+            };
             let user = User {
                 id: UserId(id.clone()),
                 uuid: uuid.unwrap_or_else(gen_uuid),
                 tuic_password: Some(tuic_password.unwrap_or(gen_password(TUIC_PASSWORD_BYTES)?)),
-                wireguard_pubkey,
+                wireguard_pubkey: wg_pub,
+                wireguard_private: wg_priv,
                 // None → inventory generates one. Don't pre-gen here so the
                 // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
@@ -96,6 +118,11 @@ pub(crate) async fn run(
                 Some(&json!({
                     "uuid": user.uuid,
                     "wg_pubkey_set": user.wireguard_pubkey.is_some(),
+                    // pin which provenance the pubkey had — the value
+                    // itself stays only in the row, not the audit log.
+                    "wg_keypair_provenance": if gen_wireguard { "server-generated" }
+                        else if user.wireguard_pubkey.is_some() { "operator-provided" }
+                        else { "absent" },
                 })),
             )
             .await?;
@@ -107,6 +134,19 @@ pub(crate) async fn run(
                 }
                 if let Some(wpk) = &u.wireguard_pubkey {
                     println!("  wireguard_pubkey : {wpk}");
+                }
+                if let Some(wpriv) = &u.wireguard_private {
+                    // Emitted to STDERR (not stdout) so:
+                    //   * scripts redirecting `> log.txt` don't capture
+                    //     the private into a plaintext file,
+                    //   * `vpnctl user add ... --output json | jq` keeps
+                    //     working without the secret poisoning the json
+                    //     stream (json on stdout, advisory on stderr),
+                    //   * terminal scrollback still shows it for the
+                    //     operator to copy in the moment.
+                    // (Review-agent finding on the wg-keygen commit.)
+                    eprintln!("  wireguard_private: {wpriv}");
+                    eprintln!("  ^^ secret material — only emitted now and via /sub/<token>");
                 }
                 Ok(())
             })

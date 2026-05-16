@@ -123,6 +123,7 @@ fn mk_user(id: &str, uuid: &str, pw: Option<&str>) -> User {
         uuid: uuid.into(),
         tuic_password: pw.map(String::from),
         wireguard_pubkey: None,
+        wireguard_private: None,
         sub_token: None,
     }
 }
