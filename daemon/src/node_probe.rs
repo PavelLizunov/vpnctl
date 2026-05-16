@@ -111,6 +111,16 @@ pub enum ProbeError {
     /// `Probe` fields as `None`.
     #[error("probe parse: no recognizable lines")]
     NothingParsed,
+    /// SSH "succeeded" but the script never reached its trailing
+    /// PROBE_OK sentinel — every body command failed and `|| true`
+    /// silently swallowed the errors. Surfaced as a distinct variant
+    /// so the UI can show "probe failed entirely" (likely shell
+    /// missing, /proc unreadable, busybox stripped) rather than the
+    /// less-actionable "nothing parsed" (which now means "we DID
+    /// reach the sentinel but no metric line parsed"). Caught by
+    /// review-agent on the burst review.
+    #[error("probe script never reached PROBE_OK sentinel — body failed entirely")]
+    ScriptDidNotComplete,
 }
 
 /// Single-script probe sent to the node. Self-contained — uses only
@@ -140,6 +150,12 @@ sb_log=/var/log/sing-box.log
 if [ -f "$sb_log" ]; then
     echo "LOG_SB $(stat -c %s "$sb_log" 2>/dev/null || echo 0)"
 fi
+# Completion sentinel. Every `|| true` above can silently swallow
+# errors; without this line a totally-broken probe (no /proc, missing
+# `ss`, busybox stripped) returns empty stdout and the parser can't
+# tell "node OK, just quiet" from "node fundamentally broken".
+# Parser requires this line; absence ⇒ `ScriptDidNotComplete`.
+echo "PROBE_OK"
 "#;
 
 /// Trait the poller calls. Defined to mirror `ClashClient` for
@@ -178,9 +194,14 @@ impl ProbeClient for SshProbeClient<'_> {
 pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
     let mut probe = Probe::default();
     let mut any_parsed = false;
+    let mut saw_sentinel = false;
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if line == "PROBE_OK" {
+            saw_sentinel = true;
             continue;
         }
         let mut parts = line.split_whitespace();
@@ -266,6 +287,14 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
             _ => continue,
         }
     }
+    // Sentinel-first: a totally-broken probe (no shell, no /proc)
+    // returns empty stdout — distinguishing from "we ran but nothing
+    // parsed" matters because the operator-facing failure modes
+    // differ. See `ProbeError::ScriptDidNotComplete` for the
+    // rationale (review-agent finding).
+    if !saw_sentinel {
+        return Err(ProbeError::ScriptDidNotComplete);
+    }
     if any_parsed {
         Ok(probe)
     } else {
@@ -291,6 +320,7 @@ PORT tcp 8443
 PORT udp 8388
 PORT udp 8443
 LOG_SB 308432
+PROBE_OK
 ";
 
     #[test]
@@ -354,7 +384,7 @@ LOG_SB 308432
 
     #[test]
     fn parses_inactive_services() {
-        let raw = "SVC sing-box inactive\nSVC fail2ban failed\n";
+        let raw = "SVC sing-box inactive\nSVC fail2ban failed\nPROBE_OK\n";
         let p = parse_probe_output(raw).unwrap();
         assert_eq!(p.sing_box_active, Some(false));
         assert_eq!(p.fail2ban_active, Some(false));
@@ -362,28 +392,36 @@ LOG_SB 308432
 
     #[test]
     fn skips_unknown_tags_quietly() {
-        let raw = "JUNK something\nSVC sing-box active\nMORE junk\n";
+        let raw = "JUNK something\nSVC sing-box active\nMORE junk\nPROBE_OK\n";
         let p = parse_probe_output(raw).unwrap();
         assert_eq!(p.sing_box_active, Some(true));
     }
 
     #[test]
-    fn nothing_parsed_returns_err() {
-        let raw = "garbage\nmore garbage\n";
+    fn nothing_parsed_returns_err_when_sentinel_present_but_no_metric() {
+        // Body lines all garbage but sentinel reached → distinct from
+        // ScriptDidNotComplete; means "we ran, just no metrics".
+        let raw = "garbage\nmore garbage\nPROBE_OK\n";
         let err = parse_probe_output(raw).unwrap_err();
         assert!(matches!(err, ProbeError::NothingParsed));
     }
 
     #[test]
-    fn empty_input_returns_err() {
+    fn no_sentinel_returns_script_did_not_complete() {
+        // The interesting failure mode: shell broken, /proc unreadable,
+        // ss missing — every `|| true` swallows the error, stdout is
+        // empty / has no PROBE_OK line. Different operator action
+        // than NothingParsed.
         let err = parse_probe_output("").unwrap_err();
-        assert!(matches!(err, ProbeError::NothingParsed));
+        assert!(matches!(err, ProbeError::ScriptDidNotComplete));
+        let err2 = parse_probe_output("garbage\nmore garbage\n").unwrap_err();
+        assert!(matches!(err2, ProbeError::ScriptDidNotComplete));
     }
 
     #[test]
     fn partial_parse_succeeds_with_some_fields_none() {
-        // Only LOAD parses; everything else garbage.
-        let raw = "LOAD 1.23\nDISK garbage data\nMEM also broken\n";
+        // Only LOAD parses; everything else garbage. Sentinel present.
+        let raw = "LOAD 1.23\nDISK garbage data\nMEM also broken\nPROBE_OK\n";
         let p = parse_probe_output(raw).unwrap();
         assert_eq!(p.load_1min_x100, Some(123));
         assert_eq!(p.disk_used_mib, None);
@@ -412,12 +450,15 @@ LOG_SB 308432
     }
 
     #[tokio::test]
-    async fn snapshot_with_garbage_returns_nothing_parsed() {
+    async fn snapshot_with_garbage_returns_script_did_not_complete() {
+        // No PROBE_OK sentinel → ScriptDidNotComplete (NOT
+        // NothingParsed). The garbage doesn't matter; the absence
+        // of the sentinel does.
         let ssh = MockTransport::new();
         ssh.expect(PROBE_SCRIPT, "junk\nmore junk\n");
         let client = SshProbeClient::new(&ssh);
         let err = client.snapshot().await.unwrap_err();
-        assert!(matches!(err, ProbeError::NothingParsed));
+        assert!(matches!(err, ProbeError::ScriptDidNotComplete));
     }
 
     #[test]

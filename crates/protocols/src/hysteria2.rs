@@ -83,6 +83,10 @@ impl Protocol for Hysteria2 {
         ProtocolId("hysteria2".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("udp", 8444)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Reuse the TUIC cert paths so we provision ONE self-signed cert
         // per node (the existing deploy command already does that for TUIC).

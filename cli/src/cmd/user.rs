@@ -69,20 +69,15 @@ pub(crate) async fn run(
             // Validate shape if provided so an obvious typo doesn't
             // sit in inventory until a `vpnctl deploy` tries to render
             // a wg config and fails (much later, much harder to
-            // diagnose). 44 base64 chars ending '=' is the WG
-            // contract — same check as `vpnctl_protocols::wireguard`.
-            if let Some(ref pk) = wireguard_pubkey {
-                let ok = pk.len() == 44
-                    && pk.ends_with('=')
-                    && pk
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
-                if !ok {
-                    anyhow::bail!(
-                        "--wireguard-pubkey must be 44 base64 chars ending '=' (got {} chars)",
-                        pk.len()
-                    );
-                }
+            // diagnose). **Reused from `vpnctl_protocols::wireguard`**
+            // for a single source of truth (review-agent finding).
+            if let Some(ref pk) = wireguard_pubkey
+                && !vpnctl_protocols::is_valid_wg_pubkey(pk)
+            {
+                anyhow::bail!(
+                    "--wireguard-pubkey must be 44 base64 chars ending '=' (got {} chars)",
+                    pk.len()
+                );
             }
             let user = User {
                 id: UserId(id.clone()),

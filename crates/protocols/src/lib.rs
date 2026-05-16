@@ -15,4 +15,4 @@ pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
 pub use trojan::{TROJAN_PORT, Trojan};
 pub use tuic_v5::TuicV5;
 pub use vless_reality::VlessReality;
-pub use wireguard::{CLIENT_PRIVKEY_PLACEHOLDER, WIREGUARD_PORT, WireGuard};
+pub use wireguard::{CLIENT_PRIVKEY_PLACEHOLDER, WIREGUARD_PORT, WireGuard, is_valid_wg_pubkey};

@@ -100,7 +100,11 @@ pub const CLIENT_PRIVKEY_PLACEHOLDER: &str = "<PASTE YOUR PRIVATE KEY HERE>";
 /// We don't decode — just shape-check, since the kernel module will
 /// reject a wrong-length or malformed key with a clear error message
 /// at apply time anyway.
-fn is_valid_wg_pubkey(s: &str) -> bool {
+///
+/// **Public so the CLI + web user-create handlers can share the SAME
+/// validator** (caught by review-agent: previously each call site had
+/// its own ad-hoc reimplementation — silent drift risk).
+pub fn is_valid_wg_pubkey(s: &str) -> bool {
     if s.len() != 44 {
         return false;
     }
@@ -127,6 +131,10 @@ const FRAGMENT: &AsciiSet = &CONTROLS
 impl Protocol for WireGuard {
     fn id(&self) -> ProtocolId {
         ProtocolId("wireguard".to_string())
+    }
+
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("udp", WIREGUARD_PORT)]
     }
 
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {

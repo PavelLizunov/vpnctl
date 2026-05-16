@@ -186,13 +186,21 @@ fn a3_client_config_field_by_field() {
 }
 
 #[test]
-fn a3_client_config_password_defaults_to_empty_when_absent() {
+fn a3_client_config_missing_password_returns_render_error() {
+    // Post-review: AnyTLS now hard-errors on missing password
+    // (consistent with share_link). Pin the new contract — minting
+    // a config with empty password would just silently auth-fail
+    // on the client.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", None);
-    let v = AnyTls::new().client_config(&ctx, &u).unwrap();
-    assert_eq!(v.get("password").and_then(Value::as_str), Some(""));
+    let err = AnyTls::new().client_config(&ctx, &u).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Render") && msg.contains("alice"),
+        "expected Render error naming user; got {msg}"
+    );
 }
 
 // ── A4: share_link ──────────────────────────────────────────────────────

@@ -1824,10 +1824,10 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     }
 
     // Optional `wireguard_pubkey` from the form. Empty → None.
-    // Shape-check: 44 base64 chars ending '=' (same contract as
-    // `vpnctl_protocols::wireguard::is_valid_wg_pubkey`). Reject
-    // at write time so a typo doesn't sit in inventory until a
-    // future `vpnctl deploy` tries to render WG/AmneziaWG config.
+    // **Validator deliberately reused from `vpnctl_protocols::wireguard`**
+    // — single source of truth so a future tweak to the canonical
+    // validator can't silently drift from the web one (review-agent
+    // finding).
     let wg_raw = body
         .split('&')
         .find_map(|kv| kv.strip_prefix("wireguard_pubkey="))
@@ -1836,21 +1836,15 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     let wg_decoded = decode_form_value(wg_raw);
     let wg_pubkey: Option<String> = if wg_decoded.is_empty() {
         None
+    } else if !vpnctl_protocols::is_valid_wg_pubkey(&wg_decoded) {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "invalid wireguard_pubkey (must be 44 base64 chars ending '='): {wg_decoded:?}"
+            )),
+        )
+            .into_response();
     } else {
-        let ok = wg_decoded.len() == 44
-            && wg_decoded.ends_with('=')
-            && wg_decoded
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
-        if !ok {
-            return (
-                StatusCode::BAD_REQUEST,
-                error_text(&format!(
-                    "invalid wireguard_pubkey (must be 44 base64 chars ending '='): {wg_decoded:?}"
-                )),
-            )
-                .into_response();
-        }
         Some(wg_decoded)
     };
 
@@ -2833,16 +2827,23 @@ pub(crate) async fn wizard_step2_stub(
 /// Map a protocol id → set of (proto, port) we EXPECT it to be
 /// listening on. Single source of truth for the drift check —
 /// matches what each `Protocol::server_inbound` emits.
-fn expected_ports_for_protocol(pid: &str) -> &'static [(&'static str, u16)] {
-    match pid {
-        "vless+reality" => &[("tcp", 443)],
-        "tuic-v5" => &[("udp", 8443)],
-        "hysteria2" => &[("udp", 8444)],
-        "shadowsocks-2022" => &[("tcp", 8388), ("udp", 8388)],
-        "wireguard" => &[("udp", 51820)],
-        "anytls" => &[("tcp", 8843)],
-        "trojan" => &[("tcp", 8643)],
-        _ => &[],
+/// Look up expected `(proto, port)` tuples for a given protocol via
+/// the registry. **Single source of truth** — each protocol owns its
+/// own `listen_ports()` (see `vpnctl_core::Protocol`), so adding a
+/// new protocol doesn't require touching this function. (Refactored
+/// 2026-05-16 per review-agent finding — previous hand-maintained
+/// map violated kernel/protocol orthogonality.)
+fn expected_ports_for_protocol(
+    registry: &vpnctl_core::Registry,
+    pid: &vpnctl_core::ProtocolId,
+) -> Vec<(String, u16)> {
+    match registry.protocol(pid) {
+        Some(p) => p
+            .listen_ports()
+            .iter()
+            .map(|(s, n)| ((*s).to_string(), *n))
+            .collect(),
+        None => Vec::new(),
     }
 }
 
@@ -2899,17 +2900,18 @@ pub(crate) async fn server_detail(
     let expected: std::collections::BTreeSet<(String, u16)> = server
         .enabled_protocols
         .iter()
-        .flat_map(|p| {
-            expected_ports_for_protocol(&p.0)
-                .iter()
-                .map(|(pr, pt)| ((*pr).to_string(), *pt))
-        })
+        .flat_map(|pid| expected_ports_for_protocol(&state.registry, pid))
         .collect();
 
     let missing: Vec<_> = expected.difference(&observed).cloned().collect();
+    // SSH is always listening — never "extra drift". Use the
+    // server's CONFIGURED port (Cloudzy is on 2222, DO sticks on 22,
+    // future hosters could be anything). Hardcoded 22 was caught by
+    // review-agent: false-positive drift on Cloudzy nodes.
+    let ssh_port = server.ssh_port;
     let extra: Vec<_> = observed
         .difference(&expected)
-        .filter(|(_, port)| *port != 22) // SSH is always listening, never "extra"
+        .filter(|(proto, port)| !(proto == "tcp" && *port == ssh_port))
         .cloned()
         .collect();
 

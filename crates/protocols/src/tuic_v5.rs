@@ -51,6 +51,10 @@ impl Protocol for TuicV5 {
         ProtocolId("tuic-v5".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("udp", 8443)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let cert_path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
         let key_path = ctx.or_default("tuic.key_path", "/etc/sing-box/key.pem");

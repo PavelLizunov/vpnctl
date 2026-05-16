@@ -80,6 +80,10 @@ impl Protocol for AnyTls {
         ProtocolId("anytls".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("tcp", ANYTLS_PORT)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let cert_path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
         let key_path = ctx.or_default("tuic.key_path", "/etc/sing-box/key.pem");
@@ -114,12 +118,24 @@ impl Protocol for AnyTls {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
+        // Consistent with `share_link`: refuse to mint a client config
+        // with an empty password — the client would auth-fail anyway,
+        // and surfacing as Render error gives the operator a clear
+        // signal vs. silently producing a broken JSON. (Review-agent
+        // finding: previous impl returned empty-string password, two
+        // different behaviours for the same missing-secret case.)
+        let pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint an AnyTLS client config",
+                user.id.0
+            ))
+        })?;
         Ok(json!({
             "type": "anytls",
             "tag": "anytls-out",
             "server": ctx.server.address,
             "server_port": ANYTLS_PORT,
-            "password": user.tuic_password.clone().unwrap_or_default(),
+            "password": pw,
             "tls": { "enabled": true, "insecure": true }
         }))
     }

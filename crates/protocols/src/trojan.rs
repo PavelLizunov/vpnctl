@@ -72,6 +72,10 @@ impl Protocol for Trojan {
         ProtocolId("trojan".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("tcp", TROJAN_PORT)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let cert_path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
         let key_path = ctx.or_default("tuic.key_path", "/etc/sing-box/key.pem");
@@ -100,12 +104,18 @@ impl Protocol for Trojan {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
+        let pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint a Trojan client config",
+                user.id.0
+            ))
+        })?;
         Ok(json!({
             "type": "trojan",
             "tag": "trojan-out",
             "server": ctx.server.address,
             "server_port": TROJAN_PORT,
-            "password": user.tuic_password.clone().unwrap_or_default(),
+            "password": pw,
             "tls": { "enabled": true, "insecure": true }
         }))
     }

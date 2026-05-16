@@ -43,6 +43,10 @@ impl Protocol for VlessReality {
         ProtocolId("vless+reality".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("tcp", 443)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;

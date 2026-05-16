@@ -242,6 +242,25 @@ pub trait Protocol: fmt::Debug + Send + Sync {
 
     /// Share-link (`vless://...`, `tuic://...`, `wg://...`, и т.д.).
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String>;
+
+    /// What `(proto, port)` tuples this protocol's `server_inbound`
+    /// is expected to listen on. Default empty so existing protocols
+    /// without listening-side semantics (or where the port is
+    /// runtime-configurable via secrets) don't have to opt in.
+    ///
+    /// **Used by:** `daemon::handlers::admin::server_detail` drift
+    /// detection — compares this declaration against the live
+    /// `node_probe` output and highlights mismatch.
+    ///
+    /// Implementations return `&'static [(&'static str, u16)]`
+    /// (compile-time constants); no runtime cost. Adding a new
+    /// protocol that wants drift coverage is one method override
+    /// here — no daemon edits needed. (Caught by review-agent
+    /// against the prior burst: hardcoding the map in admin.rs
+    /// violated the kernel/protocol orthogonality invariant.)
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[]
+    }
 }
 
 //

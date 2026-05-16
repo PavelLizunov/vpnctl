@@ -103,6 +103,10 @@ impl Protocol for Shadowsocks2022 {
         ProtocolId("shadowsocks-2022".to_string())
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        &[("tcp", SS_2022_PORT), ("udp", SS_2022_PORT)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
         // PSK is REQUIRED — without it the inbound can't decrypt.
         // We refuse rather than render a broken config; the caller
