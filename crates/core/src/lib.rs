@@ -405,6 +405,31 @@ impl Registry {
             .map(|p| p.as_ref())
     }
 
+    /// Every registered protocol id, in registration order. Used by
+    /// the admin UI to render the full set of available protocols
+    /// (e.g. checkbox list on the server-detail page) so the operator
+    /// doesn't have to remember which protocol strings the registry
+    /// accepts. Cheap clone — only ~7 short strings.
+    pub fn protocol_ids(&self) -> Vec<ProtocolId> {
+        self.protocols.iter().map(|p| p.id()).collect()
+    }
+
+    /// Every registered kernel id (analogous to `protocol_ids`).
+    pub fn kernel_ids(&self) -> Vec<KernelId> {
+        self.kernels.iter().map(|k| k.id()).collect()
+    }
+
+    /// Map kernel-id → protocols that kernel can run. Used by UI
+    /// to grey-out incompatible protocols before submission
+    /// (e.g. `wireguard` only under `amneziawg`, not under
+    /// `sing-box`). One row per kernel, in registration order.
+    pub fn kernel_protocol_matrix(&self) -> Vec<(KernelId, Vec<ProtocolId>)> {
+        self.kernels
+            .iter()
+            .map(|k| (k.id(), k.supported_protocols()))
+            .collect()
+    }
+
     pub fn validate_server(&self, server: &Server) -> Result<()> {
         let kernel = self
             .kernel(&server.kernel)

@@ -349,6 +349,19 @@ fn admin_router(state: AppState) -> Router {
         // empty-state until chunk 4 wires the periodic poller.
         .route("/admin/servers/{id}", get(admin::server_detail))
         .route("/admin/servers/{id}/", get(admin::server_detail))
+        // Server protocols toggle — inventory-only mutation; the
+        // operator runs `vpnctl deploy <server>` from the CLI to
+        // push. Routes are split into enable/disable rather than
+        // a single toggle so the operator's intent is in the URL
+        // (audit-friendly + handles double-submit gracefully).
+        .route(
+            "/admin/servers/{id}/protocols/{proto}/enable",
+            post(admin::server_enable_protocol),
+        )
+        .route(
+            "/admin/servers/{id}/protocols/{proto}/disable",
+            post(admin::server_disable_protocol),
+        )
         // Phase E sub-iter 4a: add-server wizard step 1.
         // GET renders the form (IP + root password); POST validates,
         // stashes to a server-side session keyed by HttpOnly cookie,

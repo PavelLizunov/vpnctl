@@ -22,10 +22,29 @@ async fn state(dir: &TempDir) -> AppState {
         .await
         .unwrap();
     let mut reg = Registry::new();
+    // Mirror the full production registry so tests that introspect
+    // the registry (e.g. server-detail enabled-protocols section)
+    // see the same set the live daemon does. Previously only 2
+    // protocols were registered here, which made admin_smoke
+    // tests for the protocols section fail silently — they'd
+    // pass on assertions involving vless/tuic and skip everything
+    // else without the test owner noticing.
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(vpnctl_kernels::AmneziaWg::new()))
+        .unwrap();
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::Hysteria2::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::Shadowsocks2022::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::WireGuard::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AnyTls::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::Trojan::new()))
+        .unwrap();
     // Wire the access-log writer the same way `build()` does. Drop the
     // JoinHandle — for tests that don't introspect the writer, the
     // task lives until the AppState clones drop, which happens at end
@@ -4011,4 +4030,231 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
         .unwrap_or_default();
     assert!(payload.contains("server-generated"));
     assert!(payload.contains(after.wireguard_pubkey.as_deref().unwrap()));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Pavel iter A1: server-detail protocols section — checkbox list of every
+// registered protocol with enable/disable form. Closes the "main-brat WG
+// keys are useless because vps-is-01 doesn't run wireguard" gap by
+// letting the operator add protocols to an existing server without CLI.
+
+#[tokio::test]
+async fn admin_server_detail_protocols_section_shows_every_registered_protocol() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("nowg".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("sing-box".into()),
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/nowg").await;
+    assert!(html.contains("Enabled protocols"), "section heading");
+    // Every registered protocol appears as a row (sing-box ships 6,
+    // amneziawg ships 1 — total 7 unique ids in the registry).
+    for pid in [
+        "vless+reality",
+        "tuic-v5",
+        "hysteria2",
+        "shadowsocks-2022",
+        "anytls",
+        "trojan",
+        "wireguard",
+    ] {
+        assert!(
+            html.contains(pid),
+            "protocol row '{pid}' missing from server-detail"
+        );
+    }
+    // The currently-enabled one has a disable button + ✓ on marker.
+    // `+` in vless+reality gets URL-encoded to %2B in the form action.
+    assert!(
+        html.contains(r#"/admin/servers/nowg/protocols/vless%2Breality/disable"#),
+        "enabled protocol must have a disable form (vless+reality URL-encoded)"
+    );
+    assert!(html.contains("✓ on"), "enabled marker missing");
+    // A compatible-but-not-yet-enabled one has an enable button.
+    assert!(
+        html.contains(r#"/admin/servers/nowg/protocols/hysteria2/enable"#),
+        "compatible-disabled protocol must have an enable form"
+    );
+    // Incompatible (wireguard under sing-box kernel) is greyed out
+    // with no toggle button — only the explainer copy.
+    assert!(
+        html.contains("not supported by kernel sing-box"),
+        "incompatible explainer must appear next to wireguard"
+    );
+    assert!(
+        !html.contains(r#"/admin/servers/nowg/protocols/wireguard/enable"#),
+        "incompatible protocol MUST NOT have an enable form"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_enable_protocol_persists_and_audits() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("amz".into()),
+            address: "198.51.100.5".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("amneziawg".into()),
+            enabled_protocols: vec![], // start empty
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/amz/protocols/wireguard/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let server = inv
+        .get_server(&ServerId("amz".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        server
+            .enabled_protocols
+            .contains(&ProtocolId("wireguard".into())),
+        "wireguard must be persisted into enabled_protocols"
+    );
+    // Audit row exists with the protocol name + newly_added flag.
+    let audit = inv.recent_audit(5).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|a| a.action == "server.protocol.enable")
+        .expect("audit row");
+    let payload = row
+        .payload
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(payload.contains("wireguard"));
+    assert!(payload.contains("newly_added"));
+}
+
+#[tokio::test]
+async fn admin_server_enable_protocol_rejects_unregistered_protocol_id() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("sing-box".into()),
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/sb/protocols/totally-fake/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("unknown protocol"));
+    assert!(text.contains("totally-fake"));
+}
+
+#[tokio::test]
+async fn admin_server_disable_protocol_removes_row_and_audits() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernel: KernelId("sing-box".into()),
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("tuic-v5".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/sb/protocols/tuic-v5/disable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let server = inv
+        .get_server(&ServerId("sb".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !server
+            .enabled_protocols
+            .contains(&ProtocolId("tuic-v5".into())),
+        "tuic-v5 must be gone after disable"
+    );
+    assert!(
+        server
+            .enabled_protocols
+            .contains(&ProtocolId("vless+reality".into())),
+        "other protocols must stay untouched"
+    );
 }

@@ -330,6 +330,49 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Add a single protocol to a server's `enabled_protocols`.
+    /// Idempotent at the SQL layer (`OR IGNORE` on the PK pair) — calling
+    /// twice with the same `(server, protocol)` is silent success.
+    /// Returns the row-was-actually-inserted count so the caller can
+    /// distinguish "already there" from "just added" if it wants to
+    /// audit only effective changes (currently web handler audits both).
+    /// FK constraint on `server_id` will surface as `Invalid` if the
+    /// server doesn't exist; protocol id is opaque to the DB layer
+    /// (registry validation happens at deploy time).
+    pub async fn add_server_protocol(
+        &self,
+        server: &ServerId,
+        protocol: &ProtocolId,
+    ) -> Result<u64> {
+        let res = sqlx::query(
+            "INSERT INTO server_protocols (server_id, protocol_id) VALUES (?1, ?2)
+             ON CONFLICT(server_id, protocol_id) DO NOTHING",
+        )
+        .bind(&server.0)
+        .bind(&protocol.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Remove a protocol from a server's `enabled_protocols`. Idempotent:
+    /// removing a not-present (server, protocol) is silent success.
+    /// Returns the row-was-actually-deleted count for the same audit
+    /// reason as `add_server_protocol`.
+    pub async fn remove_server_protocol(
+        &self,
+        server: &ServerId,
+        protocol: &ProtocolId,
+    ) -> Result<u64> {
+        let res =
+            sqlx::query("DELETE FROM server_protocols WHERE server_id = ?1 AND protocol_id = ?2")
+                .bind(&server.0)
+                .bind(&protocol.0)
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected())
+    }
+
     async fn list_server_protocols(&self, id: &ServerId) -> Result<Vec<ProtocolId>> {
         let rows = sqlx::query(
             "SELECT protocol_id FROM server_protocols WHERE server_id = ?1 ORDER BY protocol_id",

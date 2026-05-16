@@ -2056,6 +2056,138 @@ pub(crate) async fn user_regen_wireguard(
     .into_response()
 }
 
+/// `POST /admin/servers/{id}/protocols/{proto}/enable` — add a
+/// protocol to a server's `enabled_protocols`. Idempotent at SQL.
+/// Returns 404 if server doesn't exist, 400 if protocol id isn't
+/// registered with the daemon (no point persisting a string that
+/// nothing knows how to render). Audit row written. Always
+/// redirects back to the server-detail page.
+pub(crate) async fn server_enable_protocol(
+    State(state): State<AppState>,
+    Path((server_id_str, protocol_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+
+    // Existence check (404 if no server).
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    // Reject unregistered protocol id — persisting a typo would
+    // silently no-op every render+deploy from now on.
+    if state.registry.protocol(&pid).is_none() {
+        let known: Vec<String> = state
+            .registry
+            .protocol_ids()
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "unknown protocol '{protocol_id_str}' — registered: {}",
+                known.join(", ")
+            )),
+        )
+            .into_response();
+    }
+
+    let inserted = match state.inv.add_server_protocol(&sid, &pid).await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.protocol.enable",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "protocol": protocol_id_str,
+                "newly_added": inserted == 1,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.protocol.enable"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/protocols/{proto}/disable` — remove a
+/// protocol from a server's `enabled_protocols`. Idempotent. Same
+/// 404/audit/redirect posture as `server_enable_protocol`.
+pub(crate) async fn server_disable_protocol(
+    State(state): State<AppState>,
+    Path((server_id_str, protocol_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let removed = match state.inv.remove_server_protocol(&sid, &pid).await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.protocol.disable",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "protocol": protocol_id_str,
+                "was_present": removed == 1,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.protocol.disable"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
 /// Validate a candidate user id from the web form. The HTML5 `pattern`
 /// attribute already filters most input client-side, but we re-validate
 /// server-side because (a) browsers can be bypassed and (b) the CLI
@@ -3202,6 +3334,14 @@ pub(crate) async fn server_detail(
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some()))
 
+        // Enabled protocols — checkbox list of every registered protocol
+        // with current enable state. Toggle posts back to this same
+        // page (303 redirect). Changes take effect on the NEXT
+        // `vpnctl deploy <server>` — inventory mutation alone doesn't
+        // touch the live sing-box config (deliberate: we never push
+        // without operator-initiated deploy).
+        (server_detail_protocols_section(&server, &state.registry))
+
         // Grants
         div.ed-rule {}
         div.ed-art-eyebrow { "Grants" }
@@ -3323,6 +3463,88 @@ fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
 
 /// Drift section — what does inventory THINK is listening vs what
 /// IS listening. Orange highlights when sets disagree.
+/// Enabled-protocols editor — one row per protocol registered in the
+/// registry, each with a `[on|off]` form that toggles the (server,
+/// protocol) row in the inventory. Compatibility against the
+/// server's kernel is annotated inline (greyed-out + `incompatible`
+/// badge) so the operator sees WHY a checkbox is non-functional.
+///
+/// Changes are inventory-only — they DO NOT push to the live sing-box
+/// instance. The operator runs `vpnctl deploy <server>` from the CLI
+/// (or the wizard, when Phase E ships) to apply.
+fn server_detail_protocols_section(
+    server: &vpnctl_core::Server,
+    registry: &vpnctl_core::Registry,
+) -> Markup {
+    let enabled: std::collections::HashSet<&vpnctl_core::ProtocolId> =
+        server.enabled_protocols.iter().collect();
+    let all_protocols = registry.protocol_ids();
+    let kernel_supports: std::collections::HashSet<vpnctl_core::ProtocolId> = registry
+        .kernel(&server.kernel)
+        .map(|k| k.supported_protocols().into_iter().collect())
+        .unwrap_or_default();
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Enabled protocols" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Check what runs on this node. Toggle takes effect on the next "
+            span.ed-mono { "vpnctl deploy " (server.id.0) }
+            " — inventory mutation doesn't push a config by itself (intentional: no surprise redeploys)."
+        }
+        ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
+            @for pid in &all_protocols {
+                @let is_on = enabled.contains(pid);
+                @let compatible = kernel_supports.contains(pid);
+                li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                    span style=(if compatible { "flex: 1; color: var(--ink);" } else { "flex: 1; color: var(--mute);" }) {
+                        (pid.0)
+                        @if !compatible {
+                            " "
+                            span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
+                                "(not supported by kernel " (server.kernel.0) ")"
+                            }
+                        }
+                    }
+                    @if is_on {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
+                            "✓ on"
+                        }
+                        form method="post"
+                             action=(format!("/admin/servers/{}/protocols/{}/disable", sid_enc, path_segment_encode(&pid.0)))
+                             style="margin: 0; padding: 0;" {
+                            button type="submit"
+                                   title=(format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0))
+                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "disable"
+                            }
+                        }
+                    } @else if compatible {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-right: 4px;" {
+                            "—"
+                        }
+                        form method="post"
+                             action=(format!("/admin/servers/{}/protocols/{}/enable", sid_enc, path_segment_encode(&pid.0)))
+                             style="margin: 0; padding: 0;" {
+                            button type="submit"
+                                   title=(format!("Add {} to {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0))
+                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                "enable"
+                            }
+                        }
+                    } @else {
+                        // Incompatible — no button, just an explainer
+                        // span so the row width is consistent.
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            "incompatible"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
     observed: &std::collections::BTreeSet<(String, u16)>,
