@@ -2841,6 +2841,7 @@ fn expected_ports_for_protocol(pid: &str) -> &'static [(&'static str, u16)] {
         "shadowsocks-2022" => &[("tcp", 8388), ("udp", 8388)],
         "wireguard" => &[("udp", 51820)],
         "anytls" => &[("tcp", 8843)],
+        "trojan" => &[("tcp", 8643)],
         _ => &[],
     }
 }

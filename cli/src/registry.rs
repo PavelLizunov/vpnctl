@@ -3,7 +3,9 @@
 
 use vpnctl_core::Registry;
 use vpnctl_kernels::{AmneziaWg, SingBox};
-use vpnctl_protocols::{AnyTls, Hysteria2, Shadowsocks2022, TuicV5, VlessReality, WireGuard};
+use vpnctl_protocols::{
+    AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WireGuard,
+};
 
 /// Build the canonical Registry. Add new kernels/protocols here.
 pub(crate) fn build() -> anyhow::Result<Registry> {
@@ -30,6 +32,10 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // AnyTLS — REALITY successor; different TLS fingerprint, useful
     // as fallback channel when REALITY gets DPI'd. Sing-box ≥ 1.12.
     reg.register_protocol(Box::new(AnyTls::new()))?;
+    // Trojan — venerable TLS-mimic. Third "TLS-looking" channel
+    // for protocol diversity; many older clients know Trojan but
+    // not REALITY/AnyTLS.
+    reg.register_protocol(Box::new(Trojan::new()))?;
 
     Ok(reg)
 }

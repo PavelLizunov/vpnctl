@@ -47,6 +47,8 @@ impl Kernel for SingBox {
             // on a stale-version node `sing-box check` would reject
             // an `anytls` inbound and apply_config fails loud.
             ProtocolId("anytls".to_string()),
+            // Trojan — in sing-box since v0.1, no version concern.
+            ProtocolId("trojan".to_string()),
         ]
     }
 
