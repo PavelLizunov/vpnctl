@@ -76,6 +76,21 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // tokio runtime aborts it on graceful shutdown.
     drop(spawn_retention_purger(inv.clone()));
 
+    // Phase Track-3 chunk 4 — periodic clash-api poller.
+    // Every N minutes, SSH'es into each enabled-sing-box server,
+    // curls /127.0.0.1:9090/connections, diffs against the previous
+    // snapshot, persists deltas into vpn_connection_stats. The
+    // existing "No live stats yet" empty-state on user-detail goes
+    // away the first time a tick lands a non-empty delta.
+    //
+    // Authentication: uses the SSH key at `VPNCTLD_DEPLOY_KEY`
+    // (env var, default `/var/lib/vpnctl/.ssh/id_ed25519`). If the
+    // key is missing OR a server hasn't been authorised yet, the
+    // poller LOGS A WARN AND CONTINUES — it doesn't crash the
+    // daemon. The empty-state on the user page already explains
+    // that polling is queued for chunk 4 + needs an SSH key.
+    drop(crate::clash_poller::spawn_clash_poller(inv.clone()));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker

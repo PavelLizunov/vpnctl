@@ -25,6 +25,10 @@ vpnctl-crypto = { path = "../crates/crypto" }
 # Track-3 chunk 1: clash-api client uses the SshTransport trait.
 async-trait = "0.1"
 thiserror = { workspace = true }
+# Track-3 chunk 4 (Pavel iter D): clash-api poller opens real
+# SSH connections to each VPN node every N minutes — moved from
+# dev-only to a regular dep when the poller landed.
+vpnctl-ssh = { path = "../crates/ssh" }
 
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
@@ -52,8 +56,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Track-2 chunk 2 e2e test asserts ban TTL within ~24h tolerance.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Track-3 chunk 1: clash-api parser tests use MockTransport.
-vpnctl-ssh = { path = "../crates/ssh" }
 
 [lints]
 workspace = true
