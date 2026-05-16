@@ -53,6 +53,16 @@ impl Kernel for SingBox {
         // тем, как тянуть APT-репо SagerNet. Найдено на staging-деплое
         // 84.19.3.104 (Debian 12 minimal): exec exit=127 «curl: команда
         // не найдена».
+        //
+        // **Logrotate (added 2026-05-16):** without an explicit rotation
+        // policy, `/var/log/sing-box.log` grows linearly with traffic
+        // (~MB/day on a low-traffic node, GB/day on a busy one). At
+        // 20 GB disk staging boxes that's a death spiral within a
+        // couple months. Install a logrotate fragment that caps log
+        // age at 14 days + size at 100 MB, then `copytruncate` so
+        // sing-box doesn't need a SIGHUP/restart to pick up the new
+        // file. Idempotent: `cat > .../sing-box` replaces any prior
+        // version (including a hand-edited one — operator should know).
         let script = r#"
             set -eu
             export DEBIAN_FRONTEND=noninteractive
@@ -74,7 +84,31 @@ impl Kernel for SingBox {
             install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
             chown -R sing-box:sing-box /etc/sing-box
             systemctl enable sing-box >/dev/null
+            # logrotate fragment for sing-box's main log file. `daily`
+            # check with size-based trigger at 100 MB. `copytruncate`
+            # so sing-box's open file descriptor stays valid (no SIGHUP
+            # needed). Keep 14 rotations = ~14 days at most under
+            # idle load.
+            apt-get install -y --no-install-recommends logrotate
+            cat > /etc/logrotate.d/sing-box <<'LR'
+/var/log/sing-box.log {
+    daily
+    rotate 14
+    size 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su sing-box sing-box
+    create 0640 sing-box sing-box
+}
+LR
+            # Verify the fragment parses — logrotate's parser is strict
+            # and a typo would silently disable rotation for ALL fragments.
+            logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1
             command -v sing-box  # final assertion — fails the exec on regression
+            command -v logrotate
         "#;
         ssh.exec(script).await?;
         Ok(())
