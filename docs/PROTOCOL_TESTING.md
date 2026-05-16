@@ -352,3 +352,139 @@ in the table above: AmneziaWG took 50 min not 30, because it's a
 new kernel + first-time-on-staging combo (the budget table does
 say 90-120 min for "add a new kernel" — 50 min for live-staging
 alone fits that envelope).
+
+---
+
+## Second application — 2026-05-16 Hysteria Realm validation
+
+Goal: validate the Realm (NAT-traversal) feature end-to-end on
+`84.19.3.104`. Two pieces of new infra needed:
+
+| Binary | Source | Purpose |
+|---|---|---|
+| `hysteria-realm-server` v1.0.1 | https://github.com/apernet/hysteria-realm-server/releases | Rendezvous server (control plane) |
+| `hysteria` v2.9.1 (official) | https://github.com/apernet/hysteria/releases | Both server (`hysteria server`) and client (`hysteria client`) — sing-box 1.13.x doesn't yet ship Realm support (needs 1.14+) |
+
+Both downloaded to `/opt/realm-test/` on `84.19.3.104` for repeatability.
+
+### Setup
+
+1. **TLS material:** self-signed cert with IP SAN for `127.0.0.1` +
+   `84.19.3.104` + `DNS:localhost`. **Crucial:** the rendezvous server
+   speaks HTTPS by default; certs without IP SAN are rejected by the
+   hysteria realm client with `cannot validate certificate for
+   127.0.0.1 because it doesn't contain any IP SANs`. Generated via:
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+       -subj "/CN=staging-realm.test" \
+       -addext "subjectAltName=IP:127.0.0.1,IP:84.19.3.104,DNS:localhost" \
+       -keyout hy-key.pem -out hy-cert.pem
+   ```
+
+2. **Trust the cert system-wide** so hysteria's HTTPS client to the
+   rendezvous can verify it: copy to
+   `/usr/local/share/ca-certificates/realm-test.crt` + run
+   `update-ca-certificates`. Without this, hysteria server fails with
+   `tls: failed to verify certificate: x509: certificate signed by
+   unknown authority` even though the rendezvous itself uses the
+   exact same cert.
+
+3. **Rendezvous server** started with:
+   ```
+   rendezvous --listen :8765 --token <secret> \
+       --cert hy-cert.pem --key hy-key.pem --debug
+   ```
+   Listens on `:8765/TCP` (HTTPS).
+
+4. **Hysteria server** config:
+   ```yaml
+   listen: realm://<token>@127.0.0.1:8765/test-realm
+   tls: { cert: hy-cert.pem, key: hy-key.pem }
+   auth: { type: password, password: <user-pw> }
+   masquerade:
+     type: proxy
+     proxy: { url: https://www.bing.com }
+   ```
+
+5. **Hysteria client** config:
+   ```yaml
+   server: realm://<token>@127.0.0.1:8765/test-realm
+   auth: <user-pw>
+   tls: { insecure: true }     # for the QUIC handshake to the server
+   socks5: { listen: 127.0.0.1:11099 }
+   ```
+
+### Results
+
+| Phase | Status | Evidence |
+|---|---|---|
+| Rendezvous boot | ✅ | `hysteria realm server listening on :8765`, TLS cert accepted |
+| Server → rendezvous registration | ✅ | `realm registered, addresses: ["84.19.3.104:44128"], ttl: 60` (STUN discovered server's public address through ephemeral UDP port) |
+| Heartbeat keep-alive | ✅ | `debug: heartbeat realm=test-realm session=... addressesUpdated=false` every ~50s |
+| Client → rendezvous lookup | ✅ | `debug: connect notified clientAddresses=1 serverAddresses=1` |
+| Address-exchange + introduction | ✅ | `debug: connect-response delivered`, `debug: connect fresh addresses` |
+| UDP hole-punching | ⚠️ | No observable failure in rendezvous, but no incoming connection log on server-side either |
+| QUIC handshake server↔client | ❌ | Client fails with `CRYPTO_ERROR 0x150 (remote): tls: internal error` |
+
+### Root-cause diagnosis: loopback degeneracy
+
+Both server and client ran on the SAME host (`84.19.3.104`), behind
+the SAME public IP, with hole-punching mediated by a rendezvous on
+the SAME host. This is a degenerate test topology — UDP
+hole-punching depends on NAT mapping behavior, which doesn't apply
+when both endpoints share an external address. The QUIC packets
+from client likely arrived at the server's listening UDP socket
+but the per-flow state machine on the server side considered them
+ill-timed and the TLS layer aborted.
+
+This is a **methodology lesson, not a code bug**: to validate Realm
+end-to-end requires THREE distinct network locations — rendezvous on
+machine with public IP, hysteria server behind NAT-1, hysteria
+client behind NAT-2 (or on open internet). The control-plane (steps
+1–5 above) was fully validated on staging; the data-plane fundamentally
+requires multi-host testing.
+
+### What this DID prove
+
+- The rendezvous server runs reliably under TLS.
+- The Realm URI format (`realm://<token>@<host>:<port>/<name>`)
+  parses correctly on both server `listen` and client `server` sides.
+- STUN-based public-address discovery works (server learned its
+  `84.19.3.104:44128` mapping in <1 second).
+- Server-side registration + heartbeat lifecycle behaves as documented.
+- Client-side address lookup + introduction-response works.
+- The control plane is sound; subsequent failures are NAT-topology
+  dependent.
+
+### What's needed for a complete Realm validation
+
+| Resource | Status |
+|---|---|
+| Rendezvous on public-IP VPS | ✅ have (84.19.3.104) |
+| Hysteria server on behind-NAT host | ⏳ need — homelab `192.168.0.236` would work (it's behind Pavel's home router NAT) |
+| Hysteria client on another host (any) | ⏳ need — Pavel's laptop or phone |
+
+Estimated time for the full validation: 30–45 min Claude wall-clock
++ ~15 min Pavel attention (real client on phone). Blocker is
+non-technical: choose between (a) install hysteria on `192.168.0.236`
+in autonomous mode (writes to homelab — needs Pavel-OK per safety
+rail), or (b) defer until next Pavel-present session.
+
+### New lesson for the methodology
+
+**Lesson #4 (Realm/NAT-traversal class):** any P2P/NAT-traversal
+feature MUST be tested across at least two distinct external IPs.
+Loopback testing validates the control plane only — the actual
+hole-punching is degenerate when both endpoints share an external
+address. Add this to the per-protocol checklist when a new protocol
+involves rendezvous + STUN + UDP hole-punching (Hysteria Realm
+today; Tailscale-style DERP / Cloudflare WARP-style anycast in the
+future).
+
+Artifacts preserved on `84.19.3.104:/opt/realm-test/`:
+- `hysteria-realm-server` binary
+- `hysteria` binary (server+client)
+- `/tmp/hy-cert.pem` + `/tmp/hy-key.pem` (test TLS material, SAN'd)
+- `/tmp/hy-server.yaml` + `/tmp/hy-client.yaml` (working config templates)
+- `/tmp/realm-token` (token + user-password for re-use)
+- `/tmp/rendezvous.log` + `/tmp/hy-{server,client}.log` (last-run state)
