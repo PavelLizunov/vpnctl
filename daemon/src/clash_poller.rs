@@ -33,7 +33,11 @@
 use std::collections::HashMap;
 
 use vpnctl_core::{ServerId, UserId};
-use vpnctl_inventory::{SqliteInventory, VpnStatsDelta};
+use vpnctl_inventory::VpnStatsDelta;
+// Only used by the poller wiring (gated behind `polling` feature);
+// importing unconditionally would warn-as-error under `-D warnings`.
+#[cfg(feature = "polling")]
+use vpnctl_inventory::SqliteInventory;
 
 use crate::clash_api::Snapshot;
 
@@ -213,6 +217,12 @@ fn delta(prior: u64, new: u64) -> u64 {
 ///   `POLL_INTERVAL` of 5 min gives ~98% idle. If the homelab
 ///   grows past ~50 servers this needs parallelisation, but at
 ///   that scale we'd have many other things to revisit.
+///
+/// **Gated behind the `polling` Cargo feature.** russh pulls
+/// glibc 2.38; the bookworm production binary stays glibc 2.30 by
+/// not enabling the feature. Enable on a host with glibc ≥ 2.38 OR
+/// when cross-compiling to musl static.
+#[cfg(feature = "polling")]
 pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     use tokio::time::{MissedTickBehavior, interval};
@@ -277,6 +287,7 @@ pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
 
 /// One-server tick. Pure side-effect, never panics — every error
 /// is logged at warn-or-info and swallowed.
+#[cfg(feature = "polling")]
 async fn poll_one_server(
     inv: &SqliteInventory,
     engine: &mut DiffEngine,

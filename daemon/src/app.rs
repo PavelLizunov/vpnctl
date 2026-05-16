@@ -77,18 +77,14 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     drop(spawn_retention_purger(inv.clone()));
 
     // Phase Track-3 chunk 4 — periodic clash-api poller.
-    // Every N minutes, SSH'es into each enabled-sing-box server,
-    // curls /127.0.0.1:9090/connections, diffs against the previous
-    // snapshot, persists deltas into vpn_connection_stats. The
-    // existing "No live stats yet" empty-state on user-detail goes
-    // away the first time a tick lands a non-empty delta.
-    //
-    // Authentication: uses the SSH key at `VPNCTLD_DEPLOY_KEY`
-    // (env var, default `/var/lib/vpnctl/.ssh/id_ed25519`). If the
-    // key is missing OR a server hasn't been authorised yet, the
-    // poller LOGS A WARN AND CONTINUES — it doesn't crash the
-    // daemon. The empty-state on the user page already explains
-    // that polling is queued for chunk 4 + needs an SSH key.
+    // GATED BEHIND `polling` Cargo FEATURE — linking russh pulls
+    // glibc 2.38 syscalls and bookworm ships 2.36. Production
+    // binary for 192.168.0.236 is built WITHOUT `--features polling`;
+    // enable it on a host with glibc ≥ 2.38 OR when cross-compiling
+    // to musl static. Until enabled, the daemon never spawns the
+    // poller — the user-detail empty-state remains accurate
+    // ("queued for chunk 4 — needs SSH key + glibc upgrade").
+    #[cfg(feature = "polling")]
     drop(crate::clash_poller::spawn_clash_poller(inv.clone()));
 
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
