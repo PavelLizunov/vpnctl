@@ -96,8 +96,15 @@ async fn distinct_ips_counts_unique_addresses_within_a_bucket() {
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
     let raw = raw_pool(&dir).await;
-    inject_at(&raw, "alice", "1.1.1.1", "-3 minutes").await;
-    inject_at(&raw, "alice", "2.2.2.2", "-4 minutes").await;
+    // Sub-second offsets (same fix pattern as
+    // `two_rows_in_same_hour_collapse_into_one_bucket_same_ip` above):
+    // `-3 minutes` / `-4 minutes` flaked on GitHub CI run 25961428447
+    // at 2026-05-16T12:03:14Z — the second offset crossed back into
+    // the previous hour, producing 2 buckets instead of the asserted 1.
+    // Spec is "two rows in same hour"; sub-second offsets satisfy it
+    // without depending on the current minute-of-hour.
+    inject_at(&raw, "alice", "1.1.1.1", "-1 seconds").await;
+    inject_at(&raw, "alice", "2.2.2.2", "-2 seconds").await;
     raw.close().await;
 
     let buckets = inv.sub_access_buckets("hour", 24).await.unwrap();
