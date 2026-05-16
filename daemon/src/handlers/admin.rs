@@ -1263,14 +1263,13 @@ pub(crate) async fn user_detail(
             }
         }
 
-        // WireGuard / AmneziaWG key material. Always shows the pubkey
-        // verbatim (it's public — needed in the server [Peer] block
-        // and visible to anyone who has a granted server's config
-        // anyway). Private key marker is shown but the value is NOT
-        // rendered here — the actual private only flows through
-        // /sub/<token>. Per CLAUDE.md "users are low-tech" creation
-        // path auto-generates both halves; this section is the
-        // post-creation management surface.
+        // WireGuard / AmneziaWG key material + distribution. Always
+        // shows the pubkey verbatim (it's public). Private key marker
+        // only — actual value flows through `/sub/<token>` (sing-box-
+        // style clients) AND as inline QR/share-links below for
+        // WG-native clients (AmneziaVPN, official WireGuard app).
+        // Per CLAUDE.md "users are low-tech" — the operator must see
+        // every artefact needed to onboard the user in one place.
         div.ed-rule {}
         div.ed-art-eyebrow { "WireGuard keypair" }
         @match (&user.wireguard_pubkey, &user.wireguard_private) {
@@ -1284,7 +1283,7 @@ pub(crate) async fn user_detail(
                         }
                     }
                     p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
-                        "Both halves were generated when the user was created. The recipient one-tap imports a complete config via the subscription URL above — no keygen step on their device."
+                        "Both halves were generated when the user was created. Pick the distribution flow matching the user's client app:"
                     }
                     form method="post"
                          action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
@@ -1293,6 +1292,70 @@ pub(crate) async fn user_detail(
                                title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
                                style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                             "rotate WG keypair"
+                        }
+                    }
+
+                    // Two-column distribution panel — one column per
+                    // client persona. Same secret material rendered
+                    // two ways: sub_url (sing-box JSON) vs wireguard://
+                    // URI (WG-native conf).
+                    div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
+                        // Flow A — sing-box / Hiddify (uses the
+                        // /sub/<token> URL up top). Points back at
+                        // that QR to avoid duplication; just clarifies
+                        // that THAT QR works for WG too via sing-box's
+                        // built-in wireguard outbound.
+                        div {
+                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                "Flow A — Hiddify / Sing-box"
+                            }
+                            p style="font-family: var(--serif); font-size: 13px; line-height: 1.5; color: var(--ink); margin: 0 0 8px;" {
+                                "Recipient scans the QR in the "
+                                b { "Subscription" }
+                                " block above. Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule."
+                            }
+                            p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin: 0;" {
+                                "Recommended default — one URL covers everything."
+                            }
+                        }
+                        // Flow B — AmneziaVPN / native WireGuard app.
+                        // Per granted-server-with-wg-enabled: render a
+                        // dedicated QR and the wireguard://?conf=…
+                        // share-link the WG-native clients accept.
+                        div {
+                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                "Flow B — AmneziaVPN / WireGuard app"
+                            }
+                            @let wg_links: Vec<_> = share_links
+                                .iter()
+                                .filter(|(_, pid, _)| pid.0 == "wireguard")
+                                .collect();
+                            @if wg_links.is_empty() {
+                                p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                    "No WG-native link yet — grant the user a server whose "
+                                    span.ed-mono { "enabled_protocols" }
+                                    " includes "
+                                    span.ed-mono { "wireguard" }
+                                    " (AmneziaWG kernel). Each granted server appears here as a separate QR + link."
+                                }
+                            } @else {
+                                @for (sid, _pid, link) in &wg_links {
+                                    div style="margin-bottom: 16px;" {
+                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                            "server " (sid.0)
+                                        }
+                                        div style="display: flex; gap: 12px; align-items: flex-start;" {
+                                            (qr_svg(link))
+                                            div style="font-family: var(--mono); font-size: 10px; line-height: 1.6; color: var(--soft); word-break: break-all; max-width: 320px;" {
+                                                (mask_secret(link))
+                                                div style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 6px;" {
+                                                    "QR scans directly into AmneziaVPN — full config inlined. Link is " (link.len()) " chars (the actual private key is base64-embedded inside)."
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

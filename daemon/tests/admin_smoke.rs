@@ -3789,6 +3789,25 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         !html.contains(priv_.as_str()),
         "PRIVATE LEAK: detail HTML contains the raw private bytes"
     );
+    // Distribution-panel guidance for both client personas.
+    // Pavel's "Flow A / Flow B" pattern: ALWAYS show both labels even
+    // when no WG-enabled server is granted, so the operator knows
+    // both options exist + sees why Flow B is empty.
+    assert!(
+        html.contains("Flow A — Hiddify / Sing-box"),
+        "user-detail must teach the sing-box/Hiddify recipient flow"
+    );
+    assert!(
+        html.contains("Flow B — AmneziaVPN / WireGuard app"),
+        "user-detail must teach the WG-native recipient flow"
+    );
+    // No WG-native link yet (no granted server with wireguard enabled
+    // in this fixture). The empty-state copy MUST point at how to
+    // unlock the QR (grant a server with wireguard in enabled_protocols).
+    assert!(
+        html.contains("No WG-native link yet"),
+        "empty-state copy must walk the operator to the grant action"
+    );
 }
 
 #[tokio::test]
