@@ -35,10 +35,16 @@ use std::time::{Duration, Instant};
 /// SSE step uses the password verbatim to bootstrap the new node.
 /// Storing a hash would just mean the operator has to re-type before
 /// step 2, defeating the wizard.
+///
+/// `ssh_port` covers the Cloudzy/non-22 case (DO Cloud Firewall pins
+/// to 22 but other hosters move it; pasting "address: vpn.foo.com,
+/// port: 2222" must work). 22 is the default when the form field is
+/// blank — the most common case.
 #[derive(Clone, Debug)]
 pub struct WizardSession {
     pub address: String,
     pub root_password: String,
+    pub ssh_port: u16,
     /// Wall-clock instant the session was created. Used by `get` to
     /// expire stale sessions on access.
     pub created: Instant,
@@ -69,7 +75,7 @@ impl WizardStore {
     /// Insert a fresh session and return its id. The id is 32 bytes of
     /// crypto random, base64-url encoded (43 ASCII chars). Collisions
     /// are statistically impossible at homelab scale.
-    pub fn insert(&self, address: String, root_password: String) -> String {
+    pub fn insert(&self, address: String, root_password: String, ssh_port: u16) -> String {
         let id = vpnctl_crypto::gen_password(32).unwrap_or_else(|_| {
             // gen_password's only failure mode is OS RNG starvation,
             // which on Linux means /dev/urandom is broken — at that
@@ -82,6 +88,7 @@ impl WizardStore {
         let session = WizardSession {
             address,
             root_password,
+            ssh_port,
             created: Instant::now(),
         };
         if let Ok(mut g) = self.inner.lock() {
@@ -172,6 +179,22 @@ pub fn validate_password(input: &str) -> Result<&str, &'static str> {
     Ok(input)
 }
 
+/// Parse + validate the optional SSH port. Empty string → default 22
+/// (the most common case — DigitalOcean Cloud Firewall pins to 22).
+/// Non-empty: must parse as 1..=65535. Anything else is operator
+/// typo, surfaced with a short reason.
+pub fn validate_ssh_port(input: &str) -> std::result::Result<u16, &'static str> {
+    let t = input.trim();
+    if t.is_empty() {
+        return Ok(22);
+    }
+    let n: u32 = t.parse().map_err(|_| "ssh_port is not a number")?;
+    if n == 0 || n > 65535 {
+        return Err("ssh_port out of range (1..=65535)");
+    }
+    Ok(n as u16)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -180,11 +203,21 @@ mod tests {
     #[test]
     fn insert_then_get_roundtrips_payload() {
         let store = WizardStore::new();
-        let id = store.insert("198.51.100.42".into(), "hunter2".into());
+        let id = store.insert("198.51.100.42".into(), "hunter2".into(), 22);
         let s = store.get(&id).expect("session must be retrievable");
         assert_eq!(s.address, "198.51.100.42");
         assert_eq!(s.root_password, "hunter2");
+        assert_eq!(s.ssh_port, 22);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn insert_preserves_non_default_ssh_port() {
+        // Cloudzy ships SSH on 2222 by default — the operator's
+        // step-1 form field must round-trip through the session.
+        let store = WizardStore::new();
+        let id = store.insert("104.194.156.93".into(), "pw".into(), 2222);
+        assert_eq!(store.get(&id).unwrap().ssh_port, 2222);
     }
 
     #[test]
@@ -196,10 +229,31 @@ mod tests {
     #[test]
     fn remove_drops_session() {
         let store = WizardStore::new();
-        let id = store.insert("a".into(), "b".into());
+        let id = store.insert("a".into(), "b".into(), 22);
         store.remove(&id);
         assert!(store.get(&id).is_none());
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn validate_ssh_port_defaults_blank_to_22() {
+        assert_eq!(validate_ssh_port("").unwrap(), 22);
+        assert_eq!(validate_ssh_port("   ").unwrap(), 22);
+    }
+
+    #[test]
+    fn validate_ssh_port_accepts_in_range_values() {
+        assert_eq!(validate_ssh_port("2222").unwrap(), 2222);
+        assert_eq!(validate_ssh_port("1").unwrap(), 1);
+        assert_eq!(validate_ssh_port("65535").unwrap(), 65535);
+    }
+
+    #[test]
+    fn validate_ssh_port_rejects_zero_and_oob_and_garbage() {
+        assert!(validate_ssh_port("0").is_err());
+        assert!(validate_ssh_port("65536").is_err());
+        assert!(validate_ssh_port("abc").is_err());
+        assert!(validate_ssh_port("-1").is_err());
     }
 
     #[test]

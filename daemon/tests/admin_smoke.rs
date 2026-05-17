@@ -557,6 +557,29 @@ async fn fetch_html(app: axum::Router, path: &str) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// Variant of `fetch_html` that ships a Cookie header — used by the
+/// wizard step-2 tests where the page is session-gated.
+async fn fetch_html_with_cookie(app: axum::Router, path: &str, cookie: &str) -> String {
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected 200 from {path}, got {:?}",
+        resp.status()
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
 /// Empty inventory must render the dashboard with all four metric tiles
 /// at zero (or "live" for the daemon tile) and the empty-state copy for
 /// recent activity. Each integer is anchored to its tile, so swapping
@@ -3240,7 +3263,7 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
     let s = state(&dir).await;
     let session_id = s
         .wizard
-        .insert("vpn-de1.example.org".into(), "secret".into());
+        .insert("vpn-de1.example.org".into(), "secret".into(), 22);
     let app = router(s);
 
     let resp = app
@@ -3320,6 +3343,350 @@ async fn admin_wizard_step2_rejects_bogus_cookie_400() {
         StatusCode::BAD_REQUEST,
         "unknown session ids must 400 (no session enumeration leak)"
     );
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Phase E sub-iter 4b — wizard SSE bootstrap.
+//
+// The step-2 page must:
+//   * render an inline EventSource pointed at the SSE source,
+//   * have a log pane + status line populated by the client JS,
+//   * NEVER echo the operator's root password into the HTML,
+//   * link a fallback "start over" anchor.
+//
+// The SSE endpoint must:
+//   * reject missing/bogus session with 400 + canonical body,
+//   * single-shot consume the session (re-attach 400s),
+//   * advertise `Content-Type: text/event-stream` (browsers refuse
+//     to treat the response as an EventSource otherwise),
+//   * never appear in the CSRF/auth blast radius without protection
+//     (it's a GET — CSRF passes through, basic-auth wraps it).
+// ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_wizard_step2_page_attaches_inline_eventsource_to_sse_endpoint() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let session_id = s.wizard.insert("198.51.100.42".into(), "pw".into(), 22);
+    let app = router(s);
+
+    let html = fetch_html_with_cookie(
+        app,
+        "/admin/servers/new/step-2",
+        &format!("vpnctl_wizard={session_id}"),
+    )
+    .await;
+
+    assert!(
+        html.contains("new EventSource('/admin/servers/new/step-2/sse')"),
+        "step-2 page must wire EventSource to the SSE endpoint"
+    );
+    assert!(
+        html.contains("id=\"wizard-log\""),
+        "step-2 must have a log pane the SSE handlers append into"
+    );
+    assert!(
+        html.contains("id=\"wizard-status\""),
+        "step-2 must have a status indicator the EventSource updates"
+    );
+    assert!(
+        html.contains("addEventListener('step'") && html.contains("addEventListener('ok'"),
+        "EventSource must subscribe to the named 'step' + 'ok' events"
+    );
+    assert!(
+        !html.contains(">pw<") && !html.contains("\"pw\""),
+        "root password must NEVER appear in the step-2 page HTML"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_sse_rejects_missing_session_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2/sse")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "SSE endpoint must 400 without a session cookie"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.starts_with("vpnctl admin: wizard session missing"),
+        "canonical missing-session body required, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_sse_rejects_bogus_cookie_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2/sse")
+                .header("cookie", "vpnctl_wizard=bogus")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "SSE endpoint must 400 on unknown session id"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_sse_consumes_session_on_first_attach() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Address that's deliberately unroutable — the SSE handler will
+    // start streaming events, the bootstrap's probe phase will fail
+    // (RFC 5737 TEST-NET-1 doesn't route), but we only care here
+    // that the session is GONE after the first attach.
+    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    assert_eq!(s.wizard.len(), 1, "precondition: session present");
+    let app = router(s.clone());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2/sse")
+                .header("cookie", format!("vpnctl_wizard={session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "first SSE attach with valid session must succeed"
+    );
+    // The response body is an open SSE stream; we don't have to drain
+    // it — dropping the response closes the receiver. Session must be
+    // gone immediately on attach (single-shot semantics).
+    assert_eq!(
+        s.wizard.len(),
+        0,
+        "SSE attach must consume the wizard session"
+    );
+    drop(resp);
+}
+
+#[tokio::test]
+async fn admin_wizard_sse_advertises_event_stream_content_type() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2/sse")
+                .header("cookie", format!("vpnctl_wizard={session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "EventSource requires Content-Type: text/event-stream, got {ct:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_carries_ssh_port_2222_into_session() {
+    // Review-agent (2026-05-17, important-4): Cloudzy hosts on
+    // 2222, the wizard's ssh_port input field must round-trip.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=104.194.156.93&root_password=pw&ssh_port=2222",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Session must have port 2222 stashed.
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    let session_id = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("vpnctl_wizard=");
+    let session = s
+        .wizard
+        .get(session_id)
+        .expect("session must be retrievable by id");
+    assert_eq!(session.ssh_port, 2222, "ssh_port must round-trip from form");
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_blank_ssh_port_defaults_to_22() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("address=10.0.0.1&root_password=pw&ssh_port="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    let session_id = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("vpnctl_wizard=");
+    let session = s.wizard.get(session_id).unwrap();
+    assert_eq!(session.ssh_port, 22, "blank ssh_port must default to 22");
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_rejects_bogus_ssh_port_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=10.0.0.1&root_password=pw&ssh_port=99999",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.starts_with("vpnctl admin: invalid ssh_port"),
+        "canonical body required, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_step1_form_has_ssh_port_field() {
+    // Front-end: ensure the operator sees the (optional) ssh_port
+    // field on step 1 — otherwise they'd never know they can change
+    // it for Cloudzy / non-22 hosts.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/servers/new").await;
+    assert!(
+        html.contains("name=\"ssh_port\""),
+        "wizard step-1 must expose an ssh_port input field"
+    );
+    assert!(
+        html.contains("optional, default 22"),
+        "ssh_port label must clarify it's optional with default 22"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_sse_collision_appends_numeric_suffix() {
+    // Operator runs the wizard for the same IP twice. The second
+    // attach must derive a non-colliding server id rather than
+    // 400-ing — that's the difference between an operator hitting
+    // back-button + retry (good UX) vs. having to invent a new
+    // address (bad UX).
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Pre-seed a server with the id that would be derived from the
+    // wizard's address.
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("198.51.100.1".into()),
+        address: "198.51.100.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    s.inv.add_server(&server).await.unwrap();
+
+    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/servers/new/step-2/sse")
+                .header("cookie", format!("vpnctl_wizard={session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The SSE attach itself succeeds (200) — the collision is handled
+    // by id suffixing inside the handler. The bootstrap pipeline will
+    // then fail at the probe phase (no real server) but that's fine
+    // for this test; we only care that the attach didn't 409.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "repeat wizard for same address must suffix id, not 409"
+    );
+    drop(resp);
 }
 
 #[tokio::test]

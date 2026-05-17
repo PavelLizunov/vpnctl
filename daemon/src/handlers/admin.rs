@@ -2979,79 +2979,16 @@ pub(crate) async fn server_deploy(
             .into_response();
     }
 
-    // Bootstrap missing secrets. Same logic as `vpnctl deploy` CLI
-    // bootstrap block, minus the SSH-touching parts. Each step is
-    // independent + idempotent — re-clicking deploy when everything
-    // is already minted is a safe no-op.
-    let mut secrets = match state.inv.list_server_secrets(&sid).await {
-        Ok(m) => m,
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-    let mut bootstrapped: Vec<&'static str> = Vec::new();
-
-    let needs_reality = server
-        .enabled_protocols
-        .iter()
-        .any(|p| p.0 == "vless+reality");
-    if needs_reality
-        && (!secrets.contains_key("vless.private_key")
-            || !secrets.contains_key("vless.public_key")
-            || !secrets.contains_key("vless.short_id"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_x25519_keypair();
-        let short_id = match vpnctl_crypto::gen_short_id() {
-            Ok(s) => s,
-            Err(e) => return internal_error(anyhow::Error::new(e)),
+    // Bootstrap missing secrets. Shared with the Phase-E wizard
+    // via `wizard_bootstrap::bootstrap_server_secrets` so any new
+    // server-side secret added for a future protocol is minted
+    // identically by deploy + wizard. Idempotent — re-clicking
+    // deploy when everything is already minted is a safe no-op.
+    let (secrets, bootstrapped) =
+        match crate::wizard_bootstrap::bootstrap_server_secrets(&state.inv, &server).await {
+            Ok(v) => v,
+            Err(e) => return internal_error(anyhow::anyhow!(e)),
         };
-        for (k, v) in [
-            ("vless.private_key", &priv_key),
-            ("vless.public_key", &pub_key),
-            ("vless.short_id", &short_id),
-        ] {
-            if let Err(e) = state.inv.set_server_secret(&sid, k, v).await {
-                return internal_error(anyhow::Error::new(e));
-            }
-            secrets.insert(k.to_string(), v.clone());
-        }
-        bootstrapped.push("vless+reality keypair");
-    }
-
-    let needs_wireguard = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
-    if needs_wireguard
-        && (!secrets.contains_key("wireguard.server_public_key")
-            || !secrets.contains_key("wireguard.server_private_key"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
-        for (k, v) in [
-            ("wireguard.server_private_key", &priv_key),
-            ("wireguard.server_public_key", &pub_key),
-        ] {
-            if let Err(e) = state.inv.set_server_secret(&sid, k, v).await {
-                return internal_error(anyhow::Error::new(e));
-            }
-            secrets.insert(k.to_string(), v.clone());
-        }
-        bootstrapped.push("wireguard server keypair");
-    }
-
-    let needs_hy2_obfs = server.enabled_protocols.iter().any(|p| p.0 == "hysteria2");
-    if needs_hy2_obfs && !secrets.contains_key("hysteria2.obfs.password") {
-        // 24 bytes of entropy → 32 chars URL-safe base64. Match
-        // the bash-vpn-control salamander password shape.
-        let pw = match vpnctl_crypto::gen_password(24) {
-            Ok(p) => p,
-            Err(e) => return internal_error(anyhow::Error::new(e)),
-        };
-        if let Err(e) = state
-            .inv
-            .set_server_secret(&sid, "hysteria2.obfs.password", &pw)
-            .await
-        {
-            return internal_error(anyhow::Error::new(e));
-        }
-        secrets.insert("hysteria2.obfs.password".into(), pw);
-        bootstrapped.push("hysteria2 salamander obfs password");
-    }
 
     // SSH push to the node — Path C via SubprocessSshTransport.
     // For each declared kernel: ensure_installed → render config
@@ -4363,6 +4300,21 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
                     "Used once to push our SSH key, then password auth gets disabled. Held in daemon memory for 10 minutes; nothing is written to disk."
                 }
             }
+            div style="display: flex; flex-direction: column; gap: 4px;" {
+                label for="ssh_port"
+                      style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "ssh port (optional, default 22)"
+                }
+                input id="ssh_port" name="ssh_port" type="text" inputmode="numeric"
+                      placeholder="22"
+                      autocomplete="off" autocapitalize="none" spellcheck="false"
+                      pattern="[0-9]*"
+                      title="leave blank for 22; Cloudzy ships 2222"
+                      style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); max-width: 140px;";
+                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                    "Leave blank for 22 (the common case). Cloudzy is " span.ed-mono { "2222" } "; check the hoster's panel if SSH connect-fails on the next screen."
+                }
+            }
             div style="display: flex; gap: 12px; align-items: center; margin-top: 6px;" {
                 button type="submit"
                        title="Validate inputs and continue to the bootstrap log"
@@ -4390,6 +4342,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
 pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: String) -> Response {
     let address_raw = form_field(&body, "address").unwrap_or_default();
     let password_raw = form_field(&body, "root_password").unwrap_or_default();
+    let port_raw = form_field(&body, "ssh_port").unwrap_or_default();
 
     let address = match crate::wizard::validate_address(&address_raw) {
         Ok(s) => s.to_string(),
@@ -4408,8 +4361,18 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
         )
             .into_response();
     }
+    let ssh_port = match crate::wizard::validate_ssh_port(&port_raw) {
+        Ok(p) => p,
+        Err(why) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                error_text(&format!("invalid ssh_port — {why}")),
+            )
+                .into_response();
+        }
+    };
 
-    let session_id = state.wizard.insert(address, password_raw);
+    let session_id = state.wizard.insert(address, password_raw, ssh_port);
 
     // Cookie scope: only the wizard endpoints. Path=/admin/servers/new
     // means the browser doesn't ship the session id to /admin/users,
@@ -4426,14 +4389,27 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
     resp
 }
 
-/// `GET /admin/servers/new/step-2` — stub for sub-iter 4a. Reads the
-/// session cookie, looks up the stashed step-1 input, and renders a
-/// short page confirming the address. Sub-iter 4b replaces this with
-/// the real SSE-streaming bootstrap log.
+/// `GET /admin/servers/new/step-2` — render the streaming-bootstrap
+/// page. Pulls the wizard session out of the cookie (same store as
+/// step 1 wrote into), then renders a page whose body has:
 ///
-/// On missing/expired session redirects back to step 1 with a 303 +
-/// short message — the operator's session has timed out and there's
-/// nothing actionable on this screen without it.
+///   * a header with the address being bootstrapped,
+///   * a live `<pre>` log pane that an inline EventSource fills in
+///     line-by-line as the bootstrap progresses,
+///   * a footer that swaps to a "✓ done — go to <server>" link when
+///     the bootstrap completes successfully, OR a fail summary +
+///     "← start over" link on error.
+///
+/// The actual bootstrap work happens in `wizard_step2_sse` (the
+/// EventSource source), which calls into
+/// `crate::wizard_bootstrap::run_bootstrap`. Splitting the page
+/// from the stream lets the operator hit refresh during a
+/// bootstrap and resume watching (the bootstrap is in flight on
+/// the daemon; the SSE just attaches a new viewer).
+///
+/// On missing/expired session: 400 + canonical error body — the
+/// operator's session has timed out and there's nothing actionable
+/// on this screen without it.
 pub(crate) async fn wizard_step2_stub(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -4458,33 +4434,245 @@ pub(crate) async fn wizard_step2_stub(
         }
     };
 
+    // The EventSource URL re-uses the same cookie — the browser
+    // ships it automatically because the cookie Path is
+    // `/admin/servers/new` (which covers the SSE endpoint too).
     let body = html! {
         div.ed-art-eyebrow { "Add server · step 2 of 3" }
         h1.ed-art-h1 {
             "Bootstrapping " span.ed-mono { (session.address) }
         }
         p.ed-art-deck {
-            "The next screen will stream " span.ed-mono { "vpnctl bootstrap" }
-            " + " span.ed-mono { "vpnctl deploy" } " line-by-line over Server-Sent Events. "
-            em { "Sub-iter 4b ships that part" } " — for now this is a stub that just confirms "
-            "your step-1 input survived the round-trip."
+            "The daemon is SSHing in as " span.ed-mono { "root" }
+            " (one-time password use), pushing its deploy key, locking down "
+            "the host, installing " span.ed-mono { "sing-box" }
+            " and pushing the rendered config. Every step shows up below "
+            "as it happens. Don't close this tab — refresh is fine, the "
+            "bootstrap runs server-side and you'll re-attach."
         }
-        div style="margin: 24px 0; padding: 14px 18px; border: 1px solid var(--rule); background: var(--paper);" {
-            dl style="margin: 0; display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; font-family: var(--mono); font-size: 12px;" {
-                dt style="color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "address" }
-                dd style="margin: 0; color: var(--ink);" { (session.address) }
-                dt style="color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "root password" }
-                dd style="margin: 0; color: var(--mute); font-style: italic;" {
-                    "(held in daemon memory — never echoed to the page)"
-                }
+        div id="wizard-status" role="status"
+            style="margin: 18px 0 6px 0; padding: 8px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                "connecting…"
+        }
+        pre id="wizard-log"
+            style="margin: 0 0 18px 0; padding: 14px 18px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); max-height: 480px; overflow-y: auto; white-space: pre-wrap;" {
+            "▸ waiting for the daemon…\n"
+        }
+        div id="wizard-actions" style="display: flex; gap: 12px; align-items: center;" {
+            a href="/admin/servers/new"
+              style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
+                "← start over"
             }
         }
-        a href="/admin/servers"
-          style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
-            "← back to servers"
+        // The EventSource emits `step` / `ok` / `error` named events;
+        // we attach a handler to each and append to the log. On `ok`
+        // we navigate to the success URL; on `error` we leave the
+        // log as-is so the operator can read what went wrong.
+        //
+        // No external JS dep — the whole client is ~30 lines of
+        // hand-written script that any 2026-era browser supports
+        // natively (EventSource is in every browser since IE was
+        // alive). Inline rather than a separate asset because it's
+        // tiny and the rest of the admin UI has no other JS files
+        // to belong to.
+        script {
+            (maud::PreEscaped(r#"
+(function () {
+    var log = document.getElementById('wizard-log');
+    var status = document.getElementById('wizard-status');
+    var actions = document.getElementById('wizard-actions');
+    var es = new EventSource('/admin/servers/new/step-2/sse');
+
+    function append(line, cls) {
+        var span = document.createElement('span');
+        span.textContent = line + '\n';
+        if (cls) { span.className = cls; }
+        log.appendChild(span);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    es.addEventListener('step', function (ev) {
+        try {
+            var d = JSON.parse(ev.data);
+            append('▸ [' + d.phase + '] ' + d.message);
+            status.textContent = d.phase;
+        } catch (e) { append('(unparsable step event: ' + ev.data + ')'); }
+    });
+    es.addEventListener('ok', function (ev) {
+        try {
+            var d = JSON.parse(ev.data);
+            append('✓ done — server ' + d.server_id + ' is live.');
+            status.textContent = 'done';
+            status.style.color = 'var(--ink)';
+            var a = document.createElement('a');
+            a.href = d.redirect;
+            a.textContent = '→ open ' + d.server_id;
+            a.style.cssText = 'font-family: var(--mono); font-size: 12px; color: var(--ink); border: 1px solid var(--ink); padding: 6px 12px; text-decoration: none;';
+            actions.prepend(a);
+            // Auto-redirect after 2s so a passive operator (the most
+            // common case) lands on the detail page without an extra
+            // click. Operator wanting to re-read the log can hit Esc
+            // or click ← start over.
+            setTimeout(function () { window.location.href = d.redirect; }, 2000);
+        } catch (e) { append('(unparsable ok event: ' + ev.data + ')'); }
+        es.close();
+    });
+    es.addEventListener('error', function (ev) {
+        // Browsers fire a generic 'error' event when the connection
+        // closes (including after our last 'ok' or 'error' event).
+        // We only treat it as a real failure if there's a payload.
+        if (ev.data) {
+            try {
+                var d = JSON.parse(ev.data);
+                append('✗ FAILED at [' + d.phase + ']: ' + d.message, 'wizard-err');
+                status.textContent = 'failed at ' + d.phase;
+                status.style.color = 'var(--acc)';
+            } catch (e) { append('(unparsable error event: ' + ev.data + ')'); }
+            es.close();
+        } else if (es.readyState === EventSource.CLOSED) {
+            // Connection ended without a terminal event. This means
+            // the daemon dropped the connection mid-stream (rare —
+            // usually the SSE handler always finishes with `ok` or
+            // `error`). Show a graceful note.
+            status.textContent = 'connection closed';
+        }
+    });
+    es.addEventListener('open', function () {
+        status.textContent = 'streaming…';
+    });
+})();
+"#))
         }
     };
     shell("servers", &theme, &accent, tw, body).into_response()
+}
+
+/// `GET /admin/servers/new/step-2/sse` — the EventSource endpoint
+/// the step-2 page connects to. Reads the wizard cookie, fetches the
+/// session, builds a `BootstrapPlan`, then streams events from
+/// `wizard_bootstrap::run_bootstrap` as Server-Sent Events.
+///
+/// Events use the named-event form (`event: step\ndata: {json}\n\n`)
+/// so the front-end can attach separate handlers per event type via
+/// `EventSource.addEventListener('step', …)`. Saves us writing a
+/// discriminator in the client JSON parser.
+///
+/// **Why we delete the session on first attach**: the wizard runs
+/// exactly once. After the first SSE handler starts the bootstrap,
+/// the session is consumed — re-opening the URL would re-run the
+/// whole pipeline (including a second `inv.add_server` that fails
+/// with AlreadyExists). Single-shot is the only sane semantics.
+pub(crate) async fn wizard_step2_sse(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    let cookie = read_cookie(&headers, crate::wizard::COOKIE_NAME).map(str::to_string);
+    let Some(session_id) = cookie else {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text("wizard session missing — start over from /admin/servers/new"),
+        )
+            .into_response();
+    };
+    let Some(session) = state.wizard.get(&session_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text("wizard session expired — start over from /admin/servers/new"),
+        )
+            .into_response();
+    };
+    // Single-shot semantics — after the SSE handler attaches, the
+    // session is gone. Refresh on the page falls back to the
+    // "session missing" branch (with a "start over" link).
+    state.wizard.remove(&session_id);
+
+    // Derive a non-colliding server id from the address. If the
+    // operator wizards the same IP twice, `find_available_server_id`
+    // picks `<id>-2`, `<id>-3`, … (bounded to avoid an infinite
+    // loop on a corrupt inventory). Pure helper — unit-tested in
+    // `wizard_bootstrap::tests`.
+    let base_id = crate::wizard_bootstrap::derive_server_id(&session.address);
+    if base_id.is_empty() {
+        // Should be impossible — wizard validates address upfront —
+        // but defensive: empty id would fail inv.add_server with a
+        // useless error. Surface upfront instead.
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(
+                "address didn't produce any safe id chars — start over with a different address",
+            ),
+        )
+            .into_response();
+    }
+    let existing: std::collections::HashSet<String> = match state.inv.list_servers().await {
+        Ok(list) => list.into_iter().map(|s| s.id.0).collect(),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let server_id = match crate::wizard_bootstrap::find_available_server_id(&existing, &base_id) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::CONFLICT, error_text(&e)).into_response(),
+    };
+
+    let plan = crate::wizard_bootstrap::BootstrapPlan {
+        server_id,
+        address: session.address,
+        ssh_port: session.ssh_port,
+        root_password: session.root_password,
+        deploy_key_path: std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH),
+        known_hosts_path: std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts"),
+    };
+
+    // Map each BootstrapEvent → axum SSE Event with a named event
+    // type. The infallible Result wrapper is what axum's Sse::new
+    // expects (`Result<Event, Error>`) — we never produce errors
+    // here because the bootstrap pipeline encodes failures as
+    // `BootstrapEvent::Error` payloads, not stream-level errors.
+    let inv = state.inv.clone();
+    let registry = std::sync::Arc::clone(&state.registry);
+    let raw = crate::wizard_bootstrap::run_bootstrap(plan, inv, registry);
+    let mapped = raw.map(|ev| {
+        let name = match &ev {
+            crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",
+            crate::wizard_bootstrap::BootstrapEvent::Ok { .. } => "ok",
+            crate::wizard_bootstrap::BootstrapEvent::Error { .. } => "error",
+        };
+        // The SSE Event is built from the JSON-serialised payload.
+        // serde_json failure is effectively impossible on our
+        // BootstrapEvent types (basic Rust strings + integers,
+        // tagged enum), but if it ever happens we keep the original
+        // event name and log loudly — silently swapping to a fake
+        // error event would have the front-end think a `step` was a
+        // terminal failure.
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::wizard",
+                event_name = name,
+                error = %e,
+                "wizard SSE event serialisation failed — emitting placeholder"
+            );
+            format!("{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}")
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+
+    // Box the stream so the return type fits a single Pin<Box<dyn …>>.
+    // Without this, `Sse::new` would carry the unnameable `impl
+    // Stream` type all the way up to the route registration.
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+
+    // KeepAlive sends `: keep-alive\n\n` comments every 15s so
+    // intermediate proxies (or a tab in the background) don't drop
+    // the connection during a long apt-get install.
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
 }
 
 // ────────────────────────────────────────────────────────────────────────

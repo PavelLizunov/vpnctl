@@ -455,6 +455,17 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/new/step-2/",
             get(admin::wizard_step2_stub),
         )
+        // Phase E sub-iter 4b — SSE source for the step-2 page.
+        // EventSource attaches here, the daemon streams BootstrapEvents
+        // as named SSE events (step / ok / error). Single-shot:
+        // the handler consumes the wizard session on attach (refresh
+        // falls back to a "session missing" page with a "start over"
+        // link). See `wizard_step2_sse` + `crate::wizard_bootstrap`
+        // for the pipeline.
+        .route(
+            "/admin/servers/new/step-2/sse",
+            get(admin::wizard_step2_sse),
+        )
         .route("/admin/users", get(admin::users))
         .route("/admin/users/", get(admin::users))
         // Phase C-3.2: web add-user form posts here. Form has one

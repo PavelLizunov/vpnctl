@@ -57,6 +57,16 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Phase D audit timeline: date-grouping (Today/Yesterday/<date>) +
 # CSV export filename stamp.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Phase E sub-iter 4b — wizard SSE bootstrap. Spawns a tokio task
+# that pushes `BootstrapEvent`s into a bounded mpsc channel; the
+# `ReceiverStream` adapter turns the channel into a `Stream` for
+# axum's `Sse::new`. Pure-Rust deps — no glibc bump for the
+# SubprocessSshTransport path (see `daemon/src/ssh_subprocess.rs`).
+tokio-stream = "0.1"
+# `futures_core::Stream` is the trait `axum::response::sse::Sse::new`
+# accepts. Already pulled transitively by axum; declaring it directly
+# keeps `daemon/src/wizard_bootstrap.rs` honest about its imports.
+futures-core = "0.3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

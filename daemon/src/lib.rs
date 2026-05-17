@@ -19,6 +19,11 @@ pub mod rate_limit;
 // glibc 2.38; see ssh_subprocess.rs for the rationale.
 pub mod ssh_subprocess;
 pub mod wizard;
+// Phase E sub-iter 4b — wizard SSE bootstrap engine. Pulled out of
+// the admin handler so the bootstrap pipeline can be unit-tested
+// without spinning up an axum router. See module-level doc for the
+// 9-phase pipeline.
+pub mod wizard_bootstrap;
 
 pub use app::{
     AppState, build, make_app_state_for_tests, make_app_state_with_rate_limiter, router,
