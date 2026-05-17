@@ -1,0 +1,43 @@
+-- Migration 0010 — per-user traffic limits + alert thresholds.
+--
+-- Pavel iter D.6c: «иметь механизм ограничений или алертов по
+-- лимитам». Two columns on `users`:
+--
+--   * `monthly_bandwidth_limit_bytes INTEGER NULL`
+--     Total (upload + download) bytes the user is allowed per
+--     calendar month. NULL = no limit (default; existing rows
+--     keep working unchanged). Integer = SQLite's u64-equivalent;
+--     practical range covers up to ~9 EB which is enough for any
+--     homelab quota.
+--
+--   * `traffic_alert_threshold_pct INTEGER NULL DEFAULT 80`
+--     "Warn me when the user reaches X% of their limit". Default
+--     80 chosen because operators historically miss limits when
+--     warning at 100% — by then the user is already over. NULL
+--     here means "use the daemon's default 80%" (so the daemon
+--     can change the default later without re-touching every
+--     existing row).
+--
+-- # Where this is enforced
+--
+-- The values themselves are *advisory* — vpnctld doesn't shape
+-- traffic at the kernel level (that's a sing-box / amneziawg
+-- responsibility, and both lack per-user quota wire-format in
+-- their config schemas as of 2026-05). Instead:
+--
+--   * The dashboard's heavy-users section gains a "near limit"
+--     badge when a user crosses their threshold (D.6c front-end).
+--   * The user-detail page shows a usage-bar comparing the
+--     month-to-date total against the limit.
+--   * Future: an audit row on cross-threshold transitions so the
+--     operator can grep `journalctl -u vpnctld | grep limit`.
+--
+-- # How "month-to-date" is computed
+--
+-- `vpn_connection_stats.ts` is RFC3339 UTC; "this month" =
+-- `WHERE ts >= strftime('%Y-%m-01T00:00:00Z', 'now')`. Resets
+-- automatically on month boundary; no scheduled reset task
+-- needed.
+
+ALTER TABLE users ADD COLUMN monthly_bandwidth_limit_bytes INTEGER;
+ALTER TABLE users ADD COLUMN traffic_alert_threshold_pct INTEGER DEFAULT 80;

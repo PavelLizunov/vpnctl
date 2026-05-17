@@ -562,6 +562,23 @@ pub(crate) async fn dashboard(
             tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
             Vec::new()
         });
+    // Pavel iter D.6c — limit alerts. Pre-filtered to users who
+    // have crossed their configured threshold; sorted DESC by
+    // percent-of-limit so the most-at-risk shows first.
+    let limit_state = state
+        .inv
+        .users_traffic_vs_limit()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "users_traffic_vs_limit failed");
+            Vec::new()
+        });
+    let alerting: Vec<(vpnctl_core::UserId, u64, u64, u8)> = limit_state
+        .into_iter()
+        .filter(|(_, used, lim, threshold)| {
+            *lim > 0 && ((*used as u128 * 100) / *lim as u128) >= u128::from(*threshold)
+        })
+        .collect();
 
     let body = html! {
         div.ed-art-eyebrow { "Dashboard" }
@@ -573,10 +590,61 @@ pub(crate) async fn dashboard(
             " update on every reload."
         }
         (dashboard_metrics(&stats))
+        (dashboard_limit_alerts(&alerting))
         (dashboard_heavy_users(&heavy_users))
         (dashboard_audit(&audit))
     };
     Ok(shell("dashboard", &theme, &accent, tw, body))
+}
+
+/// Render the "limit alerts" section on the dashboard. Shows only
+/// users who have crossed their configured threshold (skipping the
+/// section entirely when nobody is at risk — empty dashboard is
+/// clean dashboard). Each row click-throughs to user-detail where
+/// the operator can rotate keys / raise limit / dig in.
+fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Markup {
+    if rows.is_empty() {
+        // Clean — no one near limit, no UI clutter. Operator sees
+        // this section only when something demands attention.
+        return html! {};
+    }
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow style="color: var(--acc);" {
+            (rows.len()) " user"
+            @if rows.len() != 1 { "s" }
+            " near monthly limit"
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "These users have crossed their configured alert threshold "
+            "(default " span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%" } "). "
+            "Click through to raise the cap or shape behaviour."
+        }
+        ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
+            @for (uid, used, lim, threshold) in rows {
+                @let pct = ((*used as u128 * 100) / (*lim).max(1) as u128).min(999) as u32;
+                @let over_limit = pct >= 100;
+                li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                    a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                      style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
+                        (uid.0)
+                    }
+                    span style="color: var(--mute);" {
+                        (fmt_traffic_progress(*used, *lim))
+                    }
+                    @if over_limit {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); font-weight: 600; margin-left: 8px;" {
+                            "OVER"
+                        }
+                    } @else {
+                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-left: 8px;" {
+                            "≥ " (threshold) "%"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render the "heavy users · last 24h" section on the dashboard.
@@ -1901,6 +1969,13 @@ pub(crate) async fn user_detail(
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
         (live_vpn_stats_section(&state, &uid).await)
 
+        // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
+        // Show current month-to-date usage + the configured cap
+        // (if any) + an inline form to change both. Re-runs the
+        // usage query so the page-after-redirect immediately
+        // reflects new limits.
+        (user_traffic_limit_section(&state, &uid).await)
+
         // Destructive zone (Phase C-3.4) — deliberately at the very
         // bottom so the operator scrolls past everything else first.
         // The link goes to a confirm page (GET) NOT a direct POST,
@@ -2126,6 +2201,125 @@ fn vpn_sparkline_24h(rows: &[vpnctl_inventory::VpnStatsRow]) -> Markup {
             div style="font-family: var(--mono); font-size: 9px; color: var(--mute); display: flex; justify-content: space-between; margin-top: 4px;" {
                 span { "-23h" }
                 span { "now" }
+            }
+        }
+    }
+}
+
+/// Daemon-wide default threshold when a user has none set. 80% is
+/// the magic number — operators historically miss the limit when
+/// alerts only fire at 100% (by then the user is already over).
+/// Picked once here so changing it later is one constant edit.
+pub(crate) const DEFAULT_TRAFFIC_THRESHOLD_PCT: u8 = 80;
+
+/// Format bytes as `1.2 GiB / 5 GiB (24%)` — used in the usage
+/// progress bar copy.
+fn fmt_traffic_progress(used: u64, limit: u64) -> String {
+    let pct = if limit == 0 {
+        0
+    } else {
+        ((used as u128 * 100) / limit as u128).min(999) as u32
+    };
+    format!(
+        "{used} / {limit} ({pct}%)",
+        used = humanize_bytes(used),
+        limit = humanize_bytes(limit),
+    )
+}
+
+/// Per-user traffic-limit section on the user-detail page. Shows
+/// the month-to-date total + the configured limit (if any) + an
+/// inline form to change both. Operator can set a cap even when
+/// no traffic has accrued yet — alerts fire only after the limit
+/// is crossed.
+async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+    let used = state
+        .inv
+        .user_traffic_this_month(uid)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_traffic_this_month failed");
+            0
+        });
+    let (limit_opt, threshold_opt) = state
+        .inv
+        .get_user_traffic_limit(uid)
+        .await
+        .unwrap_or((None, None));
+    let threshold_eff = threshold_opt.unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Traffic limit · month-to-date" }
+        @match limit_opt {
+            Some(lim) if lim > 0 => {
+                @let pct = ((used as u128 * 100) / lim as u128).min(999) as u32;
+                @let over_threshold = pct >= u32::from(threshold_eff);
+                @let over_limit = pct >= 100;
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                    "Total upload + download this calendar month vs. the "
+                    "configured monthly cap. Alert fires at "
+                    span.ed-mono { (threshold_eff) "%" } "."
+                }
+                div style="font-family: var(--mono); font-size: 13px; margin: 0 0 8px;" {
+                    (fmt_traffic_progress(used, lim))
+                    @if over_limit {
+                        " · "
+                        span style="color: var(--acc); font-weight: 600;" { "OVER LIMIT" }
+                    } @else if over_threshold {
+                        " · "
+                        span style="color: var(--acc);" { "near limit" }
+                    }
+                }
+                // Progress bar — pure CSS, no JS. Width capped at
+                // 100% so a runaway user (200% of cap) still renders
+                // a sane bar; the numeric copy above tells the truth.
+                @let bar_pct = pct.min(100);
+                // Both "over limit" and "over threshold" use accent
+                // colour — the operator-facing difference is the
+                // copy ("OVER LIMIT" vs "near limit"), not the bar
+                // hue. Single ternary keeps clippy happy.
+                @let bar_fill = if over_threshold { "var(--acc)" } else { "var(--ink)" };
+                @let _ = over_limit;  // bound above; threshold check covers fill
+                div style="height: 8px; background: var(--rule); margin-bottom: 16px; overflow: hidden;" {
+                    div style=(format!("height: 100%; width: {bar_pct}%; background: {bar_fill};")) {}
+                }
+            }
+            _ => {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                    "Used this month: " span.ed-mono { (humanize_bytes(used)) }
+                    " — no monthly cap configured. Set one below if you want a "
+                    span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%-of-limit alert" }
+                    " to fire on the dashboard."
+                }
+            }
+        }
+
+        form method="post"
+             action=(format!("/admin/users/{}/traffic-limit", path_segment_encode(&uid.0)))
+             style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                "limit"
+            }
+            // Operator-friendly input: GiB. Backend converts to
+            // bytes. 0 / empty = clear the limit.
+            @let limit_gib_default = limit_opt
+                .map(|b| b as f64 / 1_073_741_824.0)
+                .unwrap_or(0.0);
+            input type="number" name="limit_gib" step="0.1" min="0" max="100000"
+                  value=(format!("{limit_gib_default:.1}"))
+                  style="max-width: 80px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "GiB / month" }
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-left: 8px;" {
+                "alert at"
+            }
+            input type="number" name="threshold_pct" step="1" min="1" max="100"
+                  value=(threshold_eff)
+                  style="max-width: 56px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "%" }
+            button type="submit"
+                   title="Set both fields. 0 GiB = clear the limit (no cap)."
+                   style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer; margin-left: auto;" {
+                "save"
             }
         }
     }
@@ -2539,6 +2733,89 @@ pub(crate) async fn server_disable_protocol(
     Redirect::to(&format!(
         "/admin/servers/{}",
         path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/users/{id}/traffic-limit` — set monthly bandwidth
+/// cap + alert threshold for one user. Form fields:
+///   * `limit_gib` (float) — total upload+download/month in GiB.
+///     `0` (or empty / negative / non-numeric) clears the cap.
+///   * `threshold_pct` (int 1..=100) — alert fires at this fraction
+///     of the cap. Defaults to `DEFAULT_TRAFFIC_THRESHOLD_PCT` (80)
+///     when omitted.
+///
+/// 404 unknown user; 303 to user-detail on success. Audit row
+/// records new values (NOT the user's accumulated usage — that's
+/// a derived metric).
+pub(crate) async fn user_set_traffic_limit(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+
+    // Existence — explicit 404 (matches the rest of the admin tree).
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    // Parse form. Two fields, both optional in the wire format —
+    // missing limit_gib = clear, missing threshold = use default.
+    let limit_gib: f64 = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("limit_gib="))
+        .and_then(|s| decode_form_value(s).parse().ok())
+        .unwrap_or(0.0);
+    let threshold_pct: u8 = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("threshold_pct="))
+        .and_then(|s| decode_form_value(s).parse().ok())
+        .map(|v: u32| v.clamp(1, 100) as u8)
+        .unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
+
+    // 0 / negative / NaN = clear the limit (operator intent: "no cap").
+    let limit_bytes: Option<u64> = if limit_gib > 0.0 && limit_gib.is_finite() {
+        Some((limit_gib * 1_073_741_824.0) as u64)
+    } else {
+        None
+    };
+
+    if let Err(e) = state
+        .inv
+        .set_user_traffic_limit(&uid, limit_bytes, Some(threshold_pct))
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "user.traffic_limit.set",
+            Some(&user_id_str),
+            Some(&serde_json::json!({
+                "limit_bytes": limit_bytes,
+                "limit_gib": limit_gib,
+                "threshold_pct": threshold_pct,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "audit write failed for user.traffic_limit.set"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
     ))
     .into_response()
 }

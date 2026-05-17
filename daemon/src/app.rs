@@ -481,6 +481,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/wireguard/regenerate",
             post(admin::user_regen_wireguard),
         )
+        // Pavel iter D.6c — per-user monthly bandwidth cap +
+        // alert threshold. POST takes limit_gib + threshold_pct;
+        // 0 / empty / non-numeric limit clears the cap.
+        .route(
+            "/admin/users/{id}/traffic-limit",
+            post(admin::user_set_traffic_limit),
+        )
         // Phase C-3.3: per-(user, server) grant + revoke. Both POST (HTML
         // forms can't easily DELETE), both idempotent at the SQL layer
         // but audited every time so re-grant attempts show in the

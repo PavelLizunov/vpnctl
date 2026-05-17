@@ -1224,6 +1224,146 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
+    /// Set or clear a user's monthly bandwidth limit + alert
+    /// threshold. Pass `Some(limit)` to set, `None` to clear
+    /// (operator decided the user no longer needs a cap). Threshold
+    /// is a percent (0..=100); the daemon-side default lives in
+    /// `vpnctld::admin::DEFAULT_TRAFFIC_THRESHOLD_PCT`.
+    ///
+    /// Returns `Invalid` if no such user — matches the existing
+    /// `regenerate_sub_token` shape.
+    pub async fn set_user_traffic_limit(
+        &self,
+        id: &UserId,
+        limit_bytes: Option<u64>,
+        threshold_pct: Option<u8>,
+    ) -> Result<()> {
+        // Cap threshold_pct at u8 max; SQLite stores as INTEGER so
+        // both halves fit comfortably.
+        let limit_i64 = limit_bytes.map(|b| i64::try_from(b).unwrap_or(i64::MAX));
+        let threshold_i64 = threshold_pct.map(i64::from);
+        let res = sqlx::query(
+            "UPDATE users
+                SET monthly_bandwidth_limit_bytes = ?1,
+                    traffic_alert_threshold_pct  = ?2
+              WHERE id = ?3",
+        )
+        .bind(limit_i64)
+        .bind(threshold_i64)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}",
+                id.0
+            )));
+        }
+        Ok(())
+    }
+
+    /// Read both limit fields for a user. Returns
+    /// `(monthly_bandwidth_limit_bytes, traffic_alert_threshold_pct)`
+    /// — either or both may be `None` (no limit / use default
+    /// threshold). Used by the user-detail page + the daemon-side
+    /// alert evaluator.
+    pub async fn get_user_traffic_limit(&self, id: &UserId) -> Result<(Option<u64>, Option<u8>)> {
+        let row = sqlx::query(
+            "SELECT monthly_bandwidth_limit_bytes, traffic_alert_threshold_pct
+             FROM users WHERE id = ?1",
+        )
+        .bind(&id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok((None, None));
+        };
+        let limit: Option<i64> = row.try_get("monthly_bandwidth_limit_bytes")?;
+        let threshold: Option<i64> = row.try_get("traffic_alert_threshold_pct")?;
+        let limit_u64 = limit.map(|v| if v < 0 { 0 } else { v as u64 });
+        let threshold_u8 = threshold.map(|v| v.clamp(0, 100) as u8);
+        Ok((limit_u64, threshold_u8))
+    }
+
+    /// Total (upload + download) bytes for a user since the start
+    /// of the current calendar month (UTC). `0` when no traffic
+    /// has been recorded this month — never errors on "no rows".
+    /// SQLite's `strftime('%Y-%m-01T00:00:00Z', 'now')` gives the
+    /// month-start anchor; resets automatically on the 1st.
+    pub async fn user_traffic_this_month(&self, id: &UserId) -> Result<u64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
+             FROM vpn_connection_stats
+             WHERE user_id = ?1
+               AND ts >= strftime('%Y-%m-01T00:00:00Z', 'now')",
+        )
+        .bind(&id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let total: i64 = row.try_get("total")?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Aggregate over every user: their month-to-date traffic +
+    /// configured limit + configured threshold (or NULLs).
+    /// Returns ONLY users who currently have a configured
+    /// `monthly_bandwidth_limit_bytes` — operators without a cap
+    /// don't need to appear in the dashboard alert section.
+    /// Ordered by usage-as-pct-of-limit DESC so the most-at-risk
+    /// account is first.
+    pub async fn users_traffic_vs_limit(&self) -> Result<Vec<(UserId, u64, u64, u8)>> {
+        // The percentage compare is done in Rust because SQLite
+        // integer division would truncate to 0 for "5% of 100GB
+        // = 5_000_000_000_000 / 100" before SQLite-3.45's bigint
+        // arithmetic; safer + clearer in Rust where we already have
+        // u64 + f64.
+        let rows = sqlx::query(
+            "SELECT u.id,
+                    COALESCE(u.traffic_alert_threshold_pct, 80) AS threshold,
+                    u.monthly_bandwidth_limit_bytes AS lim,
+                    COALESCE(
+                        (SELECT SUM(s.upload_bytes + s.download_bytes)
+                         FROM vpn_connection_stats s
+                         WHERE s.user_id = u.id
+                           AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')),
+                        0
+                    ) AS used
+             FROM users u
+             WHERE u.monthly_bandwidth_limit_bytes IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: Vec<(UserId, u64, u64, u8)> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let id: String = r.try_get("id")?;
+            let threshold: i64 = r.try_get("threshold")?;
+            let lim: i64 = r.try_get("lim")?;
+            let used: i64 = r.try_get("used")?;
+            let lim_u = lim.max(0) as u64;
+            let used_u = used.max(0) as u64;
+            let threshold_u = threshold.clamp(0, 100) as u8;
+            out.push((UserId(id), used_u, lim_u, threshold_u));
+        }
+        // Sort by percent-of-limit DESC (most-at-risk first); ties
+        // broken by absolute used DESC for stability.
+        out.sort_by(|a, b| {
+            let pa = if a.2 == 0 {
+                0.0
+            } else {
+                a.1 as f64 / a.2 as f64
+            };
+            let pb = if b.2 == 0 {
+                0.0
+            } else {
+                b.1 as f64 / b.2 as f64
+            };
+            pb.partial_cmp(&pa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.cmp(&a.1))
+        });
+        Ok(out)
+    }
+
     /// Top-N users by total (upload + download) bytes over the
     /// look-back window. Used by the dashboard's heavy-user heatmap
     /// to surface abuse-candidate accounts at a glance. Returns

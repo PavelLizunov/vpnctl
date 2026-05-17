@@ -4988,3 +4988,198 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
         "deploy must be idempotent — re-clicking when keys exist must NOT rotate them"
     );
 }
+
+// ─── Pavel iter D.6c: traffic limit + alert UI ──────────────────────────
+
+#[tokio::test]
+async fn admin_user_detail_shows_traffic_limit_section() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "uuid-a".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/alice").await;
+    // Section heading + the form's action URL + default threshold.
+    assert!(html.contains("Traffic limit"), "section heading missing");
+    assert!(
+        html.contains(r#"action="/admin/users/alice/traffic-limit""#),
+        "form action missing"
+    );
+    assert!(
+        html.contains(r#"name="limit_gib""#),
+        "limit_gib input missing"
+    );
+    assert!(
+        html.contains(r#"name="threshold_pct""#),
+        "threshold_pct input missing"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_set_traffic_limit_persists_and_audits() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "uuid-a".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/alice/traffic-limit")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("limit_gib=5.0&threshold_pct=75"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (lim, thr) = inv
+        .get_user_traffic_limit(&UserId("alice".into()))
+        .await
+        .unwrap();
+    // 5 GiB = 5 * 1_073_741_824 = 5_368_709_120 bytes
+    assert_eq!(lim, Some(5_368_709_120));
+    assert_eq!(thr, Some(75));
+    // Audit row with the new payload.
+    let audit = inv.recent_audit(5).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|a| a.action == "user.traffic_limit.set")
+        .expect("audit row");
+    let payload = row
+        .payload
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(payload.contains("75"));
+    assert!(payload.contains("5368709120"));
+}
+
+#[tokio::test]
+async fn admin_user_set_traffic_limit_zero_clears_cap() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "uuid-a".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+    // Pre-state: cap of 10 GiB.
+    inv.set_user_traffic_limit(&UserId("alice".into()), Some(10_737_418_240), Some(80))
+        .await
+        .unwrap();
+    // POST with limit_gib=0 → cap cleared.
+    let app = router(s);
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/alice/traffic-limit")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from("limit_gib=0&threshold_pct=80"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let (lim, _) = inv
+        .get_user_traffic_limit(&UserId("alice".into()))
+        .await
+        .unwrap();
+    assert!(lim.is_none(), "limit must be NULL after limit_gib=0");
+}
+
+#[tokio::test]
+async fn admin_dashboard_shows_limit_alerts_when_user_over_threshold() {
+    use chrono::Utc;
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("heavy".into()),
+            uuid: "uuid-h".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("sb".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // 1 GiB cap, 80% threshold; record 900 MiB usage → 87% → alert.
+    s.inv
+        .set_user_traffic_limit(&UserId("heavy".into()), Some(1_073_741_824), Some(80))
+        .await
+        .unwrap();
+    let deltas = vec![VpnStatsDelta {
+        user_id: Some(UserId("heavy".into())),
+        upload_bytes: 500 * 1024 * 1024,
+        download_bytes: 400 * 1024 * 1024,
+        active_connections: 1,
+    }];
+    s.inv
+        .record_vpn_stats(&ServerId("sb".into()), &deltas)
+        .await
+        .unwrap();
+    // Suppress unused-import warning (Utc was for record_vpn_stats_at
+    // signature; record_vpn_stats stamps internally).
+    let _ = Utc::now();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/").await;
+    assert!(
+        html.contains("near monthly limit"),
+        "limit-alerts heading missing on dashboard"
+    );
+    assert!(
+        html.contains(">heavy<"),
+        "heavy user must appear in alert list"
+    );
+}
