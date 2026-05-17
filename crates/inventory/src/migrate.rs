@@ -35,12 +35,22 @@
 //! | Second VLESS inbound (e.g. `vless-reality-2083`) | 1 inbound | ⏭ skip — vpnctl's `Server` model has one port per protocol |
 //! | Legacy per-device TUIC tokens (`brat-pc`, `brat-mac`, …) | 9 | ⏭ skip — pre-unified scheme |
 //!
-//! **User-merging policy**: if a name appears in BOTH VLESS and TUIC
-//! inbounds with the SAME UUID → unified vpnctl User with both
-//! capabilities. If same name but DIFFERENT UUIDs → fatal `Warning`
-//! (operator must resolve manually; we don't pick winners). If a
-//! TUIC name has no VLESS counterpart → emit a `SkippedUser` with
-//! reason "tuic-only legacy".
+//! **User-merging policy**:
+//!   * Same name in BOTH inbounds with the SAME UUID → unified vpnctl
+//!     `User` with both VLESS uuid + tuic_password set.
+//!   * Same name with DIFFERENT UUIDs (split-identity, e.g. legacy
+//!     server `93.95.226.167` where bash generated per-protocol
+//!     UUIDs) → import VLESS-only (no `tuic_password` for that user),
+//!     emit a non-fatal warning into `plan.warnings`, AND push a
+//!     `SkippedUser` for the TUIC half so dry-run output lists every
+//!     non-imported entity in one place. Bash continues serving the
+//!     TUIC traffic to phones that already hold the bash-scanned
+//!     TUIC link — vpnctl just won't mint a *new* TUIC link for that
+//!     user. Previously this case was a fatal `Err`; that proved too
+//!     strict — see commit history for context.
+//!   * TUIC name with no VLESS counterpart → `SkippedUser` with
+//!     reason "tuic-only legacy" (these were per-device tokens
+//!     like `brat-pc`, `brat-mac` from the pre-unified scheme).
 //!
 //! # share_link byte-equality (THE invariant)
 //!
@@ -319,11 +329,21 @@ pub fn parse_bash_singbox(
 ///   * `wireguard_pubkey` / `wireguard_private` are `None` — bash
 ///     didn't do WireGuard.
 ///
+/// Warnings (non-fatal, surfaced via `plan.warnings`):
+///   * Duplicate VLESS user-name in `config.json` — last wins.
+///   * Split-identity: a name appears in both VLESS and TUIC inbounds
+///     with DIFFERENT uuids. We import VLESS-only (no `tuic_password`)
+///     and ALSO push a `SkippedUser` for the TUIC half. Was a fatal
+///     `Err` until 2026-05-17; relaxed because legacy bash server
+///     `93.95.226.167` has main-brat in this exact shape and a fatal
+///     error blocked the whole migration.
+///
 /// Errors:
-///   * Any name-conflict where a TUIC user and a VLESS user share
-///     the same `name` but DIFFERENT uuids → fatal `Err` (operator
-///     must resolve manually — silent merging would corrupt one of
-///     the two flows).
+///   * Currently none — every recoverable case is either an import,
+///     a warning, or a `SkippedUser`. The `Result` is kept for future
+///     fatal validation (e.g. empty server id, malformed reality
+///     public key) that we'd want to surface as an early operator
+///     failure rather than a silent skip.
 pub fn build_migration_plan<F: FnMut(&str) -> String>(
     server_id_override: Option<String>,
     inv: &BashInventoryEnv,
@@ -349,9 +369,22 @@ pub fn build_migration_plan<F: FnMut(&str) -> String>(
         }
     }
 
-    // TUIC → fold password into existing VLESS user IF uuids match;
-    // otherwise SKIP the TUIC user (legacy per-device tokens) OR
-    // fatal-Err on name collision with mismatched uuid.
+    // TUIC → fold password into existing VLESS user IF uuids match.
+    // Three policies for the cases that don't match:
+    //   * No VLESS counterpart → legacy per-device token (e.g.
+    //     `brat-pc`, `brat-mac` on 104); SKIP with reason.
+    //   * Same name, DIFFERENT uuid → legacy split-identity setup
+    //     (e.g. 93.95.226.167 has main-brat VLESS uuid X but TUIC
+    //     uuid Y; bash maintained two parallel identities per
+    //     protocol). vpnctl's User model has a single uuid; we
+    //     can't unify these without picking a winner — SKIP the
+    //     TUIC entry (keeping VLESS-only) and emit a WARNING so
+    //     the operator can see what happened. Previous policy
+    //     was a fatal Err which made the 93 server unmigrate-able
+    //     — too strict. Phones with bash-scanned TUIC links keep
+    //     working because bash continues to serve them; vpnctl
+    //     /sub just won't include a working TUIC outbound for
+    //     these specific users.
     let mut tuic_password_by_name: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for t in &singbox.tuic_users {
@@ -365,12 +398,33 @@ pub fn build_migration_plan<F: FnMut(&str) -> String>(
                 });
             }
             Some(vless_user) if vless_user.uuid != t.uuid => {
-                return Err(format!(
-                    "name conflict: user '{name}' has VLESS uuid {vuuid} but TUIC uuid {tuuid}. Operator must resolve manually (rename one) before re-running migration.",
+                // Split-identity (legacy bash quirk on some
+                // servers: bash add-user.sh used the same UUID
+                // for both protocols since Apr 2026, but earlier
+                // setups generated per-protocol identities).
+                // Skip the TUIC half + warn — phones with the
+                // bash-scanned TUIC link still work (bash serves
+                // it), vpnctl just won't mint a working TUIC
+                // share-link for this user. We push BOTH a warning
+                // (so the operator sees a hi-priority signal in
+                // dry-run output) AND a SkippedUser (so the
+                // per-user "skipped" table is symmetric with the
+                // TUIC-only-legacy branch — every non-imported
+                // entity is listed in one place).
+                warnings.push(format!(
+                    "user '{name}': VLESS uuid {vsh} differs from TUIC uuid {tsh} on the bash server. vpnctl imports VLESS only; bash continues serving TUIC.",
                     name = t.name,
-                    vuuid = vless_user.uuid,
-                    tuuid = t.uuid,
+                    vsh = uuid_prefix8(&vless_user.uuid),
+                    tsh = uuid_prefix8(&t.uuid),
                 ));
+                skipped.push(SkippedUser {
+                    name: t.name.clone(),
+                    reason: format!(
+                        "split-identity: TUIC uuid {tsh} differs from VLESS uuid {vsh}; vpnctl imports VLESS only and leaves TUIC to the bash server.",
+                        vsh = uuid_prefix8(&vless_user.uuid),
+                        tsh = uuid_prefix8(&t.uuid),
+                    ),
+                });
             }
             Some(_) => {
                 tuic_password_by_name.insert(t.name.clone(), t.password.clone());
@@ -453,6 +507,16 @@ pub fn build_migration_plan<F: FnMut(&str) -> String>(
         skipped,
         warnings,
     })
+}
+
+/// Short, panic-free `&str` prefix for displaying a UUID in
+/// operator-facing diagnostics. Returns up to 8 chars (NOT bytes —
+/// avoids the byte-indexed slice panic that would fire if a
+/// non-ASCII char ever lands at the boundary). UUIDs are
+/// always ASCII in practice but the no-panic invariant in
+/// `CLAUDE.md` is workspace-wide.
+fn uuid_prefix8(uuid: &str) -> String {
+    uuid.chars().take(8).collect()
 }
 
 /// Derive a vpnctl `ServerId` from an IP. IPv4 passes through; IPv6
@@ -851,24 +915,106 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_errors_on_vless_tuic_uuid_mismatch_for_same_name() {
+    fn build_plan_warns_on_vless_tuic_uuid_split_identity_imports_vless_only() {
+        // 2026-05-17 policy update: split-identity (same name,
+        // different uuids per protocol) is no longer fatal — bash
+        // 93.95.226.167 has this shape historically. The planner
+        // imports VLESS and warns about the TUIC mismatch. The
+        // fixture deliberately mixes a split-identity user ('alex')
+        // with a happy-path user ('bob', matching uuids) so the
+        // assertions distinguish "tuic_password dropped for THIS
+        // user" from "tuic_password dropped for everyone" (the
+        // inverted-impl trap the original test was vulnerable to).
         let inv = fake_inv();
         let data = BashSingboxData {
-            vless_users: vec![BashVlessUser {
-                name: "alex".into(),
-                uuid: "u-alex".into(),
-                flow: None,
-            }],
-            tuic_users: vec![BashTuicUser {
-                name: "alex".into(),
-                uuid: "u-OTHER".into(),
-                password: "pw".into(),
-            }],
+            vless_users: vec![
+                BashVlessUser {
+                    name: "alex".into(),
+                    uuid: "u-alex-vless-aaaaaaaa".into(),
+                    flow: None,
+                },
+                BashVlessUser {
+                    name: "bob".into(),
+                    uuid: "u-bob-shared-bbbbbbbb".into(),
+                    flow: None,
+                },
+            ],
+            tuic_users: vec![
+                BashTuicUser {
+                    name: "alex".into(),
+                    uuid: "u-alex-tuic-cccccccc".into(),
+                    password: "pw-alex".into(),
+                },
+                BashTuicUser {
+                    name: "bob".into(),
+                    uuid: "u-bob-shared-bbbbbbbb".into(),
+                    password: "pw-bob".into(),
+                },
+            ],
             reality_private: None,
         };
-        let err = build_migration_plan(None, &inv, &data, fake_token).unwrap_err();
-        assert!(err.contains("name conflict"));
-        assert!(err.contains("alex"));
+        let plan = build_migration_plan(None, &inv, &data, fake_token).unwrap();
+
+        // alex IS imported (with VLESS uuid + NO tuic_password) — the
+        // split-identity branch must NOT silently merge.
+        let alex = plan
+            .users_to_import
+            .iter()
+            .find(|u| u.id.0 == "alex")
+            .unwrap();
+        assert_eq!(alex.uuid, "u-alex-vless-aaaaaaaa");
+        assert_eq!(alex.tuic_password, None);
+
+        // bob IS imported with tuic_password Some(...) — positive
+        // control that the happy-path merge still works. Without
+        // this, a bug that dropped tuic_password for ALL users
+        // would not be caught.
+        let bob = plan
+            .users_to_import
+            .iter()
+            .find(|u| u.id.0 == "bob")
+            .unwrap();
+        assert_eq!(bob.uuid, "u-bob-shared-bbbbbbbb");
+        assert_eq!(bob.tuic_password.as_deref(), Some("pw-bob"));
+
+        // The split-identity is surfaced AS A WARNING, exposing the
+        // 8-char prefixes (pin the new slicing path):
+        let warning = plan
+            .warnings
+            .iter()
+            .find(|w| w.contains("alex"))
+            .expect("expected split-identity warning for alex");
+        assert!(warning.contains("differs"), "warning was: {warning}");
+        assert!(
+            warning.contains("u-alex-v"),
+            "expected VLESS uuid prefix 'u-alex-v', got: {warning}"
+        );
+        assert!(
+            warning.contains("u-alex-t"),
+            "expected TUIC uuid prefix 'u-alex-t', got: {warning}"
+        );
+
+        // AND mirrored into `skipped` so dry-run's per-user table
+        // lists every non-imported entity in one place.
+        let split_skipped = plan
+            .skipped
+            .iter()
+            .find(|s| s.name == "alex")
+            .expect("expected SkippedUser entry for split-identity TUIC half");
+        assert!(
+            split_skipped.reason.contains("split-identity"),
+            "skip reason was: {}",
+            split_skipped.reason
+        );
+
+        // tuic-v5 IS still enabled (bob has a working tuic_password).
+        let pids: Vec<&str> = plan
+            .server
+            .enabled_protocols
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect();
+        assert!(pids.contains(&"tuic-v5"));
     }
 
     #[test]
