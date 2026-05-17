@@ -19,14 +19,9 @@ use crate::AppState;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
 const COOKIE_ACCENT: &str = "vpnctl_accent";
-const COOKIE_TWEAKS_OPEN: &str = "vpnctl_tweaks";
 
 const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
-/// Open / closed state of the bottom-right Tweaks panel. Default is
-/// "open" — first-time visitors see the controls. After the operator
-/// hits the × they get a tiny pill they can click to expand again.
-const VALID_TWEAKS_OPEN: &[&str] = &["open", "closed"];
 
 /// Inline glyph — `[•]` bracket-dot, scales with `currentColor`. Matches
 /// `Glyph()` from the design source.
@@ -136,7 +131,13 @@ fn masthead(date: &str, vol: &str) -> Markup {
             }
             span.ed-mast__sub { "— a daily report from your homelab" }
             span.ed-mast__date {
-                b { (vol) }
+                // The volume number is always tinted with the active
+                // accent. Used to be the (now-removed) floating Tweaks
+                // panel that gave the accent toggle visible feedback
+                // on every page; with the panel gone we need an
+                // always-on accent hook in the chrome itself so
+                // operators see their accent choice land.
+                b style="color: var(--acc);" { (vol) }
                 " · "
                 (date)
             }
@@ -156,77 +157,53 @@ fn foot() -> Markup {
     }
 }
 
-/// The bottom-right Tweaks panel — two collapse states, controlled by
-/// the `vpnctl_tweaks` cookie:
+/// Theme + accent picker, rendered INLINE inside the Settings page.
 ///
-/// - **`open`** (default): the full panel with theme + accent segmented
-///   controls plus a `×` close button that POSTs `value=closed` to the
-///   `/admin/tweak/tweaks` endpoint.
-/// - **`closed`**: a tiny "↑ Tweaks" pill in the same corner. Clicking
-///   it POSTs `value=open` and the panel returns. Without the pill the
-///   panel would be unreachable once dismissed.
+/// History: this used to be a `position: fixed` floating panel in the
+/// bottom-right of every page (with open/closed cookie state). Pavel
+/// 2026-05-17: «Tweaks правильнее держать в settings» — moved here.
+/// Reasons it's better in Settings:
 ///
-/// The visual rationale for collapsing: the panel was floating over the
-/// page footer and (on the user-detail page) over the share-link rows
-/// the operator wants to copy. Operators who are happy with their
-/// theme/accent now get the chrome out of the way without sacrificing
-/// discoverability.
-fn tweaks_panel(theme: &str, accent: &str, open: bool) -> Markup {
-    let pos_style =
-        "position: fixed; right: 24px; bottom: 24px; z-index: 50; background: var(--paper);";
-    if !open {
-        return html! {
-            // Pill form — single button POSTs `value=open`. Same /admin/tweak
-            // dispatcher route, new "tweaks" kind. Without `display: inline`
-            // the form would push the pill onto its own line.
-            form method="post" action="/admin/tweak/tweaks" style="display: inline;" {
-                button name="value" value="open"
-                       title="Open theme + accent tweaks"
-                       style=(format!("{pos_style} border: 1px solid var(--rule-s); padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.08);")) {
-                    "↑ Tweaks"
-                }
-            }
-        };
-    }
+///   * theme/accent are one-time configuration — operator sets once
+///     and forgets; chrome on every page was clutter,
+///   * the floating panel overlapped share-link rows on the user-detail
+///     page (Phase C-2 added a CSS hack pushing the footer right; not
+///     a hack we needed long-term),
+///   * Settings is where every other one-time knob lives (deploy
+///     pubkey, retention TODO, etc).
+///
+/// The `/admin/tweak/{kind}` POST endpoints are unchanged so the
+/// `sanitize_referer` redirect path still works — operator hits a
+/// theme button on Settings, the POST handler reads Referer header,
+/// sees `/admin/settings`, redirects back there.
+fn tweaks_inline(theme: &str, accent: &str) -> Markup {
     html! {
-        // Open state: full panel with × close. Header row holds the
-        // label + a tight close form so the button sits inline-end.
-        div style=(format!("{pos_style} border: 1px solid var(--ink); padding: 12px 14px; font-family: var(--mono); font-size: 11px; color: var(--soft); box-shadow: 0 8px 24px rgba(0,0,0,0.12);")) {
-            div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px;" {
-                span style="letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);" { "Tweaks" }
-                form method="post" action="/admin/tweak/tweaks" style="margin: 0; padding: 0;" {
-                    button name="value" value="closed"
-                           title="Hide tweaks panel"
-                           style="background: transparent; border: 0; padding: 0 2px; font-family: var(--mono); font-size: 14px; color: var(--mute); cursor: pointer; line-height: 1;" {
-                        "×"
+        div style="display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--soft); max-width: 480px;" {
+            form method="post" action="/admin/tweak/theme" style="display: flex; gap: 6px; align-items: baseline;" {
+                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "paper" }
+                @for &name in VALID_THEMES {
+                    button name="value" value=(name)
+                           title=(format!("Switch paper theme to {name}"))
+                           style=(format!(
+                               "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
+                               if name == theme { "var(--ink)" } else { "transparent" },
+                               if name == theme { "var(--paper)" } else { "var(--ink)" },
+                           )) {
+                        (name)
                     }
                 }
             }
-            div style="display: flex; flex-direction: column; gap: 6px;" {
-                form method="post" action="/admin/tweak/theme" style="display: flex; gap: 4px; align-items: baseline;" {
-                    span style="width: 50px; color: var(--mute);" { "paper" }
-                    @for &name in VALID_THEMES {
-                        button name="value" value=(name)
-                               style=(format!(
-                                   "padding: 2px 7px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
-                                   if name == theme { "var(--ink)" } else { "transparent" },
-                                   if name == theme { "var(--paper)" } else { "var(--ink)" },
-                               )) {
-                            (name)
-                        }
-                    }
-                }
-                form method="post" action="/admin/tweak/accent" style="display: flex; gap: 4px; align-items: baseline;" {
-                    span style="width: 50px; color: var(--mute);" { "accent" }
-                    @for &name in VALID_ACCENTS {
-                        button name="value" value=(name)
-                               style=(format!(
-                                   "padding: 2px 7px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
-                                   if name == accent { "var(--acc)" } else { "transparent" },
-                                   if name == accent { "var(--paper)" } else { "var(--ink)" },
-                               )) {
-                            (name)
-                        }
+            form method="post" action="/admin/tweak/accent" style="display: flex; gap: 6px; align-items: baseline;" {
+                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "accent" }
+                @for &name in VALID_ACCENTS {
+                    button name="value" value=(name)
+                           title=(format!("Switch accent colour to {name}"))
+                           style=(format!(
+                               "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
+                               if name == accent { "var(--acc)" } else { "transparent" },
+                               if name == accent { "var(--paper)" } else { "var(--ink)" },
+                           )) {
+                        (name)
                     }
                 }
             }
@@ -234,12 +211,14 @@ fn tweaks_panel(theme: &str, accent: &str, open: bool) -> Markup {
     }
 }
 
-/// Build the page-root class string from theme/accent + tweaks-panel
-/// state. The `ed-tweaks-open` modifier lets the stylesheet add right-
-/// padding to the footer so the panel doesn't cover the github URL when
-/// open; without this hook the panel was sitting on top of the foot
-/// link visibly even with the × close button.
-fn root_class(theme: &str, accent: &str, tweaks_open: bool) -> String {
+/// Build the page-root class string from theme + accent. Used to be
+/// `(theme, accent, tweaks_open)` — the `ed-tweaks-open` modifier was
+/// padding the footer right so the (then-floating) Tweaks panel
+/// didn't overlap the github URL. With Tweaks moved into
+/// /admin/settings the panel is gone, so the third arg disappeared
+/// too. Kept the same arity expected by callers via a new param? No
+/// — call sites updated to drop the arg directly.
+fn root_class(theme: &str, accent: &str) -> String {
     let mut cls = String::from("ed");
     match theme {
         "newsprint" => cls.push_str(" ed-newsprint"),
@@ -253,31 +232,21 @@ fn root_class(theme: &str, accent: &str, tweaks_open: bool) -> String {
         "plum" => cls.push_str(" ed-acc-plum"),
         _ => {}
     }
-    if tweaks_open {
-        cls.push_str(" ed-tweaks-open");
-    }
     cls
 }
 
-/// Wraps a screen-specific body in the chrome (masthead + nav + main + foot
-/// + tweaks). `body` is the inner content of `<main class="ed-main">`.
+/// Wraps a screen-specific body in the chrome (masthead + nav + main +
+/// foot). `body` is the inner content of `<main class="ed-main">`.
 ///
 /// `Markup` (a `PreEscaped<String>`) is owned and small; passing by value
 /// is intentional and clippy's needless_pass_by_value is over-eager here.
 ///
-/// The shell needs to know whether the Tweaks panel is open or collapsed,
-/// so callers pass the cookie-derived state via `tweaks_open`. A bool
-/// parameter rather than re-reading headers here keeps `shell` pure /
-/// testable (no I/O, no globals).
+/// Pre-2026-05-17 this also took a `tweaks_open: bool` for the floating
+/// Tweaks panel state. Panel moved into /admin/settings; the arg is gone
+/// along with the cookie + the `/admin/tweak/tweaks` route.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn shell(
-    active_nav: &str,
-    theme: &str,
-    accent: &str,
-    tweaks_open: bool,
-    body: Markup,
-) -> Markup {
-    let cls = root_class(theme, accent, tweaks_open);
+pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -> Markup {
+    let cls = root_class(theme, accent);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -305,7 +274,6 @@ pub(crate) fn shell(
                     }
                     (foot())
                 }
-                (tweaks_panel(theme, accent, tweaks_open))
             }
         }
     }
@@ -326,20 +294,18 @@ pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> 
     None
 }
 
-/// Read theme + accent + tweaks-open cookies into owned strings + bool
-/// (default = "default" / open). Single accessor so handlers don't have
-/// to thread three cookie reads each.
-fn theme_accent(headers: &HeaderMap) -> (String, String, bool) {
+/// Read theme + accent cookies into owned strings (default = "default").
+/// Single accessor so handlers don't have to duplicate two cookie reads.
+/// Pre-2026-05-17 this returned a third bool for the floating Tweaks
+/// panel — gone with the panel.
+fn theme_accent(headers: &HeaderMap) -> (String, String) {
     let theme = cookie(headers, COOKIE_THEME)
         .unwrap_or("default")
         .to_string();
     let accent = cookie(headers, COOKIE_ACCENT)
         .unwrap_or("default")
         .to_string();
-    // Default = open. Anything that isn't literally "closed" stays open
-    // — that way a malformed cookie value can't silently hide the panel.
-    let tweaks_open = cookie(headers, COOKIE_TWEAKS_OPEN) != Some("closed");
-    (theme, accent, tweaks_open)
+    (theme, accent)
 }
 
 /// Aggregated counters used in the dashboard top-row metric tiles.
@@ -543,7 +509,7 @@ pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
 
     let (stats, audit) = collect_dashboard_data(&state)
         .await
@@ -594,7 +560,7 @@ pub(crate) async fn dashboard(
         (dashboard_heavy_users(&heavy_users))
         (dashboard_audit(&audit))
     };
-    Ok(shell("dashboard", &theme, &accent, tw, body))
+    Ok(shell("dashboard", &theme, &accent, body))
 }
 
 /// Render the "limit alerts" section on the dashboard. Shows only
@@ -722,7 +688,7 @@ pub(crate) async fn monitoring(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
 
     let hourly = state
         .inv
@@ -794,7 +760,7 @@ pub(crate) async fn monitoring(
             " (no auth — only aggregate counts, no per-IP details)."
         }
     };
-    Ok(shell("monitoring", &theme, &accent, tw, body))
+    Ok(shell("monitoring", &theme, &accent, body))
 }
 
 /// Fill the last `n_hours` hourly buckets with zero where the input
@@ -972,7 +938,7 @@ pub(crate) async fn servers(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
 
     let (server_list, user_counts) =
         tokio::try_join!(state.inv.list_servers(), state.inv.users_count_per_server())
@@ -1056,7 +1022,7 @@ pub(crate) async fn servers(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, tw, body))
+    Ok(shell("servers", &theme, &accent, body))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1166,7 +1132,7 @@ pub(crate) async fn users(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<UsersQuery>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
 
     // list_users + servers_for_user-per-user would be N+1; instead use
     // the inventory's grants-count map (one query) and look up by user.
@@ -1350,7 +1316,7 @@ pub(crate) async fn users(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, tw, body))
+    Ok(shell("users", &theme, &accent, body))
 }
 
 /// Build the canonical sub URL the QR encodes. Uses the request's `Host`
@@ -1371,6 +1337,51 @@ fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
 /// Render an inline SVG QR for the given URL. Returns
 /// `<div class="ed-qr">...<svg>...</svg>...</div>`. The SVG carries
 /// no scripts, no external refs.
+/// Symmetric share-link card used by both Flow A (sing-box subscription
+/// URL) and Flow B (WG-native wireguard:// link) on the user-detail page.
+///
+/// Layout: QR on the left, masked one-liner preview + read-only textarea
+/// (click → select-all, plus triple-click as a JS-free fallback) +
+/// italic footnote on the right. Same DOM shape for both flows so the
+/// operator never has to switch mental models between "Hiddify column"
+/// and "AmneziaVPN column" — the difference is only what bytes go into
+/// QR + textarea.
+///
+/// **Single `link` parameter** (was `(qr_url, full_link)` until
+/// review-agent 2026-05-17): the QR encoding and the copy text MUST
+/// be the same bytes — otherwise the recipient scans one URL and the
+/// operator hand-copies another, and a low-tech recipient («ctrl+c
+/// уже много», CLAUDE.md) won't notice. Collapsing to one arg makes
+/// the mismatch unrepresentable at the type level.
+///
+/// The textarea uses `onclick="this.select()"` so a single click selects
+/// the full link. Avoids the Clipboard API which requires a secure
+/// context (HTTPS or localhost) — the admin UI runs over plain HTTP on
+/// the homelab LAN, so navigator.clipboard would silently fail on
+/// 192.168.0.236. Triple-click is the JS-free fallback every browser
+/// supports; the `title` attribute spells out both interactions.
+fn share_link_card(link: &str, footnote: &Markup) -> Markup {
+    html! {
+        div style="display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px;" {
+            (qr_svg(link))
+            div style="flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0;" {
+                div style="font-family: var(--mono); font-size: 11px; color: var(--soft); word-break: break-all;" {
+                    (mask_secret(link))
+                }
+                textarea readonly="readonly" rows="3"
+                         onclick="this.select()"
+                         title="Click to select the full link (or triple-click if JS is disabled), then Ctrl+C / Cmd+C to copy"
+                         style="width: 100%; padding: 8px 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.45; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); resize: vertical; word-break: break-all; box-sizing: border-box;" {
+                    (link)
+                }
+                div style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; line-height: 1.5;" {
+                    (footnote)
+                }
+            }
+        }
+    }
+}
+
 fn qr_svg(url: &str) -> Markup {
     use qrcode::QrCode;
     use qrcode::render::svg;
@@ -1445,7 +1456,7 @@ pub(crate) async fn user_detail(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
 
     let user = state
@@ -1640,24 +1651,38 @@ pub(crate) async fn user_detail(
                     // Two-column distribution panel — one column per
                     // client persona. Same secret material rendered
                     // two ways: sub_url (sing-box JSON) vs wireguard://
-                    // URI (WG-native conf).
+                    // URI (WG-native conf). BOTH flows use the same
+                    // `share_link_card` shape — QR on the left, copy
+                    // textarea + footnote on the right — so the operator
+                    // doesn't have to switch mental models between
+                    // columns. The "above" reference is gone; each
+                    // card stands alone with its own QR + selectable
+                    // link.
                     div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
-                        // Flow A — sing-box / Hiddify (uses the
-                        // /sub/<token> URL up top). Points back at
-                        // that QR to avoid duplication; just clarifies
-                        // that THAT QR works for WG too via sing-box's
-                        // built-in wireguard outbound.
+                        // Flow A — sing-box / Hiddify subscription URL.
+                        // The QR renders the same sub_url shown in the
+                        // Subscription block at the top of the page;
+                        // duplicated here on purpose so the operator
+                        // copies the WG-via-Hiddify link from the same
+                        // distribution panel as the WG-native link.
                         div {
                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
                                 "Flow A — Hiddify / Sing-box"
                             }
-                            p style="font-family: var(--serif); font-size: 13px; line-height: 1.5; color: var(--ink); margin: 0 0 8px;" {
-                                "Recipient scans the QR in the "
-                                b { "Subscription" }
-                                " block above. Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule."
-                            }
-                            p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin: 0;" {
-                                "Recommended default — one URL covers everything."
+                            @match (&sub_token, &sub_url_str) {
+                                (Some(_), Some(url)) => {
+                                    (share_link_card(url, &html! {
+                                        "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. "
+                                        b { "Recommended default — one URL covers everything." }
+                                    }))
+                                }
+                                _ => {
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "Mint a sub-token in the "
+                                        b { "Subscription" }
+                                        " block above to populate this card."
+                                    }
+                                }
                             }
                         }
                         // Flow B — AmneziaVPN / native WireGuard app.
@@ -1750,19 +1775,13 @@ pub(crate) async fn user_detail(
                                 }
                             } @else {
                                 @for (sid, _pid, link) in &wg_links {
-                                    div style="margin-bottom: 16px;" {
+                                    div style="margin-bottom: 18px;" {
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
                                             "server " (sid.0)
                                         }
-                                        div style="display: flex; gap: 12px; align-items: flex-start;" {
-                                            (qr_svg(link))
-                                            div style="font-family: var(--mono); font-size: 10px; line-height: 1.6; color: var(--soft); word-break: break-all; max-width: 320px;" {
-                                                (mask_secret(link))
-                                                div style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 6px;" {
-                                                    "QR scans directly into AmneziaVPN — full config inlined. Link is " (link.len()) " chars (the actual private key is base64-embedded inside)."
-                                                }
-                                            }
-                                        }
+                                        (share_link_card(link, &html! {
+                                            "QR scans directly into AmneziaVPN — full config inlined. Link is " (link.len()) " chars (the actual private key is base64-embedded inside). Click the box above to select-all + copy."
+                                        }))
                                     }
                                 }
                             }
@@ -1992,7 +2011,7 @@ pub(crate) async fn user_detail(
             "delete user…"
         }
     };
-    Ok(shell("users", &theme, &accent, tw, body))
+    Ok(shell("users", &theme, &accent, body))
 }
 
 /// Phase Track-4 — UA fingerprint heuristic. Renders one row per
@@ -3628,7 +3647,7 @@ pub(crate) async fn user_delete_confirm(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
     match state.inv.get_user(&uid).await {
         Ok(Some(_)) => {}
@@ -3681,7 +3700,7 @@ pub(crate) async fn user_delete_confirm(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, tw, body))
+    Ok(shell("users", &theme, &accent, body))
 }
 
 /// `POST /admin/users/{id}/delete` — actually delete. Body must be
@@ -3744,7 +3763,7 @@ pub(crate) async fn audit(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<AuditQuery>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
 
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
@@ -3865,7 +3884,7 @@ pub(crate) async fn audit(
             }
         }
     };
-    Ok(shell("audit", &theme, &accent, tw, body))
+    Ok(shell("audit", &theme, &accent, body))
 }
 
 /// Query-string args for the audit timeline. All optional; empty
@@ -4041,7 +4060,7 @@ fn csv_field(s: &str) -> String {
 }
 
 pub(crate) async fn settings(headers: HeaderMap) -> Markup {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     // Auto-generated by vpnctld on startup (see
     // `crate::app::DEFAULT_DEPLOY_KEY_PATH` + `ensure_deploy_key`).
     // Surfaces the public half so the operator can copy it into each
@@ -4057,6 +4076,13 @@ pub(crate) async fn settings(headers: HeaderMap) -> Markup {
         p.ed-art-deck {
             "Daemon-wide knobs live here. Server / user mutations live on their respective pages."
         }
+
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Appearance — theme + accent" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            "Pick a paper theme (background palette) and an accent colour. Choices are stored as cookies; one-time configuration."
+        }
+        (tweaks_inline(&theme, &accent))
 
         div.ed-rule {}
         div.ed-art-eyebrow { "Deploy SSH key" }
@@ -4095,7 +4121,7 @@ pub(crate) async fn settings(headers: HeaderMap) -> Markup {
             }
         }
     };
-    shell("settings", &theme, &accent, tw, body)
+    shell("settings", &theme, &accent, body)
 }
 
 fn set_tweak_cookie(
@@ -4177,8 +4203,9 @@ fn sanitize_referer(referer: Option<&str>) -> String {
     }
 }
 
-/// Path `/admin/tweak/{kind}` dispatcher — `kind` is "theme", "accent",
-/// or "tweaks" (the open/closed state of the panel itself).
+/// Path `/admin/tweak/{kind}` dispatcher — `kind` is "theme" or
+/// "accent". Pre-2026-05-17 a third "tweaks" kind toggled the
+/// floating panel; gone with the panel.
 pub(crate) async fn set_tweak(
     headers: HeaderMap,
     Path(kind): Path<String>,
@@ -4187,11 +4214,10 @@ pub(crate) async fn set_tweak(
     match kind.as_str() {
         "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
         "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
-        "tweaks" => set_tweak_cookie(&headers, COOKIE_TWEAKS_OPEN, VALID_TWEAKS_OPEN, &body),
         unknown => (
             StatusCode::NOT_FOUND,
             error_text(&format!(
-                "unknown tweak kind '{unknown}' (known: theme, accent, tweaks)"
+                "unknown tweak kind '{unknown}' (known: theme, accent)"
             )),
         )
             .into_response(),
@@ -4258,7 +4284,7 @@ fn form_field(body: &str, name: &str) -> Option<String> {
 /// Submit POSTs to the same URL; success goes to `/admin/servers/new/step-2`.
 /// Cancel link leads back to `/admin/servers`.
 pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     let body = html! {
         div.ed-art-eyebrow { "Add server · step 1 of 3" }
         h1.ed-art-h1 {
@@ -4328,7 +4354,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
             }
         }
     };
-    shell("servers", &theme, &accent, tw, body)
+    shell("servers", &theme, &accent, body)
 }
 
 /// `POST /admin/servers/new` — validate the step-1 input, stash it in
@@ -4414,7 +4440,7 @@ pub(crate) async fn wizard_step2_stub(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     let session =
         read_cookie(&headers, crate::wizard::COOKIE_NAME).and_then(|id| state.wizard.get(id));
 
@@ -4544,7 +4570,7 @@ pub(crate) async fn wizard_step2_stub(
 "#))
         }
     };
-    shell("servers", &theme, &accent, tw, body).into_response()
+    shell("servers", &theme, &accent, body).into_response()
 }
 
 /// `GET /admin/servers/new/step-2/sse` — the EventSource endpoint
@@ -4717,7 +4743,7 @@ pub(crate) async fn server_detail(
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent, tw) = theme_accent(&headers);
+    let (theme, accent) = theme_accent(&headers);
     let sid = vpnctl_core::ServerId(server_id_str.clone());
 
     let server = match state.inv.get_server(&sid).await {
@@ -4810,22 +4836,34 @@ pub(crate) async fn server_detail(
 
         // Operator-facing Deploy button. Per CLAUDE.md "Web is the
         // ONLY operator surface" — Pavel must never need to open
-        // a terminal. Bootstraps missing server-secrets immediately
-        // (REALITY keypair, WG server keypair, Hy2 obfs password).
-        // Re-clickable safely — idempotent over already-minted
-        // secrets.
+        // a terminal. One click does the FULL deploy cycle:
+        //   1. mint any missing per-protocol server secrets (REALITY
+        //      keypair, WG server keypair, Hy2 obfs password) via
+        //      `bootstrap_server_secrets` — idempotent,
+        //   2. for each enabled kernel: SSH-push install
+        //      (`ensure_installed`: apt-get + start) + render config +
+        //      `apply_config` (systemctl restart),
+        //   3. write an `admin / server.deploy` audit row with the
+        //      bootstrapped secrets + per-kernel push result.
+        //
+        // Re-clicking is safe — already-minted secrets are left
+        // untouched; already-installed kernels skip apt-get; config
+        // render is deterministic so a redeploy with no changes is a
+        // no-op systemctl restart.
         div style="margin: 12px 0 18px;" {
             form method="post"
                  action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                  style="display: inline;" {
                 button type="submit"
-                       title="Mint any missing server-secrets (REALITY, WireGuard, Hy2 obfs) and audit the deploy intent. Re-clicking is safe — already-present secrets are left untouched."
+                       title="Full deploy: mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Re-clicking is safe — already-present secrets and kernels are skipped."
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     "deploy →"
                 }
             }
             span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                "Mints missing keys for every enabled protocol. Subscription URLs go live immediately."
+                "Mints missing secrets, SSH-pushes "
+                span.ed-mono { "ensure_installed" } " + " span.ed-mono { "apply_config" }
+                " for every kernel, restarts the service. Subscription URLs reflect the new config immediately."
             }
             " · hoster " b { (server.hoster) }
         }
@@ -4910,7 +4948,7 @@ pub(crate) async fn server_detail(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, tw, body))
+    Ok(shell("servers", &theme, &accent, body))
 }
 
 /// Hero block — most-recent probe at-a-glance KPIs, OR an empty state

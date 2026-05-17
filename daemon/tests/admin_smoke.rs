@@ -81,16 +81,24 @@ async fn admin_root_renders_editorial_shell() {
     // The chrome was rendered.
     assert!(html.contains("ed-mast"), "missing masthead in html");
     assert!(html.contains("ed-mast__nav-inline"), "missing nav");
-    assert!(html.contains("Tweaks"), "missing tweaks panel");
     assert!(html.contains("vpnctl"), "missing wordmark text");
-    // Page-root class composition: default theme/accent (no cookies)
-    // contributes nothing beyond `ed`; the Tweaks panel defaults to
-    // `open` so the `ed-tweaks-open` modifier lands too. That class
-    // is what triggers the footer's right-padding rule so the panel
-    // doesn't cover the github URL — pin both bits explicitly.
+    // Tweaks panel moved into /admin/settings (2026-05-17 — Pavel:
+    // «Tweaks правильнее держать в settings»). The dashboard
+    // chrome must NOT contain the panel chip or the collapse pill.
     assert!(
-        html.contains(r#"class="ed ed-tweaks-open""#),
-        "expected default page class \"ed ed-tweaks-open\", got: {}",
+        !html.contains(">Tweaks<"),
+        "dashboard must not carry the (deprecated) floating Tweaks chip"
+    );
+    assert!(
+        !html.contains("↑ Tweaks"),
+        "dashboard must not carry the (deprecated) collapse pill"
+    );
+    // Page-root class composition: default theme/accent (no cookies)
+    // contributes nothing beyond `ed`. The old `ed-tweaks-open`
+    // modifier is gone with the floating panel.
+    assert!(
+        html.contains(r#"class="ed""#),
+        "expected default page class to be just 'ed', got: {}",
         &html[..html.len().min(500)]
     );
 }
@@ -458,10 +466,10 @@ async fn admin_inactive_nav_anchors_have_no_empty_class() {
 /// operator sees the accent toggle take visible effect. Earlier Phase A
 /// pages used neutral colours only so the accent change felt inert.
 ///
-/// Phase C-2 dropped the inline "tweaks live →" indicator (it duplicated
-/// the panel's own highlighting). The accent now surfaces via the active
-/// segmented button in the bottom-right Tweaks panel; this test just
-/// confirms the variable is referenced inline at least once on the page.
+/// Pre-2026-05-17: the accent surfaced via the floating bottom-right
+/// Tweaks panel which highlighted the active button with
+/// `background: var(--acc)`. Tweaks moved into /admin/settings; the
+/// active-accent highlighting now lives there.
 #[tokio::test]
 async fn admin_renders_accent_variable_inline() {
     let dir = TempDir::new().unwrap();
@@ -482,12 +490,30 @@ async fn admin_renders_accent_variable_inline() {
         html.contains("var(--acc)"),
         "page must reference var(--acc) so the accent toggle is observable"
     );
-    // The Tweaks panel (open by default) highlights the active accent
-    // button by giving it `background: var(--acc)`. With no cookie, that
-    // button is the "default" one. This nails down WHERE the var lives.
+    // The active-accent highlight lives in the Settings page now —
+    // not in the dashboard chrome — but the var must still be wired
+    // into the dashboard SOMEWHERE so the cookie-driven re-render is
+    // visible. The masthead's glyph stroke uses var(--acc).
+    let app2 = router(state(&dir).await);
+    let settings_resp = app2
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let settings_body = settings_resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let settings_html = std::str::from_utf8(&settings_body).unwrap();
     assert!(
-        html.contains("background: var(--acc)"),
-        "default accent button in the open Tweaks panel must use var(--acc) as its background"
+        settings_html.contains("background: var(--acc)"),
+        "Settings page must highlight the active accent button with var(--acc)"
     );
 }
 
@@ -1029,125 +1055,80 @@ async fn admin_user_detail_handles_missing_sub_token() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-//  Phase C-2 — Tweaks panel UX (collapsible + dropped inline indicator)
+//  2026-05-17 — Tweaks moved into /admin/settings (was a floating panel)
+//
+//  Pavel: «Tweaks правильнее держать в settings». Removed the
+//  bottom-right fixed panel + the open/closed cookie chrome; the
+//  theme/accent picker now lives inline on the Settings page. These
+//  tests pin the new shape so a future "let's bring back the
+//  floating panel" change has to deliberately update them.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Default state (no `vpnctl_tweaks` cookie): the open panel is rendered
-/// — both the title chip "Tweaks" and the close-button form must be
-/// present, the collapsed pill must NOT be.
 #[tokio::test]
-async fn admin_tweaks_panel_open_by_default() {
+async fn admin_tweaks_no_longer_float_on_dashboard() {
     let dir = TempDir::new().unwrap();
     let html = fetch_html(router(state(&dir).await), "/admin/").await;
-
-    // Title chip + segmented controls (open state).
+    // No floating chrome.
     assert!(
-        html.contains(">Tweaks<"),
-        "open panel title 'Tweaks' missing"
+        !html.contains(">Tweaks<"),
+        "dashboard must not render the deprecated floating Tweaks chip"
     );
-    // Close button form — POSTs value=closed to /admin/tweak/tweaks.
-    assert!(
-        html.contains("/admin/tweak/tweaks") && html.contains("value=\"closed\""),
-        "open panel must include the × close form (POST /admin/tweak/tweaks value=closed)"
-    );
-    // The collapsed-pill text "↑ Tweaks" must NOT appear when open.
     assert!(
         !html.contains("↑ Tweaks"),
-        "collapsed pill leaked into the open-state markup"
+        "dashboard must not render the deprecated collapse pill"
     );
-}
-
-/// With `vpnctl_tweaks=closed` cookie: only the tiny re-open pill renders
-/// — no theme/accent buttons, no × close button.
-#[tokio::test]
-async fn admin_tweaks_panel_collapsed_when_cookie_closed() {
-    let dir = TempDir::new().unwrap();
-    let app = router(state(&dir).await);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/")
-                .header("cookie", "vpnctl_tweaks=closed")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let html = std::str::from_utf8(&body).unwrap();
-
-    // The pill is the ONLY tweaks UI in this state.
-    assert!(
-        html.contains("↑ Tweaks"),
-        "collapsed pill missing when vpnctl_tweaks=closed"
-    );
-    // Open the pill posts value=open back to the same dispatcher route.
-    assert!(
-        html.contains("/admin/tweak/tweaks") && html.contains("value=\"open\""),
-        "collapsed pill must POST value=open to re-open the panel"
-    );
-    // Theme + accent forms must be GONE (panel is collapsed).
+    // The theme + accent POST endpoints should also be absent from
+    // the dashboard — there's nothing to POST from on this page.
     assert!(
         !html.contains("/admin/tweak/theme"),
-        "theme form leaked into collapsed-state markup"
+        "dashboard must not carry the theme form (it lives on /admin/settings now)"
     );
     assert!(
         !html.contains("/admin/tweak/accent"),
-        "accent form leaked into collapsed-state markup"
-    );
-    // The × close button must be GONE too.
-    assert!(
-        !html.contains("value=\"closed\""),
-        "close button leaked into collapsed-state markup"
+        "dashboard must not carry the accent form (it lives on /admin/settings now)"
     );
 }
 
-/// POST /admin/tweak/tweaks with value=closed must set the cookie and
-/// redirect back. Mirrors the theme/accent dispatcher exactly so the
-/// open-redirect / safe-referer guards apply uniformly.
 #[tokio::test]
-async fn admin_tweak_tweaks_kind_sets_cookie_and_redirects() {
+async fn admin_settings_page_hosts_theme_and_accent_pickers() {
     let dir = TempDir::new().unwrap();
-    let app = router(state(&dir).await);
-    let resp = app
-        .oneshot(
-            add_same_origin(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/tweak/tweaks")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/users")),
-            )
-            .body(Body::from("value=closed"))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let html = fetch_html(router(state(&dir).await), "/admin/settings").await;
+    // Inline section title.
     assert!(
-        resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::TEMPORARY_REDIRECT,
-        "expected 303/307, got {:?}",
-        resp.status()
+        html.contains("Appearance — theme + accent"),
+        "Settings page must have the Appearance section heading"
     );
-    let cookie = resp
-        .headers()
-        .get("set-cookie")
-        .expect("set-cookie missing")
-        .to_str()
-        .unwrap();
-    assert!(cookie.contains("vpnctl_tweaks=closed"));
-    assert!(cookie.contains("Path=/admin"));
-    assert_eq!(
-        resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/admin/users",
-        "safe referer must be honoured for the tweaks-kind dispatcher too"
+    // Both forms — same POST endpoints as before, just embedded inline.
+    assert!(
+        html.contains("action=\"/admin/tweak/theme\""),
+        "Settings page must carry the theme form"
     );
+    assert!(
+        html.contains("action=\"/admin/tweak/accent\""),
+        "Settings page must carry the accent form"
+    );
+    // Every theme + accent option must be present as a button.
+    for name in &["default", "newsprint", "foxed", "ink"] {
+        assert!(
+            html.contains(&format!("value=\"{name}\"")),
+            "Settings page missing theme/accent option button '{name}'"
+        );
+    }
+    for name in &["rust", "forest", "plum"] {
+        assert!(
+            html.contains(&format!("value=\"{name}\"")),
+            "Settings page missing accent option button '{name}'"
+        );
+    }
 }
 
-/// /admin/tweak/tweaks with an unknown value (e.g. "maybe") must 400 —
-/// guards the cookie against junk values that would later confuse the
-/// open/closed boolean logic.
+/// 2026-05-17 — the `tweaks` tweak kind was retired with the floating
+/// panel. POST /admin/tweak/tweaks now 404s (handled by the dispatcher's
+/// default arm). Pin that so a future re-introduction of the cookie
+/// can't accidentally re-enable the open/closed toggle without
+/// reviving the UI for it.
 #[tokio::test]
-async fn admin_tweak_tweaks_kind_rejects_unknown_value() {
+async fn admin_tweak_tweaks_kind_is_gone_returns_404() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let resp = app
@@ -1158,12 +1139,27 @@ async fn admin_tweak_tweaks_kind_rejects_unknown_value() {
                     .uri("/admin/tweak/tweaks")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from("value=maybe"))
+            .body(Body::from("value=closed"))
             .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "retired tweak kind must 404 — the floating Tweaks panel is gone"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("unknown tweak kind 'tweaks'"),
+        "error body must call out the retired kind by name, got {text:?}"
+    );
+    // And the new known-kinds list must NOT include "tweaks" anymore.
+    assert!(
+        text.contains("known: theme, accent") && !text.contains("tweaks)"),
+        "known-kinds list must drop 'tweaks', got {text:?}"
+    );
 }
 
 /// Regression: the inline "tweaks live →" indicator was removed in
@@ -1254,7 +1250,7 @@ async fn admin_backend_error_responses_use_unified_prefix() {
     )
     .await;
     assert_eq!(
-        body, "vpnctl admin: unknown tweak kind 'whatever' (known: theme, accent, tweaks)\n",
+        body, "vpnctl admin: unknown tweak kind 'whatever' (known: theme, accent)\n",
         "unknown-tweak 404 body drifted"
     );
 }
@@ -1416,43 +1412,24 @@ async fn admin_pages_link_favicon_and_asset_is_served() {
     );
 }
 
-/// The `ed-tweaks-open` modifier on the page-root must carry through
-/// to the served HTML so the CSS rule that pads the footer right (so
-/// it doesn't get covered by the panel) actually fires. Pinning both
-/// the class and a presence check on the rule's CSS source.
+/// 2026-05-17: with the floating Tweaks panel gone, the
+/// `ed-tweaks-open` class on the page-root no longer serves any
+/// layout purpose (it used to pad the footer right so the panel
+/// didn't cover the github URL). Pinning the inverse: neither the
+/// page-root class NOR the CSS rule should still be in the bundle.
 #[tokio::test]
-async fn admin_open_tweaks_pads_footer_via_root_class() {
+async fn admin_ed_tweaks_open_class_and_css_rule_are_gone() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
 
-    // Default cookie state = open. Page-root carries `ed-tweaks-open`.
+    // No page-root class (default cookies, no cookie).
     let html = fetch_html(app.clone(), "/admin/").await;
     assert!(
-        html.contains("ed-tweaks-open"),
-        "open tweaks state must surface as `ed-tweaks-open` on page-root"
+        !html.contains("ed-tweaks-open"),
+        "deprecated `ed-tweaks-open` class leaked into rendered HTML"
     );
 
-    // Explicit closed cookie: class is GONE.
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/admin/")
-                .header("cookie", "vpnctl_tweaks=closed")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let html_closed = std::str::from_utf8(&body).unwrap();
-    assert!(
-        !html_closed.contains("ed-tweaks-open"),
-        "collapsed-state HTML leaked the `ed-tweaks-open` class"
-    );
-
-    // The CSS rule itself must exist — otherwise the class is decorative
-    // and the footer overlap stays.
+    // No CSS rule keying off that class.
     let css_resp = app
         .oneshot(
             Request::builder()
@@ -1465,8 +1442,8 @@ async fn admin_open_tweaks_pads_footer_via_root_class() {
     let css_bytes = css_resp.into_body().collect().await.unwrap().to_bytes();
     let css = std::str::from_utf8(&css_bytes).unwrap();
     assert!(
-        css.contains(".ed-tweaks-open .ed-foot"),
-        "admin.css missing the rule that pads the footer when tweaks are open"
+        !css.contains(".ed-tweaks-open .ed-foot"),
+        "deprecated `.ed-tweaks-open .ed-foot` rule still in admin.css"
     );
 }
 
@@ -4193,6 +4170,21 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         html.contains("No servers granted to this user yet"),
         "case A empty-state (no grants) copy missing"
     );
+    // 2026-05-17 — Pavel: «Flow A не показывает QR-код, говорит
+    // про "above"». Symmetric `share_link_card` is the fix: Flow A
+    // now renders its OWN QR + readonly copy textarea. The old
+    // "Recipient scans the QR in the Subscription block above"
+    // wording must be GONE.
+    assert!(
+        !html.contains("scans the QR in the"),
+        "Flow A must not reference 'above' anymore — it has its own QR"
+    );
+    // The Flow A card renders the sub URL inside a readonly textarea
+    // with the click-to-select-all hook.
+    assert!(
+        html.contains("Recommended default — one URL covers everything"),
+        "Flow A footnote (Recommended default) missing — copy regressed"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -5548,5 +5540,226 @@ async fn admin_dashboard_shows_limit_alerts_when_user_over_threshold() {
     assert!(
         html.contains(">heavy<"),
         "heavy user must appear in alert list"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-17 UX fixes from Pavel's review of user-detail + server-detail:
+//   * Flow A + Flow B must use the SAME `share_link_card` DOM shape
+//     (QR + readonly textarea + footnote). No more "above" reference.
+//   * Flow B's QR card must include a click-to-select-all textarea
+//     with the FULL wireguard:// link (so the operator can copy it).
+//   * deploy → button caption must spell out the full SSH push effect
+//     (ensure_installed + apply_config + restart), not just secrets.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea() {
+    // Need: a user with a sub_token AND wireguard keypair so the
+    // distribution panel renders (Flow A + Flow B both visible).
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    // Seed a WG-capable server so Flow B is populated too.
+    inv.add_server(&Server {
+        id: ServerId("wg1".into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    // Server-side WG keypair so the share_link can render.
+    inv.set_server_secret(
+        &ServerId("wg1".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("wg1".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("flowtest".into()),
+        uuid: "11111111-1111-1111-1111-111111111111".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=".into()),
+        wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
+        sub_token: Some("subtok-flowtest-abc123".into()),
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("flowtest".into()), &ServerId("wg1".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/flowtest").await;
+
+    // Flow A card MUST contain the click-to-select-all textarea
+    // attribute that ships in `share_link_card`.
+    assert!(
+        html.contains("onclick=\"this.select()\""),
+        "share_link_card must use onclick=\"this.select()\" so the textarea selects on click"
+    );
+    // The sub URL goes inside a <textarea readonly>. The user-detail
+    // page renders the sub-token TWICE: once in the Subscription
+    // block at the top (as plain text), once inside the Flow A
+    // card's textarea below. We want to assert the SECOND occurrence
+    // is the one wrapped in a textarea — use `rfind` to walk back
+    // from the last occurrence.
+    //
+    // This catches a regression where Flow A loses its textarea
+    // but Flow B still has 2+ (operator with multiple WG grants
+    // would push the count() ≥ 2 assertion through even with Flow
+    // A broken).
+    let token_substr = "/sub/subtok-flowtest-abc123";
+    let token_at = html
+        .rfind(token_substr)
+        .unwrap_or_else(|| panic!("sub-token substring missing from page: {token_substr}"));
+    // Walk back up to 800 chars and confirm a `<textarea` tag
+    // opens before the token — proves the LAST occurrence (i.e.
+    // the Flow A card) lives INSIDE a textarea. The window is
+    // wide enough to clear the textarea's inline style string
+    // (~500 chars).
+    let window_start = token_at.saturating_sub(800);
+    let before = &html[window_start..token_at];
+    assert!(
+        before.contains("<textarea readonly"),
+        "Flow A sub-token must appear inside a `<textarea readonly>` block — got window before token: {before:?}"
+    );
+    // Flow A footnote stays.
+    assert!(
+        html.contains("Sing-box / Hiddify pulls the full config"),
+        "Flow A footnote regressed"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea() {
+    // Same seeding as the previous test — we want the FULL
+    // wireguard:// link to appear inside a readonly textarea, not
+    // just the masked preview.
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("wg2".into()),
+        address: "203.0.113.8".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("wg2".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("wg2".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("flowtest2".into()),
+        uuid: "22222222-2222-2222-2222-222222222222".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=".into()),
+        wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
+        sub_token: Some("subtok-flowtest2".into()),
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("flowtest2".into()), &ServerId("wg2".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/flowtest2").await;
+
+    // The wireguard:// link must appear in full inside the page —
+    // this is the operator's only way to copy the conf to AmneziaVPN.
+    // Don't check the exact URL (build-host dependent) — assert that
+    // the scheme prefix shows up inside a textarea tag.
+    assert!(
+        html.contains("wireguard://"),
+        "Flow B must include the wireguard:// link verbatim somewhere on the page"
+    );
+    // The new copy-hint text in the Flow B footnote.
+    assert!(
+        html.contains("Click the box above to select-all + copy"),
+        "Flow B footnote must teach the click-to-copy interaction"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_detail_deploy_caption_describes_ssh_push() {
+    // 2026-05-17 — Pavel: подпись «Mints missing keys… Subscription
+    // URLs go live immediately» неполная: реальный deploy включает
+    // ensure_installed + apply_config + restart. Pin the new copy.
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("deploysrv".into()),
+        address: "203.0.113.9".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/deploysrv").await;
+
+    // New caption mentions the real SSH-side work, not just secret mint.
+    assert!(
+        html.contains("ensure_installed"),
+        "deploy caption must mention ensure_installed (apt-get install side)"
+    );
+    assert!(
+        html.contains("apply_config"),
+        "deploy caption must mention apply_config (systemctl restart side)"
+    );
+    // Old half-truth wording is gone.
+    assert!(
+        !html.contains("Mints missing keys for every enabled protocol."),
+        "deploy caption regressed to the old keys-only wording"
+    );
+    // Tooltip on the button mentions the full cycle too.
+    assert!(
+        html.contains("Full deploy:") || html.contains("Full deploy "),
+        "deploy button title attribute must lead with 'Full deploy:'"
     );
 }
