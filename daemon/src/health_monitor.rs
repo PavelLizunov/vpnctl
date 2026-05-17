@@ -1,0 +1,540 @@
+//! Phase G — operator-facing infra alerts driven by `node_health`.
+//!
+//! Sits ON TOP OF the Phase H probe pipeline. The probe (chunk 1)
+//! collects raw metrics over SSH; the poller (chunk 4) INSERTs one
+//! `node_health` row per tick per server; THIS module diffs the latest
+//! two rows per server and emits an `admin_alerts` row when a
+//! state-change crosses a threshold the operator cares about.
+//!
+//! # Why a separate poller (not inline in `node_probe_poller`)
+//!
+//! Failure isolation. If the alert state-machine has a bug, the probe
+//! data keeps flowing. If the probe SSH fails on one server, the
+//! state-machine still gets to inspect ALL servers (including the
+//! ones the probe succeeded for). They share the cadence —
+//! `VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS`, default 10 min, matching
+//! the probe interval — so we don't waste cycles diffing the same
+//! row twice.
+//!
+//! # State source
+//!
+//! `inv.recent_node_health_for_server(id, 1h)` returns up to ~6 rows
+//! per server at the 10-min cadence. We inspect the newest two:
+//!
+//!   * **First row only** (single snapshot for this server) → seed,
+//!     no alert. The diff requires two samples.
+//!   * **No rows at all** → server is being probed but the row hasn't
+//!     landed yet (or every probe has failed). No alert here — Phase G
+//!     chunk 2 will add `server.unreachable` after N consecutive
+//!     missing-row ticks, that's the right surface for "we can't
+//!     measure this node at all".
+//!
+//! # Detection rules (this chunk)
+//!
+//! | Condition | Severity | Alert kind |
+//! |---|---|---|
+//! | sing_box_active flipped `true → false` | critical | `server.singbox.down` |
+//! | sing_box_active flipped `false → true` | info | `server.singbox.up` |
+//! | fail2ban_active flipped `true → false` | warning | `server.fail2ban.down` |
+//! | fail2ban_active flipped `false → true` | info | `server.fail2ban.up` |
+//! | disk_pct crossed 90 going up | warning | `server.disk.pressure` |
+//! | disk_pct dropped below 85 (hysteresis) | info | `server.disk.recovered` |
+//! | mem_used_pct crossed 95 going up | warning | `server.mem.pressure` |
+//! | mem_used_pct dropped below 90 (hysteresis) | info | `server.mem.recovered` |
+//! | sing_box_log_bytes crossed 500 MiB going up | warning | `server.singbox.log.too_big` |
+//!
+//! Hysteresis on the disk/mem thresholds (90 vs 85, 95 vs 90) prevents
+//! flapping: a node hovering exactly at 90.0% disk would otherwise
+//! emit pressure+recovered+pressure… on every probe tick. The
+//! recovery threshold is set ~5 pp below the trigger so a brief dip
+//! doesn't reset the alert state.
+//!
+//! # Future chunks (NOT in this commit)
+//!
+//! - **chunk 2**: `server.unreachable` after N consecutive probe failures.
+//! - **chunk 2**: `server.fail2ban.banned_self` (parse `fail2ban-client
+//!   status sshd` + match our IP against the bans list).
+//! - **chunk 3**: webhook transport. Stub'd via env
+//!   `VPNCTLD_NOTIFY_WEBHOOK_URL` — when set, alerts also POST a
+//!   small JSON to that URL (Telegram bot / ntfy.sh / generic).
+//!   Pavel must pick the target before this chunk lands.
+
+use std::time::Duration;
+
+use vpnctl_inventory::{NodeHealthRow, SqliteInventory};
+
+/// Default cadence: same as the probe poller. There's no point
+/// scanning faster than the probe writes.
+const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
+
+/// Disk-pressure thresholds, with 5-pp hysteresis.
+const DISK_PRESSURE_TRIGGER_PCT: u8 = 90;
+const DISK_PRESSURE_RECOVER_PCT: u8 = 85;
+
+/// Memory-pressure thresholds.
+const MEM_PRESSURE_TRIGGER_PCT: u8 = 95;
+const MEM_PRESSURE_RECOVER_PCT: u8 = 90;
+
+/// sing-box log size threshold (bytes). 500 MiB — Pavel's earlier
+/// disk-fill concern. The logrotate fragment we install in
+/// `kernels::sing_box::ensure_installed` caps growth, but a freshly
+/// bootstrapped node before the first rotation OR a node where the
+/// fragment got blown away will eventually trip this.
+const SINGBOX_LOG_TRIGGER_BYTES: u64 = 500 * 1024 * 1024;
+
+/// One state-change detected by `diff_rows`. Materialised into an
+/// `admin_alerts` row + `audit_log` row by the caller. Exposed as a
+/// `pub` data type so the spawn-loop is testable WITHOUT a real
+/// inventory — feed in two `NodeHealthRow`s, assert the Vec of
+/// `AlertEvent`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertEvent {
+    pub kind: &'static str,
+    pub severity: &'static str,
+    pub summary: String,
+    /// Serialized as `payload_json` — small JSON object with the
+    /// crossing thresholds + prior/current values for the audit row.
+    pub payload: serde_json::Value,
+}
+
+/// Compute mem-used percentage from a `NodeHealthRow`. Mirrors
+/// `Probe::mem_used_pct` but operates on the stored row.
+fn mem_used_pct(row: &NodeHealthRow) -> Option<u8> {
+    let avail = row.mem_available_mib?;
+    let total = row.mem_total_mib?;
+    if total == 0 {
+        return None;
+    }
+    let used_pct = 100u64.saturating_sub(avail.saturating_mul(100) / total);
+    u8::try_from(used_pct.min(100)).ok()
+}
+
+/// Compute disk-used percentage from a `NodeHealthRow`.
+fn disk_pct(row: &NodeHealthRow) -> Option<u8> {
+    let used = row.disk_used_mib?;
+    let total = row.disk_total_mib?;
+    if total == 0 {
+        return None;
+    }
+    let pct = used.saturating_mul(100) / total;
+    u8::try_from(pct.min(100)).ok()
+}
+
+/// Pure diff: given the previous probe row and the current one,
+/// return every state-change alert the operator should see.
+///
+/// Stateless — same input always produces the same output. Caller
+/// is responsible for "did we already emit this same alert in the
+/// last few ticks" dedup (the table-level WHERE-not-acked on the
+/// dashboard handles user-visible duplication; firing the same
+/// `*.pressure` repeatedly is intentional so the operator sees the
+/// condition has not been resolved).
+pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
+    let mut out: Vec<AlertEvent> = Vec::new();
+
+    // ── service state flips ────────────────────────────────────────
+    if let (Some(p), Some(c)) = (prev.sing_box_active, cur.sing_box_active) {
+        if p && !c {
+            out.push(AlertEvent {
+                kind: "server.singbox.down",
+                severity: "critical",
+                summary: "sing-box is no longer active".into(),
+                payload: serde_json::json!({"prior": p, "current": c}),
+            });
+        } else if !p && c {
+            out.push(AlertEvent {
+                kind: "server.singbox.up",
+                severity: "info",
+                summary: "sing-box recovered to active".into(),
+                payload: serde_json::json!({"prior": p, "current": c}),
+            });
+        }
+    }
+    if let (Some(p), Some(c)) = (prev.fail2ban_active, cur.fail2ban_active) {
+        if p && !c {
+            out.push(AlertEvent {
+                kind: "server.fail2ban.down",
+                severity: "warning",
+                summary: "fail2ban is no longer active".into(),
+                payload: serde_json::json!({"prior": p, "current": c}),
+            });
+        } else if !p && c {
+            out.push(AlertEvent {
+                kind: "server.fail2ban.up",
+                severity: "info",
+                summary: "fail2ban recovered to active".into(),
+                payload: serde_json::json!({"prior": p, "current": c}),
+            });
+        }
+    }
+
+    // ── disk pressure (hysteretic) ─────────────────────────────────
+    if let (Some(p), Some(c)) = (disk_pct(prev), disk_pct(cur)) {
+        if p < DISK_PRESSURE_TRIGGER_PCT && c >= DISK_PRESSURE_TRIGGER_PCT {
+            out.push(AlertEvent {
+                kind: "server.disk.pressure",
+                severity: "warning",
+                summary: format!("disk usage crossed {DISK_PRESSURE_TRIGGER_PCT}% ({p}% → {c}%)"),
+                payload: serde_json::json!({
+                    "prior_pct": p, "current_pct": c, "threshold": DISK_PRESSURE_TRIGGER_PCT
+                }),
+            });
+        } else if p >= DISK_PRESSURE_TRIGGER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
+            out.push(AlertEvent {
+                kind: "server.disk.recovered",
+                severity: "info",
+                summary: format!(
+                    "disk usage dropped back under {DISK_PRESSURE_RECOVER_PCT}% ({p}% → {c}%)"
+                ),
+                payload: serde_json::json!({
+                    "prior_pct": p, "current_pct": c, "recover_threshold": DISK_PRESSURE_RECOVER_PCT
+                }),
+            });
+        }
+    }
+
+    // ── memory pressure (hysteretic) ───────────────────────────────
+    if let (Some(p), Some(c)) = (mem_used_pct(prev), mem_used_pct(cur)) {
+        if p < MEM_PRESSURE_TRIGGER_PCT && c >= MEM_PRESSURE_TRIGGER_PCT {
+            out.push(AlertEvent {
+                kind: "server.mem.pressure",
+                severity: "warning",
+                summary: format!("memory usage crossed {MEM_PRESSURE_TRIGGER_PCT}% ({p}% → {c}%)"),
+                payload: serde_json::json!({
+                    "prior_pct": p, "current_pct": c, "threshold": MEM_PRESSURE_TRIGGER_PCT
+                }),
+            });
+        } else if p >= MEM_PRESSURE_TRIGGER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
+            out.push(AlertEvent {
+                kind: "server.mem.recovered",
+                severity: "info",
+                summary: format!(
+                    "memory usage dropped back under {MEM_PRESSURE_RECOVER_PCT}% ({p}% → {c}%)"
+                ),
+                payload: serde_json::json!({
+                    "prior_pct": p, "current_pct": c, "recover_threshold": MEM_PRESSURE_RECOVER_PCT
+                }),
+            });
+        }
+    }
+
+    // ── sing-box log size ──────────────────────────────────────────
+    if let (Some(p), Some(c)) = (prev.sing_box_log_bytes, cur.sing_box_log_bytes) {
+        if p < SINGBOX_LOG_TRIGGER_BYTES && c >= SINGBOX_LOG_TRIGGER_BYTES {
+            out.push(AlertEvent {
+                kind: "server.singbox.log.too_big",
+                severity: "warning",
+                summary: format!("sing-box log size crossed 500 MiB ({} → {} bytes)", p, c),
+                payload: serde_json::json!({
+                    "prior_bytes": p, "current_bytes": c,
+                    "threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
+                }),
+            });
+        }
+    }
+
+    out
+}
+
+/// Spawn the health-monitor task. Returns the [`tokio::task::JoinHandle`]
+/// for test/abort symmetry with the other pollers.
+pub fn spawn_health_monitor(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
+    use tokio::time::{MissedTickBehavior, interval};
+
+    let interval_secs: u64 = std::env::var("VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_INTERVAL_SECS);
+
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(interval_secs));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tick.tick().await; // drop immediate first fire
+        loop {
+            tick.tick().await;
+            if let Err(e) = scan_once(&inv).await {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    error = %e,
+                    "scan_once failed; retrying next tick"
+                );
+            }
+        }
+    })
+}
+
+/// Single sweep: for each sing-box server in inventory, fetch the
+/// latest two `node_health` rows and diff them. Public so tests can
+/// invoke without going through the spawn loop.
+pub async fn scan_once(
+    inv: &SqliteInventory,
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    let servers = inv.list_servers().await?;
+    for server in &servers {
+        if !server.kernels.iter().any(|k| k.0 == "sing-box") {
+            continue;
+        }
+        // Two newest rows are enough for the diff. Looking back 24h is
+        // overkill but `recent_node_health_for_server` is the only
+        // existing API; we slice off the top two below.
+        let rows = match inv.recent_node_health_for_server(&server.id, 24).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    server = %server.id.0,
+                    error = %e,
+                    "recent_node_health_for_server failed"
+                );
+                continue;
+            }
+        };
+        if rows.len() < 2 {
+            // Seed snapshot or no data — diff requires two samples.
+            continue;
+        }
+        // recent_node_health_for_server returns newest-first; we want
+        // (prev, cur) = (rows[1], rows[0]).
+        let cur = &rows[0];
+        let prev = &rows[1];
+        for ev in diff_rows(prev, cur) {
+            // payload is always built via `serde_json::json!{}` literal,
+            // so serialization cannot fail in practice. But silently
+            // dropping the context (`.ok()`) on the rare error would
+            // break the detail-expander promise in migration 0011.
+            // Surface failure at warn + fall back to "{}" so the alert
+            // row still gets inserted with structured (if empty) JSON.
+            let payload_str = match serde_json::to_string(&ev.payload) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        error = %e,
+                        kind = ev.kind,
+                        "alert payload serialise failed; storing empty JSON object"
+                    );
+                    Some("{}".to_string())
+                }
+            };
+            match inv
+                .insert_alert(
+                    ev.kind,
+                    Some(&server.id),
+                    ev.severity,
+                    &ev.summary,
+                    payload_str.as_deref(),
+                )
+                .await
+            {
+                Ok(alert_id) => {
+                    tracing::info!(
+                        target = "vpnctld::health_monitor",
+                        alert_id,
+                        server = %server.id.0,
+                        kind = ev.kind,
+                        severity = ev.severity,
+                        "fired alert"
+                    );
+                    // Mirror into audit_log so /admin/audit's
+                    // unified timeline includes alert firings.
+                    let _ = inv
+                        .audit(
+                            "vpnctld",
+                            "alert.fire",
+                            Some(&server.id.0),
+                            Some(&serde_json::json!({
+                                "alert_id": alert_id,
+                                "kind": ev.kind,
+                                "severity": ev.severity,
+                                "summary": ev.summary,
+                            })),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        server = %server.id.0,
+                        error = %e,
+                        kind = ev.kind,
+                        "insert_alert failed"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use vpnctl_core::ServerId;
+
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        mins_ago: i64,
+        sb: Option<bool>,
+        f2b: Option<bool>,
+        disk_u: Option<u64>,
+        disk_t: Option<u64>,
+        mem_a: Option<u64>,
+        mem_t: Option<u64>,
+        log_b: Option<u64>,
+    ) -> NodeHealthRow {
+        NodeHealthRow {
+            ts: Utc.with_ymd_and_hms(2026, 5, 17, 22, 0, 0).unwrap()
+                - chrono::Duration::minutes(mins_ago),
+            server_id: ServerId("test".into()),
+            sing_box_active: sb,
+            fail2ban_active: f2b,
+            disk_used_mib: disk_u,
+            disk_total_mib: disk_t,
+            mem_available_mib: mem_a,
+            mem_total_mib: mem_t,
+            load_1min_x100: None,
+            listening_ports_json: None,
+            sing_box_log_bytes: log_b,
+        }
+    }
+
+    #[test]
+    fn diff_rows_singbox_down_fires_critical() {
+        let prev = row(10, Some(true), None, None, None, None, None, None);
+        let cur = row(0, Some(false), None, None, None, None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.down");
+        assert_eq!(evs[0].severity, "critical");
+        assert!(evs[0].summary.contains("sing-box"));
+    }
+
+    #[test]
+    fn diff_rows_singbox_up_fires_info() {
+        let prev = row(10, Some(false), None, None, None, None, None, None);
+        let cur = row(0, Some(true), None, None, None, None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.up");
+        assert_eq!(evs[0].severity, "info");
+    }
+
+    #[test]
+    fn diff_rows_no_change_emits_nothing() {
+        let prev = row(
+            10,
+            Some(true),
+            Some(true),
+            Some(50),
+            Some(100),
+            Some(80),
+            Some(100),
+            Some(1024),
+        );
+        let cur = row(
+            0,
+            Some(true),
+            Some(true),
+            Some(50),
+            Some(100),
+            Some(80),
+            Some(100),
+            Some(1024),
+        );
+        assert!(diff_rows(&prev, &cur).is_empty());
+    }
+
+    #[test]
+    fn diff_rows_disk_pressure_crosses_90_fires() {
+        // 89% → 91%
+        let prev = row(10, None, None, Some(89), Some(100), None, None, None);
+        let cur = row(0, None, None, Some(91), Some(100), None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.disk.pressure");
+        assert_eq!(evs[0].severity, "warning");
+    }
+
+    #[test]
+    fn diff_rows_disk_hysteresis_no_flap_at_88_pct() {
+        // Already at 91 (in pressure state), drops to 88 — still in
+        // the hysteresis dead-zone (85–90), NO recovery alert.
+        let prev = row(10, None, None, Some(91), Some(100), None, None, None);
+        let cur = row(0, None, None, Some(88), Some(100), None, None, None);
+        assert!(diff_rows(&prev, &cur).is_empty());
+    }
+
+    #[test]
+    fn diff_rows_disk_recovered_under_85_fires_info() {
+        // 91 → 84 — past the recovery threshold.
+        let prev = row(10, None, None, Some(91), Some(100), None, None, None);
+        let cur = row(0, None, None, Some(84), Some(100), None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.disk.recovered");
+        assert_eq!(evs[0].severity, "info");
+    }
+
+    #[test]
+    fn diff_rows_mem_pressure_crosses_95_fires() {
+        // mem_avail 6 / total 100 → mem_used 94%
+        let prev = row(10, None, None, None, None, Some(6), Some(100), None);
+        // mem_avail 4 / total 100 → mem_used 96%
+        let cur = row(0, None, None, None, None, Some(4), Some(100), None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.mem.pressure");
+    }
+
+    #[test]
+    fn diff_rows_singbox_log_crosses_500mib_fires() {
+        let prev = row(
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(400 * 1024 * 1024),
+        );
+        let cur = row(
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(600 * 1024 * 1024),
+        );
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.log.too_big");
+    }
+
+    #[test]
+    fn diff_rows_unknown_prior_emits_nothing() {
+        // Probe parser couldn't get sing_box state on the prior tick
+        // → can't tell whether this is a flip or a steady state. Don't
+        // emit a spurious "down" just because we lost visibility.
+        let prev = row(10, None, None, None, None, None, None, None);
+        let cur = row(0, Some(false), None, None, None, None, None, None);
+        assert!(diff_rows(&prev, &cur).is_empty());
+    }
+
+    #[test]
+    fn diff_rows_multi_signal_combines() {
+        // sing-box down + disk crossing 90 in one snapshot.
+        let prev = row(10, Some(true), None, Some(80), Some(100), None, None, None);
+        let cur = row(0, Some(false), None, Some(95), Some(100), None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        let kinds: Vec<&str> = evs.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"server.singbox.down"));
+        assert!(kinds.contains(&"server.disk.pressure"));
+    }
+}

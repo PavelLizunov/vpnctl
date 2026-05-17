@@ -12,6 +12,7 @@ pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
 pub mod handlers;
+pub mod health_monitor;
 pub mod node_probe;
 pub mod node_probe_poller;
 pub mod rate_limit;
@@ -48,6 +49,15 @@ pub fn spawn_node_probe_poller_for_test(
     inv: vpnctl_inventory::SqliteInventory,
 ) -> tokio::task::JoinHandle<()> {
     node_probe_poller::spawn_node_probe_poller(inv)
+}
+
+/// Test-only re-export of the Phase G health-monitor spawner so the
+/// integration suite can verify the wiring. Production code uses
+/// `vpnctld::build()` which calls this internally.
+pub fn spawn_health_monitor_for_test(
+    inv: vpnctl_inventory::SqliteInventory,
+) -> tokio::task::JoinHandle<()> {
+    health_monitor::spawn_health_monitor(inv)
 }
 
 /// Test-only re-export of the backup scheduler with custom delays

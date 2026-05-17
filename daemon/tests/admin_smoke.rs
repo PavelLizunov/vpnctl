@@ -2160,6 +2160,87 @@ async fn node_probe_poller_spawns_a_runnable_task() {
     );
 }
 
+#[tokio::test]
+async fn health_monitor_spawns_a_runnable_task() {
+    // Phase G smoke test — same shape as the two pollers above.
+    // diff_rows + scan_once are unit-tested in
+    // `daemon::health_monitor::tests`; this just proves the spawn
+    // wires up cleanly under tokio.
+    let dir = TempDir::new().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let handle = vpnctld::spawn_health_monitor_for_test(inv);
+    handle.abort();
+    let result = handle.await;
+    assert!(
+        matches!(&result, Err(e) if e.is_cancelled()),
+        "expected aborted JoinHandle; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_alerts_empty_state_renders_with_copy_contract() {
+    // Phase G — bare alerts page on an empty inventory. Should render
+    // the editorial empty-state with the canonical "no unacked alerts"
+    // copy + a link to "show all" (so the operator can confirm history
+    // even when there's nothing actionable).
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "expected 200 alerts page");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        html.contains("no unacked alerts"),
+        "expected empty-state copy 'no unacked alerts'"
+    );
+    assert!(html.contains("show all"), "expected link to acked history");
+    // Nav entry is wired.
+    assert!(
+        html.contains(r#"href="/admin/alerts""#),
+        "expected nav entry to /admin/alerts"
+    );
+}
+
+#[tokio::test]
+async fn admin_alerts_ack_unknown_id_returns_redirect_not_500() {
+    // Acking a non-existent id is idempotent — should redirect to the
+    // feed without 500ing. (Catches the bug where `inv.ack_alert(999)`
+    // would return `false` and the handler treats it as an error.)
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/alerts/999/ack")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // 303 See Other from axum's `Redirect::to`.
+    assert!(
+        resp.status() == StatusCode::SEE_OTHER
+            || resp.status() == StatusCode::FOUND
+            || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+        "expected redirect after ack POST, got {:?}",
+        resp.status()
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Phase Hardening — CSRF middleware (handlers/csrf.rs)
 //

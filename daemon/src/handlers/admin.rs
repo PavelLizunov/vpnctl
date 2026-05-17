@@ -71,6 +71,11 @@ const NAV: &[NavItem] = &[
         count: None,
     },
     NavItem {
+        key: "alerts",
+        label: "Alerts",
+        count: None,
+    },
+    NavItem {
         key: "settings",
         label: "Settings",
         count: None,
@@ -546,6 +551,14 @@ pub(crate) async fn dashboard(
         })
         .collect();
 
+    // Phase G — unacked infra alerts tile. Renders only when >0 so
+    // the dashboard stays calm during quiet times. Counted off
+    // `admin_alerts WHERE acked_at IS NULL` (single indexed SELECT).
+    let unacked_alerts = state.inv.unacked_alert_count().await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "unacked_alert_count failed");
+        0
+    });
+
     let body = html! {
         div.ed-art-eyebrow { "Dashboard" }
         h1.ed-art-h1 { "homelab " em { "at a glance" } }
@@ -556,11 +569,33 @@ pub(crate) async fn dashboard(
             " update on every reload."
         }
         (dashboard_metrics(&stats))
+        (dashboard_alerts_tile(unacked_alerts))
         (dashboard_limit_alerts(&alerting))
         (dashboard_heavy_users(&heavy_users))
         (dashboard_audit(&audit))
     };
     Ok(shell("dashboard", &theme, &accent, body))
+}
+
+/// Phase G — single-line alerts tile under the metric row. Renders
+/// only when there's at least one unacked alert; quiet dashboard stays
+/// quiet. Links to `/admin/alerts` for the full feed.
+fn dashboard_alerts_tile(unacked: u64) -> Markup {
+    html! {
+        @if unacked > 0 {
+            div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
+                div.ed-art-eyebrow { "Homelab health" }
+                p style="font-family: var(--serif); margin: 6px 0 0;" {
+                    b { (unacked) }
+                    @if unacked == 1 { " unacked alert" } @else { " unacked alerts" }
+                    " · "
+                    a href="/admin/alerts" style="color: var(--ink);" {
+                        em { "see what the daemon's complaining about →" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render the "limit alerts" section on the dashboard. Shows only
@@ -4477,6 +4512,206 @@ fn csv_field(s: &str) -> String {
     }
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+// ────────────────────────────────────────────────────────────────────
+//  Phase G — admin_alerts feed + ack action
+// ────────────────────────────────────────────────────────────────────
+
+/// `GET /admin/alerts?show=all` — operator-facing alerts feed. Default
+/// view shows UNACKED only (the dashboard tile links here when count
+/// > 0); `?show=all` includes acked rows for historical browsing.
+pub(crate) async fn alerts(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AlertsQuery>,
+) -> Result<Markup, Response> {
+    let (theme, accent) = theme_accent(&headers);
+
+    /// Generous cap — the feed wants enough history to spot patterns
+    /// without paginating. Older rows are retention-pruned (acked
+    /// >30d ago drops; unacked never).
+    const ALERTS_LIMIT: i64 = 200;
+    let include_acked = q.show.as_deref() == Some("all");
+    let alerts_rows = state
+        .inv
+        .recent_alerts(ALERTS_LIMIT, include_acked)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let unacked_total = state
+        .inv
+        .unacked_alert_count()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    let body = html! {
+        div.ed-art-eyebrow { "Alerts" }
+        h1.ed-art-h1 {
+            "what the homelab is "
+            em { "shouting" }
+            " about"
+        }
+        p.ed-art-deck {
+            "Infrastructure alerts written by the Phase G health-monitor "
+            "on top of the Phase H node probe. Service flips, disk + "
+            "memory pressure, runaway sing-box logs. Ack each one when "
+            "you've looked — the dashboard tile " em { "homelab health" }
+            " counts unacked items."
+        }
+        div.ed-rule {}
+        div style="display: flex; gap: 16px; align-items: baseline; margin-bottom: 14px;" {
+            span.ed-mono { (unacked_total) " unacked" }
+            @if include_acked {
+                a href="/admin/alerts" style="color: var(--mute); text-decoration: none;" {
+                    "← only unacked"
+                }
+            } @else {
+                a href="/admin/alerts?show=all" style="color: var(--mute); text-decoration: none;" {
+                    "show all (including acked) →"
+                }
+            }
+        }
+        @if alerts_rows.is_empty() {
+            div.ed-empty {
+                p {
+                    @if include_acked {
+                        "no alerts on record. Either the homelab has been "
+                        em { "extraordinarily" }
+                        " quiet, or vpnctld hasn't been running long enough "
+                        "for the probe to fire one. Check "
+                        span.ed-mono { "journalctl -u vpnctld -t vpnctld::health_monitor" }
+                        " for the scan trail."
+                    } @else {
+                        "no unacked alerts. Everything the homelab is currently "
+                        em { "complaining" }
+                        " about lives here; nothing means nothing's wrong "
+                        "(or every condition has been acknowledged). To "
+                        "browse history: " a href="/admin/alerts?show=all" { "show all →" }
+                    }
+                }
+            }
+        } @else {
+            (alerts_table(&alerts_rows))
+        }
+    };
+    Ok(shell("alerts", &theme, &accent, body))
+}
+
+/// `POST /admin/alerts/{id}/ack` — operator dismisses one alert.
+/// Idempotent: re-acking is a no-op. Always redirects back to
+/// `/admin/alerts` (POST-redirect-GET so refresh-after-submit doesn't
+/// re-submit). Writes an audit row with the alert id + kind so the
+/// timeline shows who acknowledged what.
+///
+/// Path/State ordering: `Path` first, `State` after — matches the
+/// convention used elsewhere in this file (`user_delete`,
+/// `user_grant_server`). Caught by review-agent on the burst diff.
+pub(crate) async fn alert_ack(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    State(state): State<AppState>,
+) -> Response {
+    // Reject negative / zero ids early — autoincrement starts at 1.
+    // Treat as a no-op redirect rather than 400 to keep ack idempotent
+    // (a stale form should not 4xx; the dashboard tile POSTs without
+    // re-fetching the feed first).
+    if id <= 0 {
+        return Redirect::to("/admin/alerts").into_response();
+    }
+    let changed = match state.inv.ack_alert(id).await {
+        Ok(b) => b,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if changed {
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "alert.ack",
+                Some(&id.to_string()),
+                Some(&serde_json::json!({"alert_id": id})),
+            )
+            .await
+        {
+            // Audit write failed but the user-visible ack already
+            // committed — surface at warn so the operator can grep
+            // the journal if the audit timeline looks short.
+            tracing::warn!(
+                target = "vpnctld::admin::alert_ack",
+                alert_id = id,
+                error = %e,
+                "ack succeeded but audit row failed; timeline will be missing this entry"
+            );
+        }
+    }
+    Redirect::to("/admin/alerts").into_response()
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub(crate) struct AlertsQuery {
+    /// `Some("all")` = include acked rows; default = unacked only.
+    pub show: Option<String>,
+}
+
+/// Render the feed table — newest-first, severity badge, server link,
+/// per-row ack button (hidden when already acked). Inline styles keep
+/// this self-contained so admin.css doesn't need a Phase G section.
+fn alerts_table(rows: &[vpnctl_inventory::AdminAlert]) -> Markup {
+    html! {
+        div.ed-time {
+            @for a in rows {
+                div.ed-time-row {
+                    span.ed-time-row__t { (clip_ts(&a.created_at.to_rfc3339())) }
+                    span class=(format!("ed-time-row__a ed-time-row__a--{}", severity_class(&a.severity))) {
+                        (a.severity)
+                    }
+                    span.ed-time-row__tgt {
+                        @match &a.server_id {
+                            Some(sid) => {
+                                a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0)))
+                                  style="color: var(--ink); text-decoration: none;" {
+                                    (sid.0)
+                                }
+                            }
+                            None => "—",
+                        }
+                    }
+                    span.ed-time-row__pl {
+                        span.ed-mono { (a.kind) }
+                        " · " (a.summary)
+                        @match &a.acked_at {
+                            Some(when) => {
+                                " · " span style="color: var(--mute);" {
+                                    "acked " (clip_ts(&when.to_rfc3339()))
+                                }
+                            }
+                            None => {
+                                " · "
+                                form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
+                                     style="display: inline;" {
+                                    button type="submit"
+                                           style="background: transparent; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 2px 8px; cursor: pointer;" {
+                                        "ack"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Map alert severity string to an `ed-time-row__a--*` modifier class
+/// matching what `audit_timeline_grouped` uses. Keeps colour-coding
+/// consistent across the audit + alerts feeds.
+fn severity_class(s: &str) -> &'static str {
+    match s {
+        "critical" => "fire",
+        "warning" => "warn",
+        "info" => "info",
+        _ => "info",
+    }
 }
 
 pub(crate) async fn settings(headers: HeaderMap, State(_state): State<AppState>) -> Markup {

@@ -22,6 +22,6 @@ pub use migrate::{
     derive_server_id_from_ip, parse_bash_inventory_env, parse_bash_singbox,
 };
 pub use sqlite::{
-    AccessBucket, AuditEntry, Ban, NodeHealthRow, SqliteInventory, SqliteInventoryError,
-    SubAccessEntry, UaCluster, VpnStatsDelta, VpnStatsRow,
+    AccessBucket, AdminAlert, AuditEntry, Ban, NodeHealthRow, SqliteInventory,
+    SqliteInventoryError, SubAccessEntry, UaCluster, VpnStatsDelta, VpnStatsRow,
 };

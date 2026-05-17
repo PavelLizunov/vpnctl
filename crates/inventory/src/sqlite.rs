@@ -190,6 +190,25 @@ pub struct NodeHealthRow {
     pub sing_box_log_bytes: Option<u64>,
 }
 
+/// Phase G — one operator-facing alert row.
+///
+/// Written by `daemon::health_monitor` when a node_health snapshot
+/// crosses a threshold or flips a service state. Stays in the table
+/// until the operator explicitly acks via the dashboard / feed page;
+/// acked rows enter the 30-day retention window in the existing
+/// retention scheduler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminAlert {
+    pub id: i64,
+    pub created_at: DateTime<Utc>,
+    pub kind: String,
+    pub server_id: Option<ServerId>,
+    pub severity: String,
+    pub summary: String,
+    pub payload_json: Option<String>,
+    pub acked_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pool: SqlitePool,
@@ -1605,6 +1624,104 @@ impl SqliteInventory {
         .await?;
         Ok(res.rows_affected())
     }
+
+    // ── Phase G admin_alerts ────────────────────────────────────────────
+
+    /// Insert one alert row. Returns the new row id so the caller can
+    /// reference it in an `audit()` payload — every fired alert ALSO
+    /// gets an audit_log row with `action='alert.fire'` so the full
+    /// timeline view in `/admin/audit` stays coherent.
+    ///
+    /// `payload_json` is opaque to inventory — callers serialise
+    /// whatever structured context they want (thresholds, prior
+    /// values, observed timestamp) and pass the resulting JSON
+    /// string. NULL = no extra context.
+    pub async fn insert_alert(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+        severity: &str,
+        summary: &str,
+        payload_json: Option<&str>,
+    ) -> Result<i64> {
+        let res = sqlx::query(
+            "INSERT INTO admin_alerts (kind, server_id, severity, summary, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(kind)
+        .bind(server_id.map(|s| s.0.as_str()))
+        .bind(severity)
+        .bind(summary)
+        .bind(payload_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.last_insert_rowid())
+    }
+
+    /// Count alerts that haven't been acked yet — backs the dashboard
+    /// «N unacked alerts» tile. One indexed SELECT.
+    pub async fn unacked_alert_count(&self) -> Result<u64> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM admin_alerts WHERE acked_at IS NULL")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(u64::try_from(row.0).unwrap_or(0))
+    }
+
+    /// Recent alerts, newest first. `include_acked = false` matches the
+    /// default feed view (only currently-actionable items); `true`
+    /// shows the full history including ones the operator dismissed.
+    pub async fn recent_alerts(&self, limit: i64, include_acked: bool) -> Result<Vec<AdminAlert>> {
+        let where_clause = if include_acked {
+            ""
+        } else {
+            "WHERE acked_at IS NULL"
+        };
+        let sql = format!(
+            "SELECT id, created_at, kind, server_id, severity, summary,
+                    payload_json, acked_at
+             FROM admin_alerts
+             {where_clause}
+             ORDER BY id DESC
+             LIMIT ?1"
+        );
+        let rows = sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_admin_alert).collect()
+    }
+
+    /// Mark one alert as acked. Returns `true` if the row existed AND
+    /// was unacked (the operator-visible state actually changed),
+    /// `false` if the id is unknown OR was already acked (idempotent).
+    /// Doesn't error on a duplicate ack — the dashboard tile uses POST
+    /// without an Idempotency-Key, so a refresh-after-ack should not
+    /// 500.
+    pub async fn ack_alert(&self, id: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE admin_alerts
+             SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND acked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Drop ACKED alerts older than `days`. UNACKED alerts are NEVER
+    /// auto-purged (an alert that fires once and is forgotten must
+    /// still be visible — see migration 0011 doc-comment for the
+    /// rationale). Wired into the existing retention scheduler.
+    pub async fn purge_acked_alerts_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM admin_alerts
+             WHERE acked_at IS NOT NULL
+               AND acked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 /// Extract the `/16` network prefix from a v4 IP literal as a
@@ -1777,6 +1894,42 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         load_1min_x100: load_i.and_then(|n| u32::try_from(n).ok()),
         listening_ports_json: ports,
         sing_box_log_bytes: log_b.and_then(|n| u64::try_from(n).ok()),
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_admin_alert(r: sqlx::sqlite::SqliteRow) -> Result<AdminAlert> {
+    let created_at_s: String = r.try_get("created_at")?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!(
+                "admin_alerts.created_at malformed: {created_at_s}: {e}"
+            ))
+        })?;
+    let acked_at_s: Option<String> = r.try_get("acked_at")?;
+    let acked_at = match acked_at_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| {
+                    SqliteInventoryError::Invalid(format!(
+                        "admin_alerts.acked_at malformed: {s}: {e}"
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let server_id_s: Option<String> = r.try_get("server_id")?;
+    Ok(AdminAlert {
+        id: r.try_get("id")?,
+        created_at,
+        kind: r.try_get("kind")?,
+        server_id: server_id_s.map(ServerId),
+        severity: r.try_get("severity")?,
+        summary: r.try_get("summary")?,
+        payload_json: r.try_get("payload_json")?,
+        acked_at,
     })
 }
 

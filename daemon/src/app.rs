@@ -129,6 +129,13 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         inv.clone(),
     ));
 
+    // Phase G — operator-facing alerts on top of node_health rows.
+    // Same cadence as the probe (10 min) — no point scanning faster
+    // than the probe writes. Each scan diffs the two newest rows per
+    // server and INSERTs an admin_alerts row + mirrored audit row
+    // on every state-change.
+    drop(crate::health_monitor::spawn_health_monitor(inv.clone()));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker
@@ -349,6 +356,29 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     target = "vpnctld::retention",
                     error = %e,
                     "node_health purge failed; will retry next tick"
+                ),
+            }
+            // Phase G: sweep ACKED admin_alerts on the same cadence.
+            // UNACKED alerts are intentionally never auto-purged —
+            // an alert that fires once and is forgotten must stay
+            // visible until the operator explicitly dismisses it.
+            // See migration 0011 doc-comment for the rationale.
+            match inv.purge_acked_alerts_older_than(RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "admin_alerts purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old acked admin_alerts rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "admin_alerts purge failed; will retry next tick"
                 ),
             }
         }
@@ -695,6 +725,11 @@ fn admin_router(state: AppState) -> Router {
         // the HTML timeline. Distinct path so browsers + curl can
         // hit it directly without a form submission.
         .route("/admin/audit.csv", get(admin::audit_csv))
+        // Phase G — operator-facing alerts feed + ack action. The
+        // dashboard tile links to /admin/alerts; ack POST is per-id.
+        .route("/admin/alerts", get(admin::alerts))
+        .route("/admin/alerts/", get(admin::alerts))
+        .route("/admin/alerts/{id}/ack", post(admin::alert_ack))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
         // Phase C-4 — manual snapshot trigger + per-file download.
