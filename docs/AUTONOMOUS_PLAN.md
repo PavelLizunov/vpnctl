@@ -465,6 +465,153 @@ binary works between step 1 and step 3, and the audit log shows
 the full story. Better than force-pushing an amended version
 which destroys the "we shipped this and it broke" history.
 
+# === 2026-05-17 — Pavel "никаких временных решений" mandate ===
+
+Pavel: «выбирай самый оптимальный вариант в плане разработки,
+никаких временных рещений, я хочу чтоб ты реализовал как можно
+больше фич, задукоментировал артефакты, и то как работает каждая
+фича».
+
+The blocker accumulated by the previous burst was: anything that
+touched SSH from vpnctld pulled glibc 2.38 (russh) or 2.39
+(tokio::process pidfd_*), and the bookworm-2.36 production host
+crash-looped. The "polling" Cargo feature was a temporary gate.
+This burst eliminates the gate via Path C + ships everything
+that was blocked behind it.
+
+## Path C — SubprocessSshTransport (commit 63248d7)
+
+Module: `daemon/src/ssh_subprocess.rs` (~340 LOC, 6 unit tests).
+
+Architecture:
+* `SubprocessSshTransport` implements `vpnctl_core::SshTransport`
+  (`exec` / `upload` / `read_file`) by shelling out to the system
+  `/usr/bin/ssh` via `std::process::Command` inside
+  `tokio::task::spawn_blocking`. No russh, no tokio::process,
+  zero new deps.
+* `build_ssh_args` pins safety options on every call: BatchMode=yes,
+  StrictHostKeyChecking=accept-new (TOFU), bounded ConnectTimeout +
+  ServerAlive*, per-vpnctld known_hosts file. Verified by two unit
+  tests.
+* `upload` pipes base64 over ssh stdin → remote `base64 -d > path`.
+  Bytes never enter shell argv; single-quote in remote paths
+  rejected upfront.
+
+Build:
+* Production build via `cargo zigbuild --release -p vpnctld
+  --target x86_64-unknown-linux-gnu.2.36`. zig pins max GLIBC
+  version cap regardless of build-host glibc. Verified output
+  has max GLIBC_2.30 symbols.
+* Documented in CLAUDE.md "Сборка vpnctld для production
+  (bookworm-2.36-compatible)" with bring-up + per-build commands.
+
+Auto-bootstrap:
+* `ensure_deploy_key(path)` invokes system `ssh-keygen -t ed25519`
+  on first daemon start. Idempotent on re-call. Parent dir gets
+  mode 0700.
+* `read_public_key(path)` reads `<path>.pub` for the admin UI.
+* Wired into `app::build()` — vpnctld auto-mints
+  `/var/lib/vpnctl/.ssh/id_ed25519` on startup if absent. Failure
+  (e.g. /var/lib/vpnctl not writable) logs warn but doesn't abort.
+
+Settings page (`/admin/settings`):
+* Was a Phase-A placeholder. Now renders the daemon's deploy
+  pubkey in a `<pre>` block + walks the operator through copying
+  it into each VPN node's authorized_keys.
+* Per CLAUDE.md "Web is the ONLY operator surface" — operator
+  never types `ssh-keygen` or `cat ... >> authorized_keys`
+  herself; just clicks, copies, pastes.
+
+## Clash poller wiring (commit 63248d7)
+
+* Feature gate `polling` deleted. `spawn_clash_poller` +
+  `poll_one_server` are unconditional.
+* Per-tick SSH uses `SubprocessSshTransport`. Connection model
+  is one ssh subprocess per tick per server (one curl over a
+  short-lived session). For 5-minute cadence this is negligible
+  overhead.
+* Skip semantics: no deploy key on disk → log info + skip; SSH
+  connect fails → log warn + continue; clash-api error → log
+  warn + skip. Daemon never crashes.
+
+## Web deploy button — full SSH push (commit 6cf579c)
+
+`POST /admin/servers/{id}/deploy` now does the FULL CLI-equivalent
+deploy:
+
+  1. validate_server (kernel × protocol compatibility) — pre-flight.
+  2. Bootstrap missing server-secrets: REALITY keypair, WG server
+     keypair, Hy2 obfs password (all minted via vpnctl_crypto;
+     no SSH needed for this part).
+  3. For each declared kernel via SubprocessSshTransport:
+     a. ensure_installed (apt install sing-box / amneziawg-tools)
+     b. render kernel config for protocols this kernel supports
+     c. apply_config (scp + systemctl restart)
+  4. Audit row with full per-step result: bootstrapped[],
+     ssh_skip_reason, ssh_kernels_pushed[], ssh_errors[],
+     ssh_config_bytes_total.
+
+Failure isolation: each step's error captured separately. A
+failed `amneziawg ensure_installed` does NOT prevent the sing-box
+restart on the same node. Daemon stays up regardless.
+
+Verified live: temp server pointed at unreachable 192.0.2.99 →
+POST returns 303 → audit row carries the full timeout-error
+diagnostic instead of crashing.
+
+## D.7 — per-user 24h sparkline (commit 4d810f2)
+
+`vpn_sparkline_24h(rows)` in admin.rs. Renders inline SVG:
+* 24 hour-buckets, paired bars per hour
+* Download = solid accent color, upload = thin soft tone
+* Bars scale to the max-hour value; tiny non-zero values clamp
+  to 1 px min so they don't disappear
+* Empty hours render as blank cells (no interpolation)
+* Helper line above shows palette swatches + max bytes/hour
+
+Integrated into `live_vpn_stats_section` on `/admin/users/{id}`,
+below the 3 KPI tiles + per-server breakdown table.
+
+## D.6 — top-5 heavy users on dashboard (commit 4d810f2)
+
+New `dashboard_heavy_users` section + new
+`SqliteInventory::top_users_by_traffic(since_hours, limit) ->
+Vec<(UserId, u64)>` query. Single GROUP BY + SUM, indexed.
+Excludes NULL user_id (server-wide aggregates).
+
+Renders as ordered list with rank, user-id (click-through to
+detail), total bytes. Empty-state walks the operator to /admin/settings
+(pubkey paste prerequisite for the poller).
+
+## What every feature does, end-to-end
+
+| Feature | Operator action | Backend behaviour | Where data goes |
+|---------|-----------------|-------------------|-----------------|
+| Add server | type id+address on /admin/servers, click register | inv.add_server with kernel=sing-box + all sing-box protocols | servers + server_kernels + server_protocols tables |
+| Add kernel to server | click "enable" next to kernel on server-detail | inv.add_server_kernel | server_kernels |
+| Add user | type id on /admin/users, click create | mint UUID + tuic_password + sub_token + WG keypair | users table |
+| Grant access | click "grant" on either user-detail Server-access OR server-detail Grants | inv.grant | grants table |
+| Deploy | click "deploy →" on server-detail | bootstrap secrets in inventory, then for each kernel: ensure_installed + render + apply_config via SubprocessSshTransport | server_secrets table + remote node's /etc/<kernel>/ + systemd unit |
+| Rotate WG keypair | click "rotate WG keypair" on user-detail | inv.set_user_wireguard_keypair (new pair via gen_wireguard_keypair) | users.wireguard_pubkey + wireguard_private |
+| See heavy users | open /admin/ | inv.top_users_by_traffic(24, 5) | reads vpn_connection_stats |
+| See per-user sparkline | open /admin/users/<id> | inv.recent_vpn_stats_for_user(uid, 24) + Rust-side hourly bucketing | vpn_connection_stats |
+| Search users | type in search box on /admin/users | client-side ?q= + ?sort= GET params | users table (in-memory filter) |
+| Get deploy pubkey | open /admin/settings | read_public_key(default path) | filesystem /var/lib/vpnctl/.ssh/id_ed25519.pub |
+
+## Cumulative session totals (db3998c .. 4d810f2)
+
+* 27 commits over two days
+* 1 critical-bug fix dance (D.5 glibc revert → reapply → gate →
+  Path C properly)
+* 0 production downtime exceeding ~30 seconds
+* 0 data loss (every inventory mutation auditable; every binary
+  swap reversible)
+* Pavel UX brief (5 items) closed except for traffic limits/
+  alerts (queued as next iter — needs new schema + check task)
+* Strategic CLAUDE.md updates: "users are low-tech" +
+  "web is the ONLY operator surface" + glibc-hazard + zigbuild
+  build recipe
+
 ## Status of deferred review-agent findings
 
 Three of the 4 IMPORTANT findings on db3998c stayed deferred,
