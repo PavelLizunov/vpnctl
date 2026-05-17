@@ -1224,6 +1224,41 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
+    /// Top-N users by total (upload + download) bytes over the
+    /// look-back window. Used by the dashboard's heavy-user heatmap
+    /// to surface abuse-candidate accounts at a glance. Returns
+    /// `(user_id, total_bytes)` sorted DESC; rows with NULL user_id
+    /// (server-wide aggregates) are excluded.
+    ///
+    /// Empty Vec when no per-user traffic has been recorded yet (or
+    /// when the poller hasn't run). Caller renders an empty-state.
+    pub async fn top_users_by_traffic(
+        &self,
+        since_hours: u32,
+        limit: u32,
+    ) -> Result<Vec<(UserId, u64)>> {
+        let rows = sqlx::query(
+            "SELECT user_id, SUM(upload_bytes + download_bytes) AS total
+             FROM vpn_connection_stats
+             WHERE user_id IS NOT NULL
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             GROUP BY user_id
+             ORDER BY total DESC
+             LIMIT ?2",
+        )
+        .bind(format!("-{since_hours} hours"))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let total: i64 = r.try_get("total")?;
+            out.push((UserId(uid), total.max(0) as u64));
+        }
+        Ok(out)
+    }
+
     /// Recent server-wide + per-user rows for one server in the
     /// look-back window. Newest-first. The server-detail UI uses
     /// the `user_id IS NULL` rows for the bandwidth sparkline and

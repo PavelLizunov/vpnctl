@@ -549,6 +549,20 @@ pub(crate) async fn dashboard(
         .await
         .map_err(internal_error)?;
 
+    // Pavel iter D.6 — heavy-user heatmap. Surface the top-5
+    // bandwidth-consuming users over the last 24h so the operator
+    // can spot abuse-candidate accounts without drilling into each
+    // user's page. Empty Vec → the section's empty-state already
+    // explains why ("no live stats yet").
+    let heavy_users = state
+        .inv
+        .top_users_by_traffic(24, 5)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
+            Vec::new()
+        });
+
     let body = html! {
         div.ed-art-eyebrow { "Dashboard" }
         h1.ed-art-h1 { "homelab " em { "at a glance" } }
@@ -559,9 +573,50 @@ pub(crate) async fn dashboard(
             " update on every reload."
         }
         (dashboard_metrics(&stats))
+        (dashboard_heavy_users(&heavy_users))
         (dashboard_audit(&audit))
     };
     Ok(shell("dashboard", &theme, &accent, tw, body))
+}
+
+/// Render the "heavy users · last 24h" section on the dashboard.
+/// Sorted DESC by total bytes (upload + download). Empty list →
+/// explanatory empty-state explaining the polling prerequisite.
+fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)]) -> Markup {
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Heavy users · last 24h" }
+        @if rows.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                "No per-user traffic recorded yet. The clash-api poller "
+                "ticks every 5 minutes — once the daemon's SSH deploy key "
+                "is in each node's "
+                span.ed-mono { "~/.ssh/authorized_keys" }
+                " (see "
+                a href="/admin/settings" style="color: var(--ink);" { "Settings" }
+                ") the section populates on the next tick."
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                "Top " (rows.len())
+                " accounts by total (upload + download) over the last 24 hours. "
+                "Click through to investigate; the user page has the full breakdown + sparkline."
+            }
+            ol style="list-style: decimal; padding-left: 24px; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
+                @for (uid, total) in rows {
+                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                          style="color: var(--ink); text-decoration: none; font-weight: 600;" {
+                            (uid.0)
+                        }
+                        span style="color: var(--mute); margin-left: 8px;" {
+                            "— " (humanize_bytes(*total))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Convert any error into a plaintext 500 response. The body is one line
@@ -1977,6 +2032,105 @@ fn ua_verdict(distinct_ips: u64, distinct_slash16: u64) -> UaVerdict {
 /// Empty-state copy explicitly tells the operator that polling isn't
 /// wired yet — chunk 4 lights up the background task. Without this
 /// nudge the "no data" message would look like a bug.
+/// Hourly upload+download sparkline over the last 24h. Renders as
+/// inline SVG — paired bars (download = solid accent, upload = thin
+/// ink) per hour-bucket, latest hour on the right. No JS, no
+/// external refs, fits in ~140 chars of computed paint.
+///
+/// Empty hours (no traffic seen) render as blank cells so the
+/// operator sees a true "quiet stretch" instead of a misleading
+/// linear interpolation.
+///
+/// Returns empty Markup if the input is empty — caller already
+/// has a "no live stats yet" empty-state above.
+fn vpn_sparkline_24h(rows: &[vpnctl_inventory::VpnStatsRow]) -> Markup {
+    use chrono::{DurationRound, TimeDelta, Utc};
+    if rows.is_empty() {
+        return html! {};
+    }
+    // Bucket by hour-of-day. Key = (day-of-month, hour) so two
+    // 17:00 buckets on different days don't collapse. Anchor the
+    // last bucket on the current hour so the rightmost bar is
+    // "right now."
+    let now = Utc::now().duration_trunc(TimeDelta::hours(1)).ok();
+    let Some(now_h) = now else {
+        return html! {};
+    };
+    // 24 cells: index 0 = 23h ago, index 23 = current hour.
+    let mut up_per_hour: [u64; 24] = [0; 24];
+    let mut dn_per_hour: [u64; 24] = [0; 24];
+    for r in rows {
+        let row_h = match r.ts.duration_trunc(TimeDelta::hours(1)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // Hours-ago, clamped to the 24-cell window.
+        let diff = now_h.signed_duration_since(row_h);
+        let hours_ago = diff.num_hours();
+        if !(0..24).contains(&hours_ago) {
+            continue;
+        }
+        let idx = (23 - hours_ago) as usize;
+        up_per_hour[idx] = up_per_hour[idx].saturating_add(r.upload_bytes);
+        dn_per_hour[idx] = dn_per_hour[idx].saturating_add(r.download_bytes);
+    }
+    // Max-axis = max of (up+dn) across all 24 cells; bars scale to
+    // 32 px max height. Zero-max corner case: render empty cells.
+    let max_total = up_per_hour
+        .iter()
+        .zip(dn_per_hour.iter())
+        .map(|(u, d)| u.saturating_add(*d))
+        .max()
+        .unwrap_or(0);
+    let cell_w: u32 = 14;
+    let cell_gap: u32 = 2;
+    let max_h: u32 = 32;
+    let width = 24 * (cell_w + cell_gap);
+    let height = max_h + 4;
+    let bar = |idx: usize, base: u64, color: &str, y_offset: f64| -> String {
+        if max_total == 0 || base == 0 {
+            return String::new();
+        }
+        // Bar height as fraction of max, min 1px so a tiny value
+        // is still visible.
+        let h_px = ((base as f64 / max_total as f64) * (max_h as f64)).max(1.0);
+        let x = (idx as u32) * (cell_w + cell_gap);
+        let y = max_h as f64 - h_px - y_offset;
+        format!(r#"<rect x="{x}" y="{y:.1}" width="{cell_w}" height="{h_px:.1}" fill="{color}"/>"#,)
+    };
+    let mut svg_inner = String::new();
+    for i in 0..24 {
+        let up = up_per_hour[i];
+        let dn = dn_per_hour[i];
+        // Stack download on top of upload — total bar fills the same
+        // proportion either way; download usually dominates, so it's
+        // the visually-driving slab.
+        let up_h = if max_total == 0 {
+            0.0
+        } else {
+            (up as f64 / max_total as f64) * (max_h as f64)
+        };
+        svg_inner.push_str(&bar(i, up, "var(--soft)", 0.0));
+        svg_inner.push_str(&bar(i, dn, "var(--acc)", up_h));
+    }
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" aria-label="24-hour upload+download sparkline" style="display: block;">{svg_inner}</svg>"#,
+    );
+    html! {
+        div style="margin: 16px 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline;" {
+                span { "24h sparkline · download " span style="display: inline-block; width: 8px; height: 8px; background: var(--acc); vertical-align: middle;" {} " · upload " span style="display: inline-block; width: 8px; height: 8px; background: var(--soft); vertical-align: middle;" {} }
+                span { "max " (humanize_bytes(max_total)) " / hour" }
+            }
+            (maud::PreEscaped(svg))
+            div style="font-family: var(--mono); font-size: 9px; color: var(--mute); display: flex; justify-content: space-between; margin-top: 4px;" {
+                span { "-23h" }
+                span { "now" }
+            }
+        }
+    }
+}
+
 async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
     let rows = match state.inv.recent_vpn_stats_for_user(uid, 24).await {
         Ok(v) => v,
@@ -2062,6 +2216,13 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
                 }
             }
         }
+        // Hourly sparkline of upload + download (Pavel iter D.7).
+        // 24-cell bar chart, height ∝ bytes/hour, sketched in inline
+        // SVG so no JS, no external assets, no fonts beyond what the
+        // editorial shell already loads. Bars use `var(--acc)` for
+        // download (the user's "fetch volume") and a faded ink for
+        // upload — both legible on every theme.
+        (vpn_sparkline_24h(&rows))
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
             "Aggregated from " (rows.len())
             @if rows.len() == 1 { " snapshot" } @else { " snapshots" }
