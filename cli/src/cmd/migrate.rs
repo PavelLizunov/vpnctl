@@ -68,6 +68,19 @@ pub(crate) struct MigrateFromBashArgs {
     /// re-shares would be broken).
     #[arg(long)]
     pub overwrite_existing: bool,
+
+    /// **L7 destructive-op gate.** With `--overwrite-existing`, the
+    /// `Server.address` / `ssh_port` / `ssh_user` of a pre-existing
+    /// server gets silently replaced if the bash IP differs. That
+    /// path is how a typo or stale `inventory/<IP>.env` can repoint
+    /// a production server id at the WRONG host — caught the hard
+    /// way 2026-05-17 when migration of 104 with `--server vps-is-01`
+    /// overwrote what was actually `vps-de-01`. This flag is REQUIRED
+    /// before any address change is applied; without it the migrate
+    /// command bails with an explicit diff so the operator can spot
+    /// the wrong-target case BEFORE inv.db gets mutated.
+    #[arg(long)]
+    pub i_really_mean_overwrite_address: bool,
 }
 
 pub(crate) async fn run_from_bash(
@@ -191,6 +204,30 @@ pub(crate) async fn run_from_bash(
              Re-run with --overwrite-existing to REPLACE them (drops vpnctl-only state \
              including WireGuard keypairs + hand-rotated sub_tokens), or rename the \
              conflicting bash users on the source server first."
+        );
+    }
+
+    // L7 destructive-op gate — `Server.address` / `ssh_port` / `ssh_user`
+    // change detection. ONLY relevant in overwrite mode (without
+    // --overwrite-existing the address is left alone in
+    // apply_migration_plan). The check still surfaces the diff so the
+    // operator knows the planned address vs what's in inv.db, but the
+    // bail-out only fires when overwrite is active AND the address
+    // would actually change AND --i-really-mean-overwrite-address is
+    // absent.
+    let mut total_address_changes = 0usize;
+    for plan in &plans {
+        total_address_changes += report_address_overwrite_warnings(&inv, plan).await?;
+    }
+    if args.overwrite_existing && total_address_changes > 0 && !args.i_really_mean_overwrite_address
+    {
+        anyhow::bail!(
+            "{total_address_changes} existing server(s) would have their address/ssh-port/\
+             ssh-user REPLACED. Production VPN nodes are addressed by `Server.id` in vpnctl; \
+             silently repointing an id at a different host is how the vps-is-01 ↔ 104 \
+             cross-overwrite happened (2026-05-17). Re-read the diff above carefully — if \
+             the new address is what you intended, re-run with \
+             --i-really-mean-overwrite-address. Otherwise re-check --server-id."
         );
     }
     println!("=== APPLYING to {} ===", db_path.display());
@@ -374,6 +411,59 @@ async fn report_overwrite_conflicts(
         println!("    Their vpnctl-only state (WG keypair, traffic limit) is RESET.");
     }
     Ok(conflicts.len())
+}
+
+/// L7 destructive-op gate. Reports each plan whose `Server.address`
+/// / `ssh_port` / `ssh_user` differs from what's already in inv.db
+/// for the same `Server.id`. Returns the count so the caller can
+/// require `--i-really-mean-overwrite-address` if non-zero.
+///
+/// Prints BEFORE the apply phase runs so the operator can spot a
+/// wrong-target case (vps-is-01 ↔ 104 redux) and Ctrl-C without
+/// touching inv.db. Always informational outside overwrite mode —
+/// the apply path itself doesn't touch the address without
+/// `--overwrite-existing`.
+async fn report_address_overwrite_warnings(
+    inv: &SqliteInventory,
+    plan: &MigrationPlan,
+) -> anyhow::Result<usize> {
+    let Some(existing) = inv.get_server(&plan.server.id).await? else {
+        return Ok(0);
+    };
+    let addr_change = existing.address != plan.server.address;
+    let port_change = existing.ssh_port != plan.server.ssh_port;
+    let user_change = existing.ssh_user != plan.server.ssh_user;
+    if !addr_change && !port_change && !user_change {
+        return Ok(0);
+    }
+    println!();
+    println!(
+        "  ! server '{id}' address / SSH coords would change:",
+        id = plan.server.id.0
+    );
+    if addr_change {
+        println!(
+            "      · address  {old}  →  {new}",
+            old = existing.address,
+            new = plan.server.address
+        );
+    }
+    if port_change {
+        println!(
+            "      · ssh_port {old}        →  {new}",
+            old = existing.ssh_port,
+            new = plan.server.ssh_port
+        );
+    }
+    if user_change {
+        println!(
+            "      · ssh_user {old}      →  {new}",
+            old = existing.ssh_user,
+            new = plan.server.ssh_user
+        );
+    }
+    println!("    Requires --i-really-mean-overwrite-address if --overwrite-existing is set.");
+    Ok(1)
 }
 
 /// `$HOME` resolution that doesn't pull the `dirs` crate (we avoid
