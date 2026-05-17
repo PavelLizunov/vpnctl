@@ -573,6 +573,12 @@ fn admin_router(state: AppState) -> Router {
         // empty-state until chunk 4 wires the periodic poller.
         .route("/admin/servers/{id}", get(admin::server_detail))
         .route("/admin/servers/{id}/", get(admin::server_detail))
+        // Phase v0.8 — TOFU pin via web. Manual paste OR auto-detect
+        // via ssh-keyscan (form's `mode` field).
+        .route(
+            "/admin/servers/{id}/set-fingerprint",
+            post(admin::server_set_fingerprint),
+        )
         // Quick-add — register an existing server in inventory with
         // default kernel + protocols. Distinct from the
         // Phase-E wizard at `/admin/servers/new` (which bootstraps a

@@ -60,6 +60,32 @@ pub(crate) enum ServerCmd {
         key: String,
         value: String,
     },
+
+    /// Set the trusted SSH host key fingerprint (TOFU pin).
+    ///
+    /// Format: `SHA256:<43-char-base64>` (no trailing `=`), as emitted
+    /// by `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -`.
+    ///
+    /// Previously the operator had to run raw SQL (caught 2026-05-16
+    /// during the vps-is-01 import — audit hash for the manual
+    /// `UPDATE servers SET trusted_host_fingerprint=...` had to be
+    /// constructed by hand). This subcommand wraps it +
+    /// audit-logs the change.
+    SetFingerprint {
+        /// Server id (e.g. `vps-is-01`).
+        id: String,
+        /// `SHA256:<base64>` fingerprint. Use `--from-keyscan` to
+        /// auto-fetch via `ssh-keyscan` instead of supplying this.
+        #[arg(value_name = "FINGERPRINT", conflicts_with = "from_keyscan")]
+        fingerprint: Option<String>,
+        /// Auto-detect via `ssh-keyscan -t ed25519 <address> |
+        /// ssh-keygen -lf -`. Requires `ssh-keyscan` + `ssh-keygen`
+        /// on PATH (standard on every modern Linux). Convenience for
+        /// the typical operator flow — equivalent to running the
+        /// two commands by hand and pasting the SHA256:… result.
+        #[arg(long, conflicts_with = "fingerprint")]
+        from_keyscan: bool,
+    },
 }
 
 pub(crate) async fn run(
@@ -245,5 +271,148 @@ pub(crate) async fn run(
             println!("set secret '{key}' on server '{server}'");
             Ok(())
         }
+
+        ServerCmd::SetFingerprint {
+            id,
+            fingerprint,
+            from_keyscan,
+        } => {
+            let sid = ServerId(id.clone());
+            let server = inv
+                .get_server(&sid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such server: {id}"))?;
+            let fp = match (fingerprint, from_keyscan) {
+                (Some(f), false) => f,
+                (None, true) => {
+                    println!(
+                        "→ ssh-keyscan -t ed25519 -p {} {} ...",
+                        server.ssh_port, server.address
+                    );
+                    fetch_fingerprint_via_keyscan(&server.address, server.ssh_port)?
+                }
+                _ => anyhow::bail!(
+                    "supply either <FINGERPRINT> or --from-keyscan (not both, not neither)"
+                ),
+            };
+            if !is_valid_sha256_fingerprint(&fp) {
+                anyhow::bail!(
+                    "fingerprint '{fp}' doesn't look like SHA256:<43-char-base64>; expected the \
+                     output of `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -` (the 2nd column)"
+                );
+            }
+            inv.update_trusted_fingerprint(&sid, &fp).await?;
+            inv.audit(
+                "cli",
+                "server.set_fingerprint",
+                Some(&id),
+                Some(&json!({
+                    "fingerprint": fp,
+                    "source": if from_keyscan { "ssh-keyscan" } else { "operator-provided" },
+                })),
+            )
+            .await?;
+            println!("set trusted_host_fingerprint on server '{id}' to {fp}");
+            Ok(())
+        }
+    }
+}
+
+/// Lightweight syntactic check for `SHA256:<base64>` — same shape
+/// validation as in the existing inventory `is_valid_fingerprint`
+/// (rejects shells of `SHA256:` with no body, MD5 prefixes, etc).
+/// We deliberately don't decode the base64 — at the CLI layer
+/// shape-equality is enough; the inventory layer applies the same
+/// check at INSERT/UPDATE time as the actual gate.
+fn is_valid_sha256_fingerprint(fp: &str) -> bool {
+    let Some(rest) = fp.strip_prefix("SHA256:") else {
+        return false;
+    };
+    // base64-url + base64 padding chars; allow a trailing `=` since
+    // some emitters keep it. SHA-256 = 32 bytes = 43 base64 chars.
+    if rest.is_empty() || rest.len() > 44 {
+        return false;
+    }
+    rest.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
+}
+
+/// Run `ssh-keyscan -t ed25519 -p <port> <host> | ssh-keygen -lf -`
+/// in two stages via `std::process::Command` and return the SHA256
+/// fingerprint (second whitespace-token of `ssh-keygen -lf -` output).
+/// Errors map to `anyhow::Error` with the failing stage in the message
+/// so the operator can re-run by hand if either tool is unhappy.
+fn fetch_fingerprint_via_keyscan(host: &str, port: u16) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    // Stage 1: ssh-keyscan emits the public key on stdout.
+    let scan = Command::new("ssh-keyscan")
+        .args(["-t", "ed25519", "-p", &port.to_string(), host])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
+    if !scan.status.success() {
+        anyhow::bail!(
+            "ssh-keyscan exited {:?}; is the host reachable on port {port}?",
+            scan.status.code()
+        );
+    }
+    if scan.stdout.is_empty() {
+        anyhow::bail!("ssh-keyscan returned empty output (host unreachable or no ed25519 key?)");
+    }
+    // Stage 2: pipe into ssh-keygen -lf -.
+    let mut child = Command::new("ssh-keygen")
+        .args(["-lf", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(&scan.stdout)?;
+    }
+    let keygen = child
+        .wait_with_output()
+        .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;
+    if !keygen.status.success() {
+        anyhow::bail!("ssh-keygen -lf - exited {:?}", keygen.status.code());
+    }
+    // Output: `256 SHA256:+cuHezsj... root@host (ED25519)` — second
+    // whitespace-token is the fingerprint.
+    let text = String::from_utf8_lossy(&keygen.stdout);
+    text.split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("ssh-keygen output had no fingerprint token: {text}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_canonical_sha256_fingerprint() {
+        assert!(is_valid_sha256_fingerprint(
+            "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
+        ));
+    }
+
+    #[test]
+    fn rejects_md5_or_missing_prefix() {
+        assert!(!is_valid_sha256_fingerprint(
+            "MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+        ));
+        assert!(!is_valid_sha256_fingerprint(
+            "+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
+        ));
+        assert!(!is_valid_sha256_fingerprint(""));
+        assert!(!is_valid_sha256_fingerprint("SHA256:"));
+    }
+
+    #[test]
+    fn rejects_oversized_body() {
+        let too_long = format!("SHA256:{}", "A".repeat(50));
+        assert!(!is_valid_sha256_fingerprint(&too_long));
     }
 }

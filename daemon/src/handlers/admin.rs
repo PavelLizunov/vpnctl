@@ -5637,6 +5637,14 @@ pub(crate) async fn server_detail(
         // without operator-initiated deploy).
         (server_detail_protocols_section(&server, &state.registry))
 
+        // Trusted host fingerprint — TOFU pin for the daemon's SSH
+        // probe + clash-api poller + deploy. The CLAUDE.md note from
+        // vps-is-01 import (2026-05-16): «CLI command for this missing
+        // — TODO for vpnctl: `vpnctl server set-fingerprint <id>`».
+        // Web equivalent lives here so the operator never has to drop
+        // to a shell + raw SQL just to pin a host key.
+        (server_detail_fingerprint_section(&server))
+
         // Grants — centralised per-server view (Pavel iter B).
         // Lists EVERY user with a per-row grant/revoke form, so the
         // operator doesn't have to bounce through each user's page
@@ -5867,13 +5875,241 @@ fn server_detail_kernels_section(
 
 /// Enabled-protocols editor — one row per protocol registered in the
 /// registry, each with a `[on|off]` form that toggles the (server,
-/// protocol) row in the inventory. Compatibility against the
-/// server's kernel is annotated inline (greyed-out + `incompatible`
-/// badge) so the operator sees WHY a checkbox is non-functional.
+/// Trusted host SSH fingerprint section — shows current pinned
+/// fingerprint (if any) plus a form for the operator to set / replace
+/// it. Two paths:
+///   * paste a `SHA256:…` literal (when the operator already has it),
+///   * "Auto-detect" button → POST that runs `ssh-keyscan +
+///     ssh-keygen -lf -` server-side, pins the resulting fingerprint.
 ///
-/// Changes are inventory-only — they DO NOT push to the live sing-box
-/// instance. The operator runs `vpnctl deploy <server>` from the CLI
-/// (or the wizard, when Phase E ships) to apply.
+/// Both go to the same `POST /admin/servers/{id}/set-fingerprint`
+/// route; the form's hidden `mode=keyscan` differentiates.
+fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
+    let sid_enc = path_segment_encode(&server.id.0);
+    let current = server.trusted_host_fingerprint.clone();
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "Trusted host fingerprint" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "Pinned SHA-256 of the node's SSH ed25519 host key. vpnctld + "
+            "the deploy / probe / clash-poller pipelines all refuse to "
+            "talk to a host whose live key doesn't match this value — "
+            "TOFU pin, set once. Update only if the node was legitimately "
+            "rebuilt (and re-confirm via console)."
+        }
+        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
+            @match &current {
+                Some(fp) => { "current: " (fp) }
+                None => {
+                    em style="color: var(--mute);" {
+                        "(no fingerprint pinned — first SSH connection will TOFU-accept whatever the host presents)"
+                    }
+                }
+            }
+        }
+        // Two-mode form. Auto-detect is the primary recommended path —
+        // operator clicks one button + daemon does the keyscan. Manual
+        // paste is the escape hatch if the operator has the fingerprint
+        // from an out-of-band channel (hoster's console screenshot, etc).
+        div style="display: flex; flex-direction: column; gap: 10px;" {
+            form method="post"
+                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint"))
+                 style="display: flex; gap: 8px; align-items: center;" {
+                input type="hidden" name="mode" value="keyscan";
+                button type="submit"
+                       title="Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint."
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "auto-detect via ssh-keyscan →"
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                    "(daemon will SSH-keyscan " span.ed-mono { (server.address) ":" (server.ssh_port) } " and pin the SHA-256)"
+                }
+            }
+            form method="post"
+                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint"))
+                 style="display: flex; gap: 8px; align-items: center;" {
+                input type="hidden" name="mode" value="manual";
+                input type="text" name="fingerprint" placeholder="SHA256:..."
+                      style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);"
+                      pattern="SHA256:[A-Za-z0-9+/=_-]{1,44}"
+                      title="SHA256:<43-char-base64>";
+                button type="submit"
+                       style="padding: 4px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "pin manually"
+                }
+            }
+        }
+    }
+}
+
+/// `POST /admin/servers/{id}/set-fingerprint` — operator pins the
+/// trusted SHA-256. Two modes (selected by hidden form field `mode`):
+///   * `keyscan` — daemon shells out to `ssh-keyscan -t ed25519 -p
+///     <port> <addr> | ssh-keygen -lf -`, takes the 2nd whitespace
+///     token. Convenience for the typical operator flow.
+///   * `manual` — operator pasted a fingerprint string into the form.
+///     Same shape validation as the CLI side.
+///
+/// Both audit-log `server.set_fingerprint` with the pinned value +
+/// source, then redirect to `/admin/servers/{id}` so the section
+/// re-renders with the new value visible.
+pub(crate) async fn server_set_fingerprint(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    // Same `&`-split + decode_form_value pattern as user_create /
+    // server_quick_add — doesn't pull a form-extractor feature.
+    let mode_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("mode="))
+        .unwrap_or("");
+    let mode = decode_form_value(mode_raw);
+    let fingerprint_raw = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("fingerprint="))
+        .unwrap_or("");
+    let fingerprint_in = decode_form_value(fingerprint_raw);
+
+    let (fp, source) = match mode.as_str() {
+        "keyscan" => match keyscan_fingerprint_blocking(&server.address, server.ssh_port) {
+            Ok(fp) => (fp, "ssh-keyscan"),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    error_text(&format!("ssh-keyscan failed: {e}")),
+                )
+                    .into_response();
+            }
+        },
+        "manual" => {
+            if fingerprint_in.trim().is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    error_text("manual mode requires a non-empty 'fingerprint' field"),
+                )
+                    .into_response();
+            }
+            (fingerprint_in.trim().to_string(), "operator-provided")
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                error_text("missing or invalid 'mode' (expected 'keyscan' or 'manual')"),
+            )
+                .into_response();
+        }
+    };
+
+    if !is_valid_sha256_fingerprint(&fp) {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "fingerprint '{fp}' is not in SHA256:<base64> shape"
+            )),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = state.inv.update_trusted_fingerprint(&sid, &fp).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.set_fingerprint",
+            Some(&server_id),
+            Some(&serde_json::json!({"fingerprint": fp, "source": source})),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::server_set_fingerprint",
+            server = %server_id,
+            error = %e,
+            "set_fingerprint succeeded but audit row failed; timeline will be missing this entry"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// Same shape validator as `vpnctl server set-fingerprint` (CLI).
+/// `SHA256:` prefix + base64 body, 1..=44 chars, alpha-num + `+/-_=`.
+fn is_valid_sha256_fingerprint(fp: &str) -> bool {
+    let Some(rest) = fp.strip_prefix("SHA256:") else {
+        return false;
+    };
+    if rest.is_empty() || rest.len() > 44 {
+        return false;
+    }
+    rest.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
+}
+
+/// Spawn `ssh-keyscan + ssh-keygen -lf -` on the daemon host. Blocking
+/// I/O wrapped in `tokio::task::spawn_blocking` so the axum runtime
+/// stays responsive. Returns the SHA256:<base64> fingerprint or an
+/// error suitable for surfacing to the operator.
+fn keyscan_fingerprint_blocking(host: &str, port: u16) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    // ssh-keyscan can be slow on unreachable hosts; daemon thread is
+    // OK to block here because the calling context is already in
+    // axum's request handler which can absorb a few seconds. If this
+    // grows past ~10s we'd want to wrap in tokio::time::timeout.
+    let scan = Command::new("ssh-keyscan")
+        .args(["-t", "ed25519", "-p", &port.to_string(), host])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
+    if !scan.status.success() || scan.stdout.is_empty() {
+        anyhow::bail!(
+            "ssh-keyscan exited {:?} or returned empty (host unreachable or no ed25519 key?)",
+            scan.status.code()
+        );
+    }
+    let mut child = Command::new("ssh-keygen")
+        .args(["-lf", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(&scan.stdout)?;
+    }
+    let keygen = child
+        .wait_with_output()
+        .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;
+    if !keygen.status.success() {
+        anyhow::bail!("ssh-keygen -lf - exited {:?}", keygen.status.code());
+    }
+    let text = String::from_utf8_lossy(&keygen.stdout);
+    text.split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("ssh-keygen output had no fingerprint token: {text}"))
+}
+
 fn server_detail_protocols_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
