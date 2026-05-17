@@ -2615,10 +2615,81 @@ pub(crate) async fn server_deploy(
         bootstrapped.push("hysteria2 salamander obfs password");
     }
 
-    // Audit — record EVERY deploy click, even when nothing changed.
-    // The operator's intent ("I want this deployed") is itself
-    // operationally interesting; an empty bootstrap list = "already
-    // up to date" is a useful signal.
+    // SSH push to the node — Path C via SubprocessSshTransport.
+    // For each declared kernel: ensure_installed → render config
+    // (only protocols this kernel can run) → apply_config.
+    //
+    // Per-kernel + per-step errors are isolated to the offending
+    // kernel: a failed amneziawg install does NOT prevent the
+    // sing-box restart. Aggregate result is captured in the audit
+    // payload (`ssh_kernels_pushed`, `ssh_errors`).
+    use crate::ssh_subprocess::SubprocessSshTransport;
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let mut ssh_kernels_pushed: Vec<String> = Vec::new();
+    let mut ssh_errors: Vec<String> = Vec::new();
+    let mut total_config_bytes: usize = 0;
+    let ssh_skip_reason: Option<&'static str> = if !key_path.exists() {
+        Some("deploy key absent; see /admin/settings")
+    } else if server.kernels.is_empty() {
+        Some("server has no kernels declared")
+    } else {
+        None
+    };
+    if ssh_skip_reason.is_none() {
+        let ssh =
+            SubprocessSshTransport::new(server.address.clone(), server.ssh_user.clone(), key_path)
+                .port(server.ssh_port);
+
+        // Pre-load users + render context once; reused for every
+        // kernel's render call.
+        let users = match state.inv.users_for_server(&sid).await {
+            Ok(u) => u,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
+        let ctx = vpnctl_core::RenderCtx::new(&server, &secrets);
+
+        for kid in &server.kernels {
+            let Some(kernel) = state.registry.kernel(kid) else {
+                ssh_errors.push(format!("{}: kernel not registered", kid.0));
+                continue;
+            };
+            if let Err(e) = kernel.ensure_installed(&ssh).await {
+                ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
+                continue;
+            }
+            let supported = kernel.supported_protocols();
+            let protocols: Vec<&dyn vpnctl_core::Protocol> = server
+                .enabled_protocols
+                .iter()
+                .filter(|p| supported.contains(p))
+                .filter_map(|p| state.registry.protocol(p))
+                .collect();
+            if protocols.is_empty() {
+                // Kernel installed but no protocols for it — still
+                // a valid step (e.g. preparing a node for future
+                // protocols). Skip render+apply, report neutral.
+                ssh_kernels_pushed.push(format!("{} (installed, no protocols)", kid.0));
+                continue;
+            }
+            let config = match kernel.render_config(&ctx, &users, &protocols) {
+                Ok(c) => c,
+                Err(e) => {
+                    ssh_errors.push(format!("{}: render failed: {e}", kid.0));
+                    continue;
+                }
+            };
+            total_config_bytes += config.len();
+            if let Err(e) = kernel.apply_config(&ssh, &config).await {
+                ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
+                continue;
+            }
+            ssh_kernels_pushed.push(kid.0.clone());
+        }
+    }
+
+    // Audit — record EVERY deploy click. Captures both the
+    // inventory-side bootstrap result AND the SSH-side push result
+    // so the operator (and future debugging) sees the full picture.
     if let Err(e) = state
         .inv
         .audit(
@@ -2629,6 +2700,10 @@ pub(crate) async fn server_deploy(
                 "bootstrapped": bootstrapped,
                 "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
                 "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+                "ssh_skip_reason": ssh_skip_reason,
+                "ssh_kernels_pushed": ssh_kernels_pushed,
+                "ssh_errors": ssh_errors,
+                "ssh_config_bytes_total": total_config_bytes,
             })),
         )
         .await
