@@ -33,11 +33,7 @@
 use std::collections::HashMap;
 
 use vpnctl_core::{ServerId, UserId};
-use vpnctl_inventory::VpnStatsDelta;
-// Only used by the poller wiring (gated behind `polling` feature);
-// importing unconditionally would warn-as-error under `-D warnings`.
-#[cfg(feature = "polling")]
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{SqliteInventory, VpnStatsDelta};
 
 use crate::clash_api::Snapshot;
 
@@ -218,11 +214,11 @@ fn delta(prior: u64, new: u64) -> u64 {
 ///   grows past ~50 servers this needs parallelisation, but at
 ///   that scale we'd have many other things to revisit.
 ///
-/// **Gated behind the `polling` Cargo feature.** russh pulls
-/// glibc 2.38; the bookworm production binary stays glibc 2.30 by
-/// not enabling the feature. Enable on a host with glibc ≥ 2.38 OR
-/// when cross-compiling to musl static.
-#[cfg(feature = "polling")]
+/// **No feature gate required** — uses
+/// `crate::ssh_subprocess::SubprocessSshTransport` which shells out
+/// to the system `/usr/bin/ssh` binary (bookworm-2.36-native, no
+/// glibc-2.38 syscalls). Previously gated behind `polling`; the
+/// gate was removed when Path C (subprocess wrapper) landed.
 pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     use tokio::time::{MissedTickBehavior, interval};
@@ -287,7 +283,6 @@ pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
 
 /// One-server tick. Pure side-effect, never panics — every error
 /// is logged at warn-or-info and swallowed.
-#[cfg(feature = "polling")]
 async fn poll_one_server(
     inv: &SqliteInventory,
     engine: &mut DiffEngine,
@@ -321,28 +316,18 @@ async fn poll_one_server(
         return;
     }
 
-    use vpnctl_ssh::RusshTransportBuilder;
-    let mut builder = RusshTransportBuilder::new(
+    // Subprocess SSH (Path C) — wraps the system `/usr/bin/ssh`,
+    // no russh, no glibc-2.38 dep. Built per-server per-tick (cheap;
+    // each tick is one process spawn for one `curl` against
+    // clash-api). Future optimisation: ssh ControlMaster session
+    // multiplexing if poll cadence drops below ~30 s. For 5-min
+    // ticks this is overkill.
+    let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         std::path::PathBuf::from(&key_path),
     )
     .port(server.ssh_port);
-    if let Some(fp) = server.trusted_host_fingerprint.as_deref() {
-        builder = builder.trusted_fingerprint(fp);
-    }
-    let ssh = match builder.connect().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                target = "vpnctld::poller",
-                server = %server.id.0,
-                error = %e,
-                "ssh connect failed"
-            );
-            return;
-        }
-    };
 
     use crate::clash_api::{ClashClient, SshClashClient};
     let client = SshClashClient::new(&ssh);

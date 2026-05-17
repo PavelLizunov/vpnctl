@@ -58,9 +58,37 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// Default deploy-key path for vpnctld. Matches the path the
+/// `/admin/settings` page surfaces + the path the clash-api poller
+/// reads via `VPNCTLD_DEPLOY_KEY` env (which still wins if set).
+pub const DEFAULT_DEPLOY_KEY_PATH: &str = "/var/lib/vpnctl/.ssh/id_ed25519";
+
 pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     let inv = SqliteInventory::open(&config.db_path).await?;
     let registry = Arc::new(build_registry()?);
+
+    // Auto-bootstrap vpnctld's deploy SSH key on first start.
+    // Generates an ed25519 keypair at `/var/lib/vpnctl/.ssh/id_ed25519`
+    // via the system `ssh-keygen` binary (no Rust crypto deps).
+    // Idempotent — re-call when the key already exists is a no-op.
+    // The public half is surfaced in the admin Settings page so the
+    // operator can paste it into each VPN node's authorized_keys.
+    // After that, every web-deploy / poller call is fully self-service.
+    let deploy_key_path = std::path::PathBuf::from(DEFAULT_DEPLOY_KEY_PATH);
+    if let Err(e) = crate::ssh_subprocess::ensure_deploy_key(&deploy_key_path).await {
+        tracing::warn!(
+            target = "vpnctld::startup",
+            path = %deploy_key_path.display(),
+            error = %e,
+            "deploy key auto-generation failed — web deploy + poller will fall back to logging warnings until resolved. Most common cause: vpnctld user lacks write access to /var/lib/vpnctl/.ssh/"
+        );
+    } else {
+        tracing::info!(
+            target = "vpnctld::startup",
+            path = %deploy_key_path.display(),
+            "deploy key ready (auto-generated if absent)"
+        );
+    }
 
     // Phase Track-1.1 retention scheduler: hourly purge of access-log
     // rows older than 30 days. The user-detail page promises this
@@ -77,14 +105,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     drop(spawn_retention_purger(inv.clone()));
 
     // Phase Track-3 chunk 4 — periodic clash-api poller.
-    // GATED BEHIND `polling` Cargo FEATURE — linking russh pulls
-    // glibc 2.38 syscalls and bookworm ships 2.36. Production
-    // binary for 192.168.0.236 is built WITHOUT `--features polling`;
-    // enable it on a host with glibc ≥ 2.38 OR when cross-compiling
-    // to musl static. Until enabled, the daemon never spawns the
-    // poller — the user-detail empty-state remains accurate
-    // ("queued for chunk 4 — needs SSH key + glibc upgrade").
-    #[cfg(feature = "polling")]
+    // Uses SubprocessSshTransport (Path C), so no Cargo-feature
+    // gate + no glibc 2.38 dep. Spawned unconditionally; the poller
+    // itself logs-and-skips when the SSH key isn't on the homelab
+    // host yet OR when a node hasn't authorised it.
     drop(crate::clash_poller::spawn_clash_poller(inv.clone()));
 
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3

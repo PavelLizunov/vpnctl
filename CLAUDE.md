@@ -622,12 +622,52 @@ ssh user@192.168.0.236 '
   `russh` / любого async-runtime / native-crypto dep в `[dependencies]`
   (а не `[dev-dependencies]`) пропулит glibc 2.38 syscalls и daemon
   на bookworm моментально упадёт в crash-loop с "GLIBC_2.38 not found".
+  Тoже самое с `tokio::process` (`pidfd_spawnp` это 2.39).
   Caught 2026-05-16: D.5 poller wire shipped, vpnctld crash-looped 30+
-  раз за минуту, revert + feature-gate fix (`polling` flag, default-off).
-  **Правило:** любой такой dep — за Cargo feature flag (default-off),
-  ИЛИ `glibc` upgrade хоста, ИЛИ musl-static build. Verify max GLIBC
-  symbol **до push** через `objdump -T target/release/<binary> | grep
-  GLIBC_ | sort -u | tail -3` — должно быть ≤ 2.36.
+  раз за минуту.
+  **Решение (Path C):** `crate::ssh_subprocess::SubprocessSshTransport`
+  оборачивает системный `/usr/bin/ssh` через
+  `std::process::Command` + `tokio::task::spawn_blocking`. Никакого
+  russh, никакого `tokio::process`. См. doc-comment в
+  `daemon/src/ssh_subprocess.rs`.
+  **Build:** `cargo zigbuild --release -p vpnctld --target
+  x86_64-unknown-linux-gnu.2.36`. zigbuild ставит cargo install +
+  zig binary download (см. ниже). Verify max GLIBC symbol **до
+  push** через `objdump -T target/x86_64-unknown-linux-gnu/release/vpnctld
+  | grep GLIBC_ | sort -u | tail -3` — должно быть ≤ 2.36.
+
+### Сборка vpnctld для production (bookworm-2.36-compatible)
+
+Контейнер claude-chat имеет glibc 2.41, host 192.168.0.236 имеет
+glibc 2.36. Прямой `cargo build --release` затащит `pidfd_*` (2.39),
+crash на target. Используем `cargo-zigbuild` который таргетирует
+старую glibc через zig as cross-linker.
+
+Bring-up (один раз на свежий контейнер):
+```bash
+export PATH=/home/appuser/.cargo/bin:$PATH
+cargo install --locked cargo-zigbuild      # ~30s
+mkdir -p /tmp/zig && cd /tmp/zig
+curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+tar -xf zig.tar.xz
+export PATH=/tmp/zig/zig-linux-x86_64-0.13.0:$PATH   # add to PATH for zigbuild
+```
+
+Сборка:
+```bash
+cd ~/vpn-control/vpnctl
+cargo zigbuild --release -p vpnctld --target x86_64-unknown-linux-gnu.2.36
+# Output: target/x86_64-unknown-linux-gnu/release/vpnctld
+objdump -T target/x86_64-unknown-linux-gnu/release/vpnctld | grep GLIBC_ | sort -u | tail -3
+# Expected: all ≤ GLIBC_2.30 (some weak symbols are OK at .25/.28/.29/.30)
+scp target/x86_64-unknown-linux-gnu/release/vpnctld user@192.168.0.236:/tmp/vpnctld
+ssh user@192.168.0.236 'sudo install -o root -g root -m 0755 /tmp/vpnctld /opt/vpnctl/vpnctld \
+  && rm /tmp/vpnctld && sudo systemctl restart vpnctld'
+```
+
+Все примеры в CLAUDE.md / scripts которые ссылаются на
+`cargo build --release` устарели — заменяй на `cargo zigbuild
+--release --target x86_64-unknown-linux-gnu.2.36`.
 - **`MemoryDenyWriteExecute=true`** в systemd unit — может сломать future
   JIT (если когда-то добавим V8/wasmtime). Сейчас OK.
 - **Креды в EnvironmentFile**, не в `Environment=` — `systemctl cat`

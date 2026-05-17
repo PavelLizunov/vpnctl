@@ -14,6 +14,10 @@ pub mod config;
 pub mod handlers;
 pub mod node_probe;
 pub mod rate_limit;
+// Subprocess-based SSH transport — wraps system `ssh` binary instead
+// of linking russh. Lets vpnctld talk to nodes without pulling
+// glibc 2.38; see ssh_subprocess.rs for the rationale.
+pub mod ssh_subprocess;
 pub mod wizard;
 
 pub use app::{

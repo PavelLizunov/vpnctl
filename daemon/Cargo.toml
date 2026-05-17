@@ -25,17 +25,21 @@ vpnctl-crypto = { path = "../crates/crypto" }
 # Track-3 chunk 1: clash-api client uses the SshTransport trait.
 async-trait = "0.1"
 thiserror = { workspace = true }
-# Track-3 chunk 4 (Pavel iter D): clash-api poller opens real
-# SSH connections to each VPN node every N minutes.
-# OPTIONAL dependency — linking russh pulls glibc 2.38 syscalls
-# (statx via newer code paths) and the homelab host runs bookworm
-# (glibc 2.36). Building with `--features polling` produces a binary
-# that needs a newer host glibc (or a musl static build).
-# Default-off keeps `cargo build --release -p vpnctld` producing the
-# bookworm-compatible binary the production daemon uses today.
-vpnctl-ssh = { path = "../crates/ssh", optional = true }
+## NOTE: vpnctl-ssh (russh) is intentionally NOT a regular dep.
+## It pulls glibc 2.38 syscalls; bookworm production host runs
+## glibc 2.36. The poller + web-deploy reach VPN nodes via
+## `crate::ssh_subprocess::SubprocessSshTransport` instead —
+## wraps the system /usr/bin/ssh binary (no russh, no glibc bump).
+## See `daemon/src/ssh_subprocess.rs` for the full rationale.
+## vpnctl-ssh stays in [dev-dependencies] for the MockTransport
+## used by unit tests (mocks don't pull russh).
 
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
+# NOTE: NO `process` feature here — `tokio::process::Command` pulls
+# `pidfd_spawnp` (glibc 2.39) as a STRONG symbol. The subprocess SSH
+# transport uses `std::process::Command` via `tokio::task::spawn_blocking`
+# instead; gives us per-call latency that's invisible at our cadence
+# (5-min polls, on-demand deploys) without the glibc bump.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = { version = "0.5", default-features = false }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout", "fs", "set-header"] }
@@ -54,18 +58,12 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # CSV export filename stamp.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-[features]
-# Default = no polling — keeps the production binary at glibc max
-# 2.30 (bookworm-compatible). Enable `polling` when the daemon will
-# run on a host with glibc ≥ 2.38, OR when cross-compiling to
-# x86_64-unknown-linux-musl for the static binary path.
-# When the homelab glibc upgrades, flip default + delete this flag.
-default = []
-polling = ["dep:vpnctl-ssh"]
-
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Used both in admin_smoke tests AND in ssh_subprocess unit tests
+# (tempdir for deploy-key generation). The crate is already a dev-dep
+# elsewhere in the workspace; keeping it here keeps the import local.
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Track-2 chunk 2 e2e test asserts ban TTL within ~24h tolerance.
