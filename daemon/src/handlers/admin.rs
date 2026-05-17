@@ -1413,6 +1413,54 @@ fn qr_svg(url: &str) -> Markup {
 /// the CLI's `vpnctl sub` and the daemon's `/sub/<token>` handler. Each
 /// entry has the protocol id and the rendered URI; failures are logged
 /// and skipped, never panic.
+/// Sibling of `collect_share_links` — one `vpn://` deep link per
+/// granted server that declares the `wireguard` protocol. Used by the
+/// user-detail page's Flow C card (AmneziaVPN).
+///
+/// Errors from `amnezia_share_link` (missing user pubkey, missing
+/// server private key, malformed pubkey) are LOGGED-AND-SKIPPED — the
+/// page still renders. The empty-state classifier in the Flow C card
+/// distinguishes "no grants" from "no WG-capable server" from "render
+/// failed" using the same `wg_capable_granted` tally as Flow B.
+fn collect_amnezia_links(
+    user: &vpnctl_core::User,
+    servers: &[vpnctl_core::Server],
+    secrets_per_server: &std::collections::HashMap<
+        vpnctl_core::ServerId,
+        std::collections::HashMap<String, String>,
+    >,
+    peers_per_server: &std::collections::HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
+) -> Vec<(vpnctl_core::ServerId, String)> {
+    let mut out = Vec::new();
+    for server in servers {
+        if !server.enabled_protocols.iter().any(|p| p.0 == "wireguard") {
+            continue;
+        }
+        let Some(secrets) = secrets_per_server.get(&server.id) else {
+            tracing::warn!(target = "vpnctld::admin", server = %server.id, "secrets missing for granted WG server (amnezia link)");
+            continue;
+        };
+        let peers: &[vpnctl_core::User] = peers_per_server
+            .get(&server.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        match vpnctl_protocols::amnezia_share_link(&ctx, user) {
+            Ok(link) => out.push((server.id.clone(), link)),
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    server = %server.id,
+                    user = %user.id,
+                    error = %e,
+                    "amnezia_share_link failed, skipping Flow C entry"
+                );
+            }
+        }
+    }
+    out
+}
+
 fn collect_share_links(
     state: &AppState,
     user: &vpnctl_core::User,
@@ -1421,6 +1469,7 @@ fn collect_share_links(
         vpnctl_core::ServerId,
         std::collections::HashMap<String, String>,
     >,
+    peers_per_server: &std::collections::HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
 ) -> Vec<(vpnctl_core::ServerId, vpnctl_core::ProtocolId, String)> {
     let mut out = Vec::new();
     for server in servers {
@@ -1428,7 +1477,11 @@ fn collect_share_links(
             tracing::warn!(target = "vpnctld::admin", server = %server.id, "secrets missing for granted server");
             continue;
         };
-        let ctx = vpnctl_core::RenderCtx::new(server, secrets);
+        let peers: &[vpnctl_core::User] = peers_per_server
+            .get(&server.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
         for pid in &server.enabled_protocols {
             let Some(proto) = state.registry.protocol(pid) else {
                 tracing::warn!(target = "vpnctld::admin", protocol = %pid, "protocol not registered");
@@ -1485,8 +1538,13 @@ pub(crate) async fn user_detail(
     let granted_ids: HashSet<vpnctl_core::ServerId> =
         servers.iter().map(|s| s.id.clone()).collect();
 
-    // Pre-fetch secrets for every granted server in parallel.
+    // Pre-fetch secrets + the granted-users list for every granted
+    // server. The users list goes into the RenderCtx so WireGuard's
+    // per-user `/32` octet matches the server's `[Peer]` block 1:1
+    // (review-agent 2026-05-17 caught a hard-coded `10.66.0.2` that
+    // collided across multiple WG users on the same server).
     let mut secrets_per_server = std::collections::HashMap::new();
+    let mut peers_per_server = std::collections::HashMap::new();
     for s in &servers {
         let secrets = state
             .inv
@@ -1494,9 +1552,28 @@ pub(crate) async fn user_detail(
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?;
         secrets_per_server.insert(s.id.clone(), secrets);
+        let peers = state
+            .inv
+            .users_for_server(&s.id)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+        peers_per_server.insert(s.id.clone(), peers);
     }
 
-    let share_links = collect_share_links(&state, &user, &servers, &secrets_per_server);
+    let share_links = collect_share_links(
+        &state,
+        &user,
+        &servers,
+        &secrets_per_server,
+        &peers_per_server,
+    );
+    // Flow C — AmneziaVPN-native deep-links (vpn://...). Built
+    // separately because the format isn't `Protocol::share_link()`
+    // semantics — it's an AmneziaVPN-app-specific wrapper around the
+    // same WG secret material. `collect_amnezia_links` returns one
+    // (server_id, vpn://...) per WG-enabled granted server.
+    let amnezia_links =
+        collect_amnezia_links(&user, &servers, &secrets_per_server, &peers_per_server);
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
 
@@ -1648,17 +1725,25 @@ pub(crate) async fn user_detail(
                         }
                     }
 
-                    // Two-column distribution panel — one column per
-                    // client persona. Same secret material rendered
-                    // two ways: sub_url (sing-box JSON) vs wireguard://
-                    // URI (WG-native conf). BOTH flows use the same
-                    // `share_link_card` shape — QR on the left, copy
-                    // textarea + footnote on the right — so the operator
-                    // doesn't have to switch mental models between
-                    // columns. The "above" reference is gone; each
-                    // card stands alone with its own QR + selectable
-                    // link.
-                    div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
+                    // Three-column distribution panel — one column per
+                    // client app. Same secret material, three wire
+                    // formats:
+                    //   * Flow A — sing-box JSON via /sub/<token> URL
+                    //   * Flow B — wireguard:// (official WG app, Hiddify)
+                    //   * Flow C — vpn://    (AmneziaVPN)
+                    //
+                    // Plus a .conf-file download per WG-capable server
+                    // as a universal fallback (drag-drop into ANY WG
+                    // client incl AmneziaVPN's "File with settings"
+                    // button).
+                    //
+                    // Pre-2026-05-17 (commit `799e28b`) Flow B claimed
+                    // to cover BOTH AmneziaVPN and the WG app, but the
+                    // `wireguard://?conf=` format AmneziaVPN rejects
+                    // with ErrorCode 900 («нет контейнеров») — Amnezia
+                    // expects its own `vpn://<base64(qCompress(json))>`
+                    // deep-link. Split into B + C; honest labels.
+                    div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
                         // Flow A — sing-box / Hiddify subscription URL.
                         // The QR renders the same sub_url shown in the
                         // Subscription block at the top of the page;
@@ -1685,13 +1770,14 @@ pub(crate) async fn user_detail(
                                 }
                             }
                         }
-                        // Flow B — AmneziaVPN / native WireGuard app.
-                        // Per granted-server-with-wg-enabled: render a
-                        // dedicated QR and the wireguard://?conf=…
-                        // share-link the WG-native clients accept.
+                        // Flow B — official WireGuard app + Hiddify.
+                        // The `wireguard://?conf=<base64>` link works
+                        // in the official WG mobile/desktop apps and
+                        // in Hiddify, NOT in AmneziaVPN (separate Flow
+                        // C below covers that).
                         div {
                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                "Flow B — AmneziaVPN / WireGuard app"
+                                "Flow B — official WireGuard app / Hiddify"
                             }
                             @let wg_links: Vec<_> = share_links
                                 .iter()
@@ -1778,9 +1864,71 @@ pub(crate) async fn user_detail(
                                     div style="margin-bottom: 18px;" {
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
                                             "server " (sid.0)
+                                            " · "
+                                            a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                            path_segment_encode(&user.id.0),
+                                                            path_segment_encode(&sid.0)))
+                                              download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                              style="color: var(--mute); text-decoration: underline;" {
+                                                ".conf"
+                                            }
                                         }
                                         (share_link_card(link, &html! {
-                                            "QR scans directly into AmneziaVPN — full config inlined. Link is " (link.len()) " chars (the actual private key is base64-embedded inside). Click the box above to select-all + copy."
+                                            "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is " (link.len()) " chars (the private key is base64-embedded inside). Click the box above to select-all + copy."
+                                        }))
+                                    }
+                                }
+                            }
+                        }
+                        // Flow C — AmneziaVPN-native deep link.
+                        // Same secret material as Flow B but wrapped
+                        // in AmneziaVPN's `vpn://<base64(qCompress(json))>`
+                        // container format. Without this card,
+                        // AmneziaVPN rejects the Flow B link with
+                        // ErrorCode 900 («нет контейнеров»).
+                        div {
+                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                "Flow C — AmneziaVPN"
+                            }
+                            @let amnezia_links: Vec<_> = amnezia_links
+                                .iter()
+                                .collect();
+                            @if amnezia_links.is_empty() {
+                                // Same empty-state classifier as Flow B.
+                                @if servers.is_empty() {
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "Grant a WireGuard-capable server to populate this card."
+                                    }
+                                } @else if wg_capable_granted.is_empty() {
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "No granted server runs WireGuard yet — add "
+                                        span.ed-mono { "wireguard" }
+                                        " to an existing server's protocols on its detail page."
+                                    }
+                                } @else {
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "Granted WG servers "
+                                        @for (i, sid) in wg_capable_granted.iter().enumerate() {
+                                            @if i > 0 { ", " }
+                                            span.ed-mono { (sid.0) }
+                                        }
+                                        " — but AmneziaVPN link rendering failed (check "
+                                        span.ed-mono { "journalctl -u vpnctld" }
+                                        ")."
+                                    }
+                                }
+                            } @else {
+                                @for (sid, link) in &amnezia_links {
+                                    div style="margin-bottom: 18px;" {
+                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                            "server " (sid.0)
+                                        }
+                                        (share_link_card(link, &html! {
+                                            "QR / paste opens in AmneziaVPN; the deep link is " (link.len()) " chars (zlib-compressed JSON-container inside). The same "
+                                            span.ed-mono { ".conf" }
+                                            " file under Flow B also imports via AmneziaVPN's "
+                                            em { "File with settings" }
+                                            " button as a fallback."
                                         }))
                                     }
                                 }
@@ -2622,6 +2770,111 @@ pub(crate) async fn user_regen_wireguard(
         path_segment_encode(&user_id_str)
     ))
     .into_response()
+}
+
+/// `GET /admin/users/{user_id}/wireguard/conf/{server_id}` — serve a
+/// drag-drop-ready `.conf` file (INI body — `[Interface]` + `[Peer]`,
+/// optionally + AmneziaWG obfs lines when secrets are set) for this
+/// (user, server) pair. Imports into the official WireGuard app, into
+/// Hiddify, AND into AmneziaVPN's "File with settings" picker — i.e.
+/// every WG client, no matter the URI scheme they prefer.
+///
+/// Headers:
+///   * `Content-Type: text/plain; charset=utf-8` — most clients sniff
+///     the body regardless, but `text/plain` is the closest match.
+///   * `Content-Disposition: attachment; filename="<user>-<server>.conf"`
+///     — triggers the browser's download UI instead of inline display.
+///
+/// Errors:
+///   * 404 if the user or server doesn't exist (canonical body).
+///   * 400 if the server doesn't enable the `wireguard` protocol.
+///   * 500 on rendering errors (missing server pubkey etc.) — these
+///     usually indicate the server hasn't been deployed.
+pub(crate) async fn user_wireguard_conf_download(
+    State(state): State<AppState>,
+    Path((user_id_str, server_id_str)): Path<(String, String)>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    let user = match state.inv.get_user(&uid).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                error_text(&format!("no such server '{server_id_str}'")),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !server.enabled_protocols.iter().any(|p| p.0 == "wireguard") {
+        return (
+            StatusCode::BAD_REQUEST,
+            error_text(&format!(
+                "server '{server_id_str}' does not enable the 'wireguard' protocol — enable it on the server detail page before downloading a .conf"
+            )),
+        )
+            .into_response();
+    }
+    // Grant check — refuse the download if the (user, server) pair
+    // isn't granted. Without this, the URL stays "live" after a
+    // revoke and a stale browser tab can still pull the .conf.
+    // Doubles as the source of `ctx.peers` so the .conf address
+    // matches the server's [Peer] block 1:1.
+    let peers = match state.inv.users_for_server(&sid).await {
+        Ok(p) => p,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !peers.iter().any(|p| p.id == uid) {
+        return (
+            StatusCode::NOT_FOUND,
+            error_text(&format!(
+                "user '{user_id_str}' is not granted on server '{server_id_str}'"
+            )),
+        )
+            .into_response();
+    }
+    let secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(m) => m,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let ctx = vpnctl_core::RenderCtx::with_peers(&server, &secrets, &peers);
+    let conf = match vpnctl_protocols::render_client_conf_public(&ctx, &user) {
+        Ok(c) => c,
+        Err(e) => return internal_error(anyhow::anyhow!(e)),
+    };
+
+    // Strip every RFC-6266 unsafe set + control bytes from the
+    // filename before quoting. `valid_user_id` (POST /admin/users) IS
+    // the input gate going forward, but old DB rows imported from
+    // legacy bash inventory MAY contain spaces / quotes / CR / LF;
+    // a CR/LF in particular would otherwise make
+    // `HeaderValue::from_str` reject the header entirely and the
+    // browser would default-name the file `download` (bad UX). Stripping
+    // is safer than rejecting because the operator's intent (download
+    // SOMETHING) is unambiguous.
+    let safe = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+            .collect()
+    };
+    let filename = format!("{}-{}.conf", safe(&user.id.0), safe(&server.id.0));
+
+    let mut resp = (StatusCode::OK, conf).into_response();
+    let headers = resp.headers_mut();
+    if let Ok(v) = HeaderValue::from_str("text/plain; charset=utf-8") {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    resp
 }
 
 /// `POST /admin/servers/{id}/protocols/{proto}/enable` — add a

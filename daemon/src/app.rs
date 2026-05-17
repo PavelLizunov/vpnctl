@@ -492,6 +492,16 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/wireguard/regenerate",
             post(admin::user_regen_wireguard),
         )
+        // Download a drag-drop-ready WG `.conf` file for this
+        // (user, server) pair. Works in EVERY WG client — official
+        // WG app, Hiddify, AmneziaVPN's "File with settings"
+        // picker. Universal fallback even when neither
+        // `wireguard://?conf=` (Flow B) nor `vpn://...` (Flow C)
+        // is what the recipient's app expects.
+        .route(
+            "/admin/users/{id}/wireguard/conf/{server_id}",
+            get(admin::user_wireguard_conf_download),
+        )
         // Pavel iter D.6c — per-user monthly bandwidth cap +
         // alert threshold. POST takes limit_gib + threshold_pct;
         // 0 / empty / non-numeric limit clears the cap.

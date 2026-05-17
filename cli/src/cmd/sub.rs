@@ -38,7 +38,11 @@ pub(crate) async fn run(
     let mut entries: Vec<LinkEntry> = Vec::new();
     for server in &servers {
         let secrets = inv.list_server_secrets(&server.id).await?;
-        let ctx = RenderCtx::new(server, &secrets);
+        // WireGuard's share_link reads `ctx.peers` to assign the right
+        // /32 per user — pass the granted-users list. Other protocols
+        // ignore the field.
+        let peers = inv.users_for_server(&server.id).await?;
+        let ctx = RenderCtx::with_peers(server, &secrets, &peers);
         for pid in &server.enabled_protocols {
             let Some(proto) = registry.protocol(pid) else {
                 eprintln!("warn: protocol '{pid}' not registered, skipping");

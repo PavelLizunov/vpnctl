@@ -253,11 +253,46 @@ pub trait SshTransport: fmt::Debug + Send + Sync {
 pub struct RenderCtx<'a> {
     pub server: &'a Server,
     pub secrets: &'a HashMap<String, String>,
+    /// Все юзеры с грантом на этот сервер, в стабильном `ORDER BY id`
+    /// порядке (то же, что `users_for_server` отдаёт inventory).
+    /// Нужно для протоколов, у которых per-user state зависит от
+    /// порядкового номера юзера на сервере — конкретно WireGuard
+    /// раздаёт `10.66.0.<2+index>/32`, иначе все клиенты
+    /// сталкиваются на 10.66.0.2 и второй пакет уходит в чёрную дыру
+    /// (review-agent 2026-05-17).
+    ///
+    /// Пустой slice — допустим: вызывает legacy fallback (octet=2 для
+    /// первого пользователя). Использовать `with_peers(..)` в любом
+    /// контексте, где нужны корректные адреса.
+    pub peers: &'a [User],
 }
 
 impl<'a> RenderCtx<'a> {
+    /// Build a `RenderCtx` without the peer list — share_link will
+    /// fall back to legacy single-user addressing (10.66.0.2). Safe
+    /// only if you know the server has at most one WG user; new code
+    /// should prefer `with_peers`.
     pub fn new(server: &'a Server, secrets: &'a HashMap<String, String>) -> Self {
-        Self { server, secrets }
+        Self {
+            server,
+            secrets,
+            peers: &[],
+        }
+    }
+
+    /// Build a `RenderCtx` carrying the full granted-users list for
+    /// the server. WireGuard's `share_link` reads `peers` to find the
+    /// target user's index and emit the right `/32` per-user CIDR.
+    pub fn with_peers(
+        server: &'a Server,
+        secrets: &'a HashMap<String, String>,
+        peers: &'a [User],
+    ) -> Self {
+        Self {
+            server,
+            secrets,
+            peers,
+        }
     }
 
     /// Достать секрет или вернуть `MissingSecret` ошибку.

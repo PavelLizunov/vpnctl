@@ -4152,17 +4152,24 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         !html.contains(priv_.as_str()),
         "PRIVATE LEAK: detail HTML contains the raw private bytes"
     );
-    // Distribution-panel guidance for both client personas.
-    // Pavel's "Flow A / Flow B" pattern: ALWAYS show both labels even
-    // when no WG-enabled server is granted, so the operator knows
-    // both options exist + sees why Flow B is empty.
+    // Distribution-panel guidance for THREE client personas.
+    // Pavel's "Flow A / Flow B / Flow C" pattern: ALWAYS show all
+    // three labels even when no WG-enabled server is granted, so the
+    // operator knows every option exists + sees why B/C are empty.
+    // 2026-05-17: Flow B + Flow C split — pre-split Flow B claimed
+    // to cover both AmneziaVPN and the WG app, but AmneziaVPN rejects
+    // `wireguard://?conf=` with ErrorCode 900. Honest labels now.
     assert!(
         html.contains("Flow A — Hiddify / Sing-box"),
         "user-detail must teach the sing-box/Hiddify recipient flow"
     );
     assert!(
-        html.contains("Flow B — AmneziaVPN / WireGuard app"),
-        "user-detail must teach the WG-native recipient flow"
+        html.contains("Flow B — official WireGuard app / Hiddify"),
+        "Flow B label must NOT claim AmneziaVPN — that's Flow C now"
+    );
+    assert!(
+        html.contains("Flow C — AmneziaVPN"),
+        "user-detail must teach the AmneziaVPN-native recipient flow"
     );
     // No grants → Case A empty state ("grant a server"). Pinned
     // so the no-grant message can't drift into the case-B/C wording.
@@ -5714,6 +5721,511 @@ async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea(
     assert!(
         html.contains("Click the box above to select-all + copy"),
         "Flow B footnote must teach the click-to-copy interaction"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-17 — AmneziaVPN-native Flow C + universal .conf download.
+//
+// Pre-2026-05-17 the user-detail page claimed `wireguard://?conf=...`
+// worked in AmneziaVPN. Pavel hit ErrorCode 900 («нет контейнеров»):
+// AmneziaVPN actually wants `vpn://<base64url(qCompress(json))>`,
+// a different URI scheme entirely. Fix is a NEW Flow C card that
+// emits that link, plus a `.conf` download as a universal fallback.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("amzwg".into()),
+        address: "203.0.113.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("amzwg".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("amzwg".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("amztest".into()),
+        uuid: "44444444-4444-4444-4444-444444444444".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-amztest".into()),
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("amztest".into()), &ServerId("amzwg".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/amztest").await;
+
+    // Flow C label is present even when empty; with a granted WG
+    // server + secrets it now has a real vpn:// link.
+    assert!(
+        html.contains("Flow C — AmneziaVPN"),
+        "Flow C label missing on user-detail"
+    );
+    assert!(
+        html.contains("vpn://"),
+        "Flow C card must include a `vpn://<...>` link for AmneziaVPN"
+    );
+    // The Flow C link must be inside a textarea like Flow B.
+    let vpn_at = html.find("vpn://").expect("vpn:// substring missing");
+    let window_start = vpn_at.saturating_sub(800);
+    let before = &html[window_start..vpn_at];
+    assert!(
+        before.contains("<textarea readonly"),
+        "Flow C vpn:// link must appear inside a `<textarea readonly>` block"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_serves_attachment() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("dlsrv".into()),
+        address: "203.0.113.11".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("dlsrv".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("dlsrv".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("dltest".into()),
+        uuid: "55555555-5555-5555-5555-555555555555".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-dltest".into()),
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("dltest".into()), &ServerId("dlsrv".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/dltest/wireguard/conf/dlsrv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cd.contains("attachment") && cd.contains("dltest-dlsrv.conf"),
+        "Content-Disposition must declare attachment with the <user>-<server>.conf filename, got {cd:?}"
+    );
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/plain"),
+        "Content-Type should be text/plain for .conf, got {ct:?}"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("[Interface]"),
+        ".conf must contain [Interface]"
+    );
+    assert!(text.contains("[Peer]"), ".conf must contain [Peer]");
+    assert!(
+        text.contains("Endpoint = 203.0.113.11:51820"),
+        ".conf must reference the right server endpoint"
+    );
+    // Private bytes MUST be inlined in the .conf so the operator's
+    // recipient can import without a second action.
+    assert!(
+        text.contains("PrivateKey = 0000000000000000000000000000000000000000000="),
+        ".conf must inline the user's private key (server-generated default)"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_404_on_unknown_user() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/nope/wireguard/conf/whatever")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_404_on_unknown_server_when_user_exists() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("u".into()),
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            tuic_password: None,
+            wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+            wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+            sub_token: Some("st".into()),
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/u/wireguard/conf/nosuch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("no such server 'nosuch'"),
+        "expected canonical 'no such server' body, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server() {
+    // Both user and server exist; server has wireguard enabled; but
+    // there's NO grant linking them. The endpoint must 404, not leak
+    // the .conf — otherwise a stale browser tab keeps working past
+    // a revoke (review-agent 2026-05-17).
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("ungranted-srv".into()),
+        address: "203.0.113.200".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("ungranted-srv".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("ungranted-user".into()),
+        uuid: "88888888-8888-8888-8888-888888888888".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st".into()),
+    })
+    .await
+    .unwrap();
+    // NB: NO grant.
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/ungranted-user/wireguard/conf/ungranted-srv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "ungranted (user, server) pair must 404, not serve the .conf"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("not granted on server"),
+        "expected canonical 'not granted' body, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_wg_conf_peer_octet_differs_per_user_index() {
+    // Two users granted to the same WG server. Their .conf files
+    // must claim different /32 addresses (10.66.0.2 + 10.66.0.3).
+    // Pre-fix both claimed 10.66.0.2 — review-agent 2026-05-17.
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("multi".into()),
+        address: "203.0.113.150".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("multi".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    // Two users — `alex` < `bob` by lex sort (matches the
+    // inv.users_for_server ORDER BY id).
+    for (uid, uuid, pubk) in [
+        (
+            "alex",
+            "11111111-1111-1111-1111-111111111111",
+            "qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=",
+        ),
+        (
+            "bob",
+            "22222222-2222-2222-2222-222222222222",
+            "AbcDefGhIjKlMnOpQrStUvWxYz0123456789AbCdEf=",
+        ),
+    ] {
+        inv.add_user(&User {
+            id: UserId(uid.into()),
+            uuid: uuid.into(),
+            tuic_password: None,
+            wireguard_pubkey: Some(pubk.into()),
+            wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+            sub_token: Some(format!("st-{uid}")),
+        })
+        .await
+        .unwrap();
+        inv.grant(&UserId(uid.into()), &ServerId("multi".into()))
+            .await
+            .unwrap();
+    }
+
+    let app = router(s);
+    let alex_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/alex/wireguard/conf/multi")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bob_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/bob/wireguard/conf/multi")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alex_resp.status(), StatusCode::OK);
+    assert_eq!(bob_resp.status(), StatusCode::OK);
+    let alex_conf = std::str::from_utf8(&alex_resp.into_body().collect().await.unwrap().to_bytes())
+        .unwrap()
+        .to_string();
+    let bob_conf = std::str::from_utf8(&bob_resp.into_body().collect().await.unwrap().to_bytes())
+        .unwrap()
+        .to_string();
+    assert!(
+        alex_conf.contains("Address = 10.66.0.2/32"),
+        "alex (index 0) must claim 10.66.0.2; got: {alex_conf}"
+    );
+    assert!(
+        bob_conf.contains("Address = 10.66.0.3/32"),
+        "bob (index 1) must claim 10.66.0.3 (NOT 10.66.0.2 — that's the regression); got: {bob_conf}"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    // Server that doesn't declare wireguard.
+    inv.add_server(&Server {
+        id: ServerId("nowg2".into()),
+        address: "203.0.113.99".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("u1".into()),
+        uuid: "66666666-6666-6666-6666-666666666666".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-u1".into()),
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/u1/wireguard/conf/nowg2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("does not enable the 'wireguard' protocol"),
+        "expected the canonical 'wireguard protocol not enabled' message, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_flow_b_links_to_conf_download() {
+    // Operator should see a `.conf` link next to each Flow B server
+    // (universal fallback that imports into AmneziaVPN via its
+    // "File with settings" picker even if the user can't paste
+    // the vpn:// link directly).
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("wgX".into()),
+        address: "203.0.113.55".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("wgX".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("wgX".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("conftest".into()),
+        uuid: "77777777-7777-7777-7777-777777777777".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-conf".into()),
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("conftest".into()), &ServerId("wgX".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/conftest").await;
+    assert!(
+        html.contains("/admin/users/conftest/wireguard/conf/wgX"),
+        "Flow B server header must link to the .conf download endpoint"
+    );
+    assert!(
+        html.contains("download=\"conftest-wgX.conf\""),
+        "anchor must set the download filename to <user>-<server>.conf"
     );
 }
 

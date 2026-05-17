@@ -333,19 +333,65 @@ fn amneziawg_block(ctx: &RenderCtx<'_>) -> Option<serde_json::Value> {
     }))
 }
 
+/// Public wrapper around the same `.conf` renderer used internally
+/// by `share_link` and `amnezia_share_link`. Exposed so the daemon's
+/// `.conf` download handler can serve a drag-drop-ready file
+/// without going through a `share_link` plus base64-decode dance.
+///
+/// Returns the full INI body (Interface + Peer sections + AmneziaWG
+/// obfs lines when secrets are set). Same error contract as
+/// `share_link`: missing `wireguard.server_public_key` returns
+/// `MissingSecret`.
+pub fn render_client_conf_public(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+    render_client_conf(ctx, user)
+}
+
+/// Compute the per-user `/32` octet for the target user on this
+/// server. Uses `ctx.peers` (the granted-users list in the SAME
+/// order `server_inbound` iterates) so the client's `Address` line
+/// matches the server's `[Peer]` block 1:1.
+///
+/// Fallback when `ctx.peers` is empty OR doesn't contain the target:
+/// octet 2 (the legacy single-user value). Logging a warning would
+/// be useful but this function is in a no-tracing crate; the daemon
+/// always passes `ctx.peers`, the only path that can fall through is
+/// a test calling `RenderCtx::new(..)` instead of `with_peers(..)`.
+///
+/// 254-peer cap matches `server_inbound`'s safety guard — past that
+/// the /24 would wrap.
+fn peer_octet_for(ctx: &RenderCtx<'_>, user: &User) -> Result<u16> {
+    if let Some(idx) = ctx.peers.iter().position(|u| u.id == user.id) {
+        let octet = 2_u16.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
+        if octet > 254 {
+            return Err(CoreError::Render(format!(
+                "wireguard /24 has only 253 peer slots; user '{}' index {idx} would overflow",
+                user.id.0
+            )));
+        }
+        Ok(octet)
+    } else {
+        // Single-user fallback. Hit by tests using `RenderCtx::new`
+        // and by legacy code paths that haven't migrated to
+        // `with_peers`. Same value as the pre-2026-05-17 hard-coded
+        // address, so existing clients keep working byte-for-byte.
+        Ok(2)
+    }
+}
+
 /// Render the actual `.conf` text the share-link encodes. INI-format,
 /// LF newlines, opens with a "do-not-edit" warning. Mirrors the conf
 /// the AmneziaWG kernel writes server-side — same obfuscation block,
 /// peer's keys swapped for client perspective.
 ///
 /// **Private-key sourcing** (per CLAUDE.md "users are low-tech" rule):
-///   * `user.wireguard_private` set (= server-generated via
-///     `--gen-wireguard`) → conf is ready-to-import, single-action UX;
-///     no editor step needed.
-///   * `user.wireguard_private` is `None` (= operator-provided pubkey
-///     only) → falls back to the legacy `<PASTE YOUR PRIVATE KEY HERE>`
-///     placeholder + the comment block instructing the operator to
-///     swap in the client-side privkey before forwarding to the user.
+///
+/// - `user.wireguard_private` set (= server-generated via
+///   `--gen-wireguard`) → conf is ready-to-import, single-action UX;
+///   no editor step needed.
+/// - `user.wireguard_private` is `None` (= operator-provided pubkey
+///   only) → falls back to the legacy `<PASTE YOUR PRIVATE KEY HERE>`
+///   placeholder + the comment block instructing the operator to
+///   swap in the client-side privkey before forwarding to the user.
 fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let server_pub = ctx.require("wireguard.server_public_key")?;
     let listen_port: u16 = ctx
@@ -353,6 +399,7 @@ fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         .get("wireguard.listen_port")
         .and_then(|s| s.parse().ok())
         .unwrap_or(WIREGUARD_PORT);
+    let peer_octet = peer_octet_for(ctx, user)?;
 
     let mut out = String::with_capacity(512);
     out.push_str("# vpnctl-rendered AmneziaWG client config.\n");
@@ -375,7 +422,9 @@ fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
             .unwrap_or(CLIENT_PRIVKEY_PLACEHOLDER),
     );
     out.push('\n');
-    out.push_str("Address = 10.66.0.2/32\n");
+    out.push_str("Address = 10.66.0.");
+    out.push_str(&peer_octet.to_string());
+    out.push_str("/32\n");
     out.push_str("DNS = 1.1.1.1\n");
     // AmneziaWG params (only if the server set them — same all-or-nothing
     // contract as the JSON envelope).
@@ -418,7 +467,165 @@ fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     Ok(out)
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// AmneziaVPN deep-link (`vpn://...`) generator.
+//
+// Why this is a separate function (not a Protocol trait method): the
+// Protocol trait's `share_link()` returns ONE link, but a WireGuard user
+// actually has TWO distinct client UXs:
+//   * Flow B — official WireGuard app / Hiddify — uses the standard
+//     `wireguard://?conf=<base64(.conf)>` link rendered by `share_link()`
+//     above.
+//   * Flow C — AmneziaVPN — uses Amnezia's own `vpn://<...>` deep-link
+//     wrapping a JSON container, NOT a WG `.conf` body. This function
+//     produces THAT link.
+//
+// AmneziaVPN's import path (canonical reference:
+// `github.com/amnezia-vpn/config-decoder`):
+//   1. Strip `vpn://` prefix.
+//   2. base64url-decode (`Base64UrlEncoding | OmitTrailingEquals`).
+//   3. Try `qUncompress` (Qt format: 4-byte big-endian uncompressed-size
+//      prefix + zlib stream). If it fails, treat the bytes as raw JSON.
+//   4. Parse JSON; look for `containers` array with at least one
+//      `{"container": "amnezia-wireguard", "wireguard": {...}}` entry.
+//   5. Extract the `last_config` string (itself a JSON-stringified
+//      object) for the actual client material — keys + endpoint + IP.
+//
+// We always compress (it shortens the link by ~60% for our typical
+// payload and Amnezia handles the zlib path natively). The fallback
+// path is there for resilience, not for us to exploit.
+//
+// ErrorCode 900 ("конфигурация не содержит контейнеров") = symptom of
+// passing a `wireguard://?conf=` link to Amnezia. That's what was
+// happening pre-2026-05-17; this function fixes it.
+
+/// Construct an AmneziaVPN deep-link (`vpn://...`) for `user` on this
+/// `ctx`'s server. Returns the full ready-to-paste URL.
+///
+/// Errors mirror `share_link`'s contract: missing wireguard_pubkey or
+/// malformed pubkey → `CoreError::Render`. Missing server pubkey secret
+/// (`wireguard.server_public_key`) → `CoreError::MissingSecret`.
+pub fn amnezia_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+    // Same upfront validation as `share_link` — operator asking for a
+    // link that can't authenticate should fail loudly, not silently
+    // produce an unusable link.
+    let user_pub = user.wireguard_pubkey.as_deref().ok_or_else(|| {
+        CoreError::Render(format!(
+            "user '{}' has no wireguard_pubkey — cannot mint an AmneziaVPN link",
+            user.id.0
+        ))
+    })?;
+    if !is_valid_wg_pubkey(user_pub) {
+        return Err(CoreError::Render(format!(
+            "user '{}' has malformed wireguard pubkey: {user_pub:?}",
+            user.id.0
+        )));
+    }
+    let server_pub = ctx.require("wireguard.server_public_key")?;
+    let listen_port: u16 = ctx
+        .secrets
+        .get("wireguard.listen_port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(WIREGUARD_PORT);
+    // Per-user /32 — derived from the user's index in `ctx.peers`.
+    // Without this, multiple WG users on the same server would all
+    // claim 10.66.0.2 and only the first would actually route.
+    let peer_octet = peer_octet_for(ctx, user)?;
+    let client_ip = format!("10.66.0.{peer_octet}");
+
+    // Reuse the same .conf renderer Flow B uses — keeps the bytes
+    // identical between AmneziaVPN's "import key" and the standalone
+    // .conf download. If Pavel's user later switches apps, the
+    // material doesn't drift.
+    let nat_conf = render_client_conf(ctx, user)?;
+    // The `last_config` inner JSON. Keys mirror amnezia-client's
+    // `WireGuardClientConfig::toJson` field names verbatim
+    // (`client_priv_key`, `client_pub_key`, `server_pub_key`,
+    // `client_ip`, `allowed_ips`, `persistent_keep_alive`, `config`).
+    // Missing the private key in `user.wireguard_private` is allowed
+    // (operator-paranoid path with placeholder); Amnezia will then
+    // fail to handshake — but that's the same trade-off as Flow B.
+    let mut last_config = serde_json::Map::new();
+    last_config.insert("config".into(), json!(nat_conf));
+    last_config.insert("hostName".into(), json!(ctx.server.address));
+    last_config.insert("port".into(), json!(listen_port));
+    last_config.insert("client_ip".into(), json!(client_ip));
+    last_config.insert(
+        "client_priv_key".into(),
+        json!(
+            user.wireguard_private
+                .as_deref()
+                .unwrap_or(CLIENT_PRIVKEY_PLACEHOLDER)
+        ),
+    );
+    last_config.insert("client_pub_key".into(), json!(user_pub));
+    last_config.insert("server_pub_key".into(), json!(server_pub));
+    last_config.insert(
+        "allowed_ips".into(),
+        json!(["0.0.0.0/0".to_string(), "::/0".to_string()]),
+    );
+    last_config.insert("persistent_keep_alive".into(), json!("25"));
+
+    let wireguard_obj = json!({
+        // Container-level WireGuardServerConfig fields. AmneziaVPN
+        // doesn't strictly need them for a client-only key but its
+        // parser expects the protocol object to exist; the
+        // `last_config` string inside is what drives the actual VPN.
+        "port": listen_port.to_string(),
+        "transport_proto": "udp",
+        "subnet_address": "10.66.0.0",
+        "last_config": serde_json::to_string(&serde_json::Value::Object(last_config))
+            .map_err(|e| CoreError::Render(format!("amnezia last_config serialise: {e}")))?,
+    });
+
+    let top = json!({
+        "containers": [
+            {
+                "container": "amnezia-wireguard",
+                "wireguard": wireguard_obj,
+            }
+        ],
+        "defaultContainer": "amnezia-wireguard",
+        "description": user.id.0,
+        "dns1": "1.1.1.1",
+        "dns2": "1.0.0.1",
+        "hostName": ctx.server.address,
+    });
+
+    let json_bytes = serde_json::to_vec(&top)
+        .map_err(|e| CoreError::Render(format!("amnezia top JSON serialise: {e}")))?;
+    let compressed = qcompress_zlib(&json_bytes)?;
+    let b64 = URL_SAFE_NO_PAD.encode(&compressed);
+    Ok(format!("vpn://{b64}"))
+}
+
+/// Qt-style `qCompress` output: 4-byte big-endian uncompressed-size
+/// prefix followed by a zlib stream. Compression level 8 mirrors
+/// amnezia-client's `qCompress(data, 8)` call so a byte-equality test
+/// against their output is meaningful.
+///
+/// We use `flate2` with the pure-Rust backend (`rust_backend` feature)
+/// to keep the dep graph free of C shims — same hygiene rule as the
+/// rest of the workspace (no openssl-sys, no native-tls).
+fn qcompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let len = u32::try_from(data.len())
+        .map_err(|_| CoreError::Render("amnezia payload >4 GiB — refuse to compress".into()))?;
+    let mut out = Vec::with_capacity(data.len() / 4 + 16);
+    out.extend_from_slice(&len.to_be_bytes());
+    let mut enc = ZlibEncoder::new(&mut out, Compression::new(8));
+    enc.write_all(data)
+        .map_err(|e| CoreError::Render(format!("amnezia zlib write: {e}")))?;
+    enc.finish()
+        .map_err(|e| CoreError::Render(format!("amnezia zlib finish: {e}")))?;
+    Ok(out)
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -448,5 +655,229 @@ mod tests {
         // Right length+padding but contains a `:` (not base64-alphabet).
         let k = "qXFvJL5KLmM3Of:hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=";
         assert!(!is_valid_wg_pubkey(k));
+    }
+
+    // ── AmneziaVPN deep-link tests ─────────────────────────────────
+    //
+    // Pin the byte-format invariants Amnezia's parser depends on:
+    //   * `vpn://` prefix exactly,
+    //   * base64-url (NO trailing `=` padding),
+    //   * qCompress envelope = 4-byte BE length + zlib stream,
+    //   * round-trip decoded JSON must contain a single container
+    //     `amnezia-wireguard` with the user's WG material accessible
+    //     under `containers[0].wireguard.last_config` (itself a
+    //     JSON-stringified object).
+
+    use std::collections::HashMap;
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+
+    fn fake_user() -> User {
+        User {
+            id: UserId("alex".into()),
+            uuid: "11111111-1111-1111-1111-111111111111".into(),
+            tuic_password: None,
+            wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+            wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+            sub_token: Some("st".into()),
+        }
+    }
+
+    fn fake_server() -> Server {
+        Server {
+            id: ServerId("vps1".into()),
+            address: "198.51.100.42".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("wireguard".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    fn fake_secrets() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert(
+            "wireguard.server_public_key".into(),
+            "Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=".into(),
+        );
+        m
+    }
+
+    #[test]
+    fn qcompress_zlib_emits_4byte_be_length_prefix() {
+        let data = b"hello amnezia";
+        let out = qcompress_zlib(data).unwrap();
+        assert!(out.len() >= 4);
+        let len_prefix = u32::from_be_bytes([out[0], out[1], out[2], out[3]]);
+        assert_eq!(len_prefix as usize, data.len());
+        // Zlib stream starts with 0x78 (CMF) — every qCompress output
+        // does, regardless of level. Pin it so a future swap of the
+        // backend (deflate-rs etc) that emits raw-deflate instead of
+        // zlib silently breaks Amnezia parsing.
+        assert_eq!(out[4], 0x78, "byte 4 must be zlib CMF magic 0x78");
+    }
+
+    /// Pin compression level 8 by comparing it to level 1 on the SAME
+    /// non-trivial payload (a JSON-like blob where the level actually
+    /// matters — pure repetition compresses identically at every
+    /// level via RLE). If a future refactor drops to `Compression::fast()`,
+    /// level-1 output will be ≥ level-8 output and this test fires.
+    #[test]
+    fn qcompress_zlib_uses_high_compression_level() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
+        // Mixed text — enough variation that the encoder's match finder
+        // has work to do; level 8 (full lazy matching) beats level 1
+        // (greedy) by several bytes on this shape.
+        let payload = br#"{"containers":[{"container":"amnezia-wireguard","wireguard":{"port":"51820","transport_proto":"udp","subnet_address":"10.66.0.0","last_config":"{\"client_ip\":\"10.66.0.2\",\"hostName\":\"203.0.113.7\",\"port\":51820,\"persistent_keep_alive\":\"25\"}"}}],"defaultContainer":"amnezia-wireguard","description":"test-user","hostName":"203.0.113.7"}"#;
+
+        let our = qcompress_zlib(payload).unwrap();
+
+        // Reference: same payload, level 1 (Compression::fast()).
+        let mut fast_out = Vec::new();
+        fast_out.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        let mut enc = ZlibEncoder::new(&mut fast_out, Compression::fast());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+
+        assert!(
+            our.len() <= fast_out.len(),
+            "qcompress_zlib (claimed level 8) produced {} bytes; level-1 reference produced {}. Level 8 must be at least as compact as level 1.",
+            our.len(),
+            fast_out.len()
+        );
+        // Also confirm a non-trivial savings (>= 4 bytes) so the
+        // test catches "we switched to default(level=6)" — default
+        // compression is within 1-2 bytes of fast() on this size.
+        assert!(
+            our.len() + 4 <= fast_out.len(),
+            "level-8 output {} bytes vs level-1 {} — savings <4 bytes suggests level was dropped below 8",
+            our.len(),
+            fast_out.len()
+        );
+    }
+
+    #[test]
+    fn amnezia_share_link_starts_with_vpn_prefix_and_is_base64url_no_pad() {
+        let server = fake_server();
+        let secrets = fake_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let user = fake_user();
+        let link = amnezia_share_link(&ctx, &user).unwrap();
+        assert!(link.starts_with("vpn://"), "wrong scheme prefix: {link:?}");
+        let payload = link.strip_prefix("vpn://").unwrap();
+        assert!(
+            !payload.ends_with('='),
+            "Amnezia parser requires base64-url WITHOUT padding (OmitTrailingEquals): {payload:?}"
+        );
+        // base64url alphabet only — `+`/`/` would fail Amnezia's
+        // `Base64UrlEncoding` decode.
+        for c in payload.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() || c == '-' || c == '_',
+                "non-base64url char {c:?} in payload"
+            );
+        }
+    }
+
+    #[test]
+    fn amnezia_share_link_roundtrips_to_container_json_with_last_config() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+
+        let server = fake_server();
+        let secrets = fake_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let user = fake_user();
+        let link = amnezia_share_link(&ctx, &user).unwrap();
+        let b64 = link.strip_prefix("vpn://").unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(b64).unwrap();
+        assert!(
+            raw.len() > 4,
+            "envelope must include the 4-byte length prefix"
+        );
+        let _len_prefix = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let mut dec = ZlibDecoder::new(&raw[4..]);
+        let mut json_bytes = Vec::new();
+        dec.read_to_end(&mut json_bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        // Top-level shape Amnezia's importer reads.
+        assert_eq!(v["defaultContainer"], "amnezia-wireguard");
+        assert_eq!(v["hostName"], "198.51.100.42");
+        assert_eq!(v["description"], "alex");
+        assert!(v["containers"].is_array());
+        let c0 = &v["containers"][0];
+        assert_eq!(c0["container"], "amnezia-wireguard");
+        let wg = &c0["wireguard"];
+        assert_eq!(wg["transport_proto"], "udp");
+        assert_eq!(wg["port"], "51820");
+        // `last_config` is a JSON-stringified inner object — Amnezia
+        // re-parses it from string. Pin both the stringification AND
+        // the inner field names.
+        let inner_str = wg["last_config"]
+            .as_str()
+            .expect("last_config must be a string");
+        let inner: serde_json::Value = serde_json::from_str(inner_str).unwrap();
+        assert_eq!(
+            inner["client_pub_key"],
+            user.wireguard_pubkey.as_deref().unwrap()
+        );
+        assert_eq!(
+            inner["client_priv_key"],
+            user.wireguard_private.as_deref().unwrap()
+        );
+        assert_eq!(
+            inner["server_pub_key"],
+            secrets["wireguard.server_public_key"]
+        );
+        assert_eq!(inner["client_ip"], "10.66.0.2");
+        assert_eq!(inner["port"], 51820);
+        assert_eq!(inner["hostName"], "198.51.100.42");
+        assert_eq!(
+            inner["allowed_ips"],
+            serde_json::json!(["0.0.0.0/0", "::/0"])
+        );
+        // The `config` field carries the full .conf body (Interface+Peer).
+        let conf = inner["config"]
+            .as_str()
+            .expect("inner config must be a string");
+        assert!(conf.contains("[Interface]"));
+        assert!(conf.contains("[Peer]"));
+        assert!(conf.contains("Endpoint = 198.51.100.42:51820"));
+    }
+
+    #[test]
+    fn amnezia_share_link_errors_on_missing_user_wireguard_pubkey() {
+        let server = fake_server();
+        let secrets = fake_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let mut user = fake_user();
+        user.wireguard_pubkey = None;
+        let err = amnezia_share_link(&ctx, &user).unwrap_err();
+        assert!(
+            format!("{err}").contains("no wireguard_pubkey"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn amnezia_share_link_errors_on_missing_server_pubkey_secret() {
+        let server = fake_server();
+        let secrets = HashMap::new(); // missing wireguard.server_public_key
+        let ctx = RenderCtx::new(&server, &secrets);
+        let user = fake_user();
+        let err = amnezia_share_link(&ctx, &user).unwrap_err();
+        assert!(
+            format!("{err}").contains("wireguard.server_public_key"),
+            "expected MissingSecret(wireguard.server_public_key), got: {err}"
+        );
     }
 }
