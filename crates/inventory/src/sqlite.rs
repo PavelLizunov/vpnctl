@@ -23,6 +23,14 @@ use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// Expose the embedded `Migrator` to sibling modules — currently
+/// `backup::restore_from` uses it to validate that an incoming
+/// snapshot's schema is at-or-above the current binary's expected
+/// version before atomically swapping it over the live DB.
+pub(crate) fn migrator() -> &'static Migrator {
+    &MIGRATOR
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteInventoryError {
     #[error("sqlx: {0}")]
@@ -188,6 +196,15 @@ pub struct SqliteInventory {
 }
 
 impl SqliteInventory {
+    /// Internal-ish accessor for the underlying `SqlitePool`. Currently
+    /// used by the `backup` module to run `VACUUM INTO` (which can't go
+    /// through a typed query because the target path isn't bindable).
+    /// `pub(crate)` keeps the door closed for external callers — pool
+    /// is owned state, not API.
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Open (or create) DB at `path`, apply pragmas, run migrations.
     pub async fn open(path: &Path) -> Result<Self> {
         let opts =

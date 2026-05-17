@@ -38,3 +38,16 @@ pub fn spawn_retention_purger_for_test(
 ) -> tokio::task::JoinHandle<()> {
     app::spawn_retention_purger(inv)
 }
+
+/// Test-only re-export of the backup scheduler with custom delays
+/// — lets the integration test prove the scheduler actually
+/// snapshots + audits without waiting the production 60-second
+/// startup delay.
+pub fn spawn_backup_scheduler_with_for_test(
+    inv: vpnctl_inventory::SqliteInventory,
+    backup_dir: std::path::PathBuf,
+    startup_delay: std::time::Duration,
+    tick: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    app::spawn_backup_scheduler_with(inv, backup_dir, startup_delay, tick)
+}

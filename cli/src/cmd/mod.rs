@@ -1,6 +1,7 @@
 //! Subcommand handlers. One module per resource group; thin glue between
 //! `clap`-parsed args and crate functions.
 
+pub(crate) mod backup;
 pub(crate) mod bootstrap;
 pub(crate) mod deploy;
 pub(crate) mod grant;

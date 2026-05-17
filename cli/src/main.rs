@@ -79,6 +79,24 @@ enum Cmd {
     /// touching SSH. Useful for offline review + live-staging tests
     /// (closes the methodology TODO in docs/PROTOCOL_TESTING.md).
     Render { server: String },
+    /// Manage `inv.db` snapshots (Phase C-4 backups). Subcommands:
+    /// `snapshot` (take one now), `list` (newest-first), `prune`
+    /// (apply default retention).
+    Backup {
+        #[command(subcommand)]
+        cmd: cmd::backup::BackupCmd,
+    },
+    /// Restore the inventory from a snapshot file. **Daemon MUST be
+    /// stopped first** — replacing the open DB while vpnctld holds it
+    /// silently corrupts state. Sequence:
+    ///   1. sudo systemctl stop vpnctld
+    ///   2. vpnctl restore /var/lib/vpnctl/backups/inv.db.<ts>.bak
+    ///   3. sudo systemctl start vpnctld
+    Restore {
+        /// Path to the snapshot file produced by `vpnctl backup snapshot`
+        /// or downloaded from the Settings page.
+        snapshot: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -100,6 +118,8 @@ async fn main() -> std::process::ExitCode {
         Cmd::Sub { user, qr } => cmd::sub::run(&user, qr, cli.db, cli.output).await,
         Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
         Cmd::Render { server } => cmd::render::run(&server, cli.db).await,
+        Cmd::Backup { cmd } => cmd::backup::run(cmd, cli.db, cli.output).await,
+        Cmd::Restore { snapshot } => cmd::backup::run_restore(snapshot, cli.db, cli.output).await,
     };
 
     match res {

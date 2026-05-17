@@ -63,6 +63,12 @@ impl std::fmt::Debug for AppState {
 /// reads via `VPNCTLD_DEPLOY_KEY` env (which still wins if set).
 pub const DEFAULT_DEPLOY_KEY_PATH: &str = "/var/lib/vpnctl/.ssh/id_ed25519";
 
+/// Default backup directory for vpnctld. Surfaced in the Settings page's
+/// Backups section. Same value as `vpnctl_inventory::DEFAULT_BACKUP_DIR`
+/// — re-exported here so the daemon's other surfaces (download
+/// handler, scheduler) can reference one canonical constant.
+pub const DEFAULT_BACKUP_DIR: &str = vpnctl_inventory::DEFAULT_BACKUP_DIR;
+
 pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     let inv = SqliteInventory::open(&config.db_path).await?;
     let registry = Arc::new(build_registry()?);
@@ -129,6 +135,17 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     drop(spawn_rate_limit_cleanup(
         Arc::clone(&rate_limiter),
         inv.clone(),
+    ));
+
+    // Phase C-4 — hourly inventory snapshot to /var/lib/vpnctl/backups
+    // plus retention pruning (24h / 30d / 12mo). Settings UI surfaces
+    // the snapshot list + a manual "snapshot now" button + per-file
+    // download anchor for operator off-site (USB, Forgejo, etc).
+    // Restore is CLI-only — the daemon literally can't replace its
+    // own open DB file while it's holding it (see `vpnctl restore`).
+    drop(spawn_backup_scheduler(
+        inv.clone(),
+        std::path::PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR),
     ));
 
     let state = AppState {
@@ -298,6 +315,113 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     error = %e,
                     "vpn_connection_stats purge failed; will retry next tick"
                 ),
+            }
+        }
+    })
+}
+
+/// Phase C-4 — hourly inventory snapshot + retention pruner.
+///
+/// One tick per hour:
+///   1. `snapshot_now(inv, dir)` writes a fresh `inv.db.<ts>.bak`
+///   2. `prune_snapshots(dir, Retention::default())` enforces the
+///      24-hourly / 30-daily / 12-monthly cap so the disk doesn't
+///      fill up on a long-running daemon.
+///   3. Audit row written either way (success row carries snapshot
+///      path + retained/dropped counts; failure row carries the
+///      error string so the operator can see WHY backups stopped).
+///
+/// First snapshot fires ~60 seconds after daemon start (NOT
+/// immediately) so the daemon's hot-path migrations have a chance
+/// to settle before the VACUUM INTO write-lock window.
+///
+/// Returns the `JoinHandle` so production discards it (task lives
+/// as long as the runtime) and tests can `abort()` after the spawn
+/// assertion.
+pub(crate) fn spawn_backup_scheduler(
+    inv: SqliteInventory,
+    backup_dir: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    use std::time::Duration;
+
+    /// Per CLAUDE.md «backups are critical, not optional» — hourly
+    /// is the minimum useful cadence (loses at most ~60 min of
+    /// operator activity on a host failure). Operator can trigger
+    /// extra snapshots from Settings ("snapshot now" button).
+    const TICK: Duration = Duration::from_secs(3600);
+    /// Delay before the first tick — keeps the daemon's hot
+    /// startup path (migrations, registry init, deploy-key gen,
+    /// SSE wizard wakeup) clear of a VACUUM INTO write-lock.
+    const STARTUP_DELAY: Duration = Duration::from_secs(60);
+    spawn_backup_scheduler_with(inv, backup_dir, STARTUP_DELAY, TICK)
+}
+
+/// Parameterised variant — tests use it with tiny delays so the
+/// scheduler fires within the test's timeout window.
+pub(crate) fn spawn_backup_scheduler_with(
+    inv: SqliteInventory,
+    backup_dir: PathBuf,
+    startup_delay: std::time::Duration,
+    tick: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::time::{MissedTickBehavior, interval, sleep};
+
+    tokio::spawn(async move {
+        sleep(startup_delay).await;
+        let mut tick = interval(tick);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let snapshot_result = vpnctl_inventory::snapshot_now(&inv, &backup_dir).await;
+            let prune_result = vpnctl_inventory::prune_snapshots(
+                &backup_dir,
+                vpnctl_inventory::Retention::default(),
+            );
+            let snapshot_path: Option<String> = snapshot_result
+                .as_ref()
+                .ok()
+                .map(|p| p.display().to_string());
+            let snapshot_err: Option<String> =
+                snapshot_result.as_ref().err().map(|e| e.to_string());
+            let pruned: u64 = *prune_result.as_ref().unwrap_or(&0);
+            let prune_err: Option<String> = prune_result.as_ref().err().map(|e| e.to_string());
+            match (&snapshot_err, &prune_err) {
+                (None, None) => tracing::info!(
+                    target = "vpnctld::backup",
+                    snapshot = snapshot_path.as_deref().unwrap_or(""),
+                    pruned = pruned,
+                    "inv.db snapshot complete"
+                ),
+                _ => tracing::warn!(
+                    target = "vpnctld::backup",
+                    snapshot_err = snapshot_err.as_deref().unwrap_or(""),
+                    prune_err = prune_err.as_deref().unwrap_or(""),
+                    "inv.db snapshot or prune failed; will retry next tick"
+                ),
+            }
+            // Audit (regardless of success — operator wants to see
+            // the failure too). The payload is operator-facing —
+            // visible in the audit-timeline page and CSV export.
+            if let Err(e) = inv
+                .audit(
+                    "admin",
+                    "backup.snapshot",
+                    None,
+                    Some(&serde_json::json!({
+                        "trigger": "scheduler",
+                        "snapshot_path": snapshot_path,
+                        "snapshot_err": snapshot_err,
+                        "pruned": pruned,
+                        "prune_err": prune_err,
+                    })),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target = "vpnctld::backup",
+                    error = %e,
+                    "audit write failed for backup.snapshot"
+                );
             }
         }
     })
@@ -538,6 +662,19 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/audit.csv", get(admin::audit_csv))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
+        // Phase C-4 — manual snapshot trigger + per-file download.
+        // Download is GET (so a normal `<a download>` works); snapshot
+        // trigger is POST (it mutates filesystem state + writes an
+        // audit row). Filename validation in the handler keeps `..`
+        // and absolute paths out of the backup dir.
+        .route(
+            "/admin/backup/snapshot",
+            post(admin::backup_snapshot_now),
+        )
+        .route(
+            "/admin/backup/download/{name}",
+            get(admin::backup_download),
+        )
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);

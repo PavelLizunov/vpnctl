@@ -1,0 +1,192 @@
+//! `vpnctl backup …` and `vpnctl restore <snapshot>` — the CLI side
+//! of Phase C-4.
+//!
+//! # When the CLI matters vs the web
+//!
+//! `Web is the ONLY operator surface` (CLAUDE.md) — and indeed the
+//! Settings page covers the everyday cases (list snapshots, take a
+//! snapshot now, download for off-site copy). The CLI exists for the
+//! one case that fundamentally can't go through the web:
+//!
+//!   * **Restore.** The daemon owns the open `inv.db` handle + WAL.
+//!     Replacing the file while the daemon is running causes
+//!     undefined behaviour (silent corruption is the failure mode).
+//!     So restore demands: stop daemon → CLI swaps the file → start
+//!     daemon. That's an SSH session by definition.
+//!
+//! Backup `snapshot` / `list` / `prune` are mirrored here as
+//! quality-of-life helpers (the same operator may want to script a
+//! cron job that copies the newest snapshot to a remote host, or
+//! verify retention from a non-browser context).
+//!
+//! All commands read the canonical backup dir from the
+//! `VPNCTLD_BACKUP_DIR` env var, falling back to
+//! `vpnctl_inventory::DEFAULT_BACKUP_DIR`. The daemon's systemd unit
+//! sets the env var when there's a non-default install layout; the
+//! CLI honours it so the operator's `vpnctl restore` lands in the
+//! same place the daemon was writing.
+
+use std::path::PathBuf;
+
+use clap::Subcommand;
+
+use crate::OutputFormat;
+use vpnctl_inventory::{SqliteInventory, list_snapshots, prune_snapshots, snapshot_now};
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum BackupCmd {
+    /// Take a snapshot now. Mirrors the web `snapshot now` button.
+    Snapshot,
+    /// List snapshots in the configured backup directory, newest first.
+    List,
+    /// Apply the default retention policy: keep 24 hourly plus 30
+    /// daily plus 12 monthly snapshots; remove everything else.
+    /// Mirrors what the daemon scheduler does at the end of every
+    /// tick.
+    Prune,
+}
+
+pub(crate) async fn run(
+    cmd: BackupCmd,
+    db: Option<PathBuf>,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let dir = backup_dir_from_env();
+    match cmd {
+        BackupCmd::Snapshot => {
+            let db_path = db_path_from_arg(db)?;
+            let inv = SqliteInventory::open(&db_path).await?;
+            let snap = snapshot_now(&inv, &dir).await?;
+            match output {
+                OutputFormat::Text => println!("snapshot written: {}", snap.display()),
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({"snapshot": snap.display().to_string()})
+                ),
+            }
+            Ok(())
+        }
+        BackupCmd::List => {
+            let list = list_snapshots(&dir)?;
+            match output {
+                OutputFormat::Text => {
+                    if list.is_empty() {
+                        println!("(no snapshots in {})", dir.display());
+                    } else {
+                        println!("{:<32}  {:>10}  file", "created (UTC)", "size");
+                        for snap in &list {
+                            println!(
+                                "{:<32}  {:>10}  {}",
+                                snap.created.as_deref().unwrap_or("?"),
+                                format_size_bytes(snap.size_bytes),
+                                snap.path.display()
+                            );
+                        }
+                    }
+                }
+                OutputFormat::Json => {
+                    let arr: Vec<_> = list
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "created": s.created,
+                                "file_name": s.file_name,
+                                "path": s.path.display().to_string(),
+                                "size_bytes": s.size_bytes,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::Value::Array(arr));
+                }
+            }
+            Ok(())
+        }
+        BackupCmd::Prune => {
+            let removed = prune_snapshots(&dir, vpnctl_inventory::Retention::default())?;
+            match output {
+                OutputFormat::Text => {
+                    println!("pruned {removed} snapshot(s) in {}", dir.display());
+                }
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"removed": removed, "dir": dir.display().to_string()})
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `vpnctl restore <snapshot>` — atomic swap of the snapshot file
+/// over the live `inv.db`. Daemon MUST be stopped first; we don't
+/// try to detect that (no good cross-platform way) — the operator
+/// follows the documented sequence:
+///
+///   1. `sudo systemctl stop vpnctld`
+///   2. `vpnctl restore /var/lib/vpnctl/backups/inv.db.<ts>.bak`
+///   3. `sudo systemctl start vpnctld`
+pub(crate) async fn run_restore(
+    snapshot: PathBuf,
+    db: Option<PathBuf>,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let db_path = db_path_from_arg(db)?;
+    if !snapshot.exists() {
+        anyhow::bail!("snapshot not found: {}", snapshot.display());
+    }
+    vpnctl_inventory::restore_from(&snapshot, &db_path).await?;
+    match output {
+        OutputFormat::Text => {
+            println!(
+                "ok — restored {} -> {}",
+                snapshot.display(),
+                db_path.display()
+            );
+            println!("now run `sudo systemctl start vpnctld` to bring the daemon back up");
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "restored_from": snapshot.display().to_string(),
+                    "db_path": db_path.display().to_string(),
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the backup directory: env var override, otherwise the
+/// shipped default. Mirrors the daemon's resolution order so the CLI
+/// + daemon agree on the same dir even in non-standard installs.
+fn backup_dir_from_env() -> PathBuf {
+    std::env::var("VPNCTLD_BACKUP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR))
+}
+
+/// Resolve the DB path: `--db` arg → `VPNCTL_DB` env (via clap's
+/// `global = true`) → production default `/var/lib/vpnctl/inv.db`.
+fn db_path_from_arg(arg: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    Ok(arg.unwrap_or_else(|| PathBuf::from("/var/lib/vpnctl/inv.db")))
+}
+
+/// Same human-friendly formatter as the daemon Settings page uses,
+/// duplicated here because the daemon module isn't a CLI dep.
+fn format_size_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if n < KB {
+        format!("{n} B")
+    } else if n < MB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else if n < GB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else {
+        format!("{:.2} GB", n as f64 / GB as f64)
+    }
+}
