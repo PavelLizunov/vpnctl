@@ -1,0 +1,380 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/sing-box.log",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [
+        {
+          "uuid": "00000000-0000-0000-0000-000000000000",
+          "name": "main-brat",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "ninitux",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000002",
+          "name": "liza",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000003",
+          "name": "oleg",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000004",
+          "name": "Demonnot-3",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000005",
+          "name": "hahahartv",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000006",
+          "name": "zappodler",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000007",
+          "name": "El-Kuzari",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000008",
+          "name": "maksimsubrakov",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000009",
+          "name": "SlaaneshChampion",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000a",
+          "name": "subrak52323",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000b",
+          "name": "ronerifeza",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000c",
+          "name": "lana.fedyanina",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000d",
+          "name": "Jokerkis1",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000e",
+          "name": "vouvaivah",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000f",
+          "name": "sergogostmen",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000010",
+          "name": "alicemoren1991",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000011",
+          "name": "unitydjxd",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000012",
+          "name": "alena_ruslan",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000013",
+          "name": "Khunrath",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000014",
+          "name": "gelios",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000015",
+          "name": "SanguisGG",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000016",
+          "name": "tester-1",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "www.microsoft.com",
+            "server_port": 443
+          },
+          "private_key": "EXAMPLE_REDACTED_PRIVATE_KEY_xxxxxxxxxxxxxxxxxxxx",
+          "short_id": [
+            "d86e92a0c6dd2271"
+          ]
+        }
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-in",
+      "listen": "::",
+      "listen_port": 8443,
+      "users": [
+        {
+          "uuid": "00000000-0000-0000-0000-000000000000",
+          "password": "tuicpass-0000000000000000000000",
+          "name": "brat-pc"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "password": "tuicpass-0000000000000000000001",
+          "name": "brat-mac"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000002",
+          "password": "tuicpass-0000000000000000000002",
+          "name": "brat-mobile"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000003",
+          "password": "tuicpass-0000000000000000000003",
+          "name": "nini-pc"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000004",
+          "password": "tuicpass-0000000000000000000004",
+          "name": "nini-mobile"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000005",
+          "password": "tuicpass-0000000000000000000005",
+          "name": "liza-pc"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000006",
+          "password": "tuicpass-0000000000000000000006",
+          "name": "liza-mobile"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000007",
+          "password": "tuicpass-0000000000000000000007",
+          "name": "sezam104"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000008",
+          "password": "tuicpass-0000000000000000000008",
+          "name": "nini"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/certs/cert.pem",
+        "key_path": "/etc/sing-box/certs/key.pem"
+      },
+      "congestion_control": "bbr",
+      "zero_rtt_handshake": false,
+      "heartbeat": "10s"
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality-2083",
+      "listen": "::",
+      "listen_port": 2083,
+      "users": [
+        {
+          "uuid": "00000000-0000-0000-0000-000000000000",
+          "name": "main-brat",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "ninitux",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000002",
+          "name": "liza",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000003",
+          "name": "oleg",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000004",
+          "name": "Demonnot-3",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000005",
+          "name": "hahahartv",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000006",
+          "name": "zappodler",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000007",
+          "name": "El-Kuzari",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000008",
+          "name": "maksimsubrakov",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000009",
+          "name": "SlaaneshChampion",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000a",
+          "name": "subrak52323",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000b",
+          "name": "ronerifeza",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000c",
+          "name": "lana.fedyanina",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000d",
+          "name": "Jokerkis1",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000e",
+          "name": "vouvaivah",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-00000000000f",
+          "name": "sergogostmen",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000010",
+          "name": "alicemoren1991",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000011",
+          "name": "unitydjxd",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000012",
+          "name": "alena_ruslan",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000013",
+          "name": "Khunrath",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000014",
+          "name": "gelios",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000015",
+          "name": "SanguisGG",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000000016",
+          "name": "tester-1",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "gateway.icloud.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "gateway.icloud.com",
+            "server_port": 443
+          },
+          "private_key": "EXAMPLE_REDACTED_PRIVATE_KEY_xxxxxxxxxxxxxxxxxxxx",
+          "short_id": [
+            "d86e92a0c6dd2271"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "final": "direct",
+    "default_domain_resolver": "google-dns"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "google-dns",
+        "server": "8.8.8.8"
+      },
+      {
+        "type": "udp",
+        "tag": "cloudflare-dns",
+        "server": "1.1.1.1"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090"
+    }
+  }
+}

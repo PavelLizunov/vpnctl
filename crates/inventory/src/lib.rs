@@ -8,6 +8,7 @@
 
 pub mod backup;
 pub mod mem;
+pub mod migrate;
 pub mod sqlite;
 
 pub use backup::{
@@ -15,6 +16,11 @@ pub use backup::{
     prune_snapshots, restore_from, snapshot_filename_at, snapshot_now, snapshot_to,
 };
 pub use mem::InMemoryInventory;
+pub use migrate::{
+    BashInventoryEnv, BashSingboxData, BashTuicUser, BashVlessUser, MigrationOutcome,
+    MigrationPlan, SkippedUser, apply_migration_plan, build_migration_plan,
+    derive_server_id_from_ip, parse_bash_inventory_env, parse_bash_singbox,
+};
 pub use sqlite::{
     AccessBucket, AuditEntry, Ban, NodeHealthRow, SqliteInventory, SqliteInventoryError,
     SubAccessEntry, UaCluster, VpnStatsDelta, VpnStatsRow,

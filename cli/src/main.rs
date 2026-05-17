@@ -97,6 +97,22 @@ enum Cmd {
         /// or downloaded from the Settings page.
         snapshot: PathBuf,
     },
+    /// Migrate state from the legacy bash `vpn-control` project (Phase
+    /// C-5). Subcommand `from-bash <dir>` reads each `<IP>.env`, SSHs
+    /// to each server read-only to pull `/etc/sing-box/{config.json,keys.env}`,
+    /// builds a plan, and (with `--apply`) inserts servers/users/grants
+    /// into vpnctl's inv.db preserving UUIDs + TUIC passwords. Default
+    /// is dry-run.
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MigrateCmd {
+    /// Pull state out of a bash `vpn-control` inventory + servers.
+    FromBash(cmd::migrate::MigrateFromBashArgs),
 }
 
 #[tokio::main]
@@ -120,6 +136,11 @@ async fn main() -> std::process::ExitCode {
         Cmd::Render { server } => cmd::render::run(&server, cli.db).await,
         Cmd::Backup { cmd } => cmd::backup::run(cmd, cli.db, cli.output).await,
         Cmd::Restore { snapshot } => cmd::backup::run_restore(snapshot, cli.db, cli.output).await,
+        Cmd::Migrate { cmd } => match cmd {
+            MigrateCmd::FromBash(args) => {
+                cmd::migrate::run_from_bash(args, cli.db, cli.output).await
+            }
+        },
     };
 
     match res {

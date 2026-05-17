@@ -336,6 +336,40 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Replace a server's `address` + `ssh_port` + `ssh_user` in
+    /// place. Used by the `--overwrite-existing` path of
+    /// `vpnctl migrate from-bash` when an operator's earlier
+    /// wizard-test created a server row with a stale IP that the
+    /// migration needs to correct. Does NOT touch kernels,
+    /// protocols, or secrets (those have their own setters); the
+    /// scope is intentionally narrow so an accidental call can't
+    /// nuke unrelated state.
+    pub async fn update_server_address(
+        &self,
+        id: &ServerId,
+        address: &str,
+        ssh_port: u16,
+        ssh_user: &str,
+    ) -> Result<()> {
+        if address.is_empty() {
+            return Err(SqliteInventoryError::Invalid(
+                "address must not be empty".into(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE servers SET address = ?1, ssh_port = ?2, ssh_user = ?3,
+                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?4",
+        )
+        .bind(address)
+        .bind(i64::from(ssh_port))
+        .bind(ssh_user)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_trusted_fingerprint(&self, id: &ServerId, fp: &str) -> Result<()> {
         // Defensive validation — a malicious or buggy caller could otherwise
         // store an empty / arbitrary value, after which every future connect
