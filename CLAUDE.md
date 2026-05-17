@@ -83,17 +83,20 @@ Confirmed by Pavel 2026-05-14:
 | C-1 | users list + detail + QR | ✅ shipped | commit `aafc180` |
 | C-2 | UX polish (collapsible Tweaks, copy contracts, favicon) | ✅ shipped | commit `663a653` |
 | C-3.1 | writes — regenerate sub-token | ✅ shipped | commit `276e47d` |
-| **C-3.2-4** | **writes — add user / grants / delete** | **next** | each web-mutation paired with `inv.audit("admin", …)` |
-| **Track-1** | **abuse signal: per-user sub-fetch log + UI** | ✅ shipped | next commit |
-| Track-2 | rate-limit `/sub/<token>` (per-IP, per-token), auto-deny on burst | queued | `tower-governor` or hand-rolled token bucket |
-| **C-4** | **backup + restore** | queued (priority) | scheduled inv.db snapshot, off-site target, `vpnctl restore` command |
-| **C-5** | **migrate from bash** | queued (priority) | `vpnctl migrate from-bash <path>` reads `inventory/*.env`, preserves UUIDs & passwords; share_link byte-equality test |
-| E | add-server wizard (THE feature) | planned | IP+root → SSE-streamed bootstrap, hardening, install, deploy |
-| Track-3 | clash-api polling on each node, per-user real-time conns/traffic | planned (after E) | adds clash-api to deploy, daemon poller, `vpn_connection_stats` table |
-| D | audit timeline | planned | filters, search, export |
-| F | monitoring | planned | sparklines (needs stats endpoint design) |
-| Track-4 | UA fingerprint heuristic (roaming vs shared URL) | low priority | classifier on top of Track-1 data |
-| G | infra notifications | planned | server-down / crash-loop / fail2ban-banned-self alerts |
+| C-3.2-4 | writes — add user / grants / delete | ✅ shipped | `2a5ce95` add + `60a90e9` grant/revoke + `0b1fec5` delete-confirm |
+| Track-1 | abuse signal: per-user sub-fetch log + UI | ✅ shipped | `1e91eeb` |
+| Track-1.1 | retention scheduler (sub_access_log + vpn_stats hourly purge >30d) | ✅ shipped | `1e33e29` |
+| Track-2 | rate-limit `/sub/<token>` (per-IP, per-token), persistent bans | ✅ shipped | `555fd5a` token+IP bucket + `daemon/src/rate_limit.rs` |
+| C-4 | backup + restore | ✅ shipped | `bbf427f` VACUUM INTO snapshot + retention + Settings download + `vpnctl restore` |
+| C-5 | migrate from bash | ✅ shipped | `0530251` + `33b3025` split-identity policy |
+| E | add-server wizard (THE feature) | ✅ shipped | `1821c99` step1 form + `4477199` SSE-streamed bootstrap (sub-iter 4b) |
+| Track-3 | clash-api polling on each node, per-user real-time conns/traffic | ✅ shipped | `537342c` kernel block + `cd61838` client + `f22df7d` diff engine + `d36b7c9` UI + `473b2e4` poller reapply + `54ee77f` feature-gate |
+| D | audit timeline | ✅ shipped | `1a2d8c9` paginated + filtered + CSV export |
+| F | monitoring | ✅ shipped | `dbfd211` sparklines + `4d810f2` 24h dashboard sparkline + heatmap |
+| Track-4 | UA fingerprint heuristic (roaming vs shared URL) | ✅ shipped | `272a3ec` ua_clusters_for_user + likely-shared/-roaming classifier on user-detail |
+| H | node telemetry (read side) | ✅ chunks 1-3 shipped | `3970530` probe + `604cf0c` storage + `d5ff423` /admin/servers/{id} detail page; **chunk 4 poller wiring still pending** |
+| **G** | **infra notifications** | **next** | server-down / sing-box crash-loop / fail2ban-banned-self alerts; needs node_probe poller (Phase H chunk 4) + `admin_alerts` table + dashboard tile. Webhook transport (Telegram / ntfy.sh / journald) gated on Pavel decision. |
+| **L7** | **migrate destructive-op gate** | **next** | `vpnctl migrate from-bash --overwrite-existing` must require an explicit `--i-really-mean-overwrite-address` flag when `Server.address` changes — caught by Pavel 2026-05-17 after vps-is-01 ↔ 104 cross-overwrite. Methodology dirt fix. |
 
 ### Three-layer visibility model (abuse detection)
 
@@ -690,30 +693,60 @@ get oriented without reading the whole methodology block.
 - **v0.4** ✅ daemon `vpnctld` + REST API + `GET /sub/<token>` + admin UI
   Phase A (editorial shell, theme/accent cookies) + Phase B
   (dashboard metrics, servers list)
-- **v0.5** in progress — admin UI feature delivery
+- **v0.5** ✅ admin UI feature delivery complete
   - ✅ Phase C-1: users list + detail + inline-SVG QR (`aafc180`)
   - ✅ Phase C-2: collapsible Tweaks + footer overlap fix + favicon +
     unified backend copy contract (`d1c0578`, `663a653`)
   - ✅ Phase C-3.1: regenerate sub-token from web (`276e47d`)
   - ✅ Phase Track-1: subscription-access log + abuse-signal UI on
     user-detail (`1e91eeb`) — first abuse-detection layer
-  - ⏳ Phase C-3.2-4: web add-user / grant / revoke / delete
-  - ⏳ Phase Track-1.1: retention scheduler (purge runs periodically;
-    UI today says "auto-purged after 30 days" but the scheduler is not
-    yet wired — known gap, queued for the hardening commit)
-  - ⏳ Phase Track-2: rate-limit `/sub/<token>` (per-IP + per-token
-    token bucket, 429 on burst)
-- **v0.6** queued — backups + migration before more features
-  - ⏳ Phase C-4: scheduled `inv.db` snapshot + off-site target +
-    `vpnctl restore` (the homelab `192.168.0.236` is a single point
-    of failure today; no backup exists)
-  - ⏳ Phase C-5: `vpnctl migrate from-bash <path>` with byte-equal
-    `share_link` regression test (existing bash-vpn-control clients on
-    phones MUST keep working without re-import)
-- **v0.7+** Phase E (add-server wizard with SSE-streamed bootstrap),
-  Phase Track-3 (clash-api real-time connections), Phase D (audit
-  timeline), Phase F (monitoring), Track-4 (UA fingerprint), Phase G
-  (infra notifications)
+  - ✅ Phase C-3.2-4: web add-user (`2a5ce95`), grant/revoke (`60a90e9`),
+    delete with double-submit confirm (`0b1fec5`)
+  - ✅ Phase Track-1.1: retention scheduler wired in `daemon/src/app.rs`
+    — hourly purge of `sub_access_log` AND `vpn_connection_stats`
+    rows >30 days (`1e33e29`)
+  - ✅ Phase Track-2: rate-limit `/sub/<token>` with per-IP + per-token
+    token bucket + persistent bans table (`555fd5a` + `daemon/src/rate_limit.rs`)
+- **v0.6** ✅ backups + migration shipped
+  - ✅ Phase C-4: `inv.db` snapshot + retention + Settings UI download
+    + `vpnctl restore` CLI (`bbf427f`)
+  - ✅ Phase C-5: `vpnctl migrate from-bash <path>` preserves UUIDs +
+    TUIC passwords, split-identity policy permits import of bash 93
+    (`0530251` + `33b3025`)
+- **v0.7** ✅ wizard + protocol breadth + audit/monitoring/UA fingerprint
+  - ✅ Phase E: add-server wizard with SSE-streamed bootstrap
+    (`1821c99` form + `4477199` sub-iter 4b SSE)
+  - ✅ Phase Track-3: clash-api kernel block (`537342c`) + client
+    (`cd61838`) + diff engine + storage (`f22df7d`) + UI (`d36b7c9`)
+    + poller (`473b2e4` reapply + `54ee77f` feature-gate)
+  - ✅ Phase D: paginated + filtered + CSV audit timeline (`1a2d8c9`)
+  - ✅ Phase F: monitoring sparklines + `/api/v1/stats/sub-access`
+    JSON endpoint (`dbfd211`) + 24h dashboard sparkline + heavy-users
+    heatmap (`4d810f2`) + D.6c traffic limits + alerts (`fdbd618`)
+  - ✅ Phase Track-4: UA fingerprint section on user-detail with
+    likely-shared / likely-roaming classifier (`272a3ec`)
+  - ✅ Phase H chunks 1-3: node_probe + node_health storage + per-server
+    detail page with DECLARED vs OBSERVED drift banner (`3970530`,
+    `604cf0c`, `d5ff423`)
+  - ✅ AnyTLS protocol (`ce521ec`) + Trojan protocol (`f8823b0`) for
+    РФ-DPI diversity; 7 protocols total across 2 kernels
+  - ✅ `--gen-wireguard` CLI + AmneziaVPN Flow C `vpn://` deep-link
+    (`522d449` + `091b82e`)
+- **v0.8 (in progress, post-2026-05-17)** — closing the last gaps
+  - ⏳ Phase H chunk 4: node_probe **poller wiring** into daemon
+    startup. Storage + UI ready; just need periodic SSH probe.
+    Empty-state on `/admin/servers/{id}` until then.
+  - ⏳ Phase G: infra notifications — `admin_alerts` table + state-
+    machine on top of Phase H chunk 4 probe data; dashboard alert
+    feed + ack. Webhook transport (Telegram / ntfy.sh / journald)
+    deferred until Pavel picks one.
+  - ⏳ L7 methodology fix: `vpnctl migrate from-bash --overwrite-existing`
+    must require explicit confirmation when `Server.address` changes.
+    Caught the hard way (vps-is-01 ↔ 104 cross-overwrite, 2026-05-17).
+  - ⏳ `vpnctl server set-fingerprint <id>` CLI + web action — today
+    operators run raw SQL (noted in `docs/AUTONOMOUS_PLAN.md:273`).
+  - ⏳ `decode_form_value` UTF-8 fix (3 call sites, masked today by
+    validators — deferred minor from `e250789` audit).
 - **v1.0** far away — defined as "everything in roadmap shipped + months
   of operating experience without rolling back"
 
