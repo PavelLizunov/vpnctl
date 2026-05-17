@@ -2140,6 +2140,26 @@ async fn retention_purger_spawns_a_runnable_task() {
     );
 }
 
+#[tokio::test]
+async fn node_probe_poller_spawns_a_runnable_task() {
+    // Phase H chunk 4 smoke test — mirrors retention_purger above.
+    // Proves `spawn_node_probe_poller` compiles, returns a real
+    // tokio task, and lets `abort()` cancel cleanly. The probe body
+    // (parser, SSH client, inventory INSERT) is fully exercised by
+    // `crate::node_probe::tests` + `spec_node_health`.
+    let dir = TempDir::new().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let handle = vpnctld::spawn_node_probe_poller_for_test(inv);
+    handle.abort();
+    let result = handle.await;
+    assert!(
+        matches!(&result, Err(e) if e.is_cancelled()),
+        "expected aborted JoinHandle; got {result:?}"
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Phase Hardening — CSRF middleware (handlers/csrf.rs)
 //

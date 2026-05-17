@@ -13,6 +13,7 @@ pub mod clash_poller;
 pub mod config;
 pub mod handlers;
 pub mod node_probe;
+pub mod node_probe_poller;
 pub mod rate_limit;
 // Subprocess-based SSH transport — wraps system `ssh` binary instead
 // of linking russh. Lets vpnctld talk to nodes without pulling
@@ -37,6 +38,16 @@ pub fn spawn_retention_purger_for_test(
     inv: vpnctl_inventory::SqliteInventory,
 ) -> tokio::task::JoinHandle<()> {
     app::spawn_retention_purger(inv)
+}
+
+/// Test-only re-export of the node-probe poller (Phase H chunk 4)
+/// spawner so integration tests can verify the wiring without
+/// constructing a full `AppState`. Production code uses
+/// `vpnctld::build()` which calls this internally.
+pub fn spawn_node_probe_poller_for_test(
+    inv: vpnctl_inventory::SqliteInventory,
+) -> tokio::task::JoinHandle<()> {
+    node_probe_poller::spawn_node_probe_poller(inv)
 }
 
 /// Test-only re-export of the backup scheduler with custom delays

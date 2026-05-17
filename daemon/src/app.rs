@@ -117,6 +117,18 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // host yet OR when a node hasn't authorised it.
     drop(crate::clash_poller::spawn_clash_poller(inv.clone()));
 
+    // Phase H chunk 4 — periodic node_health probe (systemctl /
+    // disk / mem / load / listening ports / sing-box log size).
+    // Same SubprocessSshTransport, same skip-when-no-key behaviour,
+    // independent cadence (10 min by default vs clash's 5 min — see
+    // node_probe_poller doc-comment for the cadence rationale).
+    // Until this is wired, `/admin/servers/{id}` shows empty-state
+    // forever because the underlying `node_health` table never
+    // gets a row.
+    drop(crate::node_probe_poller::spawn_node_probe_poller(
+        inv.clone(),
+    ));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker
@@ -314,6 +326,29 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     target = "vpnctld::retention",
                     error = %e,
                     "vpn_connection_stats purge failed; will retry next tick"
+                ),
+            }
+            // Phase H chunk 4: sweep node_health on the same cadence.
+            // The probe inserts ~144 rows/server/day (every 10 min);
+            // a 5-server homelab generates ~22K rows over 30 days —
+            // trivial in row count but kept aligned with the other
+            // retention windows for operator-mental-model consistency.
+            match crate::node_probe_poller::purge_old(&inv, RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "node_health purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old node_health rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "node_health purge failed; will retry next tick"
                 ),
             }
         }
