@@ -7,6 +7,7 @@ mod shadowsocks2022;
 mod trojan;
 mod tuic_v5;
 mod vless_reality;
+mod wg_addressing;
 mod wgturn;
 mod wireguard;
 

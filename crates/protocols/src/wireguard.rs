@@ -347,35 +347,21 @@ pub fn render_client_conf_public(ctx: &RenderCtx<'_>, user: &User) -> Result<Str
 }
 
 /// Compute the per-user `/32` octet for the target user on this
-/// server. Uses `ctx.peers` (the granted-users list in the SAME
-/// order `server_inbound` iterates) so the client's `Address` line
-/// matches the server's `[Peer]` block 1:1.
+/// server. Thin wrapper around the shared `wg_addressing` helper
+/// — both AmneziaWg (here) and wgturn pick from a /24 with the
+/// same indexing scheme, only the base subnet differs.
 ///
-/// Fallback when `ctx.peers` is empty OR doesn't contain the target:
-/// octet 2 (the legacy single-user value). Logging a warning would
-/// be useful but this function is in a no-tracing crate; the daemon
-/// always passes `ctx.peers`, the only path that can fall through is
-/// a test calling `RenderCtx::new(..)` instead of `with_peers(..)`.
-///
-/// 254-peer cap matches `server_inbound`'s safety guard — past that
-/// the /24 would wrap.
+/// Semantics (per `wg_addressing::peer_octet_in_slash24`):
+///   * `ctx.peers` empty → `Ok(2)` legacy single-user fallback
+///     (kept for byte-equality with pre-2026-05-17 clients holding
+///     a `.conf` rendered without `with_peers`).
+///   * `ctx.peers` populated + user found → `Ok(2 + idx)`.
+///   * `ctx.peers` populated + user MISSING → `Err(Render)` —
+///     tightened contract from the pre-extraction version that
+///     silently returned 2; the caller built `RenderCtx` for the
+///     wrong server.
 fn peer_octet_for(ctx: &RenderCtx<'_>, user: &User) -> Result<u16> {
-    if let Some(idx) = ctx.peers.iter().position(|u| u.id == user.id) {
-        let octet = 2_u16.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
-        if octet > 254 {
-            return Err(CoreError::Render(format!(
-                "wireguard /24 has only 253 peer slots; user '{}' index {idx} would overflow",
-                user.id.0
-            )));
-        }
-        Ok(octet)
-    } else {
-        // Single-user fallback. Hit by tests using `RenderCtx::new`
-        // and by legacy code paths that haven't migrated to
-        // `with_peers`. Same value as the pre-2026-05-17 hard-coded
-        // address, so existing clients keep working byte-for-byte.
-        Ok(2)
-    }
+    crate::wg_addressing::peer_octet_in_slash24(ctx, user, 2)
 }
 
 /// Render the actual `.conf` text the share-link encodes. INI-format,
