@@ -850,14 +850,20 @@ fn admin_router(state: AppState) -> Router {
 /// future shared `crate vpnctl-registry` can replace this without changing
 /// callers.
 fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::{AmneziaWg, SingBox};
+    use vpnctl_kernels::{AmneziaWg, SingBox, WgTurn as WgTurnKernel};
     use vpnctl_protocols::{
-        AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WireGuard,
+        AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WgTurn as WgTurnProtocol,
+        WireGuard,
     };
 
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new()))?;
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
+    // wgturn-core — VK-TURN-relayed WireGuard emergency channel.
+    // Mirrors `cli/src/registry.rs::build`. The duplication is
+    // pre-existing (see this function's doc-comment); a future
+    // `vpnctl-registry` crate consolidates both sites.
+    reg.register_kernel(Box::new(WgTurnKernel::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
@@ -865,5 +871,6 @@ fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(WireGuard::new()))?;
     reg.register_protocol(Box::new(AnyTls::new()))?;
     reg.register_protocol(Box::new(Trojan::new()))?;
+    reg.register_protocol(Box::new(WgTurnProtocol::new()))?;
     Ok(reg)
 }

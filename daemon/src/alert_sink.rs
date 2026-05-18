@@ -705,7 +705,10 @@ mod tests {
             !safe.contains("SECRETtoken12abcd"),
             "token must be replaced: {safe}"
         );
-        assert!(safe.contains("••••abcd"), "must include last4 marker: {safe}");
+        assert!(
+            safe.contains("••••abcd"),
+            "must include last4 marker: {safe}"
+        );
         // Untouched parts survive.
         assert!(safe.contains("curl error:"));
         assert!(safe.contains("api.telegram.org"));

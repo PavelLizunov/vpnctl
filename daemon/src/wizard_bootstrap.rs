@@ -563,6 +563,38 @@ pub async fn bootstrap_server_secrets(
         minted.push("hysteria2 salamander obfs password");
     }
 
+    // wgturn-core: Curve25519 keypair for the bundled `wgturnsrv`
+    // WireGuard backend. The VK link (`wgturn:vk_link`) is operator-
+    // pasted via /admin/servers/<id>/secrets (captcha-gated, can't
+    // be minted server-side) so we deliberately DO NOT mint a
+    // placeholder — `render_config` fails loud at deploy time with a
+    // clear «paste a fresh VK link» pointer instead of silently
+    // shipping a broken config.
+    //
+    // Key naming uses `wgturn:` (colon) to match the kernel's
+    // `render_config` look-ups — that's intentional kernel-namespace
+    // separation from the protocol-namespaced dot keys (`vless.*`,
+    // `wireguard.*`, `tuic.*`). A future refactor unifying to dots
+    // touches both call sites — flag this in the comment so it's
+    // greppable.
+    let needs_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
+    if needs_wgturn
+        && (!secrets.contains_key("wgturn:server_wg_private")
+            || !secrets.contains_key("wgturn:server_wg_public"))
+    {
+        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
+        for (k, v) in [
+            ("wgturn:server_wg_private", &priv_key),
+            ("wgturn:server_wg_public", &pub_key),
+        ] {
+            inv.set_server_secret(&server.id, k, v)
+                .await
+                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
+            secrets.insert(k.to_string(), v.clone());
+        }
+        minted.push("wgturn server wireguard keypair");
+    }
+
     Ok((secrets, minted))
 }
 

@@ -10,6 +10,8 @@
 
 mod amnezia_wg;
 mod sing_box;
+mod wgturn;
 
 pub use amnezia_wg::AmneziaWg;
 pub use sing_box::SingBox;
+pub use wgturn::WgTurn;
