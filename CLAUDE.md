@@ -95,8 +95,9 @@ Confirmed by Pavel 2026-05-14:
 | F | monitoring | ✅ shipped | `dbfd211` sparklines + `4d810f2` 24h dashboard sparkline + heatmap |
 | Track-4 | UA fingerprint heuristic (roaming vs shared URL) | ✅ shipped | `272a3ec` ua_clusters_for_user + likely-shared/-roaming classifier on user-detail |
 | H | node telemetry (read side) | ✅ chunks 1-3 shipped | `3970530` probe + `604cf0c` storage + `d5ff423` /admin/servers/{id} detail page; **chunk 4 poller wiring still pending** |
-| **G** | **infra notifications** | **next** | server-down / sing-box crash-loop / fail2ban-banned-self alerts; needs node_probe poller (Phase H chunk 4) + `admin_alerts` table + dashboard tile. Webhook transport (Telegram / ntfy.sh / journald) gated on Pavel decision. |
-| **L7** | **migrate destructive-op gate** | **next** | `vpnctl migrate from-bash --overwrite-existing` must require an explicit `--i-really-mean-overwrite-address` flag when `Server.address` changes — caught by Pavel 2026-05-17 after vps-is-01 ↔ 104 cross-overwrite. Methodology dirt fix. |
+| G | infra notifications | ✅ shipped | `dbfd211` alerts + Telegram bot transport + admin_alerts table + dashboard tile (security audit 2026-05-18 rolled the test-send + token-via-stdin parts). |
+| L7 | migrate destructive-op gate | ✅ shipped | `--i-really-mean-overwrite-address` flag in `cli/src/cmd/migrate.rs`; pinned by 5 unit tests in commit `0068c8f` (the impl itself landed earlier post-2026-05-17 vps-is-01 ↔ 104 cross-overwrite). |
+| **WG-T** | **wgturn-core kernel + protocol** | ✅ shipped 2026-05-18 | VK-TURN-relayed WireGuard «emergency channel». Phase 1 `c06c175` (kernel skeleton + stub protocol + bootstrap + 17 tests). Phase 2 `4e08b2d` (offline `wgturn://` share-link encoder ported from `pkg/wgshare` af0f209f, 11 new tests + extracted `wg_addressing` shared peer-octet helper). Admin UI `d9f6400` (VK-link form on `/admin/servers/{id}` + audit-leak-free payload, 8 admin_smoke tests). |
 
 ### Three-layer visibility model (abuse detection)
 
