@@ -786,13 +786,63 @@ fn admin_router(state: AppState) -> Router {
         crate::handlers::csrf::require_same_origin,
     ));
 
+    // Security-headers layer for the admin tree. Defense-in-depth
+    // against XSS (CSP), MIME-sniffing attacks (nosniff), clickjacking
+    // (frame-ancestors / X-Frame-Options), and referrer leakage to
+    // any external resource we might fetch (none today, but pre-pin).
+    // Added 2026-05-18 per security audit. Notes:
+    //   * `script-src 'self' 'unsafe-inline'` — we use inline `style=`
+    //     attrs heavily (maud-generated). `unsafe-inline` for STYLE
+    //     not SCRIPT — script is `'self'` only. No inline `<script>`
+    //     today.
+    //   * `connect-src 'self'` — pre-blocks future XSS attempts to
+    //     exfil via fetch() to evil.com.
+    //   * `frame-ancestors 'none'` is the modern equivalent of
+    //     X-Frame-Options: DENY; we set both for old browsers.
+    let with_security_headers = with_csrf
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self'; \
+                 style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data:; \
+                 font-src 'self' https://fonts.gstatic.com; \
+                 connect-src 'self'; \
+                 frame-ancestors 'none'; \
+                 base-uri 'self'; \
+                 form-action 'self'",
+            ),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::header::REFERRER_POLICY,
+            axum::http::HeaderValue::from_static("no-referrer"),
+        ))
+        // `Permissions-Policy` deprecates Feature-Policy. Block every
+        // sensor + device API we don't use (= all of them).
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::HeaderName::from_static("permissions-policy"),
+            axum::http::HeaderValue::from_static(
+                "accelerometer=(), camera=(), geolocation=(), gyroscope=(), \
+                 magnetometer=(), microphone=(), payment=(), usb=()",
+            ),
+        ));
+
     if let Some(auth) = BasicAuth::from_env() {
-        with_csrf.layer(axum::middleware::from_fn_with_state(
+        with_security_headers.layer(axum::middleware::from_fn_with_state(
             auth,
             crate::handlers::auth::require_basic_auth,
         ))
     } else {
-        with_csrf
+        with_security_headers
     }
 }
 

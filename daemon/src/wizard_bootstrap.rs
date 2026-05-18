@@ -674,6 +674,12 @@ pub async fn ssh_password_run(
     args.extend(ssh_safety_opts(known_hosts));
     args.push("-p".into());
     args.push(port_s);
+    // POSIX getopt separator — same defense as `build_ssh_args` /
+    // `build_keyscan_args`. Today `userhost` starts with «root@…»
+    // (literal `r`) so no dash, but a future refactor allowing
+    // non-root users from inventory would re-open flag-injection
+    // without this guard.
+    args.push("--".into());
     args.push(userhost);
     args.push(cmd_owned);
 

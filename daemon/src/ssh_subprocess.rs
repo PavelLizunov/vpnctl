@@ -118,6 +118,15 @@ impl SubprocessSshTransport {
             "BatchMode=yes".into(),
         ];
         args.extend(ssh_safety_opts(&self.known_hosts));
+        // POSIX getopt separator — every token after `--` is treated
+        // as positional regardless of leading dash. Defensive: today
+        // `self.user` is hardcoded `"root"` and `self.host` is the
+        // inventory address (validated). A future refactor letting
+        // operator-controlled `ssh_user` reach here (e.g. supporting
+        // non-root probes for hardened hosts) would silently
+        // re-introduce a flag-injection path without this guard.
+        // Same defense as host-fingerprint's `build_keyscan_args`.
+        args.push("--".into());
         args.push(format!("{}@{}", self.user, self.host));
         args.push(remote_cmd.to_string());
         args

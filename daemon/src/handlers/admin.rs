@@ -3573,18 +3573,21 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         ));
     }
 
-    let address: String = form_field(&body, "address")
+    let address_raw: String = form_field(&body, "address")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    if address.is_empty() {
-        return bad_request("address must not be empty (IPv4, IPv6 or hostname)");
-    }
-    // Shallow address shape check — full IP/hostname validation lives
-    // in the bootstrap path; here we just reject obvious garbage so a
-    // typo doesn't get persisted.
-    if address.contains(' ') || address.len() > 253 {
-        return bad_request(&format!("address looks malformed: {address:?}"));
-    }
+    // Route through the wizard's strict validator (charset
+    // `[A-Za-z0-9.:_-]`, length ≤ 255). The old quick-add gate
+    // only rejected ASCII space + length > 253, letting `\n`, `\r`,
+    // `\t`, and most control bytes through into `Server.address`
+    // (where they could later land in log lines / audit payloads as
+    // broken multi-line records). Security audit 2026-05-18 finding.
+    let address = match crate::wizard::validate_address(&address_raw) {
+        Ok(s) => s.to_string(),
+        Err(why) => {
+            return bad_request(&format!("invalid address: {why}"));
+        }
+    };
 
     let ssh_port: u16 = form_field(&body, "ssh_port")
         .and_then(|s| s.parse().ok())

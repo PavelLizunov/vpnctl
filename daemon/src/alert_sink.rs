@@ -433,8 +433,29 @@ impl AlertSink for TelegramSink {
         // `{"ok":false,"description":"... \"ok\":true ..."}` since
         // Telegram echoes operator-supplied chat names into
         // `description` (review-agent finding from chunk 3 part 2).
+        //
+        // **Response body cap (64 KiB)** — defense against an
+        // upstream that streams arbitrarily-large JSON. curl
+        // already caps at `--max-time 20`, but a fat pipe could
+        // still deliver hundreds of MB in that window; serde_json
+        // would happily parse the whole thing into a `Value` tree
+        // and OOM the daemon. Telegram's real responses are tiny
+        // (sub-KiB); 64 KiB is generous + bounds memory.
+        // Security-audit 2026-05-18 finding.
+        const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+        let trimmed: &str = if response_body.len() > MAX_RESPONSE_BYTES {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                got_bytes = response_body.len(),
+                cap = MAX_RESPONSE_BYTES,
+                "Telegram response body exceeded cap; truncating"
+            );
+            &response_body[..MAX_RESPONSE_BYTES]
+        } else {
+            &response_body
+        };
         let parsed: serde_json::Value =
-            serde_json::from_str(&response_body).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(trimmed).unwrap_or(serde_json::Value::Null);
         let ok_field = parsed.get("ok").and_then(serde_json::Value::as_bool);
         if ok_field != Some(true) {
             let truncated: String = response_body.chars().take(200).collect();

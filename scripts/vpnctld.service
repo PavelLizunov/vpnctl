@@ -1,0 +1,66 @@
+[Unit]
+Description=vpnctl HTTP daemon (admin UI + /sub/<token>)
+Documentation=https://github.com/PavelLizunov/vpnctl
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/opt/vpnctl
+EnvironmentFile=/etc/vpnctl/vpnctld.env
+ExecStart=/opt/vpnctl/vpnctld
+Restart=on-failure
+RestartSec=2
+
+# ── Sandbox / hardening ────────────────────────────────────────────
+# Updated 2026-05-18 per security audit. Daemon needs:
+#   * outbound TCP (api.telegram.org via curl OR via inventory ssh)
+#   * outbound SSH (probes + deploys to VPN nodes)
+#   * sqlite read/write at /var/lib/vpnctl/inv.db
+#   * read of /etc/vpnctl/vpnctld.env (creds, EnvironmentFile)
+#   * read-write of /var/lib/vpnctl/.ssh/{id_ed25519,known_hosts}
+# Anything else is out of scope.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vpnctl
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+
+# Caps: daemon never needs root capabilities. Drop them all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Syscall filter — `@system-service` is the maintained allowlist for
+# normal long-running services. Excluding `@privileged @resources
+# @obsolete @raw-io @reboot @swap @debug @cpu-emulation @mount`.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @raw-io @reboot @swap @debug @cpu-emulation @mount
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+# Address families — IPv4/IPv6 outbound + unix sockets (sqlx). Block
+# AF_NETLINK, AF_PACKET, AF_BLUETOOTH, etc.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Resource ceilings (low-effort DoS defense).
+TasksMax=256
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

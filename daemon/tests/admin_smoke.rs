@@ -2616,6 +2616,118 @@ async fn settings_telegram_post_rejects_garbage_chat_id() {
     );
 }
 
+/// Security audit 2026-05-18 — admin responses must carry CSP +
+/// X-Content-Type-Options + X-Frame-Options + Referrer-Policy +
+/// Permissions-Policy headers. Defense-in-depth against XSS,
+/// MIME-sniff, clickjacking, referrer leakage. CSP must NOT have
+/// `unsafe-inline` for script-src (style-src does, intentional).
+#[tokio::test]
+async fn admin_responses_carry_security_headers() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let headers = resp.headers();
+    // CSP
+    let csp = headers
+        .get("content-security-policy")
+        .expect("CSP must be set on /admin/* responses")
+        .to_str()
+        .unwrap();
+    assert!(
+        csp.contains("default-src 'self'"),
+        "CSP must default to self"
+    );
+    assert!(
+        csp.contains("script-src 'self'") && !csp.contains("script-src 'self' 'unsafe-inline'"),
+        "script-src MUST NOT include 'unsafe-inline' — XSS defense: {csp}"
+    );
+    assert!(
+        csp.contains("frame-ancestors 'none'"),
+        "frame-ancestors must be 'none' — clickjacking defense: {csp}"
+    );
+    // Companion headers
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .map(|v| v.to_str().unwrap()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers.get("x-frame-options").map(|v| v.to_str().unwrap()),
+        Some("DENY")
+    );
+    assert_eq!(
+        headers.get("referrer-policy").map(|v| v.to_str().unwrap()),
+        Some("no-referrer")
+    );
+    let perm = headers
+        .get("permissions-policy")
+        .expect("Permissions-Policy must be set")
+        .to_str()
+        .unwrap();
+    assert!(
+        perm.contains("camera=()")
+            && perm.contains("microphone=()")
+            && perm.contains("geolocation=()"),
+        "Permissions-Policy must block sensor / device APIs: {perm}"
+    );
+}
+
+/// Security audit 2026-05-18 — quick-add must reject addresses
+/// containing control bytes (`\n`, `\r`, `\t`, etc) that would
+/// produce broken multi-line audit / log records downstream. Old
+/// validator only rejected ASCII space + length>253.
+#[tokio::test]
+async fn server_quick_add_rejects_control_chars_in_address() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    // Control chars MID-STRING (not trailing — `.trim()` would strip
+    // those). These produce broken multi-line audit / log records
+    // if persisted as-is.
+    for (encoded_addr, label) in [
+        ("198%0A.51.100.1", "embedded newline in middle"),
+        ("198%0D.51.100.1", "embedded CR"),
+        ("198%09.51.100.1", "embedded tab"),
+        ("host%20with%20space", "embedded space"),
+        (
+            "evil%3B%20rm%20-rf%20%2F",
+            "shell-metachar injection attempt",
+        ),
+    ] {
+        let body = format!("id=test&address={encoded_addr}&ssh_port=22");
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/admin/servers/quick-add")
+            .header("content-type", "application/x-www-form-urlencoded");
+        req = add_same_origin(req);
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "quick-add MUST 400 on {label} in address"
+        );
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            text.contains("invalid address"),
+            "error must call out 'invalid address': {text}"
+        );
+    }
+}
+
 /// Post-2026-05-18 rule (Pavel: «не должен просить меня сделать
 /// что-то вручную на серверах»). No 4xx/5xx response body, no
 /// admin HTML deck-copy, and no UI hint may instruct the operator
