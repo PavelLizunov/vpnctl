@@ -129,6 +129,14 @@ fn nav(active: &str) -> Markup {
     }
 }
 
+/// Today's UTC date formatted for the masthead, matching the
+/// editorial «— a daily report from your homelab» voice. Computed
+/// per-render — caches would be more code than it's worth, and the
+/// page is uncached anyway (every GET hits the admin handler).
+fn masthead_date() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
 fn masthead(date: &str, vol: &str) -> Markup {
     html! {
         div.ed-mast {
@@ -274,7 +282,7 @@ pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -
             }
             body {
                 div class=(cls) {
-                    (masthead("dynamic date TBD", "vol. 0.4"))
+                    (masthead(&masthead_date(), &format!("vol. {}", env!("CARGO_PKG_VERSION"))))
                     (nav(active_nav))
                     main.ed-main {
                         (body)
@@ -2979,7 +2987,10 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
     if let Err(e) = snapshot_result {
         return internal_error(anyhow::Error::new(e));
     }
-    Redirect::to("/admin/settings").into_response()
+    // Fragment anchor → browser scrolls back to the Backups
+    // section (where the operator pressed «snapshot now») instead
+    // of jumping to the top of /admin/settings.
+    Redirect::to("/admin/settings#backups-section").into_response()
 }
 
 /// `GET /admin/backup/download/{name}` — stream a snapshot file with
@@ -4642,7 +4653,9 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         (tweaks_inline(&theme, &accent))
 
         div.ed-rule {}
-        div.ed-art-eyebrow { "Backups — inventory snapshots" }
+        // `id` so `backup_snapshot_now`'s POST-redirect-GET can
+        // anchor back to this section.
+        div #backups-section.ed-art-eyebrow { "Backups — inventory snapshots" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             "vpnctld snapshots " span.ed-mono { (crate::app::DEFAULT_DEPLOY_KEY_PATH.replace("/.ssh/id_ed25519", "/inv.db")) }
             " hourly into "
@@ -4678,29 +4691,36 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 }
             }
             Ok(list) => {
-                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
-                    thead {
-                        tr {
-                            th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "created (UTC)" }
-                            th style="text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "size" }
-                            th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "action" }
-                        }
-                    }
-                    tbody {
-                        @for snap in list.iter().take(60) {
+                // Scrollable container so a 60-row backlog at the
+                // retention policy's cap doesn't push the rest of
+                // Settings (Deploy key, Telegram, etc) several
+                // viewport-heights down. Sticky header keeps the
+                // column labels visible while scrolling.
+                div style="max-height: 360px; overflow-y: auto; border: 1px solid var(--rule);" {
+                    table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
+                        thead style="position: sticky; top: 0; background: var(--paper); z-index: 1;" {
                             tr {
-                                td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
-                                    (snap.created.as_deref().unwrap_or("(unparseable timestamp)"))
-                                }
-                                td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule); text-align: right; color: var(--soft);" {
-                                    (format_size_bytes(snap.size_bytes))
-                                }
-                                td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
-                                    a href=(format!("/admin/backup/download/{}", path_segment_encode(&snap.file_name)))
-                                      download=(&snap.file_name)
-                                      title="Save this snapshot to your local disk for off-site storage"
-                                      style="color: var(--ink); text-decoration: underline;" {
-                                        "download"
+                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "created (UTC)" }
+                                th style="text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "size" }
+                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "action" }
+                            }
+                        }
+                        tbody {
+                            @for snap in list.iter().take(60) {
+                                tr {
+                                    td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
+                                        (snap.created.as_deref().unwrap_or("(unparseable timestamp)"))
+                                    }
+                                    td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule); text-align: right; color: var(--soft);" {
+                                        (format_size_bytes(snap.size_bytes))
+                                    }
+                                    td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
+                                        a href=(format!("/admin/backup/download/{}", path_segment_encode(&snap.file_name)))
+                                          download=(&snap.file_name)
+                                          title="Save this snapshot to your local disk for off-site storage"
+                                          style="color: var(--ink); text-decoration: underline;" {
+                                            "download"
+                                        }
                                     }
                                 }
                             }
@@ -4727,7 +4747,11 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         }
 
         div.ed-rule {}
-        div.ed-art-eyebrow { "Notifications — Telegram bot" }
+        // `id` so the POST-redirect-GET after Save can use a
+        // fragment anchor (`#telegram-notifications`) and the
+        // browser scrolls back to this section instead of jumping
+        // to the top of /admin/settings.
+        div #telegram-notifications.ed-art-eyebrow { "Notifications — Telegram bot" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             "When an alert fires (probe-detector or service flip), vpnctld POSTs a one-line message to a Telegram chat via "
             span.ed-mono { "api.telegram.org/bot<token>/sendMessage" }
@@ -4823,7 +4847,7 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 };
                 select name="proxy_via_server_id"
                        id="proxy_via_server_id"
-                       title="If the daemon host can't reach api.telegram.org directly (РФ blocks, NAT, etc), route the call through an inventory server's network instead. Uses the existing deploy SSH key — no extra setup on the server."
+                       title="If the daemon host can't reach api.telegram.org directly (РФ blocks, NAT, etc), route the call through an inventory server's network instead. Uses the existing deploy SSH key — the public half must be on root@<proxy-server>:~/.ssh/authorized_keys (see «Deploy SSH key» section below to copy)."
                        style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);" {
                     option value="" selected[current_proxy_id.is_empty()] {
                         "direct (local network)"
@@ -4841,6 +4865,17 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     "No servers in inventory yet — only " b { "direct" } " egress is available. "
                     "Add a server on " span.ed-mono { "/admin/servers" }
                     " first if your daemon host can't reach " span.ed-mono { "api.telegram.org" } "."
+                }
+            } @else {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0; max-width: 720px;" {
+                    "Picking a " b { "via server: …" } " option requires the daemon's "
+                    "deploy SSH pubkey to be on that server's "
+                    span.ed-mono { "~/.ssh/authorized_keys" } ". The pubkey lives in the "
+                    a href="#deploy-ssh-key" style="color: var(--ink);" {
+                        b { "Deploy SSH key" }
+                    }
+                    " section below — copy it once, then "
+                    em { "send test message" } " confirms the path works."
                 }
             }
 
@@ -4878,6 +4913,13 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 }
             }
         }
+
+        div.ed-rule {}
+        // `id` so the via-server SSH error message and any future
+        // cross-link can anchor here. Eyebrow was previously
+        // missing — fixed 2026-05-18 same commit that added the
+        // anchor support.
+        div #deploy-ssh-key.ed-art-eyebrow { "Deploy SSH key" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             "vpnctld auto-generated this Curve25519 keypair on first start. "
             "The private half stays in "
@@ -5057,7 +5099,10 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
         );
     }
 
-    Redirect::to("/admin/settings").into_response()
+    // Fragment anchor → browser scrolls back to the Telegram
+    // section instead of jumping to the top of /admin/settings
+    // after Save / test-send.
+    Redirect::to("/admin/settings#telegram-notifications").into_response()
 }
 
 /// `POST /admin/settings/telegram/test` — synchronously send a test

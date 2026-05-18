@@ -139,6 +139,48 @@ pub fn format_alert_message(kind: &str, severity: &str, summary: &str) -> String
     format!("{prefix} vpnctld · {severity} · {kind}\n\n{summary}")
 }
 
+/// Classify a raw SSH transport error string into an actionable
+/// operator-facing message. The default «SSH transport failed: …»
+/// is correct but generic; the most common failure modes deserve
+/// specific remediation steps.
+///
+/// Public so tests can pin the classifications.
+pub fn classify_ssh_failure(stderr: &str) -> String {
+    if stderr.contains("Permission denied (publickey") {
+        format!(
+            "deploy SSH key not authorised on the proxy server. \
+             Copy the public key from /admin/settings (Deploy SSH key section), \
+             then on the server run \
+             `mkdir -p ~/.ssh && echo '<paste>' >> ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys`. \
+             Raw error: {stderr}"
+        )
+    } else if stderr.contains("Connection refused") {
+        format!(
+            "SSH connection refused — the server's sshd isn't listening on the \
+             configured port. Check the server's `ssh_port` on /admin/servers/<id> \
+             matches what's actually open. Raw error: {stderr}"
+        )
+    } else if stderr.contains("Connection timed out") || stderr.contains("Connection timeout") {
+        format!(
+            "SSH connection timed out — proxy server unreachable from the daemon. \
+             Likely causes: server is down, firewall blocking the daemon's outbound, \
+             wrong address on /admin/servers/<id>. Raw error: {stderr}"
+        )
+    } else if stderr.contains("Host key verification failed") {
+        format!(
+            "SSH host-key mismatch — the server's host key changed since the daemon \
+             first connected. Verify the new fingerprint via console then update on \
+             /admin/servers/<id> (Trusted host fingerprint section). Raw error: {stderr}"
+        )
+    } else {
+        format!(
+            "SSH transport failed: {stderr} \
+             (deploy key authorised on the proxy server? \
+             server reachable on its SSH port?)"
+        )
+    }
+}
+
 /// No-op sink. `send_text` returns `Ok(())` without I/O. Used when
 /// the operator hasn't configured a transport — the alert still
 /// lands in `admin_alerts` (Phase G chunk 2), just no push.
@@ -348,11 +390,7 @@ impl AlertSink for TelegramSink {
                 .map_err(|e| AlertSinkError::NonZeroExit {
                     tool: "ssh-then-curl",
                     code: None,
-                    stderr: format!(
-                        "SSH transport failed: {e} \
-                         (deploy key authorised on the proxy server? \
-                         server reachable on its SSH port?)"
-                    ),
+                    stderr: classify_ssh_failure(&e.to_string()),
                 })?
         } else {
             // Local path: spawn curl directly.
@@ -606,6 +644,60 @@ mod tests {
         );
         assert!(dbg.contains("••••"), "must include redaction marker");
         assert!(dbg.contains("21 chars"), "must include token length");
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognises_permission_denied() {
+        let raw = "ssh transport error: ssh root@1.2.3.4:22 exit=Some(255) \
+                   stderr=root@1.2.3.4: Permission denied (publickey,password).";
+        let msg = classify_ssh_failure(raw);
+        assert!(
+            msg.contains("deploy SSH key not authorised"),
+            "must classify permission-denied: {msg}"
+        );
+        assert!(
+            msg.contains("/admin/settings"),
+            "must point operator at Deploy SSH key section: {msg}"
+        );
+        assert!(
+            msg.contains("authorized_keys"),
+            "must include the copy-paste hint: {msg}"
+        );
+        assert!(
+            msg.contains(raw),
+            "must preserve raw stderr for full context"
+        );
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognises_connection_refused() {
+        let msg = classify_ssh_failure("Connection refused");
+        assert!(msg.contains("sshd isn't listening"));
+        assert!(msg.contains("ssh_port"));
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognises_timeout() {
+        let msg = classify_ssh_failure("ssh: connect to host 1.2.3.4: Connection timed out");
+        assert!(msg.contains("server unreachable"));
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognises_host_key_mismatch() {
+        let msg = classify_ssh_failure(
+            "@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@\n\
+             Host key verification failed.",
+        );
+        assert!(msg.contains("host-key mismatch"));
+        assert!(msg.contains("Trusted host fingerprint"));
+    }
+
+    #[test]
+    fn classify_ssh_failure_falls_through_to_generic_for_unknown() {
+        let msg = classify_ssh_failure("some completely novel weirdness");
+        // Default phrasing preserved.
+        assert!(msg.contains("SSH transport failed"));
+        assert!(msg.contains("some completely novel weirdness"));
     }
 
     #[test]
