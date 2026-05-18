@@ -2617,6 +2617,122 @@ async fn settings_telegram_post_rejects_garbage_chat_id() {
 }
 
 #[tokio::test]
+async fn server_detail_renders_push_deploy_key_section() {
+    // Phase G chunk 3.5 follow-up — every server-detail page must
+    // expose a «push deploy key» form so the operator can append
+    // the daemon's pubkey without dropping to a terminal.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("vps-de1".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 2222,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/vps-de1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("Deploy SSH key — push to this server"),
+        "section eyebrow must render"
+    );
+    assert!(
+        html.contains(r#"action="/admin/servers/vps-de1/push-deploy-key""#),
+        "form must POST to the push-key route"
+    );
+    assert!(
+        html.contains(r#"name="root_password""#),
+        "form must include the password input"
+    );
+    assert!(
+        html.contains("root@203.0.113.7:2222"),
+        "button hint must show concrete ssh_user@host:port"
+    );
+    assert!(
+        html.contains("never stored"),
+        "placeholder must reassure operator that password isn't persisted"
+    );
+}
+
+#[tokio::test]
+async fn server_push_deploy_key_404s_for_unknown_server() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/no-such/push-deploy-key")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(req.body(Body::from("root_password=hunter2")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("no such server 'no-such'"),
+        "must surface the unknown-server message"
+    );
+}
+
+#[tokio::test]
+async fn server_push_deploy_key_rejects_empty_password() {
+    // Defensive: empty password reaches the handler if the
+    // browser bypasses the `required` attr (curl, custom client).
+    // Must 400 with a clear message — NEVER attempt the SSH call
+    // with no password (sshpass would silently retry without
+    // password and the failure mode would look like generic
+    // network error).
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("stg".into()),
+            address: "1.2.3.4".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/stg/push-deploy-key")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(req.body(Body::from("root_password=")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn settings_telegram_proxy_dropdown_lists_inventory_servers() {
     // Phase G chunk 3.5 — when servers exist in inventory, the
     // «egress» dropdown must list them as «via server: <id> (<addr>)»

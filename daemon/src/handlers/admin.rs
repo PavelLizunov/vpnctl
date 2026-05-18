@@ -4958,6 +4958,144 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
     shell("settings", &theme, &accent, body)
 }
 
+/// `POST /admin/servers/{id}/push-deploy-key` — append the daemon's
+/// deploy pubkey to the server's `~/.ssh/authorized_keys` via sshpass.
+/// Recovery action for servers added via quick-add / migrate-from-bash
+/// (Phase E wizard does this automatically as step 3 of bootstrap).
+///
+/// Reuses [`crate::wizard_bootstrap::ssh_password_run`] so the remote
+/// command is byte-identical to the wizard's push-key step. Idempotent
+/// at the remote shell level (`grep -qxF || echo >>`), so a successful
+/// click followed by an accidental second click is a no-op.
+///
+/// **Password handling:** the operator-typed password lives in the
+/// SSHPASS env var of the sshpass child process — never in argv (so
+/// `ps auxe` from non-root can't see it). After the SSH call returns,
+/// the password string lives only on this handler's stack; not stored,
+/// not logged, not in the audit payload.
+///
+/// **Audit row** written on both success + failure (operator action
+/// either way). Payload: `{success: bool, error?: str}` — never the
+/// password.
+pub(crate) async fn server_push_deploy_key(
+    Path(server_id_str): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+
+    // Look up server. 404 if not in inventory.
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let password = form_field(&body, "root_password").unwrap_or_default();
+    if password.is_empty() {
+        return bad_request("root_password must not be empty");
+    }
+
+    // Read the daemon's deploy pubkey from disk. Same path the
+    // Settings page surfaces + the wizard's BootstrapPlan uses.
+    let key_path = std::path::Path::new(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let pubkey = match crate::ssh_subprocess::read_public_key(key_path) {
+        Ok(p) => p,
+        Err(e) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(
+                    "deploy pubkey unreadable at {}: {e}. \
+                     Check /admin/settings (Deploy SSH key section) for the root cause.",
+                    key_path.with_extension("pub").display()
+                ),
+            );
+        }
+    };
+
+    // Idempotent remote append + chmod. Byte-identical to the
+    // wizard's step 3 (push-key).
+    let push_cmd = format!(
+        "set -eu; \
+         mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
+         touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys; \
+         grep -qxF {pk_q} ~/.ssh/authorized_keys || echo {pk_q} >> ~/.ssh/authorized_keys; \
+         echo done",
+        pk_q = vpnctl_core::shell::single_quote(&pubkey),
+    );
+
+    // known_hosts path mirrors the wizard's default (and the
+    // daemon's `SubprocessSshTransport` default for subsequent
+    // pubkey-auth connects). Living in `/var/lib/vpnctl/.ssh/`
+    // keeps it daemon-owned.
+    let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
+
+    let result = crate::wizard_bootstrap::ssh_password_run(
+        &server.address,
+        server.ssh_port,
+        &server.ssh_user,
+        &password,
+        &known_hosts,
+        &push_cmd,
+    )
+    .await;
+
+    // Audit either way. Payload: server id, success, optional error.
+    // Never the password (caller-owned secret); never the full sshpass
+    // stderr (might quote the password verbatim if sshpass leaks it).
+    let audit_payload = match &result {
+        Ok(_) => serde_json::json!({"success": true, "server_id": &server_id_str}),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "server_id": &server_id_str,
+            "error": e,
+        }),
+    };
+    if let Err(audit_err) = state
+        .inv
+        .audit(
+            "admin",
+            "server.push_deploy_key",
+            Some(&server_id_str),
+            Some(&audit_payload),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::server_push_deploy_key",
+            server = %server_id_str,
+            error = %audit_err,
+            "audit row failed; push result was {:?}",
+            result.is_ok()
+        );
+    }
+
+    match result {
+        Ok(_) => {
+            // Anchor scroll back to the section + a query flag a
+            // future toast could read. For now the operator just
+            // sees the page refresh; pubkey-auth verification
+            // happens organically the next time the node probe
+            // poller runs.
+            Redirect::to(&format!(
+                "/admin/servers/{}#push-deploy-key",
+                path_segment_encode(&server_id_str)
+            ))
+            .into_response()
+        }
+        Err(e) => error_resp(
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "push-deploy-key failed for {server_id_str}: {e} — \
+                 common causes: wrong password, server's sshd disabled \
+                 PasswordAuthentication (then you have to push the pubkey \
+                 out-of-band — see /admin/settings → Deploy SSH key), \
+                 server unreachable on configured port"
+            ),
+        ),
+    }
+}
+
 /// `POST /admin/settings/telegram` — save the Telegram bot
 /// transport config (Phase G chunk 3 part 1). Atomic update of both
 /// fields. Either empty input → that field set to NULL in DB →
@@ -5907,6 +6045,13 @@ pub(crate) async fn server_detail(
         // to a shell + raw SQL just to pin a host key.
         (server_detail_fingerprint_section(&server))
 
+        // Push deploy key — recovery action for servers added via
+        // quick-add / migrate-from-bash where the wizard's step-3
+        // pubkey push never ran. Phase G chunk 3.5 follow-up; the
+        // user's «почему это не делается автоматически» surfaced
+        // the gap.
+        (server_detail_push_deploy_key_section(&server))
+
         // Grants — centralised per-server view (Pavel iter B).
         // Lists EVERY user with a per-row grant/revoke form, so the
         // operator doesn't have to bounce through each user's page
@@ -6146,6 +6291,77 @@ fn server_detail_kernels_section(
 ///
 /// Both go to the same `POST /admin/servers/{id}/set-fingerprint`
 /// route; the form's hidden `mode=keyscan` differentiates.
+/// Phase G chunk 3.5 follow-up — «Push deploy key» recovery action.
+///
+/// The Phase E wizard at `/admin/servers/new` does this automatically
+/// as step 3 of bootstrap (sshpass + `mkdir -p ~/.ssh && grep -qxF ||
+/// echo ... >>`). But three operator paths leave a server in
+/// inventory WITHOUT the daemon's pubkey on it:
+///
+///   * **migrate-from-bash** — imported pre-existing servers that
+///     have their own SSH key infra, daemon's key never pushed
+///   * **quick-add** (`POST /admin/servers`) — minimal form, only
+///     id + address + port; no password field, no push
+///   * **wizard failure mid-flow** — bootstrap got past step 1-2
+///     but failed before step 3 completed (rare)
+///
+/// All three leave Pavel with the «open a terminal + ssh root@…
+/// + paste the pubkey» chore. This section makes it a single click
+/// + paste-password instead.
+///
+/// Reuses `wizard_bootstrap::ssh_password_run` so the actual remote
+/// command is byte-identical to what the wizard runs (idempotent
+/// `grep -qxF || echo >>` — re-clicking after success is safe).
+fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup {
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        div.ed-rule {}
+        div #push-deploy-key.ed-art-eyebrow { "Deploy SSH key — push to this server" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px; max-width: 760px;" {
+            "Daemon needs its pubkey on this server's "
+            span.ed-mono { "~/.ssh/authorized_keys" }
+            " before probes, deploys, or the Telegram via-server proxy can work. "
+            "The Phase E wizard at "
+            span.ed-mono { "/admin/servers/new" }
+            " does this automatically; if the server was added via "
+            span.ed-mono { "quick-add" }
+            " / "
+            span.ed-mono { "migrate-from-bash" }
+            " (or you're not sure), push the key here. "
+            "Idempotent — re-clicking after success appends nothing (uses "
+            span.ed-mono { "grep -qxF || echo" }
+            "). Password is used ONCE, sent via "
+            span.ed-mono { "SSHPASS" }
+            " env var (never in argv), then discarded."
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/push-deploy-key"))
+             style="margin: 0 0 14px;" {
+            div style="display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; max-width: 560px;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    "root password"
+                }
+                input type="password"
+                      name="root_password"
+                      autocomplete="off"
+                      placeholder="never stored — used once for the SSH connect, then discarded"
+                      required
+                      style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
+            }
+            div style="margin-top: 12px;" {
+                button type="submit"
+                       title="SSH to the server using sshpass + the password below, append the daemon's deploy pubkey to ~/.ssh/authorized_keys, then verify with a pubkey-auth round-trip."
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "push deploy key"
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
+                    "Connects to " span.ed-mono { (server.ssh_user) "@" (server.address) ":" (server.ssh_port) }
+                }
+            }
+        }
+    }
+}
+
 fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
     let sid_enc = path_segment_encode(&server.id.0);
     let current = server.trusted_host_fingerprint.clone();

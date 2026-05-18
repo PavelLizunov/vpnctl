@@ -752,6 +752,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/settings/telegram/test",
             post(admin::settings_telegram_test),
         )
+        // Phase G chunk 3.5 follow-up — recovery action for servers
+        // added without wizard (quick-add / migrate-from-bash). One-
+        // shot password-auth SSH + pubkey append; same logic as
+        // wizard step 3. See server_push_deploy_key doc-comment.
+        .route(
+            "/admin/servers/{id}/push-deploy-key",
+            post(admin::server_push_deploy_key),
+        )
         // Phase C-4 — manual snapshot trigger + per-file download.
         // Download is GET (so a normal `<a download>` works); snapshot
         // trigger is POST (it mutates filesystem state + writes an

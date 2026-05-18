@@ -638,7 +638,13 @@ pub fn derive_server_id(address: &str) -> String {
 /// Password lives in the `SSHPASS` env var (sshpass's `-e` flag) so
 /// it never appears in argv — `ps auxe` wouldn't expose it (only
 /// `/proc/PID/environ`, which is root-only on Linux).
-async fn ssh_password_run(
+///
+/// Public so the post-Phase-E «push deploy key to an existing
+/// inventory server» button (`/admin/servers/{id}/push-deploy-key`)
+/// can reuse it without re-implementing the sshpass dance — same
+/// safety contract, same `--` separator defenses, same known_hosts
+/// file.
+pub async fn ssh_password_run(
     host: &str,
     port: u16,
     user: &str,
