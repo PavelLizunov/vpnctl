@@ -210,9 +210,10 @@ pub struct AdminAlert {
 }
 
 /// Phase G chunk 3 — Telegram bot transport config. Singleton row.
-/// Both fields are `Option<String>` because the schema allows either
-/// to be NULL; the dispatch loop treats either-None as «transport
-/// disabled». An «Enable» flow in the Settings UI requires BOTH set.
+/// The two main halves (`token`, `chat_id`) are `Option<String>`
+/// because the schema allows either to be NULL; the dispatch loop
+/// treats either-None as «transport disabled». An «Enable» flow in
+/// the Settings UI requires BOTH set.
 ///
 /// **`token` is a SECRET** — same care as `users.wireguard_private`.
 /// Never serialise into `audit_log.payload_json` or any
@@ -221,15 +222,27 @@ pub struct AdminAlert {
 /// The Settings page renders `••••<last4>` + a «replace» button;
 /// the only place the full value goes is the outgoing HTTPS POST
 /// to `api.telegram.org`.
+///
+/// `proxy_via_server_id` (migration 0015) routes the outbound HTTPS
+/// through an inventory server via SSH — used when the daemon host
+/// can't reach api.telegram.org directly (РФ network blocks, etc).
+/// `None` = local curl from the daemon host. Plain TEXT in the
+/// schema, NOT an FK, so the operator gets a loud SSH-spawn error
+/// if the referenced server is deleted rather than a silent
+/// transport-broken state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramConfig {
     pub token: Option<String>,
     pub chat_id: Option<String>,
+    pub proxy_via_server_id: Option<String>,
 }
 
 impl TelegramConfig {
     /// True iff both halves are present — the dispatch loop should
-    /// only attempt a send when this is true.
+    /// only attempt a send when this is true. The `proxy_via_server_id`
+    /// doesn't gate enablement — direct mode is the default and a
+    /// missing server reference is independent of «can we Telegram
+    /// at all».
     pub fn is_enabled(&self) -> bool {
         self.token.is_some() && self.chat_id.is_some()
     }
@@ -1873,30 +1886,41 @@ impl SqliteInventory {
 
     // ── Phase G chunk 3 notification_settings ──────────────────────
 
-    /// Read the singleton notification-transport config. Both fields
-    /// are `Option<String>` because either can independently be NULL
-    /// in the schema; callers downstream (the dispatch loop, the
+    /// Read the singleton notification-transport config. All three
+    /// fields are `Option<String>` because each can independently be
+    /// NULL in the schema; callers downstream (the dispatch loop, the
     /// Settings UI) decide what to do with partial config.
     ///
     /// Returns `Ok(None)` if the singleton row is somehow missing
     /// (shouldn't happen — migration 0014 seeds it — but defended
     /// against so a corrupted DB doesn't crash-loop the daemon).
     pub async fn get_telegram_config(&self) -> Result<Option<TelegramConfig>> {
-        let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-            "SELECT telegram_bot_token, telegram_chat_id
+        let row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+            "SELECT telegram_bot_token, telegram_chat_id, proxy_via_server_id
              FROM notification_settings WHERE id = 1",
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(token, chat_id)| TelegramConfig { token, chat_id }))
+        Ok(
+            row.map(|(token, chat_id, proxy_via_server_id)| TelegramConfig {
+                token,
+                chat_id,
+                proxy_via_server_id,
+            }),
+        )
     }
 
-    /// Atomically set BOTH halves of the Telegram config. `None` for
-    /// a field clears it (transport disabled if either is None).
-    /// Caller-side validators (the Settings POST handler) reject the
-    /// «partial config» state of (Some(token), None) or vice versa
-    /// before reaching here — but the DB doesn't enforce it because
-    /// «clear» is a legitimate Set(None, None) call.
+    /// Atomically set ALL THREE halves of the Telegram config. `None`
+    /// for a field clears it. Caller-side validators (the Settings
+    /// POST handler) reject the «partial config» state of
+    /// (Some(token), None, _) or vice versa before reaching here —
+    /// but the DB doesn't enforce it because «clear» is a legitimate
+    /// `Set(None, None, None)` call.
+    ///
+    /// `proxy_via_server_id` is a plain TEXT (no FK to `servers.id`)
+    /// — see migration 0015's doc-comment for the rationale (operator
+    /// gets a loud SSH-spawn error rather than a silent FK-cascade
+    /// NULL when the referenced server is deleted).
     ///
     /// Writes `updated_at` automatically via `strftime`. Does NOT
     /// write to `audit_log` — caller is responsible for the audit
@@ -1905,16 +1929,19 @@ impl SqliteInventory {
         &self,
         token: Option<&str>,
         chat_id: Option<&str>,
+        proxy_via_server_id: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE notification_settings
-             SET telegram_bot_token = ?1,
-                 telegram_chat_id   = ?2,
-                 updated_at         = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             SET telegram_bot_token  = ?1,
+                 telegram_chat_id    = ?2,
+                 proxy_via_server_id = ?3,
+                 updated_at          = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = 1",
         )
         .bind(token)
         .bind(chat_id)
+        .bind(proxy_via_server_id)
         .execute(&self.pool)
         .await?;
         Ok(())

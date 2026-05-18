@@ -2617,6 +2617,138 @@ async fn settings_telegram_post_rejects_garbage_chat_id() {
 }
 
 #[tokio::test]
+async fn settings_telegram_proxy_dropdown_lists_inventory_servers() {
+    // Phase G chunk 3.5 — when servers exist in inventory, the
+    // «egress» dropdown must list them as «via server: <id> (<addr>)»
+    // options. Pavel's specific use case: РФ blocks api.telegram.org
+    // from the daemon host but a VPN server can reach it.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    inv.add_server(&vpnctl_core::Server {
+        id: vpnctl_core::ServerId("vps-de1".into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        html.contains(r#"name="proxy_via_server_id""#),
+        "dropdown must be named proxy_via_server_id"
+    );
+    assert!(
+        html.contains("direct (local network)"),
+        "must include the 'direct' default option"
+    );
+    assert!(
+        html.contains("via server: vps-de1 (203.0.113.7)"),
+        "must include each inventory server as a via-option"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_proxy_dropdown_shows_hint_when_no_servers() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("direct (local network)"));
+    assert!(
+        html.contains("No servers in inventory yet"),
+        "must include the explanatory hint when inventory is empty"
+    );
+    assert!(
+        !html.contains("via server:"),
+        "no via-options when inventory empty"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_save_persists_proxy_via_server_id() {
+    // POST with proxy_via_server_id selected → next GET shows the
+    // option pre-selected. Round-trips the new column through both
+    // handlers + the inventory layer.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    inv.add_server(&vpnctl_core::Server {
+        id: vpnctl_core::ServerId("vps-de1".into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    let app = router(st);
+    let body = "telegram_bot_token=1234567890%3AABCDEFghijklmn\
+                &telegram_chat_id=987654321\
+                &proxy_via_server_id=vps-de1";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    app.clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(
+        html.contains(r#"<option value="vps-de1" selected"#)
+            || html.contains(r#"<option selected value="vps-de1""#),
+        "vps-de1 option must be marked selected after save"
+    );
+}
+
+#[tokio::test]
 async fn settings_telegram_test_send_button_appears_only_when_enabled() {
     // Phase G chunk 3 part 2 — the «send test message» button must
     // appear ONLY when the transport is enabled. Disabled / partial
@@ -2650,7 +2782,7 @@ async fn settings_telegram_test_send_button_appears_only_when_enabled() {
     );
 
     // Enable and re-render.
-    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), Some("987654321"))
+    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), Some("987654321"), None)
         .await
         .unwrap();
 
@@ -2711,7 +2843,7 @@ async fn settings_telegram_partial_config_renders_red_warning() {
     let st = state(&dir).await;
     let inv = st.inv.clone();
     // Set only the token; chat_id stays NULL.
-    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), None)
+    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), None, None)
         .await
         .unwrap();
 

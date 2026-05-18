@@ -1,0 +1,37 @@
+-- Phase G chunk 3 «via VPN server» — operator can route Telegram
+-- API calls through an inventory server's network when the daemon
+-- host can't reach api.telegram.org directly (РФ blocks, corporate
+-- NAT, sit-behind-CGNAT homelab, etc).
+--
+-- ## Why a server reference, not just a proxy URL
+--
+-- The daemon already has deploy-SSH access to every inventory server
+-- (used by clash_poller + node_probe). Routing curl through SSH to
+-- one of those servers reuses the existing transport, key material,
+-- and operator mental model — no new daemon to install on the
+-- server, no third-party proxy service, no extra firewall hole.
+-- The daemon spawns a `ssh user@server "curl ..."` per send.
+--
+-- ## NULL semantics
+--
+-- `proxy_via_server_id IS NULL` ⇒ local curl from the daemon host
+-- (current behaviour, no behaviour change after migration). Setting
+-- it to an inventory `servers.id` switches the next send to
+-- ssh-then-curl. If the referenced server is later removed from
+-- inventory, sends fail at SSH-spawn time with an operator-friendly
+-- error — we intentionally don't ON DELETE CASCADE because losing
+-- the transport silently is worse than a loud failure.
+--
+-- ## Not a FK
+--
+-- The column is plain TEXT, NOT a `REFERENCES servers(id)` foreign
+-- key. Two reasons:
+--   * Migration 0014 ran on every existing deploy that has 0 to N
+--     servers; an FK created here would prevent the singleton seed
+--     from sticking if the operator hasn't added any servers yet.
+--   * The «server was deleted, transport now broken» case is more
+--     useful as a loud SSH spawn error («no such host») than as a
+--     silent FK-cascade NULL.
+
+ALTER TABLE notification_settings
+    ADD COLUMN proxy_via_server_id TEXT;

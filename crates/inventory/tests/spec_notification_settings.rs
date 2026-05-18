@@ -32,8 +32,82 @@ async fn get_on_fresh_db_returns_some_with_both_halves_none() {
         Some(TelegramConfig {
             token: None,
             chat_id: None,
+            proxy_via_server_id: None,
         }),
         "migration 0014 seed must insert singleton row with both halves NULL"
+    );
+}
+
+// ─── proxy_via_server_id: round-trip + clear semantics ─────────────
+
+#[tokio::test]
+async fn proxy_via_server_id_is_seeded_null_on_fresh_db() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(cfg.proxy_via_server_id, None);
+}
+
+#[tokio::test]
+async fn proxy_via_server_id_round_trip() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.set_telegram_config(Some("t"), Some("c"), Some("vps-de1"))
+        .await
+        .unwrap();
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(cfg.proxy_via_server_id.as_deref(), Some("vps-de1"));
+}
+
+#[tokio::test]
+async fn proxy_via_server_id_clears_independently_of_other_fields() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.set_telegram_config(Some("t"), Some("c"), Some("vps-de1"))
+        .await
+        .unwrap();
+    inv.set_telegram_config(Some("t"), Some("c"), None)
+        .await
+        .unwrap();
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(cfg.token.as_deref(), Some("t"), "token preserved");
+    assert_eq!(cfg.chat_id.as_deref(), Some("c"), "chat_id preserved");
+    assert_eq!(
+        cfg.proxy_via_server_id, None,
+        "proxy_via_server_id cleared back to direct"
+    );
+}
+
+#[tokio::test]
+async fn proxy_via_server_id_does_not_gate_is_enabled() {
+    // is_enabled() must check ONLY token + chat_id. The proxy field
+    // is independent — operator can set or clear it without touching
+    // the «am I enabled» state.
+    let cfg = TelegramConfig {
+        token: Some("t".into()),
+        chat_id: Some("c".into()),
+        proxy_via_server_id: None,
+    };
+    assert!(cfg.is_enabled(), "direct mode with both halves → enabled");
+
+    let cfg = TelegramConfig {
+        token: Some("t".into()),
+        chat_id: Some("c".into()),
+        proxy_via_server_id: Some("vps-de1".into()),
+    };
+    assert!(
+        cfg.is_enabled(),
+        "via-proxy mode with both halves → enabled"
+    );
+
+    let cfg = TelegramConfig {
+        token: None,
+        chat_id: Some("c".into()),
+        proxy_via_server_id: Some("vps-de1".into()),
+    };
+    assert!(
+        !cfg.is_enabled(),
+        "missing token disables regardless of proxy"
     );
 }
 
@@ -44,7 +118,7 @@ async fn get_on_fresh_db_returns_some_with_both_halves_none() {
 async fn set_both_some_then_get_returns_both() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    inv.set_telegram_config(Some("t"), Some("c"))
+    inv.set_telegram_config(Some("t"), Some("c"), None)
         .await
         .expect("set must not error");
     let cfg = inv.get_telegram_config().await.unwrap();
@@ -53,6 +127,7 @@ async fn set_both_some_then_get_returns_both() {
         Some(TelegramConfig {
             token: Some("t".into()),
             chat_id: Some("c".into()),
+            proxy_via_server_id: None,
         }),
         "round-trip must return exactly what was set"
     );
@@ -65,9 +140,11 @@ async fn set_both_none_clears_but_singleton_remains() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     // Populate first so "clear" has something to clear.
-    inv.set_telegram_config(Some("t"), Some("c")).await.unwrap();
+    inv.set_telegram_config(Some("t"), Some("c"), None)
+        .await
+        .unwrap();
     // Now clear.
-    inv.set_telegram_config(None, None)
+    inv.set_telegram_config(None, None, None)
         .await
         .expect("clear must not error");
     let cfg = inv.get_telegram_config().await.unwrap();
@@ -76,6 +153,7 @@ async fn set_both_none_clears_but_singleton_remains() {
         Some(TelegramConfig {
             token: None,
             chat_id: None,
+            proxy_via_server_id: None,
         }),
         "clear must leave singleton row in place with both halves NULL"
     );
@@ -88,7 +166,7 @@ async fn set_both_none_clears_but_singleton_remains() {
 async fn set_partial_token_only_is_accepted_and_persisted() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    inv.set_telegram_config(Some("a"), None)
+    inv.set_telegram_config(Some("a"), None, None)
         .await
         .expect("partial config must be accepted at storage layer");
     let cfg = inv
@@ -116,13 +194,13 @@ async fn set_partial_token_only_is_accepted_and_persisted() {
 async fn successive_set_calls_overwrite_only_one_row() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    inv.set_telegram_config(Some("first-token"), Some("first-chat"))
+    inv.set_telegram_config(Some("first-token"), Some("first-chat"), None)
         .await
         .unwrap();
-    inv.set_telegram_config(Some("second-token"), Some("second-chat"))
+    inv.set_telegram_config(Some("second-token"), Some("second-chat"), None)
         .await
         .unwrap();
-    inv.set_telegram_config(Some("third-token"), Some("third-chat"))
+    inv.set_telegram_config(Some("third-token"), Some("third-chat"), None)
         .await
         .unwrap();
     let cfg = inv.get_telegram_config().await.unwrap();
@@ -131,19 +209,21 @@ async fn successive_set_calls_overwrite_only_one_row() {
         Some(TelegramConfig {
             token: Some("third-token".into()),
             chat_id: Some("third-chat".into()),
+            proxy_via_server_id: None,
         }),
         "only the LAST set must be observable — proves singleton, not append"
     );
 
     // And a clear after three sets still produces exactly one row's
     // worth of state (both None), not an accumulated history.
-    inv.set_telegram_config(None, None).await.unwrap();
+    inv.set_telegram_config(None, None, None).await.unwrap();
     let cleared = inv.get_telegram_config().await.unwrap();
     assert_eq!(
         cleared,
         Some(TelegramConfig {
             token: None,
             chat_id: None,
+            proxy_via_server_id: None,
         }),
         "clear after multiple writes still ends in single empty row"
     );
@@ -157,6 +237,7 @@ async fn is_enabled_true_when_both_halves_some() {
     let cfg = TelegramConfig {
         token: Some("hello123".into()),
         chat_id: Some("@me".into()),
+        proxy_via_server_id: None,
     };
     assert!(cfg.is_enabled(), "both Some(_) must be enabled");
 }
@@ -167,6 +248,7 @@ async fn is_enabled_false_when_token_missing() {
     let cfg = TelegramConfig {
         token: None,
         chat_id: Some("@me".into()),
+        proxy_via_server_id: None,
     };
     assert!(!cfg.is_enabled(), "missing token must disable");
 }
@@ -177,6 +259,7 @@ async fn is_enabled_false_when_chat_id_missing() {
     let cfg = TelegramConfig {
         token: Some("abc".into()),
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert!(!cfg.is_enabled(), "missing chat_id must disable");
 }
@@ -187,6 +270,7 @@ async fn is_enabled_false_when_both_none() {
     let cfg = TelegramConfig {
         token: None,
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert!(!cfg.is_enabled(), "both None must be disabled");
 }
@@ -200,6 +284,7 @@ async fn token_last4_returns_last_four_chars_for_long_token() {
     let cfg = TelegramConfig {
         token: Some("1234567890:ABCDEF".into()),
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -214,6 +299,7 @@ async fn token_last4_returns_full_token_when_shorter_than_4() {
     let cfg = TelegramConfig {
         token: Some("abc".into()),
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -228,6 +314,7 @@ async fn token_last4_handles_exactly_four_chars() {
     let cfg = TelegramConfig {
         token: Some("abcd".into()),
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -242,6 +329,7 @@ async fn token_last4_returns_empty_string_when_token_none() {
     let cfg = TelegramConfig {
         token: None,
         chat_id: None,
+        proxy_via_server_id: None,
     };
     assert_eq!(cfg.token_last4(), "", "None token must yield empty string");
 }

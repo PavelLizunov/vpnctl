@@ -422,47 +422,16 @@ pub async fn dispatch_alerts(
 /// out why a Telegram message didn't arrive, the journal carries
 /// the full curl-stderr context.
 async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
-    use crate::alert_sink::{AlertSink, NullSink, TelegramSink};
-
-    // Read config. Failure → log + return (no push, but admin_alerts
-    // row is still there).
-    let cfg = match inv.get_telegram_config().await {
-        Ok(Some(c)) => c,
-        Ok(None) => return, // singleton row missing — separate problem; UI handles surfacing
+    let sink = match build_alert_sink(inv).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return, // transport not configured — no-op
         Err(e) => {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
                 error = %e,
-                "get_telegram_config failed; skipping push for this alert"
+                "build_alert_sink failed; skipping push for this alert"
             );
             return;
-        }
-    };
-
-    // Disabled → no push. NullSink would also work but a short-
-    // circuit saves the spawn cost.
-    if !cfg.is_enabled() {
-        return;
-    }
-
-    let token = match cfg.token {
-        Some(t) => t,
-        None => return,
-    };
-    let chat_id = match cfg.chat_id {
-        Some(c) => c,
-        None => return,
-    };
-
-    let sink: Box<dyn AlertSink> = match TelegramSink::from_env(token, chat_id) {
-        Ok(s) => Box::new(s),
-        Err(e) => {
-            tracing::warn!(
-                target = "vpnctld::alert_sink",
-                error = %e,
-                "TelegramSink construction failed; this is a bug (cfg.is_enabled() should have gated)"
-            );
-            Box::new(NullSink)
         }
     };
 
@@ -471,23 +440,114 @@ async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: 
     let severity = severity.to_string();
     let summary = summary.to_string();
     tokio::spawn(async move {
+        // Track sink name BEFORE the move-into-await so we can log
+        // it on success without resurrecting a borrow from `sink`.
+        let sink_name = sink.name();
         if let Err(e) = sink.send_text(&kind, &severity, &summary).await {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
                 kind = %kind,
                 error = %e,
                 "push to {} failed; alert row still in admin_alerts",
-                sink.name()
+                sink_name
             );
         } else {
             tracing::info!(
                 target = "vpnctld::alert_sink",
                 kind = %kind,
                 "pushed via {}",
-                sink.name()
+                sink_name
             );
         }
     });
+}
+
+/// Build the appropriate `AlertSink` from the current
+/// `notification_settings` row. Returns `Ok(None)` when the
+/// operator hasn't configured a transport (transport is then a
+/// no-op — alert still in `admin_alerts` for the pull view). Returns
+/// `Err` only on storage-layer failures the caller should log.
+///
+/// Pulled out as a free fn so both `push_alert` (fire-and-forget)
+/// and the synchronous test-send handler share the same construction
+/// logic — no risk of the two paths drifting on which server the
+/// proxy uses, which proxy env var wins, etc.
+pub async fn build_alert_sink(
+    inv: &SqliteInventory,
+) -> Result<Option<Box<dyn crate::alert_sink::AlertSink>>, vpnctl_inventory::SqliteInventoryError> {
+    use crate::alert_sink::TelegramSink;
+
+    let cfg = match inv.get_telegram_config().await? {
+        Some(c) if c.is_enabled() => c,
+        // Either no row OR not enabled.
+        _ => return Ok(None),
+    };
+
+    // `is_enabled()` proved both halves Some, but the workspace
+    // forbids `expect()` even in this provably-infallible position.
+    // Defensive `match` returns Ok(None) in the impossible None arm
+    // — equivalent to «transport not configured», which is the
+    // operator-visible behaviour we'd want anyway.
+    let (token, chat_id) = match (cfg.token, cfg.chat_id) {
+        (Some(t), Some(c)) => (t, c),
+        _ => return Ok(None),
+    };
+
+    // Build the base direct-mode sink first; then chain via-ssh if
+    // the operator picked a proxy server.
+    let mut sink = match TelegramSink::from_env(token, chat_id) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                error = %e,
+                "TelegramSink construction failed despite is_enabled gate; transport disabled"
+            );
+            return Ok(None);
+        }
+    };
+
+    if let Some(server_id_str) = cfg.proxy_via_server_id.as_deref() {
+        // Look up the server. Removed-from-inventory case: we log
+        // + fall back to direct mode (operator-friendlier than
+        // silently disabling — they'll see the «proxy server gone»
+        // warning in the journal AND get the message from a working
+        // direct path if their network allows; if direct ALSO fails
+        // the operator gets the «port 443 timeout» curl error which
+        // is the natural next step).
+        let server_id = vpnctl_core::ServerId(server_id_str.to_string());
+        match inv.list_servers().await {
+            Ok(servers) => {
+                if let Some(server) = servers.iter().find(|s| s.id == server_id) {
+                    let key_path = std::env::var("VPNCTLD_DEPLOY_KEY")
+                        .unwrap_or_else(|_| crate::app::DEFAULT_DEPLOY_KEY_PATH.to_string());
+                    let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
+                        server.address.clone(),
+                        server.ssh_user.clone(),
+                        std::path::PathBuf::from(&key_path),
+                    )
+                    .port(server.ssh_port);
+                    sink = sink.with_via_ssh(ssh);
+                } else {
+                    tracing::warn!(
+                        target = "vpnctld::alert_sink",
+                        server_id = %server_id_str,
+                        "configured proxy_via_server_id no longer in inventory; \
+                         falling back to direct mode"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::alert_sink",
+                    error = %e,
+                    "list_servers failed; falling back to direct mode"
+                );
+            }
+        }
+    }
+
+    Ok(Some(Box::new(sink)))
 }
 
 /// Helper: bulk-ack any open (kind, server_id) alerts and write the

@@ -34,6 +34,22 @@
 //! already used implicitly by the kernel-install path in
 //! `crates/kernels/src/sing_box.rs`.
 //!
+//! ## Via-server proxy mode (РФ workaround)
+//!
+//! When the daemon host can't reach `api.telegram.org` directly (РФ
+//! network blocks, corporate NAT) the operator can route the call
+//! through an inventory server by setting
+//! `notification_settings.proxy_via_server_id`. The sink then SSHes
+//! to that server using the existing deploy key and runs `curl`
+//! THERE — the daemon doesn't need outbound HTTPS itself, only
+//! outbound SSH to the inventory server (which it has anyway for
+//! probes + deploys). The token + body still travel encrypted —
+//! the bot-token URL is built locally and shell-quoted into the
+//! remote command, the SSH tunnel encrypts in transit, the remote
+//! curl establishes its own TLS to api.telegram.org from the
+//! server's network. No long-lived tunnels, no proxy daemon on
+//! the server.
+//!
 //! ## Why fire-and-forget at the caller (not here)
 //!
 //! `send_text` takes `&self` + returns `Result<(), Error>` so callers
@@ -44,6 +60,9 @@
 //! to the operator. Neither concern belongs in the sink itself.
 
 use std::process::{Command, Stdio};
+
+use crate::ssh_subprocess::SubprocessSshTransport;
+use vpnctl_core::{SshTransport, shell::single_quote};
 
 /// One sink transport. Implementors deliver alerts to wherever the
 /// operator wants to be notified. Delivery errors are returned via
@@ -143,15 +162,44 @@ impl AlertSink for NullSink {
 }
 
 /// Telegram bot transport. Posts to `api.telegram.org/bot<token>/
-/// sendMessage` via the system `curl`. Reads the optional
-/// `VPNCTLD_HTTPS_PROXY` env var on construction so РФ-blocked
-/// outbound can route through the homelab gost→xray proxy at
-/// `http://192.168.0.142:18080`.
-#[derive(Debug, Clone)]
+/// sendMessage` either:
+///   * directly from the daemon host's network (default), optionally
+///     through an HTTP proxy specified via `VPNCTLD_HTTPS_PROXY`, or
+///   * through an inventory server via SSH-then-curl (when the
+///     daemon host can't reach api.telegram.org but a VPN server
+///     can). The server's TLS to api.telegram.org is direct from
+///     the server's network; the daemon only needs outbound SSH.
+///
+/// The two egress modes are mutually exclusive — `via_ssh` wins
+/// when set; the `proxy` field is ignored in that case (it would
+/// be a property of the remote curl, not the local one).
+///
+/// Manual `Debug` (not derived) because `SubprocessSshTransport`
+/// doesn't itself impl Debug and we don't want to add a workspace-
+/// wide derive for it just to support this struct. Token is redacted
+/// in the Debug output by design.
 pub struct TelegramSink {
     token: String,
     chat_id: String,
     proxy: Option<String>,
+    /// When `Some(...)`, the sink runs `curl` ON the remote server
+    /// via SSH (uses the daemon's deploy key). When `None`, runs
+    /// `curl` locally.
+    via_ssh: Option<SubprocessSshTransport>,
+}
+
+impl std::fmt::Debug for TelegramSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramSink")
+            .field("token", &format!("•••• ({} chars)", self.token.len()))
+            .field("chat_id", &self.chat_id)
+            .field("proxy", &self.proxy)
+            .field(
+                "via_ssh",
+                &self.via_ssh.as_ref().map(|_| "<SubprocessSshTransport>"),
+            )
+            .finish()
+    }
 }
 
 impl TelegramSink {
@@ -181,7 +229,17 @@ impl TelegramSink {
             token,
             chat_id,
             proxy: proxy.filter(|s| !s.is_empty()),
+            via_ssh: None,
         })
+    }
+
+    /// Switch this sink to via-server proxy mode. The SSH transport
+    /// is the daemon's normal deploy-key one pointed at an inventory
+    /// server; `send_text` will run `curl` THERE instead of locally.
+    /// Chainable.
+    pub fn with_via_ssh(mut self, ssh: SubprocessSshTransport) -> Self {
+        self.via_ssh = Some(ssh);
+        self
     }
 
     /// Convenience constructor that reads `VPNCTLD_HTTPS_PROXY` from
@@ -190,6 +248,30 @@ impl TelegramSink {
     pub fn from_env(token: String, chat_id: String) -> Result<Self, AlertSinkError> {
         let proxy = std::env::var("VPNCTLD_HTTPS_PROXY").ok();
         Self::new(token, chat_id, proxy)
+    }
+
+    /// Build the *remote* shell command that runs `curl` on the
+    /// inventory server. Single-quotes the URL + body so the remote
+    /// shell sees them as opaque tokens — relies on
+    /// `vpnctl_core::shell::single_quote`'s POSIX escape rules
+    /// (already pinned by 8 spec tests in `crates/core/src/shell.rs`).
+    ///
+    /// Public so a test can assert that:
+    ///   * the URL is single-quoted (so a token containing shell
+    ///     metacharacters can't escape),
+    ///   * the body is `--data` followed by a quoted JSON literal,
+    ///   * the same connect/max timeouts as the local path apply,
+    ///   * a `--` separator sits between the flag block and the URL
+    ///     (defense against a future refactor that puts the URL
+    ///     earlier).
+    pub fn build_remote_curl_command(&self, body_json: &str) -> String {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
+        format!(
+            "curl -sS --connect-timeout 10 --max-time 20 -X POST \
+             -H 'Content-Type: application/json' --data {body} -- {url}",
+            body = single_quote(body_json),
+            url = single_quote(&url),
+        )
     }
 
     /// Construct the curl argv. Public so a test can pin the
@@ -250,38 +332,60 @@ impl AlertSink for TelegramSink {
             "text": text,
         })
         .to_string();
-        let args = self.build_curl_args(&body);
 
-        // `spawn_blocking` so curl's blocking I/O doesn't pin a
-        // tokio worker. The curl process itself uses its own I/O
-        // path; we just wait_with_output.
-        let res = tokio::task::spawn_blocking(move || {
-            Command::new("curl")
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-        })
-        .await
-        .map_err(|e| AlertSinkError::Spawn {
-            tool: "curl",
-            source: std::io::Error::other(format!("tokio spawn_blocking JoinError: {e}")),
-        })?
-        .map_err(|e| AlertSinkError::Spawn {
-            tool: "curl",
-            source: e,
-        })?;
-
-        if !res.status.success() {
-            let stderr = String::from_utf8_lossy(&res.stderr);
-            let truncated: String = stderr.chars().take(200).collect();
-            return Err(AlertSinkError::NonZeroExit {
+        // Two egress paths. Both end up parsing the same response
+        // JSON (Telegram always returns 200 + body); only the
+        // transport differs.
+        let response_body: String = if let Some(ssh) = &self.via_ssh {
+            // Via-server path: SSH to inventory server, run curl
+            // THERE. The remote command is built via
+            // `build_remote_curl_command` which single-quotes the
+            // URL + body so the remote shell sees them as opaque
+            // tokens regardless of metacharacters.
+            let remote_cmd = self.build_remote_curl_command(&body);
+            ssh.exec(&remote_cmd)
+                .await
+                .map_err(|e| AlertSinkError::NonZeroExit {
+                    tool: "ssh-then-curl",
+                    code: None,
+                    stderr: format!(
+                        "SSH transport failed: {e} \
+                         (deploy key authorised on the proxy server? \
+                         server reachable on its SSH port?)"
+                    ),
+                })?
+        } else {
+            // Local path: spawn curl directly.
+            let args = self.build_curl_args(&body);
+            let res = tokio::task::spawn_blocking(move || {
+                Command::new("curl")
+                    .args(&args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+            })
+            .await
+            .map_err(|e| AlertSinkError::Spawn {
                 tool: "curl",
-                code: res.status.code(),
-                stderr: truncated,
-            });
-        }
+                source: std::io::Error::other(format!("tokio spawn_blocking JoinError: {e}")),
+            })?
+            .map_err(|e| AlertSinkError::Spawn {
+                tool: "curl",
+                source: e,
+            })?;
+
+            if !res.status.success() {
+                let stderr = String::from_utf8_lossy(&res.stderr);
+                let truncated: String = stderr.chars().take(200).collect();
+                return Err(AlertSinkError::NonZeroExit {
+                    tool: "curl",
+                    code: res.status.code(),
+                    stderr: truncated,
+                });
+            }
+            String::from_utf8_lossy(&res.stdout).into_owned()
+        };
 
         // Telegram returns HTTP 200 even on logical errors (chat
         // not found, bot blocked) with body `{"ok":false,
@@ -290,13 +394,12 @@ impl AlertSink for TelegramSink {
         // would false-positive on a description like
         // `{"ok":false,"description":"... \"ok\":true ..."}` since
         // Telegram echoes operator-supplied chat names into
-        // `description` (review-agent finding).
-        let body_text = String::from_utf8_lossy(&res.stdout);
+        // `description` (review-agent finding from chunk 3 part 2).
         let parsed: serde_json::Value =
-            serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(&response_body).unwrap_or(serde_json::Value::Null);
         let ok_field = parsed.get("ok").and_then(serde_json::Value::as_bool);
         if ok_field != Some(true) {
-            let truncated: String = body_text.chars().take(200).collect();
+            let truncated: String = response_body.chars().take(200).collect();
             return Err(AlertSinkError::NonZeroExit {
                 tool: "telegram-api",
                 code: Some(200),
@@ -308,7 +411,11 @@ impl AlertSink for TelegramSink {
     }
 
     fn name(&self) -> &'static str {
-        "telegram"
+        if self.via_ssh.is_some() {
+            "telegram-via-ssh"
+        } else {
+            "telegram"
+        }
     }
 }
 
@@ -431,5 +538,89 @@ mod tests {
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), Some(String::new())).unwrap();
         let args = s.build_curl_args("{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
+    }
+
+    #[test]
+    fn build_remote_curl_command_quotes_url_and_body() {
+        // Via-server proxy mode: the curl invocation is built as a
+        // single shell-string for SSH to execute remotely. Both the
+        // URL (contains the bot token) and the body (contains the
+        // operator's alert text, may include any UTF-8) must be
+        // wrapped in POSIX single-quotes so the remote shell sees
+        // them as opaque tokens.
+        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
+        let cmd = s.build_remote_curl_command(r#"{"x":1}"#);
+        // Body literal must appear as `--data '<body>'`.
+        assert!(
+            cmd.contains(r#"--data '{"x":1}'"#),
+            "body must be `--data` then single-quoted JSON: {cmd}"
+        );
+        // URL must appear as `'https://api.telegram.org/...'`.
+        assert!(
+            cmd.contains("'https://api.telegram.org/botTOK/sendMessage'"),
+            "URL must be single-quoted: {cmd}"
+        );
+        // `--` separator before URL — defense for a future refactor
+        // that reorders the args.
+        let dash_idx = cmd
+            .find(" -- ")
+            .expect("must include ` -- ` flag separator");
+        let url_idx = cmd.find("'https://").expect("must include URL");
+        assert!(dash_idx < url_idx, "`--` must come before URL");
+        // Same timeouts as the local path.
+        assert!(cmd.contains("--connect-timeout 10"));
+        assert!(cmd.contains("--max-time 20"));
+        assert!(cmd.contains("-X POST"));
+    }
+
+    #[test]
+    fn build_remote_curl_command_escapes_single_quote_in_body() {
+        // Defense: if the operator's alert text contains a `'`, the
+        // POSIX-single-quote escape from `vpnctl_core::shell::
+        // single_quote` (`'a'\''b'`) must survive into the command
+        // so the remote shell reassembles the original byte sequence.
+        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
+        // JSON literal with an embedded `'` in the text field.
+        let body = r#"{"text":"can't reach you"}"#;
+        let cmd = s.build_remote_curl_command(body);
+        // Expected single-quote pattern: original `'` becomes `'\''`.
+        // Raw string handles the literal backslash + double-quote
+        // bytes; the assertion is byte-equality against the
+        // expected single_quote output.
+        let expected_quoted = r#"'{"text":"can'\''t reach you"}'"#;
+        assert!(
+            cmd.contains(expected_quoted),
+            "embedded `'` must be escaped via close-escape-reopen trick\n\
+             expected substring: {expected_quoted}\n\
+             actual cmd:         {cmd}"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_token_length_only() {
+        let s = TelegramSink::new("12345SECRETtoken67890".into(), "CHAT".into(), None).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(
+            !dbg.contains("SECRET"),
+            "token bytes must NOT appear in Debug"
+        );
+        assert!(dbg.contains("••••"), "must include redaction marker");
+        assert!(dbg.contains("21 chars"), "must include token length");
+    }
+
+    #[test]
+    fn name_reflects_via_ssh_mode() {
+        let direct = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
+        assert_eq!(direct.name(), "telegram");
+        // Construct a sink in via-ssh mode by chaining the helper.
+        // We don't actually open the SSH connection in the test —
+        // the transport is just held as a value.
+        let ssh = SubprocessSshTransport::new(
+            String::from("203.0.113.7"),
+            String::from("root"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        let proxied = direct.with_via_ssh(ssh);
+        assert_eq!(proxied.name(), "telegram-via-ssh");
     }
 }

@@ -4622,6 +4622,11 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         .await
         .map_err(|e| e.to_string());
 
+    // Phase G chunk 3.5 — list inventory servers for the «proxy via»
+    // dropdown. If the listing fails the dropdown shows only the
+    // «direct» option (empty Vec) + the rest of Settings still renders.
+    let servers_for_proxy_dropdown = state.inv.list_servers().await.unwrap_or_default();
+
     let body = html! {
         div.ed-art-eyebrow { "Settings" }
         h1.ed-art-h1 { "homelab " em { "controls" } }
@@ -4807,10 +4812,41 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                       })
                       placeholder="numeric, e.g. 123456789 (or @your_channel)"
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
+
+                // ─── Phase G chunk 3.5 — proxy-via-server dropdown ──
+                label for="proxy_via_server_id" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    "egress"
+                }
+                @let current_proxy_id: &str = match &telegram_cfg {
+                    Ok(Some(cfg)) => cfg.proxy_via_server_id.as_deref().unwrap_or(""),
+                    _ => "",
+                };
+                select name="proxy_via_server_id"
+                       id="proxy_via_server_id"
+                       title="If the daemon host can't reach api.telegram.org directly (РФ blocks, NAT, etc), route the call through an inventory server's network instead. Uses the existing deploy SSH key — no extra setup on the server."
+                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);" {
+                    option value="" selected[current_proxy_id.is_empty()] {
+                        "direct (local network)"
+                    }
+                    @for s in &servers_for_proxy_dropdown {
+                        option value=(s.id.0) selected[current_proxy_id == s.id.0] {
+                            "via server: " (s.id.0) " (" (s.address) ")"
+                        }
+                    }
+                }
             }
+
+            @if servers_for_proxy_dropdown.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0; max-width: 720px;" {
+                    "No servers in inventory yet — only " b { "direct" } " egress is available. "
+                    "Add a server on " span.ed-mono { "/admin/servers" }
+                    " first if your daemon host can't reach " span.ed-mono { "api.telegram.org" } "."
+                }
+            }
+
             div style="margin-top: 12px;" {
                 button type="submit"
-                       title="Save both fields. Empty token = keep existing (unless chat-id is ALSO empty, then clear). Empty chat-id = clear."
+                       title="Save all three fields. Empty token = keep existing (unless chat-id is ALSO empty, then clear). Empty chat-id = clear. Egress dropdown is always overwritten with the selected value."
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     "save"
                 }
@@ -4969,16 +5005,36 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
         Some(chat_id.to_string())
     };
 
+    // ─── Phase G chunk 3.5 — proxy_via_server_id ─────────────────
+    // Empty = direct (NULL in DB). Non-empty = inventory server id.
+    // We DON'T validate the id against the inventory here because:
+    //   (1) the dropdown can only emit existing ids OR empty;
+    //   (2) if an operator hand-crafts a POST with a fake id, the
+    //       build_alert_sink path will log + fall back to direct
+    //       mode (loud-but-non-fatal), AND the test-send button will
+    //       surface the SSH error the very next time they click it.
+    let proxy_via_raw = form_field(&body, "proxy_via_server_id").unwrap_or_default();
+    let proxy_arg: Option<String> = if proxy_via_raw.trim().is_empty() {
+        None
+    } else {
+        Some(proxy_via_raw.trim().to_string())
+    };
+
     if let Err(e) = state
         .inv
-        .set_telegram_config(token_arg.as_deref(), chat_id_arg.as_deref())
+        .set_telegram_config(
+            token_arg.as_deref(),
+            chat_id_arg.as_deref(),
+            proxy_arg.as_deref(),
+        )
         .await
     {
         return internal_error(anyhow::Error::new(e));
     }
 
-    // Audit row. Payload carries the chat_id (operator-visible
-    // anyway) + a boolean for «token state changed». NEVER the token.
+    // Audit row. Payload carries the chat_id + proxy_via_server_id
+    // (both operator-visible anyway) + a boolean for «token state
+    // changed». NEVER the token.
     if let Err(e) = state
         .inv
         .audit(
@@ -4989,6 +5045,7 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
                 "token_set": token_arg.is_some(),
                 "chat_id_set": chat_id_arg.is_some(),
                 "chat_id": chat_id_arg.as_deref().unwrap_or(""),
+                "proxy_via_server_id": proxy_arg.as_deref().unwrap_or(""),
             })),
         )
         .await
@@ -5019,33 +5076,19 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
 /// Default timeout is 20s (curl `--max-time`), so the operator's
 /// HTTP request can take that long in the worst case.
 pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Response {
-    use crate::alert_sink::{AlertSink, TelegramSink};
-
-    let cfg = match state.inv.get_telegram_config().await {
-        Ok(Some(c)) => c,
-        // Singleton row missing — operator-facing it looks identical
-        // to «not configured» (because effectively it is). Return
-        // the same 400 + message rather than masking it as a 500
-        // (review-agent finding: a partial migration failure should
-        // surface as «fix your config», not «daemon bug»). The GET
-        // settings page separately surfaces the root cause in red.
+    // Use the SAME sink-construction logic as the production push
+    // loop (`node_probe_poller::build_alert_sink`) so the test-send
+    // path doesn't drift on details like `proxy_via_server_id` —
+    // operator's test verifies the exact same pipeline that real
+    // alerts use.
+    let sink = match crate::node_probe_poller::build_alert_sink(&state.inv).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return bad_request(
                 "Telegram transport not configured — fill in both fields on /admin/settings first",
             );
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-
-    let (Some(token), Some(chat_id)) = (cfg.token, cfg.chat_id) else {
-        return bad_request(
-            "Telegram transport not configured — fill in both fields on /admin/settings first",
-        );
-    };
-
-    let sink = match TelegramSink::from_env(token, chat_id) {
-        Ok(s) => s,
-        Err(e) => return internal_error(anyhow::anyhow!("sink construct: {e}")),
     };
 
     let send_result = sink
