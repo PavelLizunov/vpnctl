@@ -1721,6 +1721,122 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Fire-once-per-condition variant of [`insert_alert`].
+    ///
+    /// Insert a new alert row ONLY if there is no currently-unacked row
+    /// of the same `(kind, server_id)` pair. Returns `Some(new_id)` if
+    /// inserted, `None` if a matching unacked row already existed
+    /// (idempotent — the caller's tick-driven detection loop can call
+    /// this every probe interval without flooding the feed).
+    ///
+    /// Semantics: a `(kind, server_id)` pair has at most ONE open row
+    /// in the unacked view at a time. The operator acks it (or it gets
+    /// auto-acked by a recovery transition via [`ack_open_alerts`]),
+    /// AFTER which the next firing legitimately creates a fresh row.
+    /// This matches the natural state-machine for «is this condition
+    /// currently raised?».
+    ///
+    /// ## Atomicity
+    ///
+    /// The dedup is enforced at the SQL ENGINE level by the partial
+    /// UNIQUE index `idx_admin_alerts_unique_unacked` (migration
+    /// 0013), keyed on `(kind, COALESCE(server_id, '__GLOBAL__'))`
+    /// filtered to `acked_at IS NULL`. A simple `INSERT OR IGNORE`
+    /// is therefore atomic across concurrent writers — there is no
+    /// READ-then-WRITE race window the way an `INSERT ... SELECT ...
+    /// WHERE NOT EXISTS` formulation would have. Two daemons (or
+    /// two sqlx pool connections) firing simultaneously cannot
+    /// both succeed; the loser silently no-ops via the IGNORE clause.
+    ///
+    /// ## Secret-leakage warning (mirrored from [`insert_alert`])
+    ///
+    /// **Do NOT serialise secrets** (`User.uuid`, `User.sub_token`,
+    /// `tuic_password`, `wireguard_private`, etc.) into `payload_json`.
+    /// The string is rendered verbatim in the operator-facing
+    /// `/admin/alerts` feed AND copied into the audit_log row AND any
+    /// future webhook payload (Phase G chunk 3). Stick to thresholds,
+    /// percentages, prior/current values, and other operationally-
+    /// relevant numbers.
+    pub async fn insert_alert_if_no_unacked(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+        severity: &str,
+        summary: &str,
+        payload_json: Option<&str>,
+    ) -> Result<Option<i64>> {
+        let server_id_str = server_id.map(|s| s.0.as_str());
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO admin_alerts
+                 (kind, server_id, severity, summary, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(kind)
+        .bind(server_id_str)
+        .bind(severity)
+        .bind(summary)
+        .bind(payload_json)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 1 {
+            Ok(Some(res.last_insert_rowid()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Bulk-ack every currently-unacked alert of the given `(kind,
+    /// server_id)` pair. Returns `rows_affected` — `0` if no matching
+    /// open row existed (idempotent: the caller's recovery-detection
+    /// loop can call this every probe interval without erroring out
+    /// when the condition was never raised).
+    ///
+    /// Companion to [`insert_alert_if_no_unacked`]. The «recovery
+    /// silently clears the alert» semantics is intentional — an alert
+    /// that auto-clears doesn't need operator attention; the audit_log
+    /// row written by the caller preserves the timeline. If the
+    /// operator's preference shifts to «recovery emits a new
+    /// `*.recovered` info alert», that's a Phase G chunk 3 decision,
+    /// not this helper's responsibility.
+    ///
+    /// ## NULL-equality predicate
+    ///
+    /// SQLite's regular `=` returns NULL on NULL operands; for the
+    /// `server_id IS NULL` global-alert case we use
+    /// `((?2 IS NULL AND server_id IS NULL) OR server_id = ?2)` so
+    /// NULL matches NULL. The companion [`insert_alert_if_no_unacked`]
+    /// achieves the same semantics via the partial UNIQUE index's
+    /// `COALESCE(server_id, '__GLOBAL__')` expression — different
+    /// mechanism, same observable rule.
+    ///
+    /// ## Race-vs-concurrent-fire
+    ///
+    /// If a new firing of the same (kind, server_id) lands between
+    /// this UPDATE's row-scan and commit, that new row legitimately
+    /// represents the NEXT occurrence — the condition recovered then
+    /// re-fired. The new row remains unacked; the operator sees it.
+    /// This is the correct semantics for a state-machine that
+    /// distinguishes «raised → cleared → raised again».
+    pub async fn ack_open_alerts(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+    ) -> Result<u64> {
+        let server_id_str = server_id.map(|s| s.0.as_str());
+        let res = sqlx::query(
+            "UPDATE admin_alerts
+             SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE kind = ?1
+               AND ((?2 IS NULL AND server_id IS NULL) OR server_id = ?2)
+               AND acked_at IS NULL",
+        )
+        .bind(kind)
+        .bind(server_id_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Drop ACKED alerts older than `days`. UNACKED alerts are NEVER
     /// auto-purged (an alert that fires once and is forgotten must
     /// still be visible — see migration 0011 doc-comment for the

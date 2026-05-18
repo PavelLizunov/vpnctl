@@ -1,0 +1,60 @@
+-- Partial UNIQUE index enforcing «at most one currently-unacked row
+-- per (kind, server_id) pair» as a schema-level invariant rather
+-- than relying on caller-side `INSERT ... SELECT ... WHERE NOT EXISTS`
+-- (which is racy across two SqlitePool connections — both writers
+-- can evaluate NOT EXISTS, see no row, and both insert).
+--
+-- ## Why partial
+--
+-- The constraint only applies to UNACKED rows. Acked rows are kept
+-- for the audit timeline and can legitimately repeat the same
+-- (kind, server_id) — e.g. a server flaps three times in a day, the
+-- operator acks each occurrence, the table has three rows. Without
+-- the `WHERE acked_at IS NULL` predicate we'd block legitimate
+-- repeat-firings.
+--
+-- ## Why COALESCE(server_id, '__GLOBAL__')
+--
+-- SQLite treats NULL in UNIQUE indexes as DISTINCT (each NULL is its
+-- own value — opposite of «NULL = NULL is NULL» under regular
+-- equality). For our dedup contract we want two global alerts
+-- (server_id IS NULL) of the same kind to collide. COALESCE-to-
+-- sentinel forces NULL → constant string → standard string equality
+-- inside the UNIQUE machinery.
+--
+-- The sentinel `__GLOBAL__` is impossible as a real ServerId because
+-- ServerId validation (`vpnctl_core::ServerId`) rejects underscores
+-- at start; even if someone bypassed that, `add_server` would FK-
+-- reject because no row with id `__GLOBAL__` exists in `servers`.
+-- So no real `server_id` value can collide with the sentinel slot.
+--
+-- ## Effect on insert_alert_if_no_unacked
+--
+-- Caller can switch from `INSERT ... SELECT ... WHERE NOT EXISTS`
+-- to `INSERT OR IGNORE INTO admin_alerts ...` — a single statement
+-- that's atomic at the SQL engine level. If a duplicate would
+-- violate this index, SQLite silently no-ops the INSERT and the
+-- helper reports `Ok(None)` via `rows_affected() == 0`.
+--
+-- ## Effect on ack_open_alerts
+--
+-- The UPDATE remains the same; the race «new insert lands between
+-- ack's scan and commit» is now harmless — the new row legitimately
+-- represents the next firing of the condition (the prior one having
+-- been just acked).
+--
+-- ## Effect on existing rows
+--
+-- This index is CREATEd on a table that may already contain rows
+-- with duplicate (kind, server_id) pairs in the unacked set —
+-- though the only writer today is `insert_alert` and the daemon's
+-- Phase H/G poller hasn't been wired yet, so the table is empty
+-- on every existing deploy. SQLite will fail the CREATE if a
+-- duplicate exists. If a future restore from an older snapshot
+-- contains conflicting rows, the migration will fail loudly — the
+-- recovery path is to manually ack all but one of the conflicting
+-- rows then re-run migration.
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_alerts_unique_unacked
+    ON admin_alerts(kind, COALESCE(server_id, '__GLOBAL__'))
+    WHERE acked_at IS NULL;
