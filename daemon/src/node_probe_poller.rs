@@ -114,7 +114,10 @@ pub enum UnreachableTransition {
     /// The counter just reached the threshold for the FIRST time
     /// since the last `Recovered` (or process start). Caller fires
     /// the `server.unreachable` alert.
-    BecameUnreachable { consecutive_failures: u32, threshold: u32 },
+    BecameUnreachable {
+        consecutive_failures: u32,
+        threshold: u32,
+    },
     /// A previously-failed server just succeeded. Caller acks any
     /// open `server.unreachable` alert for this id.
     Recovered,
@@ -167,7 +170,11 @@ impl FailState {
 
     /// Record one probe outcome for a server, returning the alert
     /// transition (if any). Pure state-machine; no I/O.
-    pub fn observe(&mut self, server_id: &ServerId, outcome: &ProbeOutcome) -> UnreachableTransition {
+    pub fn observe(
+        &mut self,
+        server_id: &ServerId,
+        outcome: &ProbeOutcome,
+    ) -> UnreachableTransition {
         match outcome {
             ProbeOutcome::Ok(_) => self.recover(server_id),
             ProbeOutcome::SshFailed(_) => self.fail(server_id),
@@ -177,9 +184,7 @@ impl FailState {
             ProbeOutcome::RowWriteFailed => UnreachableTransition::NoChange,
             // Skipped / NoDeployKey: not a probe attempt; don't
             // affect counter or fired-flag.
-            ProbeOutcome::Skipped | ProbeOutcome::NoDeployKey => {
-                UnreachableTransition::NoChange
-            }
+            ProbeOutcome::Skipped | ProbeOutcome::NoDeployKey => UnreachableTransition::NoChange,
         }
     }
 
@@ -344,10 +349,7 @@ pub async fn dispatch_alerts(
     if let ProbeOutcome::Ok(probe) = outcome {
         match probe.fail2ban_self_banned {
             Some(true) => {
-                let banned_list = probe
-                    .fail2ban_banned_ips
-                    .clone()
-                    .unwrap_or_default();
+                let banned_list = probe.fail2ban_banned_ips.clone().unwrap_or_default();
                 let our_ip = probe.probe_source_ip.clone().unwrap_or_default();
                 let ban_count_other = banned_list.len().saturating_sub(1);
                 let payload = serde_json::json!({
@@ -403,12 +405,7 @@ pub async fn dispatch_alerts(
 /// the caller's tick loop must continue regardless of audit-write
 /// failures (an audit failure should not block the next server's
 /// probe).
-async fn auto_ack(
-    inv: &SqliteInventory,
-    server_id: &ServerId,
-    kind: &str,
-    reason: &str,
-) {
+async fn auto_ack(inv: &SqliteInventory, server_id: &ServerId, kind: &str, reason: &str) {
     match inv.ack_open_alerts(kind, Some(server_id)).await {
         Ok(0) => {} // no open row — nothing to log
         Ok(n) => {
@@ -449,10 +446,7 @@ async fn auto_ack(
 /// detector. Pure side-effect, never panics. Every error is logged
 /// at warn-or-info and folded into the outcome enum (callers don't
 /// need to re-check Result variants).
-async fn probe_one_server(
-    inv: &SqliteInventory,
-    server: &vpnctl_core::Server,
-) -> ProbeOutcome {
+async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) -> ProbeOutcome {
     // Skip non-sing-box kernels for now via the centralised filter
     // (see `probeable` doc-comment for the AmneziaWG TODO). Once-per-
     // tick info log so the operator can grep + spot the no-op state

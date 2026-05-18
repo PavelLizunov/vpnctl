@@ -71,7 +71,6 @@ pub struct Probe {
     pub sing_box_log_bytes: Option<u64>,
 
     // ─── Phase G chunk 2 — banned-self detector inputs ───────────
-
     /// Daemon's outbound IP as observed from the node, parsed from
     /// `$SSH_CLIENT`'s first space-separated field (the client IP).
     /// `None` when the script could not capture it (`SSH_CLIENT`

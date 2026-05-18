@@ -2430,9 +2430,7 @@ async fn dispatch_alerts_recovery_auto_acks_open_unreachable() {
         vpnctld::node_probe_poller::dispatch_alerts(
             &inv,
             &server,
-            &vpnctld::node_probe_poller::ProbeOutcome::SshFailed(
-                "connect timeout".into(),
-            ),
+            &vpnctld::node_probe_poller::ProbeOutcome::SshFailed("connect timeout".into()),
             &mut fail_state,
         )
         .await;
@@ -2447,9 +2445,7 @@ async fn dispatch_alerts_recovery_auto_acks_open_unreachable() {
     vpnctld::node_probe_poller::dispatch_alerts(
         &inv,
         &server,
-        &vpnctld::node_probe_poller::ProbeOutcome::Ok(
-            vpnctld::node_probe::Probe::default(),
-        ),
+        &vpnctld::node_probe_poller::ProbeOutcome::Ok(vpnctld::node_probe::Probe::default()),
         &mut fail_state,
     )
     .await;

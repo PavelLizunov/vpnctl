@@ -1817,11 +1817,7 @@ impl SqliteInventory {
     /// re-fired. The new row remains unacked; the operator sees it.
     /// This is the correct semantics for a state-machine that
     /// distinguishes «raised → cleared → raised again».
-    pub async fn ack_open_alerts(
-        &self,
-        kind: &str,
-        server_id: Option<&ServerId>,
-    ) -> Result<u64> {
+    pub async fn ack_open_alerts(&self, kind: &str, server_id: Option<&ServerId>) -> Result<u64> {
         let server_id_str = server_id.map(|s| s.0.as_str());
         let res = sqlx::query(
             "UPDATE admin_alerts

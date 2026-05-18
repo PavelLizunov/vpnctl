@@ -257,14 +257,5 @@ pub fn extract_sha256_token(stdout: &str) -> Option<String> {
 /// flag-injection regression test in `tests/spec_host_fingerprint.rs`
 /// fails immediately rather than waiting for a security audit.
 pub fn build_keyscan_args<'a>(port_s: &'a str, host: &'a str) -> [&'a str; 8] {
-    [
-        "-T",
-        "10",
-        "-p",
-        port_s,
-        "-t",
-        "ed25519,rsa",
-        "--",
-        host,
-    ]
+    ["-T", "10", "-p", port_s, "-t", "ed25519,rsa", "--", host]
 }

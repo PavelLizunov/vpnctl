@@ -207,10 +207,7 @@ fn error_display_mentions_host_and_port_on_keyscan_failed() {
         stderr: "Connection refused".to_string(),
     };
     let msg = e.to_string();
-    assert!(
-        msg.contains("example.com"),
-        "expected host in error: {msg}"
-    );
+    assert!(msg.contains("example.com"), "expected host in error: {msg}");
     assert!(msg.contains("2222"), "expected port in error: {msg}");
     assert!(
         msg.contains("Connection refused"),

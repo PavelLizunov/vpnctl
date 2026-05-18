@@ -221,11 +221,23 @@ async fn ack_open_scope_isolation_kind_server_and_null() {
     inv.add_server(&srv("s2")).await.unwrap();
 
     // Target row + three decoys that must remain unacked.
-    fire(&inv, "server.singbox.down", Some(&sid("s1"))).await.expect("target");
-    fire(&inv, "server.disk.pressure", Some(&sid("s1"))).await.expect("decoy B,s1");
-    fire(&inv, "server.singbox.down", Some(&sid("s2"))).await.expect("decoy A,s2");
-    fire(&inv, "server.singbox.down", None).await.expect("decoy A,None");
-    assert_eq!(inv.unacked_alert_count().await.unwrap(), 4, "sanity: 4 open before ack");
+    fire(&inv, "server.singbox.down", Some(&sid("s1")))
+        .await
+        .expect("target");
+    fire(&inv, "server.disk.pressure", Some(&sid("s1")))
+        .await
+        .expect("decoy B,s1");
+    fire(&inv, "server.singbox.down", Some(&sid("s2")))
+        .await
+        .expect("decoy A,s2");
+    fire(&inv, "server.singbox.down", None)
+        .await
+        .expect("decoy A,None");
+    assert_eq!(
+        inv.unacked_alert_count().await.unwrap(),
+        4,
+        "sanity: 4 open before ack"
+    );
 
     let n = inv
         .ack_open_alerts("server.singbox.down", Some(&sid("s1")))
@@ -244,9 +256,21 @@ async fn ack_open_scope_isolation_kind_server_and_null() {
         let inv = inv.clone();
         async move { inv.ack_open_alerts(kind, srv.as_ref()).await.unwrap() }
     };
-    assert_eq!(ack("server.disk.pressure", Some(sid("s1"))).await, 1, "(B, s1) still open");
-    assert_eq!(ack("server.singbox.down", Some(sid("s2"))).await, 1, "(A, s2) still open");
-    assert_eq!(ack("server.singbox.down", None).await, 1, "(A, None) still open");
+    assert_eq!(
+        ack("server.disk.pressure", Some(sid("s1"))).await,
+        1,
+        "(B, s1) still open"
+    );
+    assert_eq!(
+        ack("server.singbox.down", Some(sid("s2"))).await,
+        1,
+        "(A, s2) still open"
+    );
+    assert_eq!(
+        ack("server.singbox.down", None).await,
+        1,
+        "(A, None) still open"
+    );
 }
 
 // 12b. Regression for «predicate flipped to acked_at IS NOT NULL»:
@@ -294,7 +318,9 @@ async fn ack_open_hides_from_unacked_feed_but_keeps_history() {
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    fire(&inv, "server.singbox.down", Some(&sid("s1"))).await.expect("seed");
+    fire(&inv, "server.singbox.down", Some(&sid("s1")))
+        .await
+        .expect("seed");
     assert_eq!(
         inv.ack_open_alerts("server.singbox.down", Some(&sid("s1")))
             .await
