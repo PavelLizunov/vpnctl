@@ -5307,13 +5307,34 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
     }
 
     match send_result {
-        Ok(()) => Redirect::to("/admin/settings").into_response(),
-        Err(e) => error_resp(
-            StatusCode::BAD_GATEWAY,
-            &format!(
-                "test-send failed: {e} — common causes: chat-id wrong (Telegram returns 'chat not found'), token revoked, bot never started conversation with you (open the bot in Telegram + tap Start), api.telegram.org blocked (set VPNCTLD_HTTPS_PROXY env)"
-            ),
-        ),
+        Ok(()) => Redirect::to("/admin/settings#telegram-notifications").into_response(),
+        Err(e) => {
+            let raw = e.to_string();
+            // Don't double up on remediation hints: `classify_ssh_failure`
+            // (in alert_sink) already produces a specific message for
+            // the SSH path (Permission denied / refused / timed out /
+            // host-key). Appending the generic «common causes» list on
+            // top of that classified message creates redundancy that
+            // dilutes the actionable bit — caught by Pavel during live
+            // testing 2026-05-18. Only append the generic list when
+            // the failure was NOT SSH-level (curl-direct path or
+            // Telegram-API-level «ok:false»).
+            let msg = if raw.contains("ssh-then-curl") {
+                format!("test-send failed: {e}")
+            } else {
+                format!(
+                    "test-send failed: {e} — common causes: \
+                     chat-id wrong (Telegram returns 'chat not found'), \
+                     token revoked, \
+                     bot never started conversation with you \
+                     (open the bot in Telegram + tap Start), \
+                     api.telegram.org blocked (use the «egress» dropdown \
+                     on /admin/settings to route via an inventory server, \
+                     or set VPNCTLD_HTTPS_PROXY env)"
+                )
+            };
+            error_resp(StatusCode::BAD_GATEWAY, &msg)
+        }
     }
 }
 
