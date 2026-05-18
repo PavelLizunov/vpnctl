@@ -4959,24 +4959,34 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
 }
 
 /// `POST /admin/servers/{id}/push-deploy-key` — append the daemon's
-/// deploy pubkey to the server's `~/.ssh/authorized_keys` via sshpass.
-/// Recovery action for servers added via quick-add / migrate-from-bash
+/// deploy pubkey to the server's `~/.ssh/authorized_keys`. Recovery
+/// action for servers added via quick-add / migrate-from-bash
 /// (Phase E wizard does this automatically as step 3 of bootstrap).
 ///
-/// Reuses [`crate::wizard_bootstrap::ssh_password_run`] so the remote
-/// command is byte-identical to the wizard's push-key step. Idempotent
-/// at the remote shell level (`grep -qxF || echo >>`), so a successful
+/// ## Two egress paths, tried in order
+///
+/// 1. **Reference SSH key** (preferred) — if `VPNCTLD_REFERENCE_SSH_KEY`
+///    env var points at a readable private key on the daemon host AND
+///    `root_password` is left empty, the handler uses that key
+///    (assumed pre-authorised on every inventory server, e.g. the
+///    operator's existing `~/.ssh/id_ed25519`) for a silent push. This
+///    matches Pavel's «if I added the server, the daemon should have
+///    all the access» expectation: configure the env var ONCE, all
+///    subsequent push-deploy-key clicks are no-input.
+/// 2. **Root password via sshpass** — fallback when reference key
+///    isn't set / isn't readable / didn't work. Operator-typed
+///    password → SSHPASS env var of the sshpass child process →
+///    never in argv (`ps auxe` from non-root can't see it). After
+///    the SSH call returns, the password lives only on this handler's
+///    stack; not stored, not logged, not in the audit payload.
+///
+/// Server-side command is byte-identical to the wizard's step 3
+/// (push-key) and idempotent (`grep -qxF || echo >>`) — a successful
 /// click followed by an accidental second click is a no-op.
 ///
-/// **Password handling:** the operator-typed password lives in the
-/// SSHPASS env var of the sshpass child process — never in argv (so
-/// `ps auxe` from non-root can't see it). After the SSH call returns,
-/// the password string lives only on this handler's stack; not stored,
-/// not logged, not in the audit payload.
-///
 /// **Audit row** written on both success + failure (operator action
-/// either way). Payload: `{success: bool, error?: str}` — never the
-/// password.
+/// either way). Payload: `{success: bool, method: "reference-key" | "sshpass", error?: str}`
+/// — never the password.
 pub(crate) async fn server_push_deploy_key(
     Path(server_id_str): Path<String>,
     State(state): State<AppState>,
@@ -4992,8 +5002,22 @@ pub(crate) async fn server_push_deploy_key(
     };
 
     let password = form_field(&body, "root_password").unwrap_or_default();
-    if password.is_empty() {
-        return bad_request("root_password must not be empty");
+
+    // ─── Credentials gate (BEFORE expensive pubkey read) ─────────
+    // 400 ASAP if operator gave neither a password nor a usable
+    // reference key on the daemon host — otherwise a missing
+    // deploy-pubkey file (read step below) would surface as a
+    // misleading 500 hiding the real «no creds» bug.
+    let reference_key_path = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
+    let try_reference = password.is_empty()
+        && reference_key_path
+            .as_ref()
+            .is_some_and(|p| !p.is_empty() && std::path::Path::new(p).exists());
+    if password.is_empty() && !try_reference {
+        return bad_request(
+            "root_password is required (or set VPNCTLD_REFERENCE_SSH_KEY \
+             on the daemon host to use a pre-authorised key instead)",
+        );
     }
 
     // Read the daemon's deploy pubkey from disk. Same path the
@@ -5024,6 +5048,82 @@ pub(crate) async fn server_push_deploy_key(
         pk_q = vpnctl_core::shell::single_quote(&pubkey),
     );
 
+    if let Some(ref_key) = reference_key_path.clone().filter(|_| try_reference) {
+        let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
+            server.address.clone(),
+            server.ssh_user.clone(),
+            std::path::PathBuf::from(&ref_key),
+        )
+        .port(server.ssh_port);
+        use vpnctl_core::SshTransport;
+        match ssh.exec(&push_cmd).await {
+            Ok(_) => {
+                let _ = state
+                    .inv
+                    .audit(
+                        "admin",
+                        "server.push_deploy_key",
+                        Some(&server_id_str),
+                        Some(&serde_json::json!({
+                            "success": true,
+                            "server_id": &server_id_str,
+                            "method": "reference-key",
+                            "reference_key_path": &ref_key,
+                        })),
+                    )
+                    .await;
+                return Redirect::to(&format!(
+                    "/admin/servers/{}#push-deploy-key",
+                    path_segment_encode(&server_id_str)
+                ))
+                .into_response();
+            }
+            Err(e) => {
+                // Reference key didn't work (likely not authorised on
+                // THIS server). If a password was ALSO provided, fall
+                // through to sshpass path; otherwise surface the
+                // reference-key failure with a hint.
+                if password.is_empty() {
+                    let _ = state
+                        .inv
+                        .audit(
+                            "admin",
+                            "server.push_deploy_key",
+                            Some(&server_id_str),
+                            Some(&serde_json::json!({
+                                "success": false,
+                                "server_id": &server_id_str,
+                                "method": "reference-key",
+                                "error": e.to_string(),
+                            })),
+                        )
+                        .await;
+                    return error_resp(
+                        StatusCode::BAD_GATEWAY,
+                        &format!(
+                            "push-deploy-key via reference key ({ref_key}) failed for \
+                             {server_id_str}: {e} — the reference key isn't authorised \
+                             on this server. Either authorise it out-of-band, OR fill \
+                             in the root_password field to fall back to sshpass."
+                        ),
+                    );
+                }
+                // password is non-empty → continue to sshpass path.
+                tracing::info!(
+                    target = "vpnctld::admin::server_push_deploy_key",
+                    server = %server_id_str,
+                    error = %e,
+                    "reference key failed; falling back to sshpass"
+                );
+            }
+        }
+    }
+
+    // ─── Path 2: sshpass + operator-typed password ────────────────
+    // (Credentials gate above already ensured password is non-empty
+    // when we get here — either initial state, or fall-through from
+    // reference-key failure with password supplied.)
+
     // known_hosts path mirrors the wizard's default (and the
     // daemon's `SubprocessSshTransport` default for subsequent
     // pubkey-auth connects). Living in `/var/lib/vpnctl/.ssh/`
@@ -5044,10 +5144,15 @@ pub(crate) async fn server_push_deploy_key(
     // Never the password (caller-owned secret); never the full sshpass
     // stderr (might quote the password verbatim if sshpass leaks it).
     let audit_payload = match &result {
-        Ok(_) => serde_json::json!({"success": true, "server_id": &server_id_str}),
+        Ok(_) => serde_json::json!({
+            "success": true,
+            "server_id": &server_id_str,
+            "method": "sshpass",
+        }),
         Err(e) => serde_json::json!({
             "success": false,
             "server_id": &server_id_str,
+            "method": "sshpass",
             "error": e,
         }),
     };
@@ -6335,6 +6440,13 @@ fn server_detail_kernels_section(
 /// `grep -qxF || echo >>` — re-clicking after success is safe).
 fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup {
     let sid_enc = path_segment_encode(&server.id.0);
+    // Detect whether the daemon has a reference SSH key configured —
+    // if yes, the password field is OPTIONAL (clicking with empty
+    // password attempts ref-key first). If no, password is required.
+    let reference_key = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
+    let reference_ok = reference_key
+        .as_ref()
+        .is_some_and(|p| std::path::Path::new(p).exists());
     html! {
         div.ed-rule {}
         div #push-deploy-key.ed-art-eyebrow { "Deploy SSH key — push to this server" }
@@ -6344,17 +6456,27 @@ fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup
             " before probes, deploys, or the Telegram via-server proxy can work. "
             "The Phase E wizard at "
             span.ed-mono { "/admin/servers/new" }
-            " does this automatically; if the server was added via "
-            span.ed-mono { "quick-add" }
-            " / "
-            span.ed-mono { "migrate-from-bash" }
-            " (or you're not sure), push the key here. "
-            "Idempotent — re-clicking after success appends nothing (uses "
-            span.ed-mono { "grep -qxF || echo" }
-            "). Password is used ONCE, sent via "
-            span.ed-mono { "SSHPASS" }
-            " env var (never in argv), then discarded."
+            " does this automatically. For servers added via "
+            span.ed-mono { "quick-add" } " / " span.ed-mono { "migrate-from-bash" }
+            " (or when the wizard's push step failed), use this form. "
+            "Idempotent — re-clicking after success is a no-op."
         }
+
+        @if reference_ok {
+            p style="font-family: var(--mono); font-size: 11px; color: var(--ink); margin: 0 0 12px; padding: 8px 12px; background: var(--paper); border-left: 3px solid var(--acc); max-width: 760px;" {
+                "✓ " b { "reference SSH key configured" } " (" span.ed-mono { (reference_key.as_deref().unwrap_or("")) } "). "
+                "Click " b { "push deploy key" } " with password EMPTY — daemon will use the reference key for a silent push. "
+                "If that key isn't authorised on this specific server, fill in the password to fall back to sshpass."
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px; max-width: 760px;" {
+                "Tip: set " span.ed-mono { "VPNCTLD_REFERENCE_SSH_KEY=/path/to/operator_key" }
+                " in the daemon's "
+                span.ed-mono { "/etc/vpnctl/vpnctld.env" }
+                " (then restart vpnctld) to skip the password input on future pushes — useful when an operator key (claude-dev, etc) is already authorised on every server."
+            }
+        }
+
         form method="post"
              action=(format!("/admin/servers/{sid_enc}/push-deploy-key"))
              style="margin: 0 0 14px;" {
@@ -6365,13 +6487,12 @@ fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup
                 input type="password"
                       name="root_password"
                       autocomplete="off"
-                      placeholder="never stored — used once for the SSH connect, then discarded"
-                      required
+                      placeholder=(if reference_ok { "leave blank to use reference key; fill to force sshpass fallback" } else { "never stored — used once for the SSH connect, then discarded" })
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
             }
             div style="margin-top: 12px;" {
                 button type="submit"
-                       title="SSH to the server using sshpass + the password below, append the daemon's deploy pubkey to ~/.ssh/authorized_keys, then verify with a pubkey-auth round-trip."
+                       title="Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. Tries reference key first (if configured) then falls back to sshpass + the password above."
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     "push deploy key"
                 }

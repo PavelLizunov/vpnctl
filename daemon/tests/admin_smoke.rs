@@ -2695,7 +2695,7 @@ async fn server_push_deploy_key_404s_for_unknown_server() {
 }
 
 #[tokio::test]
-async fn server_push_deploy_key_rejects_empty_password() {
+async fn server_push_deploy_key_rejects_empty_password_without_reference_key() {
     // Defensive: empty password reaches the handler if the
     // browser bypasses the `required` attr (curl, custom client).
     // Must 400 with a clear message — NEVER attempt the SSH call
