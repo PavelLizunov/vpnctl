@@ -42,8 +42,50 @@ For Pavel's wake-up. Skip to the **TL;DR** if you want the punch line first.
 | `2fda5c6` | feat(cli/web): vpnctl server set-fingerprint + matching web action |
 | `aef1c6b` | fix(daemon/admin): decode_form_value UTF-8 — assemble bytes, then String |
 | `1155333` | docs(inventory): full codebase analysis — LOC + features + artefacts |
+| `4e77744` | docs(burst): wake-up report (this file) |
+| `9819538` | fix(burst): apply 3-agent review findings — 2 critical + 5 important |
+| `ef2eb6f` | fix(inventory): split index improvement into 0012 — sqlx checksum |
+| `5841628` | fix(migrations): restore 0011 byte-for-byte (sqlx checksum) |
 
-Plus this report.
+## Fix trail after the review
+
+Three review-agents (one per crate group: crates/, daemon/, cli/) ran
+in parallel against the burst diff `e928cd2..1155333`. They surfaced
+**2 critical + 5 important + 4 minor**, all addressed inline in
+`9819538`:
+
+  * **CRITICAL #1** — both CLI + daemon `ssh-keyscan host` calls
+    were missing the `--` separator before `<host>`. An address
+    starting with `-` (typo, IDN edge case) would be parsed by
+    ssh-keyscan's getopt as a flag (`-fSomething` reads attacker-
+    controlled files). Fixed in both surfaces.
+  * **CRITICAL #2** — daemon `keyscan_fingerprint_blocking` called
+    synchronously from the async `server_set_fingerprint` handler.
+    ssh-keyscan on an unreachable host pins the tokio worker
+    thread for ~5–10s, starving other requests. Wrapped in
+    `tokio::task::spawn_blocking`.
+  * **IMPORTANT × 5** — `stdin.take()` None branch deadlock,
+    explicit `drop(stdin)` for EOF, audit row captures previous
+    fingerprint, health_monitor audit no longer silently swallowed,
+    `validate_address` re-run before keyscan, kernel-skip filter
+    centralised + log signal upgraded.
+  * **MINOR × 4** — `Result<usize>` → `Result<bool>` for honest
+    types, `insert_alert` doc-comment warns against secret
+    leakage, partial-index column swap to `(acked_at)` for smaller
+    footprint, decode_form_value doc-comment accuracy + ack test
+    covers id=0 + id=999.
+
+The partial-index swap (minor #3) caused a **live-deploy mini-incident
+at 00:06 UTC**: changing the byte content of `0011_admin_alerts.sql`
+after the file was already applied tripped sqlx's checksum guard
+and vpnctld crash-looped for two restart cycles. Recovery: revert
+0011 to byte-identical state with the originally-applied version +
+add the index-swap as a fresh `0012_admin_alerts_unacked_index.sql`
+that DROPs + recreates. Daemon up + healthy by 00:08 UTC.
+
+Methodology takeaway pinned in `5841628` commit message: **never
+edit an applied sqlx migration in place** — always add a follow-up
+migration, even for internal index reshuffles.
 
 ## Methodology run
 
