@@ -96,3 +96,40 @@ jobs:
         run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
       - name: spec_password_auth (independent test-writer-agent suite)
         run: cargo test -p vpnctl-ssh --test spec_password_auth -- --ignored --nocapture
+
+  # cargo-mutants — mutation testing on the protocols crate's
+  # byte-equality contract. Catches «tests pass even when impl is
+  # inverted» bugs (the db3998c-style mistake). Promoted from
+  # `just mutants-protocols` to CI per the 2026-05-18 audit
+  # deferred-items list.
+  #
+  # Scoped to `vpnctl-protocols` only because:
+  #   * That crate's `share_link` byte-equality regression tests are
+  #     the highest-value mutation surface.
+  #   * Whole-workspace mutants would push CI past 30 min.
+  #   * `--in-diff origin/main` further narrows runtime on PRs by
+  #     mutating only changed code paths.
+  #
+  # Soft-fail policy: a missed mutant produces a warning annotation
+  # but does NOT block merge. Hardening to a blocking gate happens
+  # once the surface is stable + the false-positive rate is known.
+  # (continue-on-error: true.)
+  mutants:
+    name: cargo-mutants (protocols, soft-fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # `--in-diff origin/main` needs main reachable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-mutants
+        run: cargo install --locked cargo-mutants --version ^25
+      - name: run mutation tests on protocols crate
+        run: |
+          # The `|| true` belt-and-braces with continue-on-error:
+          # cargo-mutants exits non-zero when any mutant survives,
+          # which we want surfaced as an annotation, not a hard fail.
+          cargo mutants -p vpnctl-protocols --in-diff origin/main \
+            --timeout-multiplier 3 --no-shuffle || true
