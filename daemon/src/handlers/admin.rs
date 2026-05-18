@@ -4433,9 +4433,10 @@ pub(crate) async fn alerts(
         p.ed-art-deck {
             "Infrastructure alerts written by the Phase G health-monitor "
             "on top of the Phase H node probe. Service flips, disk + "
-            "memory pressure, runaway sing-box logs. Ack each one when "
-            "you've looked — the dashboard tile " em { "homelab health" }
-            " counts unacked items."
+            "memory pressure, runaway sing-box logs, unreachable hosts, "
+            "and the «I locked myself out» class (fail2ban banned us). "
+            "Ack each one when you've looked — the dashboard tile "
+            em { "homelab health" } " counts unacked items."
         }
         div.ed-rule {}
         div style="display: flex; gap: 16px; align-items: baseline; margin-bottom: 14px;" {

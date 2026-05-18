@@ -69,6 +69,32 @@ pub struct Probe {
     /// byte-stable across runs).
     pub listening: BTreeSet<(String, u16)>,
     pub sing_box_log_bytes: Option<u64>,
+
+    // ─── Phase G chunk 2 — banned-self detector inputs ───────────
+
+    /// Daemon's outbound IP as observed from the node, parsed from
+    /// `$SSH_CLIENT`'s first space-separated field (the client IP).
+    /// `None` when the script could not capture it (`SSH_CLIENT`
+    /// unset, e.g. someone heavily customised sshd's `AcceptEnv`).
+    /// Used by [`Probe::fail2ban_self_banned`] derivation, NOT
+    /// rendered directly.
+    pub probe_source_ip: Option<String>,
+
+    /// All currently-banned sshd IPs as reported by
+    /// `fail2ban-client status sshd`. `Some([])` means fail2ban is
+    /// up but nothing is currently banned; `None` means
+    /// `fail2ban-client` was not runnable (not installed, sshd jail
+    /// missing, command exited non-zero) — the operator-facing
+    /// «no signal» state, NOT «definitely clear».
+    pub fail2ban_banned_ips: Option<Vec<String>>,
+
+    /// Derived during parse: `Some(true)` iff `probe_source_ip` is
+    /// present AND that IP appears in `fail2ban_banned_ips`.
+    /// `Some(false)` iff both are present but our IP is NOT in the
+    /// list. `None` otherwise (no signal — either we don't know our
+    /// IP or fail2ban didn't report). Caller uses this verdict
+    /// directly for the `server.fail2ban.banned_self` alert.
+    pub fail2ban_self_banned: Option<bool>,
 }
 
 impl Probe {
@@ -149,6 +175,27 @@ ss -tunl 2>/dev/null | awk 'NR>1 {
 sb_log=/var/log/sing-box.log
 if [ -f "$sb_log" ]; then
     echo "LOG_SB $(stat -c %s "$sb_log" 2>/dev/null || echo 0)"
+fi
+# Phase G chunk 2 — banned-self detector inputs.
+# SSH_CLIENT format: "<client_ip> <client_port> <server_port>". sshd
+# sets this from the kernel-known source IP of the connection, which
+# clients cannot forge. Extract first space-separated field.
+if [ -n "${SSH_CLIENT:-}" ]; then
+    echo "SSH_CLIENT_IP ${SSH_CLIENT%% *}"
+fi
+# fail2ban banned IPs. Output of `fail2ban-client status sshd`:
+#     ...
+#     `- Banned IP list:	1.2.3.4 5.6.7.8
+# Emit ONE BAN line per IP so the parser doesn't need to split.
+# LC_ALL=C pins English output across non-C-locale hosts. Silent on
+# missing fail2ban-client / sshd jail (exit non-zero swallowed).
+if command -v fail2ban-client >/dev/null 2>&1; then
+    LC_ALL=C fail2ban-client status sshd 2>/dev/null | awk -F: '
+        /Banned IP list/ {
+            sub(/^[[:space:]]+/, "", $2)
+            n = split($2, ips, /[[:space:]]+/)
+            for (i = 1; i <= n; i++) if (ips[i] != "") print "BAN " ips[i]
+        }'
 fi
 # Completion sentinel. Every `|| true` above can silently swallow
 # errors; without this line a totally-broken probe (no /proc, missing
@@ -284,6 +331,32 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
                     any_parsed = true;
                 }
             }
+            "SSH_CLIENT_IP" => {
+                // Defensive: validate it looks like a v4/v6 literal
+                // before accepting. fail2ban stores literal IPs in
+                // the banned list, so string-equal comparison is
+                // what we need; reject anything containing a slash
+                // (CIDR) or whitespace (junk).
+                if let Some(ip) = parts.next()
+                    && !ip.is_empty()
+                    && !ip.contains('/')
+                    && parts.next().is_none()
+                {
+                    probe.probe_source_ip = Some(ip.to_string());
+                    any_parsed = true;
+                }
+            }
+            "BAN" => {
+                if let Some(ip) = parts.next()
+                    && !ip.is_empty()
+                {
+                    probe
+                        .fail2ban_banned_ips
+                        .get_or_insert_with(Vec::new)
+                        .push(ip.to_string());
+                    any_parsed = true;
+                }
+            }
             _ => continue,
         }
     }
@@ -294,6 +367,17 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
     // rationale (review-agent finding).
     if !saw_sentinel {
         return Err(ProbeError::ScriptDidNotComplete);
+    }
+    // Derive fail2ban_self_banned verdict. Both inputs must be
+    // present — partial signal yields `None` (caller's no-op path).
+    // This deliberately does NOT fire on empty-bans-list-but-IP-
+    // known: that's "fail2ban running, nobody banned" → `Some(false)`,
+    // the operator-clear state.
+    if let (Some(my_ip), Some(bans)) = (
+        probe.probe_source_ip.as_ref(),
+        probe.fail2ban_banned_ips.as_ref(),
+    ) {
+        probe.fail2ban_self_banned = Some(bans.iter().any(|b| b == my_ip));
     }
     if any_parsed {
         Ok(probe)
@@ -337,6 +421,127 @@ PROBE_OK
         assert_eq!(p.listening.len(), 5);
         assert!(p.listening.contains(&("tcp".into(), 443)));
         assert!(p.listening.contains(&("udp".into(), 8443)));
+        // SAMPLE has no SSH_CLIENT_IP / BAN lines → no signal.
+        assert_eq!(p.probe_source_ip, None);
+        assert_eq!(p.fail2ban_banned_ips, None);
+        assert_eq!(p.fail2ban_self_banned, None);
+    }
+
+    // ─── Phase G chunk 2 — banned-self detector parser ─────────
+
+    #[test]
+    fn parses_ssh_client_ip_and_bans_yields_self_banned_true() {
+        // Daemon's outbound IP is among the banned set → fire.
+        let raw = "\
+SVC sing-box active
+SSH_CLIENT_IP 192.168.0.236
+BAN 192.168.0.236
+BAN 1.2.3.4
+PROBE_OK
+";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.probe_source_ip.as_deref(), Some("192.168.0.236"));
+        assert_eq!(
+            p.fail2ban_banned_ips,
+            Some(vec!["192.168.0.236".into(), "1.2.3.4".into()])
+        );
+        assert_eq!(
+            p.fail2ban_self_banned,
+            Some(true),
+            "our IP appears in the banned set → must fire"
+        );
+    }
+
+    #[test]
+    fn parses_bans_without_self_match_yields_self_banned_false() {
+        // fail2ban running, some IPs banned, none is ours → clear.
+        let raw = "\
+SVC sing-box active
+SSH_CLIENT_IP 192.168.0.236
+BAN 1.2.3.4
+BAN 5.6.7.8
+PROBE_OK
+";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(
+            p.fail2ban_self_banned,
+            Some(false),
+            "bans present but not our IP → operator-clear"
+        );
+    }
+
+    #[test]
+    fn parses_no_bans_with_ip_known_yields_self_banned_false() {
+        // fail2ban up, BAN line absent (means we DID query and got
+        // no entries — empty `Banned IP list:` produces zero BAN
+        // lines from the awk script). We still emitted SSH_CLIENT_IP,
+        // so the verdict requires fail2ban_banned_ips = Some(_).
+        // The parser only derives `Some(_)` for self_banned when
+        // BOTH inputs are Some — an absent BAN entirely (no BAN
+        // lines at all) leaves fail2ban_banned_ips as None.
+        //
+        // This test pins that semantics: "fail2ban-client missing
+        // OR jail missing OR command failed" all look identical
+        // (zero BAN lines) and produce a No-signal verdict, not
+        // a false-positive "everything's clear".
+        let raw = "\
+SVC sing-box active
+SSH_CLIENT_IP 192.168.0.236
+PROBE_OK
+";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.probe_source_ip.as_deref(), Some("192.168.0.236"));
+        assert_eq!(p.fail2ban_banned_ips, None);
+        assert_eq!(
+            p.fail2ban_self_banned, None,
+            "no BAN signal → no verdict (NOT a false 'clear')"
+        );
+    }
+
+    #[test]
+    fn parses_bans_without_ssh_client_yields_no_verdict() {
+        // Defensive: even if fail2ban reports bans, without knowing
+        // our own IP we can't say whether we're in there. Strictly
+        // no-signal — caller's no-op path.
+        let raw = "\
+SVC sing-box active
+BAN 1.2.3.4
+PROBE_OK
+";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(p.probe_source_ip, None);
+        assert_eq!(p.fail2ban_banned_ips, Some(vec!["1.2.3.4".into()]));
+        assert_eq!(
+            p.fail2ban_self_banned, None,
+            "without our IP, cannot decide → no verdict"
+        );
+    }
+
+    #[test]
+    fn ssh_client_ip_rejects_cidr_and_junk() {
+        // Defensive shape gate: an IP with a `/` (CIDR) or extra
+        // tokens after the IP is rejected as malformed.
+        let raw_cidr = "\
+SVC sing-box active
+SSH_CLIENT_IP 192.168.0.236/24
+PROBE_OK
+";
+        let p = parse_probe_output(raw_cidr).unwrap();
+        assert_eq!(
+            p.probe_source_ip, None,
+            "CIDR-shaped value must be rejected upstream"
+        );
+
+        let raw_extra = "\
+SVC sing-box active
+SSH_CLIENT_IP 192.168.0.236 something-else-here
+PROBE_OK
+";
+        let p = parse_probe_output(raw_extra).unwrap();
+        assert_eq!(
+            p.probe_source_ip, None,
+            "extra tokens on the line must be rejected"
+        );
     }
 
     #[test]
@@ -474,6 +679,19 @@ PROBE_OK
         assert!(
             PROBE_SCRIPT.contains("/proc/loadavg"),
             "uses /proc, not uptime command"
+        );
+        // Phase G chunk 2 — banned-self detector probes.
+        assert!(
+            PROBE_SCRIPT.contains("SSH_CLIENT"),
+            "emits SSH_CLIENT_IP for banned-self verdict"
+        );
+        assert!(
+            PROBE_SCRIPT.contains("fail2ban-client status sshd"),
+            "queries fail2ban for banned sshd IPs"
+        );
+        assert!(
+            PROBE_SCRIPT.contains("LC_ALL=C"),
+            "pins fail2ban-client English output across non-C locales"
         );
     }
 }

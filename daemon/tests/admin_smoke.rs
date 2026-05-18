@@ -2254,6 +2254,268 @@ async fn admin_alerts_empty_state_renders_with_copy_contract() {
         html.contains(r#"href="/admin/alerts""#),
         "expected nav entry to /admin/alerts"
     );
+    // Phase G chunk 2 deck-copy extension — page now advertises the
+    // new detector categories so the operator knows what will show
+    // up here. Catches drift on either the «unreachable hosts»
+    // or «locked myself out» substring.
+    assert!(
+        html.contains("unreachable hosts"),
+        "deck must mention the new server.unreachable detector"
+    );
+    assert!(
+        html.contains("locked myself out"),
+        "deck must mention the new fail2ban.banned_self detector"
+    );
+}
+
+#[tokio::test]
+async fn admin_alerts_renders_unreachable_kind_row() {
+    // Phase G chunk 2 — seed an unreachable-kind alert row and verify
+    // the feed renders it with the expected kind label + severity.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    inv.add_server(&vpnctl_core::Server {
+        id: vpnctl_core::ServerId("stg".into()),
+        address: "1.1.1.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.insert_alert(
+        "server.unreachable",
+        Some(&vpnctl_core::ServerId("stg".into())),
+        "warning",
+        "3 consecutive SSH probes failed",
+        Some(r#"{"consecutive_failures":3,"threshold":3}"#),
+    )
+    .await
+    .unwrap();
+
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("server.unreachable"),
+        "feed must render the kind: {html:?}"
+    );
+    assert!(
+        html.contains("3 consecutive SSH probes failed"),
+        "feed must render the summary"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_alerts_banned_self_writes_row_with_payload() {
+    // Phase G chunk 2 — full integration of the banned-self detector:
+    // build a Probe with fail2ban_self_banned=Some(true), call the
+    // public `dispatch_alerts` free fn (the same one the poller
+    // loop calls), then hit /admin/alerts and assert the rendered
+    // row contains the operator-relevant fields from the payload
+    // (our_ip + summary text). Catches any typo in the payload key
+    // names, the summary template, or the kind string.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("stg".into()),
+        address: "1.1.1.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+
+    // Build a Probe in the «banned-self» state: our IP appears in
+    // the fail2ban-banned set.
+    let probe = vpnctld::node_probe::Probe {
+        probe_source_ip: Some("192.168.0.236".into()),
+        fail2ban_banned_ips: Some(vec!["192.168.0.236".into(), "1.2.3.4".into()]),
+        fail2ban_self_banned: Some(true),
+        ..Default::default()
+    };
+
+    let mut fail_state = vpnctld::node_probe_poller::FailState::new();
+    vpnctld::node_probe_poller::dispatch_alerts(
+        &inv,
+        &server,
+        &vpnctld::node_probe_poller::ProbeOutcome::Ok(probe),
+        &mut fail_state,
+    )
+    .await;
+
+    // Row was written.
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(
+        alerts.len(),
+        1,
+        "dispatch_alerts must write exactly one row for self_banned=Some(true)"
+    );
+    assert_eq!(alerts[0].kind, "server.fail2ban.banned_self");
+    assert_eq!(alerts[0].severity, "critical");
+
+    // Payload survived through to the rendering path.
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("server.fail2ban.banned_self"),
+        "feed must render the kind"
+    );
+    assert!(
+        html.contains("192.168.0.236"),
+        "feed must render our IP from the summary template"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_alerts_recovery_auto_acks_open_unreachable() {
+    // Phase G chunk 2 — full integration of the recovery path:
+    // drive FailState through the consecutive-failure threshold so
+    // dispatch_alerts fires `server.unreachable`, then drive an
+    // Ok outcome and assert the row is auto-acked (no longer in
+    // the unacked feed) AND an `alert.auto_ack` audit row landed.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("stg".into()),
+        address: "1.1.1.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+
+    let mut fail_state = vpnctld::node_probe_poller::FailState::with_threshold(2);
+
+    // 2 failures → BecameUnreachable → row written.
+    for _ in 0..2 {
+        vpnctld::node_probe_poller::dispatch_alerts(
+            &inv,
+            &server,
+            &vpnctld::node_probe_poller::ProbeOutcome::SshFailed(
+                "connect timeout".into(),
+            ),
+            &mut fail_state,
+        )
+        .await;
+    }
+    assert_eq!(
+        inv.recent_alerts(10, false).await.unwrap().len(),
+        1,
+        "2 consecutive failures with threshold=2 must fire one row"
+    );
+
+    // Recovery → row auto-acked → unacked feed empty.
+    vpnctld::node_probe_poller::dispatch_alerts(
+        &inv,
+        &server,
+        &vpnctld::node_probe_poller::ProbeOutcome::Ok(
+            vpnctld::node_probe::Probe::default(),
+        ),
+        &mut fail_state,
+    )
+    .await;
+    assert_eq!(
+        inv.recent_alerts(10, false).await.unwrap().len(),
+        0,
+        "recovery must auto-ack the open unreachable row"
+    );
+    // History view still shows it (with acked_at set).
+    let history = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].acked_at.is_some(), "row must be marked acked");
+}
+
+#[tokio::test]
+async fn admin_alerts_renders_banned_self_kind_row() {
+    // Phase G chunk 2 — seed a fail2ban banned-self alert row and
+    // verify the feed renders it with the critical severity class.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    inv.add_server(&vpnctl_core::Server {
+        id: vpnctl_core::ServerId("stg".into()),
+        address: "1.1.1.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.insert_alert(
+        "server.fail2ban.banned_self",
+        Some(&vpnctl_core::ServerId("stg".into())),
+        "critical",
+        "daemon's outbound IP 192.168.0.236 is in fail2ban's banned list for sshd",
+        Some(r#"{"our_ip":"192.168.0.236","ban_count_other":0}"#),
+    )
+    .await
+    .unwrap();
+
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("server.fail2ban.banned_self"),
+        "feed must render the kind"
+    );
+    assert!(
+        html.contains("192.168.0.236"),
+        "feed must render the IP from the summary"
+    );
 }
 
 #[tokio::test]
