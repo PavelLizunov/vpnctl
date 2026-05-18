@@ -6091,6 +6091,17 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Per-server secrets — only read here so kernel-specific sections
+    // (currently wgturn's VK-link form) can display their current state.
+    // Fetched even when no such kernel is enabled because the cost is
+    // one indexed SELECT; conditional load would complicate the section
+    // helper without measurable savings.
+    let server_secrets = state
+        .inv
+        .list_server_secrets(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -6206,6 +6217,13 @@ pub(crate) async fn server_detail(
         // Web equivalent lives here so the operator never has to drop
         // to a shell + raw SQL just to pin a host key.
         (server_detail_fingerprint_section(&server))
+
+        // wgturn-specific settings — only renders when the server has
+        // the wgturn kernel enabled. The VK Calls invite URL is
+        // captcha-gated (can't be auto-minted server-side), so the
+        // operator pastes it once here; subsequent deploys read it
+        // from `server_secrets["wgturn:vk_link"]`.
+        (server_detail_wgturn_section(&server, &server_secrets))
 
         // Push deploy key — recovery action for servers added via
         // quick-add / migrate-from-bash where the wizard's step-3
@@ -6727,6 +6745,204 @@ pub(crate) async fn server_set_fingerprint(
 // alphabet (the inventory variant rejected URL-safe base64 the surface
 // validators accepted). Crate is the single source of truth; spec
 // tests live with it.
+
+/// Validate an operator-pasted `wgturn:vk_link` value. The kernel
+/// expects a fresh VK Calls invite URL, which has the shape
+/// `https://vk.com/call/join/<32-char-token>` (sometimes with
+/// additional query params for hash / role).
+///
+/// We enforce:
+///   * exact prefix `https://vk.com/call/join/` — the kernel's
+///     `render_config` error message tells operators that shape
+///     explicitly, so anything else is a paste mistake.
+///   * length 26 (prefix) < len ≤ 512 — VK's tokens fit comfortably
+///     under 200 chars; 512 leaves headroom for query params.
+///   * no control chars / no whitespace inside the link — caught by
+///     `c.is_control()` (covers `\n`, `\r`, `\t`, `\0` etc).
+///
+/// Returns `Ok(trimmed_link)` on success, `Err(reason)` for a 400
+/// response body explaining the rejection. The trimmed form is what
+/// gets stored.
+pub(crate) fn validate_wgturn_vk_link(raw: &str) -> std::result::Result<&str, &'static str> {
+    const PREFIX: &str = "https://vk.com/call/join/";
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("empty — paste the URL from your VK Calls invite");
+    }
+    if !s.starts_with(PREFIX) {
+        return Err("must start with 'https://vk.com/call/join/' — paste the full invite URL");
+    }
+    // Reject the bare-prefix case: a paste of just `https://vk.com/
+    // call/join/` is operator-noise the kernel would happily render
+    // into a non-functional config (review-agent finding 2 — important).
+    if s.len() <= PREFIX.len() {
+        return Err(
+            "token missing after 'https://vk.com/call/join/' — paste the full invite link including its token",
+        );
+    }
+    if s.len() > 512 {
+        return Err("link too long (>512 chars) — paste only the VK invite URL, no extra text");
+    }
+    if s.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(
+            "link contains whitespace / control chars — paste a single line, no extra spaces",
+        );
+    }
+    Ok(s)
+}
+
+/// Render the wgturn-specific settings section on `/admin/servers/{id}`.
+///
+/// The section is OMITTED entirely when the server doesn't have the
+/// `wgturn` kernel — keeps the page short for the common case where
+/// most nodes are sing-box only. When wgturn IS in `server.kernels`,
+/// the section surfaces:
+///   * Current state of `wgturn:vk_link` (set ✓ / unset) — never
+///     renders the actual value (VK invite grants call-join + thus
+///     relay bandwidth).
+///   * Form to paste / re-paste a fresh VK Calls invite URL.
+///   * Inline note explaining that the daemon CANNOT mint this
+///     itself (captcha-gated → operator-input only).
+fn server_detail_wgturn_section(
+    server: &vpnctl_core::Server,
+    secrets: &std::collections::HashMap<String, String>,
+) -> Markup {
+    let has_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
+    if !has_wgturn {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let vk_link_set = secrets.contains_key("wgturn:vk_link");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "wgturn settings" }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            "VK Calls invite that "
+            span.ed-mono { "wgturn-cli serve" }
+            " uses as the TURN relay credential. Captcha-gated on vk.com — "
+            "the daemon cannot mint it. Paste once here; "
+            span.ed-mono { "deploy →" }
+            " reads it from the server-secrets row on every render."
+        }
+        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
+            @if vk_link_set {
+                "current: " span style="color: var(--accent);" { "set ✓" }
+                " (value masked — re-paste below to replace)"
+            } @else {
+                em style="color: var(--mute);" {
+                    "(no VK link set — deploy will refuse until you paste one)"
+                }
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/wgturn/vk-link"))
+             style="display: flex; gap: 8px; align-items: center;" {
+            input type="url"
+                  name="vk_link"
+                  required
+                  pattern="https://vk\\.com/call/join/.+"
+                  placeholder="https://vk.com/call/join/..."
+                  title="Paste a fresh VK Calls invite URL"
+                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            button type="submit"
+                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                "save vk link →"
+            }
+        }
+    }
+}
+
+/// `POST /admin/servers/{id}/wgturn/vk-link` — store the operator-
+/// pasted VK Calls invite URL in `server_secrets` under the
+/// `wgturn:vk_link` key. The kernel's `render_config` reads from
+/// there at every deploy.
+///
+/// Validation (see `validate_wgturn_vk_link`): exact `https://vk.com/
+/// call/join/` prefix + length 26..=512 + no whitespace/control
+/// chars. Bad input → 400 with a precise message; valid input →
+/// `set_server_secret` + audit row + 303 to the server-detail page.
+///
+/// Audit payload OMITS the link itself — VK invites grant TURN-
+/// relay bandwidth and the `/admin/audit.csv` export serialises
+/// `payload_json` verbatim to a downloaded file. Same convention as
+/// tuic_password / wireguard_private / sub_token (pinned by
+/// `audit_summary_never_leaks_secret_fields`). For forensics we
+/// store the link's length + a SHA-256 prefix (8 hex chars) so a
+/// later compromise can be cross-referenced against the live
+/// `server_secrets` value without leaking it in the audit trail.
+pub(crate) async fn server_set_wgturn_vk_link(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return not_found(&format!("no such server '{server_id}'"));
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    // Refuse to set the VK link if the server doesn't actually have
+    // the wgturn kernel enabled — clearer error than letting the
+    // secret rot in the table forever.
+    if !server.kernels.iter().any(|k| k.0 == "wgturn") {
+        return bad_request(&format!(
+            "server '{server_id}' has no wgturn kernel enabled; the VK link \
+             would never be read. Enable the kernel in the Kernels section first."
+        ));
+    }
+
+    let raw = match crate::http_util::form_field(&body, "vk_link") {
+        Some(v) => v,
+        None => return bad_request("missing 'vk_link' field"),
+    };
+    let link = match validate_wgturn_vk_link(&raw) {
+        Ok(l) => l.to_string(),
+        Err(reason) => return bad_request(&format!("vk_link rejected: {reason}")),
+    };
+
+    if let Err(e) = state
+        .inv
+        .set_server_secret(&sid, "wgturn:vk_link", &link)
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    // NEVER include `link` itself or any substring of it in the
+    // payload — review-agent finding 1 (critical): /admin/audit.csv
+    // exports payload_json verbatim. We record bool + length only.
+    // Forensics get the timestamp + actor + the row's existence;
+    // a previous attempt at storing the «last N chars» bled the
+    // entire token for short tokens, so the tail field is gone.
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.set_wgturn_vk_link",
+            Some(&server_id),
+            Some(&serde_json::json!({
+                "server_id": server_id,
+                "vk_link_set": true,
+                "vk_link_len": link.len(),
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::server_set_wgturn_vk_link",
+            error = %e,
+            "set_wgturn_vk_link succeeded but audit row failed"
+        );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
 
 fn server_detail_protocols_section(
     server: &vpnctl_core::Server,

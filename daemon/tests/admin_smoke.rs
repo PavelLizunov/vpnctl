@@ -2931,6 +2931,387 @@ async fn server_push_deploy_key_rejects_empty_password_without_reference_key() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── wgturn iter 2 — VK link admin UI section ────────────────────────
+
+#[tokio::test]
+async fn server_detail_omits_wgturn_section_for_non_wgturn_kernels() {
+    // Server with only sing-box kernel — the wgturn section must NOT
+    // render. Keeps the page short for the common case.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("plain".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/plain")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("wgturn settings"),
+        "section must NOT render for non-wgturn servers"
+    );
+    assert!(
+        !html.contains("wgturn/vk-link"),
+        "form must NOT render for non-wgturn servers"
+    );
+}
+
+#[tokio::test]
+async fn server_detail_renders_wgturn_section_when_kernel_enabled() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("wt-1".into()),
+            address: "203.0.113.20".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("wgturn".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("wgturn".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/wt-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("wgturn settings"),
+        "section eyebrow must render"
+    );
+    assert!(
+        html.contains("/admin/servers/wt-1/wgturn/vk-link"),
+        "form must POST to the vk-link route"
+    );
+    assert!(
+        html.contains(r#"name="vk_link""#),
+        "form must include the vk_link input"
+    );
+    // Empty-state copy: «no VK link set»
+    assert!(
+        html.contains("no VK link set"),
+        "empty state must surface unset-VK warning"
+    );
+}
+
+#[tokio::test]
+async fn server_detail_wgturn_section_masks_existing_vk_link() {
+    // VK invite URLs grant relay bandwidth + are operator-rotation-
+    // sensitive. The section MUST NOT echo the value back into HTML.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("wt-2".into()),
+            address: "203.0.113.21".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("wgturn".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("wgturn".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let stored = "https://vk.com/call/join/abcdef123456";
+    st.inv
+        .set_server_secret(
+            &vpnctl_core::ServerId("wt-2".into()),
+            "wgturn:vk_link",
+            stored,
+        )
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/wt-2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("set ✓"), "must surface the set state: {html}");
+    assert!(
+        !html.contains("abcdef123456"),
+        "raw link MUST NOT appear in HTML — secret leak: {html}"
+    );
+}
+
+#[tokio::test]
+async fn server_set_wgturn_vk_link_accepts_well_formed_url() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("wt-3".into()),
+            address: "203.0.113.22".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("wgturn".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("wgturn".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let inv = st.inv.clone();
+    let app = router(st);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/wt-3/wgturn/vk-link")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(
+            req.body(Body::from(
+                "vk_link=https%3A%2F%2Fvk.com%2Fcall%2Fjoin%2Fxyz789",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Stored verbatim in server_secrets.
+    let stored = inv
+        .get_server_secret(&vpnctl_core::ServerId("wt-3".into()), "wgturn:vk_link")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, "https://vk.com/call/join/xyz789");
+
+    // Review-agent finding 3 (important): pin that an audit row was
+    // written + finding 1 (critical): pin that the audit payload
+    // does NOT echo the VK link or its token verbatim. /admin/audit.csv
+    // exports the payload JSON — leakage there ends up in the
+    // operator's Downloads folder.
+    let audit_rows = inv
+        .recent_audit_paginated(100, 0, None, None)
+        .await
+        .expect("recent_audit_paginated");
+    let row = audit_rows
+        .iter()
+        .find(|r| r.action == "server.set_wgturn_vk_link")
+        .expect("audit row for server.set_wgturn_vk_link missing");
+    assert_eq!(row.actor, "admin");
+    assert_eq!(row.target.as_deref(), Some("wt-3"));
+    let payload_str = row
+        .payload
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(
+        !payload_str.contains("xyz789"),
+        "audit payload leaked the VK invite token: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("https://vk.com/call/join/xyz789"),
+        "audit payload leaked the full VK link: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("vk_link_set"),
+        "audit payload should record `vk_link_set` for forensics: {payload_str}"
+    );
+}
+
+#[tokio::test]
+async fn server_set_wgturn_vk_link_rejects_bare_prefix() {
+    // Review-agent finding 2 (important): a paste of just the prefix
+    // (no token after `…/join/`) must be rejected at the validator,
+    // not silently stored.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("wt-3b".into()),
+            address: "203.0.113.221".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("wgturn".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("wgturn".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/wt-3b/wgturn/vk-link")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(
+            req.body(Body::from("vk_link=https%3A%2F%2Fvk.com%2Fcall%2Fjoin%2F"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("token missing"),
+        "error must explain the bare-prefix issue: {text}"
+    );
+}
+
+#[tokio::test]
+async fn server_set_wgturn_vk_link_rejects_wrong_prefix() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("wt-4".into()),
+            address: "203.0.113.23".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("wgturn".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("wgturn".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/wt-4/wgturn/vk-link")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(
+            req.body(Body::from(
+                "vk_link=https%3A%2F%2Fevil.example.com%2Fcall%2Fjoin%2Fxyz",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("https://vk.com/call/join/"),
+        "error must name the required prefix: {text}"
+    );
+}
+
+#[tokio::test]
+async fn server_set_wgturn_vk_link_refuses_if_kernel_not_enabled() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("plain-2".into()),
+            address: "203.0.113.24".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/plain-2/wgturn/vk-link")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(
+            req.body(Body::from(
+                "vk_link=https%3A%2F%2Fvk.com%2Fcall%2Fjoin%2Fxyz",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("no wgturn kernel"),
+        "error must explain the kernel mismatch: {text}"
+    );
+}
+
+#[tokio::test]
+async fn server_set_wgturn_vk_link_404s_for_unknown_server() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/servers/missing/wgturn/vk-link")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(
+            req.body(Body::from(
+                "vk_link=https%3A%2F%2Fvk.com%2Fcall%2Fjoin%2Fxyz",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    // Review-agent minor finding: pin the error_text contract; a 404
+    // from axum's route-miss would satisfy the status code alone.
+    assert!(
+        text.contains("no such server 'missing'"),
+        "404 body must come from not_found() — got: {text}"
+    );
+}
+
 #[tokio::test]
 async fn settings_telegram_proxy_dropdown_lists_inventory_servers() {
     // Phase G chunk 3.5 — when servers exist in inventory, the
