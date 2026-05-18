@@ -13,6 +13,11 @@ pub mod clash_poller;
 pub mod config;
 pub mod handlers;
 pub mod health_monitor;
+// Generic HTTP helpers shared across handler surfaces and (in the
+// future) CLI consumers of form-encoded payloads. Started life as
+// `decode_form_value` inlined in `handlers/admin.rs`; extracted so
+// the next surface that needs form decoding doesn't reinvent it.
+pub mod http_util;
 pub mod node_probe;
 pub mod node_probe_poller;
 pub mod rate_limit;
