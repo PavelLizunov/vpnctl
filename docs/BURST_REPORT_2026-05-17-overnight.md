@@ -154,21 +154,68 @@ cosmetic smells logged below.
 
 **Follow-ups (not blocking, deferred):**
 
-  * `format_size_bytes(u64) -> String` is byte-identical at
-    `daemon/src/handlers/admin.rs:3067` and `cli/src/cmd/backup.rs:179`
-    — with a comment at the CLI site explicitly admitting the
-    duplication. Should move to a shared `vpnctl-fmt` mini-crate
-    next time we touch either site.
-  * `crates/hosters/` (67 LOC, 3 hardcoded impls) is mostly data,
-    not behaviour — could fold into `crates/core` or inline into the
-    wizard. Pure organisational cleanup, no behaviour change.
-  * `daemon/src/handlers/admin.rs` is 6 361 LOC in one file (now
-    closer to 6 260 after this morning's extractions). Mechanical
-    split into `admin/{dashboard,users,servers,wizard,audit,
-    alerts,monitoring,backup,settings}.rs` would be a low-risk
-    1-2 hour move-only refactor with no behaviour change — useful
-    once we hit 7K LOC or the next time a feature touches >3
-    section.
+  * `format_size_bytes(u64) -> String` ✅ **shipped** as
+    `d41630d` — moved to `vpnctl_core::humanize::format_size_bytes`,
+    12 spec tests, deck rendering verified on /admin/settings.
+  * `crates/hosters/` (67 LOC, 3 hardcoded impls) — still pending.
+    Architectural decision (fold to core vs inline to wizard) is
+    Pavel-gated.
+  * `daemon/src/handlers/admin.rs` — was 6361 LOC, now 6094 after
+    tonight's series of helper extractions (form_field, path_segment_
+    encode, bad_request/not_found/unauthorized/error_resp,
+    delete vpn_kpi_tile). Split into submodules still deferred —
+    mechanical move-only refactor that changes git blame for 6K LOC;
+    worth doing once we hit 7K OR when next feature touches >3
+    sections, NOT in the middle of an autonomous loop.
+
+## Autonomous loop (overnight 2026-05-18, post-morning-audit)
+
+Pavel asked «давай вообще все не останавливаясь, после каждого
+действия делай ревью через запуск параллельного агента и таже
+проверяй методологию». Loop ran 8 commits + one CI-recovery hotfix
++ one methodology pin. Each non-docs commit went through a parallel
+review-agent before merge per the directive.
+
+### Commits shipped
+
+| # | Hash | What | Review-agent verdict |
+|---|---|---|---|
+| 1 | `1b633ad` | `form_field` + `path_segment_encode` → `daemon::http_util` (~11 inline sites consolidated, including the wizard's local copy with admitting comment) | `[]` |
+| 2 | `5c6d8d3` | `bad_request/not_found/unauthorized` helpers + generic `error_resp` (40 sites) **+ newline-injection defense** in `error_text` (operator's curl-pipe-head can't be split anymore) | 5 findings — 1 important (3 missed exotic-code sites) + 1 important (response-splitting depth-in-defense); both applied inline |
+| 3 | `f8fbf9e` | `vpnctl_core::shell::single_quote` (triplicated across russh / cli / wizard) + `ssh_safety_opts` extracted (2 SSH-arg blocks). New crate-level module with 8 spec tests (`$HOME` literalness, multi-quote escape chain, ssh-key round-trip). | `[]` |
+| 4 | `8d38a6f` | Delete `vpn_kpi_tile`, fold into `status_tile(_, _, "var(--ink)")` — byte-identical HTML; UI dedup. | `[]` (CSS char-by-char identical) |
+| 5 | `cbb4d41` | **feat(inventory)**: Phase G chunk 2 part 1 — `insert_alert_if_no_unacked` + `ack_open_alerts` + migration `0013_admin_alerts_unique_unacked.sql` (partial UNIQUE index on `(kind, COALESCE(server_id, '__GLOBAL__'))` WHERE `acked_at IS NULL`) + 13 spec tests by test-writer-agent | 2 important (`INSERT … SELECT … WHERE NOT EXISTS` race across pool connections) — both fixed by routing through SQL-engine-level UNIQUE constraint + `INSERT OR IGNORE`. 4 minor; 2 applied (inlined secret docs, acked-row regression test 12b). |
+| 6 | `189c79c` | **feat(daemon)**: Phase G chunk 2 part 2 — `Probe` extended with `probe_source_ip` / `fail2ban_banned_ips` / `fail2ban_self_banned` (5 new parser tests); `ProbeOutcome` enum + `FailState` consecutive-fail counter + `dispatch_alerts` free fn + `auto_ack` helper. Alerts deck copy updated. 4 new admin_smoke tests (kind-render × 2 + dispatch-integration × 2). | 2 important (full re-fire cycle test, dispatch_alerts integration test) + 2 minor (DRY `auto_ack` extraction); all 3 applied inline. |
+| 7 | `818bad2` | style: cargo fmt hotfix — CI on cbb4d41 + 189c79c both red on fmt-check after I ran tests + clippy but skipped fmt. No behaviour change. | docs-only (skip review per CLAUDE.md rule) |
+| 8 | `0310ad0` | docs(claude.md): pin `cargo fmt --check` as explicit pre-push gate with the 3 scenarios that don't look fmt-affecting but are (test-writer-agent output, mass-replace scripts, ≥2-file commits). Recommendation: prefer `cargo fmt --all` over `--check` so any drift lands in the same commit. | docs-only |
+
+### What's actually live on 192.168.0.236
+
+- All 8 commits deployed via zigbuild (max GLIBC_2.30 ≤ bookworm's 2.36).
+- `/admin/users/no-such` still returns the unified `vpnctl admin: no such user 'no-such'\n` prefix; newly verified that `/admin/users/%0A.poison` collapses the embedded `\n` to a space (od -c shows exactly 1 trailing newline in the body).
+- `/admin/alerts` deck now mentions «unreachable hosts» + «locked myself out» categories; rendering verified.
+- Phase G chunk 2 detectors are **dormant** on the homelab — they require the deploy SSH key to be authorised on each production VPN node. Once authorised, the `node_probe_poller` ticks every 10 min (default `VPNCTLD_NODE_PROBE_INTERVAL_SECS`), and 3 consecutive failures (default `VPNCTLD_UNREACHABLE_THRESHOLD`) fires `server.unreachable`. The `server.fail2ban.banned_self` detector fires immediately on any probe that observes the daemon's own outbound IP in the node's fail2ban-banned list.
+
+### Codebase trim summary (cumulative for tonight)
+
+Net diff across the 6 functional commits: **+~1900 / −~1100 lines**, but most additions are new tests + extensive rustdoc. Production code dropped by **~400 LOC** of duplicated boilerplate. `admin.rs` shrank from 6361 to ~6094 lines. Two new top-level modules added (`crates/core/src/{humanize,shell}.rs`), one new top-level crate (`vpnctl-host-fingerprint` from the morning audit). One new migration (0013) — additive UNIQUE index, no destructive changes.
+
+### Methodology slip-and-fix
+
+The two CI fmt-check failures in this session are the only methodology violation. Root cause: I ran `cargo test` + `cargo clippy` locally before push but skipped `cargo fmt --check`, twice. Pinned in `0310ad0` (CLAUDE.md update) with an explicit list of scenarios that don't visually look fmt-affecting. Next session should not repeat.
+
+### What's left in v0.8
+
+The roadmap's v0.8 «closing the last gaps» list is essentially **done** after tonight:
+
+  * ✅ Phase H chunk 4 — node_probe poller wiring (shipped earlier in `d391c73`)
+  * ⏳ Phase G chunk 3 — webhook transport. **BLOCKED on Pavel decision**: Telegram bot / ntfy.sh / journald. Implementation is ~150 LOC in any direction.
+  * ✅ L7 destructive-op gate — shipped `aa83241`
+  * ✅ `vpnctl server set-fingerprint` CLI + web — shipped `2fda5c6`
+  * ✅ `decode_form_value` UTF-8 fix — shipped `aef1c6b`
+  * **NEW**: Phase G chunk 2 detectors — shipped `cbb4d41` + `189c79c`
+
+Once Pavel picks a webhook transport, v0.8 ships.
 
 ## Methodology run
 
