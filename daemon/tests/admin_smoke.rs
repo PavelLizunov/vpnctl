@@ -2617,6 +2617,90 @@ async fn settings_telegram_post_rejects_garbage_chat_id() {
 }
 
 #[tokio::test]
+async fn settings_telegram_test_send_button_appears_only_when_enabled() {
+    // Phase G chunk 3 part 2 — the «send test message» button must
+    // appear ONLY when the transport is enabled. Disabled / partial
+    // / error states show an explanatory hint instead.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+
+    let app = router(st.clone());
+
+    // Default state: no config → no button.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("send test message"),
+        "button must NOT appear when transport disabled"
+    );
+    assert!(
+        html.contains("Test-send button appears after both fields are saved"),
+        "explanatory hint must appear instead"
+    );
+
+    // Enable and re-render.
+    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), Some("987654321"))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("send test message"),
+        "button must appear when transport enabled"
+    );
+    assert!(
+        html.contains(r#"action="/admin/settings/telegram/test""#),
+        "button must POST to test route"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_test_send_when_disabled_returns_400() {
+    // POST to test endpoint with no config set → 400, NOT 502 (502
+    // is for «config is set but Telegram rejected us»; 400 is for
+    // «no config to test»).
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram/test");
+    req = add_same_origin(req);
+    let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "no config → 400, not 500/502"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("not configured") && text.contains("fill in both fields"),
+        "must explain the missing-config state"
+    );
+}
+
+#[tokio::test]
 async fn settings_telegram_partial_config_renders_red_warning() {
     // Phase G chunk 3 part 1 — when only one half is set (token OR
     // chat_id but not both), the status line MUST surface this as

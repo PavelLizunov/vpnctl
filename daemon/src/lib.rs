@@ -18,6 +18,10 @@ pub mod health_monitor;
 // `decode_form_value` inlined in `handlers/admin.rs`; extracted so
 // the next surface that needs form decoding doesn't reinvent it.
 pub mod http_util;
+// Phase G chunk 3 — pluggable push-notification sink. NullSink as
+// default; TelegramSink for the operator's configured chat. Future
+// ntfy.sh / journald-bridge land as sibling impls in the same module.
+pub mod alert_sink;
 pub mod node_probe;
 pub mod node_probe_poller;
 pub mod rate_limit;

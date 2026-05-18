@@ -4814,8 +4814,31 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     "save"
                 }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
-                    "Test-send button arrives with Phase G chunk 3 part 2."
+            }
+        }
+
+        // Test-send button — separate form POSTing to /admin/settings/
+        // telegram/test so the operator can verify their credentials
+        // without waiting for an actual alert to fire. Disabled (greyed
+        // out via inline disabled attr) when the transport isn't
+        // currently enabled — same predicate the dispatch loop uses.
+        @match &telegram_cfg {
+            Ok(Some(cfg)) if cfg.is_enabled() => {
+                form method="post" action="/admin/settings/telegram/test" style="margin-top: 10px;" {
+                    button type="submit"
+                           title="Send a test message to the configured chat. Surfaces curl / Telegram-API errors inline."
+                           style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        "send test message"
+                    }
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
+                        "Posts «🔵 vpnctld · info · test · vpnctld test message ...» to your chat."
+                    }
+                }
+            }
+            _ => {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 10px 0 0;" {
+                    "Test-send button appears after both fields are saved + status is "
+                    b style="color: var(--ink);" { "enabled" } "."
                 }
             }
         }
@@ -4978,6 +5001,94 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
     }
 
     Redirect::to("/admin/settings").into_response()
+}
+
+/// `POST /admin/settings/telegram/test` — synchronously send a test
+/// message via the currently-configured Telegram bot. Surfaces
+/// success (redirect to /admin/settings) or failure (502 Bad Gateway
+/// with the truncated curl-stderr line, so the operator can
+/// distinguish «bot blocked», «wrong chat-id», «proxy down», «РФ
+/// blocked api.telegram.org» without journalctl access).
+///
+/// Audit row written either way — operator action, regardless of
+/// outcome. Payload includes `success: bool` + error string when
+/// failed (NO token).
+///
+/// **NOT fire-and-forget** — unlike the probe-loop's push, this
+/// handler awaits the curl call so the response carries the verdict.
+/// Default timeout is 20s (curl `--max-time`), so the operator's
+/// HTTP request can take that long in the worst case.
+pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Response {
+    use crate::alert_sink::{AlertSink, TelegramSink};
+
+    let cfg = match state.inv.get_telegram_config().await {
+        Ok(Some(c)) => c,
+        // Singleton row missing — operator-facing it looks identical
+        // to «not configured» (because effectively it is). Return
+        // the same 400 + message rather than masking it as a 500
+        // (review-agent finding: a partial migration failure should
+        // surface as «fix your config», not «daemon bug»). The GET
+        // settings page separately surfaces the root cause in red.
+        Ok(None) => {
+            return bad_request(
+                "Telegram transport not configured — fill in both fields on /admin/settings first",
+            );
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let (Some(token), Some(chat_id)) = (cfg.token, cfg.chat_id) else {
+        return bad_request(
+            "Telegram transport not configured — fill in both fields on /admin/settings first",
+        );
+    };
+
+    let sink = match TelegramSink::from_env(token, chat_id) {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::anyhow!("sink construct: {e}")),
+    };
+
+    let send_result = sink
+        .send_text(
+            "test",
+            "info",
+            "vpnctld test message — Telegram bot is configured correctly. \
+             Real alerts arrive with the same format.",
+        )
+        .await;
+
+    // Audit either way.
+    let audit_payload = match &send_result {
+        Ok(()) => serde_json::json!({"success": true}),
+        Err(e) => serde_json::json!({"success": false, "error": e.to_string()}),
+    };
+    if let Err(audit_err) = state
+        .inv
+        .audit(
+            "admin",
+            "settings.telegram.test_send",
+            None,
+            Some(&audit_payload),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::settings_telegram_test",
+            error = %audit_err,
+            "audit row for test_send failed; result was {:?}",
+            send_result.is_ok()
+        );
+    }
+
+    match send_result {
+        Ok(()) => Redirect::to("/admin/settings").into_response(),
+        Err(e) => error_resp(
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "test-send failed: {e} — common causes: chat-id wrong (Telegram returns 'chat not found'), token revoked, bot never started conversation with you (open the bot in Telegram + tap Start), api.telegram.org blocked (set VPNCTLD_HTTPS_PROXY env)"
+            ),
+        ),
+    }
 }
 
 fn set_tweak_cookie(

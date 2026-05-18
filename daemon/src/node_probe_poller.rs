@@ -309,7 +309,7 @@ pub async fn dispatch_alerts(
             let summary = format!(
                 "{consecutive_failures} consecutive SSH probes failed — host may be down, key revoked, or sshd port changed"
             );
-            if let Err(e) = inv
+            match inv
                 .insert_alert_if_no_unacked(
                     "server.unreachable",
                     Some(&server.id),
@@ -319,12 +319,22 @@ pub async fn dispatch_alerts(
                 )
                 .await
             {
-                tracing::warn!(
+                Ok(Some(_id)) => {
+                    // Row freshly inserted → push to the configured
+                    // sink (best-effort; failures logged but don't
+                    // unwind — the alert is already persisted).
+                    push_alert(inv, "server.unreachable", "warning", &summary).await;
+                }
+                Ok(None) => {
+                    // Duplicate suppressed by the partial-UNIQUE
+                    // index — same condition already raised + unacked.
+                }
+                Err(e) => tracing::warn!(
                     target = "vpnctld::node_probe",
                     server = %server.id.0,
                     error = %e,
                     "insert server.unreachable alert failed"
-                );
+                ),
             }
         }
         UnreachableTransition::Recovered => {
@@ -363,7 +373,7 @@ pub async fn dispatch_alerts(
                 let summary = format!(
                     "daemon's outbound IP {our_ip} is in fail2ban's banned list for sshd — daemon may lose access on the next ban-cycle"
                 );
-                if let Err(e) = inv
+                match inv
                     .insert_alert_if_no_unacked(
                         "server.fail2ban.banned_self",
                         Some(&server.id),
@@ -373,12 +383,16 @@ pub async fn dispatch_alerts(
                     )
                     .await
                 {
-                    tracing::warn!(
+                    Ok(Some(_id)) => {
+                        push_alert(inv, "server.fail2ban.banned_self", "critical", &summary).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(
                         target = "vpnctld::node_probe",
                         server = %server.id.0,
                         error = %e,
                         "insert server.fail2ban.banned_self alert failed"
-                    );
+                    ),
                 }
             }
             Some(false) => {
@@ -393,6 +407,87 @@ pub async fn dispatch_alerts(
             None => {} // no signal → no action
         }
     }
+}
+
+/// Push one freshly-inserted alert via the configured AlertSink.
+/// Fire-and-forget — spawns a tokio task so the curl call (up to
+/// 20s with the default timeout) doesn't block the next server's
+/// probe. Reads the Telegram config from inventory each call (cheap
+/// SQLite roundtrip, ~µs) so a config change via /admin/settings
+/// takes effect on the very next alert without a daemon restart.
+///
+/// Sink-side errors are LOGGED at warn but never returned — the
+/// alert is already persisted in `admin_alerts`, push is the
+/// best-effort secondary delivery. If the operator wants to find
+/// out why a Telegram message didn't arrive, the journal carries
+/// the full curl-stderr context.
+async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
+    use crate::alert_sink::{AlertSink, NullSink, TelegramSink};
+
+    // Read config. Failure → log + return (no push, but admin_alerts
+    // row is still there).
+    let cfg = match inv.get_telegram_config().await {
+        Ok(Some(c)) => c,
+        Ok(None) => return, // singleton row missing — separate problem; UI handles surfacing
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                error = %e,
+                "get_telegram_config failed; skipping push for this alert"
+            );
+            return;
+        }
+    };
+
+    // Disabled → no push. NullSink would also work but a short-
+    // circuit saves the spawn cost.
+    if !cfg.is_enabled() {
+        return;
+    }
+
+    let token = match cfg.token {
+        Some(t) => t,
+        None => return,
+    };
+    let chat_id = match cfg.chat_id {
+        Some(c) => c,
+        None => return,
+    };
+
+    let sink: Box<dyn AlertSink> = match TelegramSink::from_env(token, chat_id) {
+        Ok(s) => Box::new(s),
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                error = %e,
+                "TelegramSink construction failed; this is a bug (cfg.is_enabled() should have gated)"
+            );
+            Box::new(NullSink)
+        }
+    };
+
+    // Owned clones for the spawn — these are short strings.
+    let kind = kind.to_string();
+    let severity = severity.to_string();
+    let summary = summary.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = sink.send_text(&kind, &severity, &summary).await {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                kind = %kind,
+                error = %e,
+                "push to {} failed; alert row still in admin_alerts",
+                sink.name()
+            );
+        } else {
+            tracing::info!(
+                target = "vpnctld::alert_sink",
+                kind = %kind,
+                "pushed via {}",
+                sink.name()
+            );
+        }
+    });
 }
 
 /// Helper: bulk-ack any open (kind, server_id) alerts and write the

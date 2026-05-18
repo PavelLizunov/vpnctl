@@ -745,6 +745,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/settings/telegram",
             post(admin::settings_telegram),
         )
+        // Phase G chunk 3 part 2 — synchronous test-send so the
+        // operator can verify credentials without waiting for an
+        // actual alert. Surfaces curl/API errors as 502.
+        .route(
+            "/admin/settings/telegram/test",
+            post(admin::settings_telegram_test),
+        )
         // Phase C-4 — manual snapshot trigger + per-file download.
         // Download is GET (so a normal `<a download>` works); snapshot
         // trigger is POST (it mutates filesystem state + writes an
