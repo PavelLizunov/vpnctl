@@ -231,9 +231,17 @@ Find issues. Categories, in priority order:
    stateful things that should be stateless.
 3. SECURITY: secrets logged to stdout/audit payload; missing host-key
    verification path; weak randomness; permission/visibility leaks.
-4. TEST COVERAGE: a new public function with no test for its error path;
+4. DUPLICATION across codebase: for every new function ≥ 20 lines in
+   the diff, search the whole repo for similar implementations (grep
+   for 3-4 distinctive identifiers or library calls from the body —
+   e.g. if the function calls `Command::new("ssh-keyscan")`, grep for
+   that string in `**/*.rs` outside the diff). Report HIGH severity
+   if a near-duplicate exists; the fix is "extract to shared helper",
+   not "inline both copies". (this would have caught the ssh-keyscan
+   triplication on 2026-05-17)
+5. TEST COVERAGE: a new public function with no test for its error path;
    tests that would pass even if the implementation was inverted.
-5. LIBRARY MISUSE: anything that goes against russh / sqlx / tokio /
+6. LIBRARY MISUSE: anything that goes against russh / sqlx / tokio /
    clap official patterns (cite the doc if you reference it).
 
 Output ≤300 words as a single JSON array:
