@@ -92,13 +92,6 @@ CREATE TABLE IF NOT EXISTS admin_alerts (
 -- frequently (one query per dashboard render). Partial index limits
 -- the index size to only currently-unacked rows AND lets SQLite
 -- satisfy the COUNT from the index alone (no row visits).
---
--- NOTE: This is the ORIGINAL definition — migration 0012 replaces
--- the index column with `acked_at` for a smaller footprint. We
--- can't edit 0011 in place because sqlx verifies the migration
--- checksum on every startup and rejects changed-after-applied
--- files («migration N was previously applied but has been
--- modified»). 0012 drops + recreates.
 CREATE INDEX IF NOT EXISTS idx_admin_alerts_unacked
     ON admin_alerts(id) WHERE acked_at IS NULL;
 
