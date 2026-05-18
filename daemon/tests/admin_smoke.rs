@@ -1255,6 +1255,50 @@ async fn admin_backend_error_responses_use_unified_prefix() {
     );
 }
 
+/// Defense-in-depth: even if a caller passes a `detail` containing
+/// literal `\n` or `\r` (e.g. an axum `Path<String>` extractor
+/// straight through without validation, future regression), the body
+/// must NOT contain extra line breaks beyond the trailing one. The
+/// `error_text` helper collapses `\n`/`\r` to spaces.
+///
+/// Today every caller sanitises upstream (UserId/ServerId/form
+/// validators reject `\n`), but pinning the invariant here means a
+/// future refactor that bypasses those guards cannot silently
+/// re-introduce response-splitting-shaped behaviour.
+#[tokio::test]
+async fn admin_backend_error_text_normalises_newlines_in_detail() {
+    // Smoke the helper directly via a path that's known to interpolate
+    // user-controlled content into the error body. The tweak handler's
+    // 400 includes the user-supplied `value=...` field — but the form
+    // decoder strips %-encoding and our validators reject control
+    // chars. We instead test via the `/admin/users/<id>` 404 path,
+    // which interpolates the raw path segment after decoding.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    // %0A is a literal newline, percent-encoded as a single path
+    // segment. axum's `Path<String>` extractor URL-decodes it back to
+    // `\n`. Before the normalisation fix, the response body would be:
+    //   "vpnctl admin: no such user '\n.poison'\n"
+    // → splits into 2 lines for `curl … | head -1`. After the fix, the
+    // `\n` collapses to a space.
+    let body = body_of(app.clone(), "GET", "/admin/users/%0A.poison", None, None).await;
+    // Body must be exactly ONE line + the trailing `\n`. Count
+    // explicit newlines.
+    let nl_count = body.matches('\n').count();
+    assert_eq!(
+        nl_count, 1,
+        "error_text MUST normalise embedded \\n — body has {nl_count} newlines: {body:?}",
+    );
+    assert!(
+        body.starts_with("vpnctl admin: no such user '"),
+        "prefix survived the normalisation: {body:?}"
+    );
+    assert!(
+        body.ends_with(".poison'\n"),
+        "trailing context survived the normalisation: {body:?}"
+    );
+}
+
 /// Default same-origin host used by every test that POSTs to /admin
 /// without explicitly testing CSRF behaviour. Using a single constant
 /// here means a future schema change (e.g. switching to a vhost-aware

@@ -714,8 +714,19 @@ fn internal_error(err: anyhow::Error) -> Response {
 /// Single source of truth for the textual prefix used on every admin
 /// error body. Tests pin this string so it can't drift away from the
 /// `vpnctl admin: …\n` convention by accident.
+///
+/// **Defensive normalisation:** literal `\n` and `\r` in `detail` are
+/// collapsed to a single space so caller-controlled (Path<String> /
+/// form-field) content can't inject an extra line into the response.
+/// Every body still ends with exactly one trailing `\n` — the line
+/// `vpnctl admin: <detail>\n` shape is what the layer-3 copy-contract
+/// tests assert (`curl … | head -1` must capture the whole message).
+/// Today every caller sanitises upstream (UserId / ServerId / form
+/// validators reject `\n`), but the depth-in-defense keeps the
+/// invariant local to this function.
 pub(crate) fn error_text(detail: &str) -> String {
-    format!("vpnctl admin: {detail}\n")
+    let sanitised = detail.replace(['\n', '\r'], " ");
+    format!("vpnctl admin: {sanitised}\n")
 }
 
 /// Phase F monitoring page. Pulls hourly + daily access buckets from
@@ -2652,11 +2663,45 @@ fn humanize_bytes(n: u64) -> String {
 /// the editorial chrome out (matches the bare-text 500 convention from
 /// `internal_error`) so the operator sees the message in plain form.
 fn user_not_found(id: &str) -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        error_text(&format!("no such user '{id}'")),
-    )
-        .into_response()
+    not_found(&format!("no such user '{id}'"))
+}
+
+/// Generic editorial-prefixed error response. Single point where the
+/// `(status, error_text(detail)).into_response()` shape lives — every
+/// status-specific helper (`bad_request`, `not_found`, `unauthorized`)
+/// delegates here, and exotic codes (`CONFLICT`, `BAD_GATEWAY`,
+/// `INTERNAL_SERVER_ERROR` from non-anyhow paths) call it directly
+/// rather than open-coding the tuple. Keeps the prefix discipline
+/// (and the newline normalisation in [`error_text`]) in lock-step
+/// across every admin response.
+fn error_resp(status: StatusCode, detail: &str) -> Response {
+    (status, error_text(detail)).into_response()
+}
+
+/// 400 Bad Request with the editorial-prefixed body. Single source of
+/// truth — was inlined as `(StatusCode::BAD_REQUEST, error_text(...))
+/// .into_response()` at ~25 sites before consolidation. Delegates to
+/// [`error_resp`].
+fn bad_request(detail: &str) -> Response {
+    error_resp(StatusCode::BAD_REQUEST, detail)
+}
+
+/// 404 Not Found with the editorial-prefixed body. Companion to
+/// [`bad_request`] / [`unauthorized`] — was inlined ~14× before
+/// consolidation. `user_not_found` is now a thin wrapper around this
+/// helper, preserving its call-site brevity.
+fn not_found(detail: &str) -> Response {
+    error_resp(StatusCode::NOT_FOUND, detail)
+}
+
+/// 401 Unauthorized with the editorial-prefixed body. Used by the
+/// in-handler auth gates (the basic-auth middleware emits its own
+/// 401 with the literal prefix baked in — see `daemon/src/auth.rs`
+/// — because it runs BEFORE this module is reachable). Was inlined
+/// at ~3 sites; consolidated for parity.
+#[allow(dead_code)]
+fn unauthorized(detail: &str) -> Response {
+    error_resp(StatusCode::UNAUTHORIZED, detail)
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -2829,22 +2874,14 @@ pub(crate) async fn user_wireguard_conf_download(
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     if !server.enabled_protocols.iter().any(|p| p.0 == "wireguard") {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "server '{server_id_str}' does not enable the 'wireguard' protocol — enable it on the server detail page before downloading a .conf"
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "server '{server_id_str}' does not enable the 'wireguard' protocol — enable it on the server detail page before downloading a .conf"
+        ));
     }
     // Grant check — refuse the download if the (user, server) pair
     // isn't granted. Without this, the URL stays "live" after a
@@ -2856,13 +2893,9 @@ pub(crate) async fn user_wireguard_conf_download(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     if !peers.iter().any(|p| p.id == uid) {
-        return (
-            StatusCode::NOT_FOUND,
-            error_text(&format!(
-                "user '{user_id_str}' is not granted on server '{server_id_str}'"
-            )),
-        )
-            .into_response();
+        return not_found(&format!(
+            "user '{user_id_str}' is not granted on server '{server_id_str}'"
+        ));
     }
     let secrets = match state.inv.list_server_secrets(&sid).await {
         Ok(m) => m,
@@ -2965,15 +2998,11 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     // `std::path::Path::join` semantics, which would otherwise let
     // an absolute path override the parent prefix.
     if !is_safe_snapshot_name(&name) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "invalid snapshot name '{name}' — expected '{prefix}<timestamp>{suffix}'",
-                prefix = vpnctl_inventory::backup::SNAPSHOT_FILENAME_PREFIX,
-                suffix = vpnctl_inventory::backup::SNAPSHOT_FILENAME_SUFFIX,
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "invalid snapshot name '{name}' — expected '{prefix}<timestamp>{suffix}'",
+            prefix = vpnctl_inventory::backup::SNAPSHOT_FILENAME_PREFIX,
+            suffix = vpnctl_inventory::backup::SNAPSHOT_FILENAME_SUFFIX,
+        ));
     }
     let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
     let path = backup_dir.join(&name);
@@ -2986,30 +3015,21 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
         Err(e) => {
-            return (
+            return error_resp(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                error_text(&format!("backup dir not readable: {e}")),
-            )
-                .into_response();
+                &format!("backup dir not readable: {e}"),
+            );
         }
     };
     let canon_path = match std::fs::canonicalize(&path) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("snapshot '{name}' not found")),
-            )
-                .into_response();
+            return not_found(&format!("snapshot '{name}' not found"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     if !canon_path.starts_with(&canon_dir) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text("snapshot path escaped backup dir — refusing"),
-        )
-            .into_response();
+        return bad_request("snapshot path escaped backup dir — refusing");
     }
     let bytes = match std::fs::read(&canon_path) {
         Ok(b) => b,
@@ -3076,11 +3096,7 @@ pub(crate) async fn server_enable_protocol(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3093,14 +3109,10 @@ pub(crate) async fn server_enable_protocol(
             .into_iter()
             .map(|p| p.0)
             .collect();
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "unknown protocol '{protocol_id_str}' — registered: {}",
-                known.join(", ")
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "unknown protocol '{protocol_id_str}' — registered: {}",
+            known.join(", ")
+        ));
     }
 
     let inserted = match state.inv.add_server_protocol(&sid, &pid).await {
@@ -3149,11 +3161,7 @@ pub(crate) async fn server_disable_protocol(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3286,11 +3294,7 @@ pub(crate) async fn server_grant_user(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3336,11 +3340,7 @@ pub(crate) async fn server_revoke_user(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3407,11 +3407,7 @@ pub(crate) async fn server_deploy(
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
@@ -3422,11 +3418,7 @@ pub(crate) async fn server_deploy(
     // would still succeed but the render would later fail with a
     // confusing "unsupported protocol" — surface that upfront.
     if let Err(e) = state.registry.validate_server(&server) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!("config invalid before deploy: {e}")),
-        )
-            .into_response();
+        return bad_request(&format!("config invalid before deploy: {e}"));
     }
 
     // Bootstrap missing secrets. Shared with the Phase-E wizard
@@ -3570,34 +3562,22 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
     if !valid_user_id(&id) {
         // Reuse user-id validator — same allowed alphabet (alphanumerics,
         // . _ -). Length cap 64 is reasonable for server ids too.
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+        ));
     }
 
     let address: String = form_field(&body, "address")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if address.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text("address must not be empty (IPv4, IPv6 or hostname)"),
-        )
-            .into_response();
+        return bad_request("address must not be empty (IPv4, IPv6 or hostname)");
     }
     // Shallow address shape check — full IP/hostname validation lives
     // in the bootstrap path; here we just reject obvious garbage so a
     // typo doesn't get persisted.
     if address.contains(' ') || address.len() > 253 {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!("address looks malformed: {address:?}")),
-        )
-            .into_response();
+        return bad_request(&format!("address looks malformed: {address:?}"));
     }
 
     let ssh_port: u16 = form_field(&body, "ssh_port")
@@ -3631,11 +3611,9 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
 
     if let Err(e) = state.inv.add_server(&server).await {
         return match e {
-            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => (
-                StatusCode::BAD_REQUEST,
-                error_text(&format!("{what} already exists — pick a different id")),
-            )
-                .into_response(),
+            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => {
+                bad_request(&format!("{what} already exists — pick a different id"))
+            }
             other => internal_error(anyhow::Error::new(other)),
         };
     }
@@ -3678,11 +3656,7 @@ pub(crate) async fn server_enable_kernel(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3696,14 +3670,10 @@ pub(crate) async fn server_enable_kernel(
             .into_iter()
             .map(|k| k.0)
             .collect();
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "unknown kernel '{kernel_id_str}' — registered: {}",
-                known.join(", ")
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "unknown kernel '{kernel_id_str}' — registered: {}",
+            known.join(", ")
+        ));
     }
 
     let inserted = match state.inv.add_server_kernel(&sid, &kid).await {
@@ -3751,11 +3721,7 @@ pub(crate) async fn server_disable_kernel(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3836,13 +3802,9 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         .unwrap_or_default();
 
     if !valid_user_id(&id_decoded) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "invalid user id '{id_decoded}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "invalid user id '{id_decoded}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+        ));
     }
 
     // Mint ALL secrets unconditionally — UUID, tuic_password, WG
@@ -3872,11 +3834,9 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     // different id, no need to surface a generic 500.
     if let Err(e) = state.inv.add_user(&user).await {
         return match e {
-            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => (
-                StatusCode::BAD_REQUEST,
-                error_text(&format!("{what} already exists — pick a different id")),
-            )
-                .into_response(),
+            vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => {
+                bad_request(&format!("{what} already exists — pick a different id"))
+            }
             other => internal_error(anyhow::Error::new(other)),
         };
     }
@@ -3940,11 +3900,7 @@ pub(crate) async fn user_grant_server(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -3996,11 +3952,7 @@ pub(crate) async fn user_revoke_server(
     match state.inv.get_server(&sid).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
@@ -4110,13 +4062,9 @@ pub(crate) async fn user_delete(
 ) -> Response {
     let confirm = form_field(&body, "confirm").unwrap_or_default();
     if confirm != user_id_str {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "delete confirm mismatch: form sent '{confirm}', URL targets '{user_id_str}' — type the user id exactly to confirm"
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "delete confirm mismatch: form sent '{confirm}', URL targets '{user_id_str}' — type the user id exactly to confirm"
+        ));
     }
 
     let uid = vpnctl_core::UserId(user_id_str.clone());
@@ -4823,14 +4771,10 @@ fn set_tweak_cookie(
         // Be specific: the operator already knows it was a tweak POST
         // (they hit /admin/tweak/<kind>); the surface they need is
         // *what value* and *which kind*. Include both.
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
-                valid.join(", ")
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+            valid.join(", ")
+        ));
     }
     // 1-year, HttpOnly, SameSite=Lax — operator-only UI, no XSS surface.
     let cookie_val =
@@ -4898,13 +4842,9 @@ pub(crate) async fn set_tweak(
     match kind.as_str() {
         "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
         "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
-        unknown => (
-            StatusCode::NOT_FOUND,
-            error_text(&format!(
-                "unknown tweak kind '{unknown}' (known: theme, accent)"
-            )),
-        )
-            .into_response(),
+        unknown => not_found(&format!(
+            "unknown tweak kind '{unknown}' (known: theme, accent)"
+        )),
     }
 }
 
@@ -5052,28 +4992,16 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
     let address = match crate::wizard::validate_address(&address_raw) {
         Ok(s) => s.to_string(),
         Err(why) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                error_text(&format!("invalid address — {why}")),
-            )
-                .into_response();
+            return bad_request(&format!("invalid address — {why}"));
         }
     };
     if let Err(why) = crate::wizard::validate_password(&password_raw) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!("invalid root password — {why}")),
-        )
-            .into_response();
+        return bad_request(&format!("invalid root password — {why}"));
     }
     let ssh_port = match crate::wizard::validate_ssh_port(&port_raw) {
         Ok(p) => p,
         Err(why) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                error_text(&format!("invalid ssh_port — {why}")),
-            )
-                .into_response();
+            return bad_request(&format!("invalid ssh_port — {why}"));
         }
     };
 
@@ -5129,13 +5057,9 @@ pub(crate) async fn wizard_step2_stub(
             // No session = direct hit on step-2 without going through
             // step-1, OR the session expired (10-min TTL). Either way
             // the operator needs to start over.
-            return (
-                StatusCode::BAD_REQUEST,
-                error_text(
-                    "wizard session expired or missing — start over from /admin/servers/new",
-                ),
-            )
-                .into_response();
+            return bad_request(
+                "wizard session expired or missing — start over from /admin/servers/new",
+            );
         }
     };
 
@@ -5278,18 +5202,10 @@ pub(crate) async fn wizard_step2_sse(
 
     let cookie = read_cookie(&headers, crate::wizard::COOKIE_NAME).map(str::to_string);
     let Some(session_id) = cookie else {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text("wizard session missing — start over from /admin/servers/new"),
-        )
-            .into_response();
+        return bad_request("wizard session missing — start over from /admin/servers/new");
     };
     let Some(session) = state.wizard.get(&session_id) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text("wizard session expired — start over from /admin/servers/new"),
-        )
-            .into_response();
+        return bad_request("wizard session expired — start over from /admin/servers/new");
     };
     // Single-shot semantics — after the SSE handler attaches, the
     // session is gone. Refresh on the page falls back to the
@@ -5306,13 +5222,9 @@ pub(crate) async fn wizard_step2_sse(
         // Should be impossible — wizard validates address upfront —
         // but defensive: empty id would fail inv.add_server with a
         // useless error. Surface upfront instead.
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(
-                "address didn't produce any safe id chars — start over with a different address",
-            ),
-        )
-            .into_response();
+        return bad_request(
+            "address didn't produce any safe id chars — start over with a different address",
+        );
     }
     let existing: std::collections::HashSet<String> = match state.inv.list_servers().await {
         Ok(list) => list.into_iter().map(|s| s.id.0).collect(),
@@ -5320,7 +5232,7 @@ pub(crate) async fn wizard_step2_sse(
     };
     let server_id = match crate::wizard_bootstrap::find_available_server_id(&existing, &base_id) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::CONFLICT, error_text(&e)).into_response(),
+        Err(e) => return error_resp(StatusCode::CONFLICT, &e),
     };
 
     let plan = crate::wizard_bootstrap::BootstrapPlan {
@@ -5428,11 +5340,7 @@ pub(crate) async fn server_detail(
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id_str}'")),
-            )
-                .into_response());
+            return Err(not_found(&format!("no such server '{server_id_str}'")));
         }
         Err(e) => return Err(internal_error(anyhow::Error::new(e))),
     };
@@ -5893,11 +5801,7 @@ pub(crate) async fn server_set_fingerprint(
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_text(&format!("no such server '{server_id}'")),
-            )
-                .into_response();
+            return not_found(&format!("no such server '{server_id}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
@@ -5915,14 +5819,10 @@ pub(crate) async fn server_set_fingerprint(
             // predate the validator. Cheap; rejects with 400 before
             // we spawn anything.
             if let Err(reason) = crate::wizard::validate_address(&server.address) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    error_text(&format!(
-                        "server '{server_id}' has an address that fails the validator ({reason}); \
+                return bad_request(&format!(
+                    "server '{server_id}' has an address that fails the validator ({reason}); \
                          fix it in the inventory before running auto-detect"
-                    )),
-                )
-                    .into_response();
+                ));
             }
             // Wrap blocking subprocess in spawn_blocking — otherwise an
             // unreachable host pins the tokio worker thread for the
@@ -5937,11 +5837,10 @@ pub(crate) async fn server_set_fingerprint(
             match scan_res {
                 Ok(Ok(fp)) => (fp, "ssh-keyscan"),
                 Ok(Err(e)) => {
-                    return (
+                    return error_resp(
                         StatusCode::BAD_GATEWAY,
-                        error_text(&format!("ssh-keyscan failed: {e}")),
-                    )
-                        .into_response();
+                        &format!("ssh-keyscan failed: {e}"),
+                    );
                 }
                 Err(join_err) => {
                     return internal_error(anyhow::anyhow!(
@@ -5952,31 +5851,19 @@ pub(crate) async fn server_set_fingerprint(
         }
         "manual" => {
             if fingerprint_in.trim().is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    error_text("manual mode requires a non-empty 'fingerprint' field"),
-                )
-                    .into_response();
+                return bad_request("manual mode requires a non-empty 'fingerprint' field");
             }
             (fingerprint_in.trim().to_string(), "operator-provided")
         }
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                error_text("missing or invalid 'mode' (expected 'keyscan' or 'manual')"),
-            )
-                .into_response();
+            return bad_request("missing or invalid 'mode' (expected 'keyscan' or 'manual')");
         }
     };
 
     if !vpnctl_host_fingerprint::validate_shape(&fp) {
-        return (
-            StatusCode::BAD_REQUEST,
-            error_text(&format!(
-                "fingerprint '{fp}' is not in SHA256:<base64> shape"
-            )),
-        )
-            .into_response();
+        return bad_request(&format!(
+            "fingerprint '{fp}' is not in SHA256:<base64> shape"
+        ));
     }
 
     // Capture previous fingerprint BEFORE overwriting — same forensic
