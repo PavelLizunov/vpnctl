@@ -433,10 +433,8 @@ async fn report_address_overwrite_warnings(
     let Some(existing) = inv.get_server(&plan.server.id).await? else {
         return Ok(false);
     };
-    let addr_change = existing.address != plan.server.address;
-    let port_change = existing.ssh_port != plan.server.ssh_port;
-    let user_change = existing.ssh_user != plan.server.ssh_user;
-    if !addr_change && !port_change && !user_change {
+    let diff = AddressOverwriteDiff::compute(&existing, &plan.server);
+    if !diff.any_changed() {
         return Ok(false);
     }
     println!();
@@ -444,21 +442,21 @@ async fn report_address_overwrite_warnings(
         "  ! server '{id}' address / SSH coords would change:",
         id = plan.server.id.0
     );
-    if addr_change {
+    if diff.addr_change {
         println!(
             "      · address  {old}  →  {new}",
             old = existing.address,
             new = plan.server.address
         );
     }
-    if port_change {
+    if diff.port_change {
         println!(
             "      · ssh_port {old}        →  {new}",
             old = existing.ssh_port,
             new = plan.server.ssh_port
         );
     }
-    if user_change {
+    if diff.user_change {
         println!(
             "      · ssh_user {old}      →  {new}",
             old = existing.ssh_user,
@@ -469,6 +467,36 @@ async fn report_address_overwrite_warnings(
     Ok(true)
 }
 
+/// Pure comparison of two `Server` rows on the SSH-coordinate fields
+/// that L7's destructive-op gate guards (`address`, `ssh_port`,
+/// `ssh_user`). Extracted from `report_address_overwrite_warnings`
+/// so the gate logic can be unit-tested without a live SqliteInventory.
+///
+/// Returns three independent booleans + an aggregate `any_changed()`
+/// — the call-site only needs the aggregate to gate
+/// `--i-really-mean-overwrite-address`, but the per-field info is
+/// what the print loop above uses to render the diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AddressOverwriteDiff {
+    pub addr_change: bool,
+    pub port_change: bool,
+    pub user_change: bool,
+}
+
+impl AddressOverwriteDiff {
+    pub(crate) fn compute(existing: &vpnctl_core::Server, planned: &vpnctl_core::Server) -> Self {
+        Self {
+            addr_change: existing.address != planned.address,
+            port_change: existing.ssh_port != planned.ssh_port,
+            user_change: existing.ssh_user != planned.ssh_user,
+        }
+    }
+
+    pub(crate) fn any_changed(&self) -> bool {
+        self.addr_change || self.port_change || self.user_change
+    }
+}
+
 /// `$HOME` resolution that doesn't pull the `dirs` crate (we avoid
 /// adding deps for tiny needs). Falls back to `/root` on the homelab
 /// where `vpnctl` runs as root via systemd.
@@ -476,4 +504,90 @@ fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/root"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+
+    fn fake_server(addr: &str, port: u16, user: &str) -> Server {
+        Server {
+            id: ServerId("s1".into()),
+            address: addr.into(),
+            ssh_port: port,
+            ssh_user: user.into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    #[test]
+    fn no_changes_returns_all_false() {
+        let a = fake_server("1.2.3.4", 22, "root");
+        let b = fake_server("1.2.3.4", 22, "root");
+        let diff = AddressOverwriteDiff::compute(&a, &b);
+        assert!(!diff.addr_change);
+        assert!(!diff.port_change);
+        assert!(!diff.user_change);
+        assert!(!diff.any_changed());
+    }
+
+    #[test]
+    fn detects_address_change_in_isolation() {
+        // The vps-is-01 ↔ 104 cross-overwrite case (2026-05-17):
+        // operator passed `--server vps-is-01` but the .env file was
+        // actually for 104; the address swap was silent until L7.
+        let existing = fake_server("198.51.100.5", 22, "root");
+        let planned = fake_server("203.0.113.7", 22, "root");
+        let diff = AddressOverwriteDiff::compute(&existing, &planned);
+        assert!(diff.addr_change);
+        assert!(!diff.port_change);
+        assert!(!diff.user_change);
+        assert!(diff.any_changed());
+    }
+
+    #[test]
+    fn detects_ssh_port_change_in_isolation() {
+        // DigitalOcean drops their managed firewall block on 22 →
+        // operator imports a Cloudzy node on 2222 over an existing
+        // DO row. Different attack but same gate.
+        let existing = fake_server("198.51.100.5", 22, "root");
+        let planned = fake_server("198.51.100.5", 2222, "root");
+        let diff = AddressOverwriteDiff::compute(&existing, &planned);
+        assert!(!diff.addr_change);
+        assert!(diff.port_change);
+        assert!(!diff.user_change);
+        assert!(diff.any_changed());
+    }
+
+    #[test]
+    fn detects_ssh_user_change_in_isolation() {
+        // Less common (we always provision as root, then deploy creates
+        // a non-root daemon user) but still part of the SSH-coordinate
+        // surface — pin it.
+        let existing = fake_server("198.51.100.5", 22, "root");
+        let planned = fake_server("198.51.100.5", 22, "admin");
+        let diff = AddressOverwriteDiff::compute(&existing, &planned);
+        assert!(!diff.addr_change);
+        assert!(!diff.port_change);
+        assert!(diff.user_change);
+        assert!(diff.any_changed());
+    }
+
+    #[test]
+    fn detects_combined_address_and_port_change() {
+        let existing = fake_server("198.51.100.5", 22, "root");
+        let planned = fake_server("203.0.113.7", 2222, "root");
+        let diff = AddressOverwriteDiff::compute(&existing, &planned);
+        assert!(diff.addr_change);
+        assert!(diff.port_change);
+        assert!(!diff.user_change);
+        assert!(diff.any_changed());
+    }
 }
