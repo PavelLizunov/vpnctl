@@ -2586,9 +2586,9 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
             "not subscription-config fetches."
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
-            (vpn_kpi_tile("uploaded", &humanize_bytes(total_up)))
-            (vpn_kpi_tile("downloaded", &humanize_bytes(total_dn)))
-            (vpn_kpi_tile("peak conns", &peak_conns.to_string()))
+            (status_tile("uploaded", &humanize_bytes(total_up), "var(--ink)"))
+            (status_tile("downloaded", &humanize_bytes(total_dn), "var(--ink)"))
+            (status_tile("peak conns", &peak_conns.to_string(), "var(--ink)"))
         }
         @if !per_server.is_empty() {
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
@@ -2627,16 +2627,11 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
     }
 }
 
-/// Editorial KPI tile — small label + big-serif number. Reused
-/// pattern from the dashboard / Track-1 abuse signal.
-fn vpn_kpi_tile(label: &str, value: &str) -> Markup {
-    html! {
-        div style="border: 1px solid var(--rule); padding: 10px 12px; background: var(--paper);" {
-            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" { (label) }
-            div style="font-family: var(--serif); font-size: 22px; color: var(--ink); margin-top: 2px;" { (value) }
-        }
-    }
-}
+// `vpn_kpi_tile` removed 2026-05-18 — was exactly equivalent to
+// `status_tile(label, value, "var(--ink)")`. The 3 call sites at
+// `live_vpn_stats_section` now invoke `status_tile` directly with
+// the ink color so the editorial chrome (border + label-style + serif
+// number) lives in exactly one helper.
 
 /// Convert a raw byte count into a human-readable string with a
 /// binary-IEC suffix. Picks the largest unit at which the number
