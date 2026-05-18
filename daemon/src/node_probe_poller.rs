@@ -203,6 +203,19 @@ impl FailState {
         }
     }
 
+    /// Drop in-memory entries for server ids that are no longer in
+    /// the current inventory snapshot. Caller passes the live set
+    /// from `list_servers()`. Prevents (a) unbounded HashMap growth
+    /// on server churn (b) the stale-state bug where re-adding a
+    /// previously-deleted server with the same id silently inherits
+    /// `fired=true` and the next N failures don't alert.
+    ///
+    /// Bug-hunt agent 2026-05-18 finding.
+    pub fn prune(&mut self, live_ids: &std::collections::HashSet<ServerId>) {
+        self.counters.retain(|k, _| live_ids.contains(k));
+        self.fired.retain(|k, _| live_ids.contains(k));
+    }
+
     fn recover(&mut self, server_id: &ServerId) -> UnreachableTransition {
         let was_failing = self.counters.get(server_id).copied().unwrap_or(0) > 0;
         let had_fired = self.fired.get(server_id).copied().unwrap_or(false);
@@ -267,6 +280,14 @@ pub fn spawn_node_probe_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<
                     continue;
                 }
             };
+            // Prune FailState entries for ids no longer in inventory
+            // BEFORE iterating. Catches the «delete + re-add same id»
+            // case where stale fired=true would suppress the next
+            // BecameUnreachable. Bug-hunt agent finding 2026-05-18.
+            let live_ids: std::collections::HashSet<vpnctl_core::ServerId> =
+                servers.iter().map(|s| s.id.clone()).collect();
+            fail_state.prune(&live_ids);
+
             for server in &servers {
                 let outcome = probe_one_server(&inv, server).await;
                 dispatch_alerts(&inv, server, &outcome, &mut fail_state).await;
@@ -319,10 +340,14 @@ pub async fn dispatch_alerts(
                 )
                 .await
             {
-                Ok(Some(_id)) => {
-                    // Row freshly inserted → push to the configured
-                    // sink (best-effort; failures logged but don't
-                    // unwind — the alert is already persisted).
+                Ok(Some(id)) => {
+                    // Row freshly inserted. Honour migration 0011's
+                    // contract: «audit_log row is STILL written for
+                    // every alert with action='alert.fire'». Bug-
+                    // hunt agent 2026-05-18 caught this — chunk 2
+                    // detectors skipped it, breaking /admin/audit.
+                    audit_alert_fire(inv, &server.id, id, "server.unreachable", &summary).await;
+                    // Then push to the configured sink (best-effort).
                     push_alert(inv, "server.unreachable", "warning", &summary).await;
                 }
                 Ok(None) => {
@@ -398,7 +423,17 @@ pub async fn dispatch_alerts(
                     )
                     .await
                 {
-                    Ok(Some(_id)) => {
+                    Ok(Some(id)) => {
+                        // Honour 0011's audit_log contract — same
+                        // fix as server.unreachable above.
+                        audit_alert_fire(
+                            inv,
+                            &server.id,
+                            id,
+                            "server.fail2ban.banned_self",
+                            &summary,
+                        )
+                        .await;
                         push_alert(inv, "server.fail2ban.banned_self", "critical", &summary).await;
                     }
                     Ok(None) => {}
@@ -436,6 +471,42 @@ pub async fn dispatch_alerts(
 /// best-effort secondary delivery. If the operator wants to find
 /// out why a Telegram message didn't arrive, the journal carries
 /// the full curl-stderr context.
+/// Write the `alert.fire` audit_log row that migration 0011's
+/// schema doc-comment mandates for every newly-inserted alert.
+/// Same shape as `health_monitor.rs::insert_alert`'s audit call,
+/// extracted as a free fn so both `dispatch_alerts` detector
+/// branches share one source of truth. Bug-hunt agent finding
+/// 2026-05-18.
+async fn audit_alert_fire(
+    inv: &SqliteInventory,
+    server_id: &ServerId,
+    alert_id: i64,
+    kind: &str,
+    summary: &str,
+) {
+    if let Err(e) = inv
+        .audit(
+            "vpnctld",
+            "alert.fire",
+            Some(&server_id.0),
+            Some(&serde_json::json!({
+                "alert_id": alert_id,
+                "kind": kind,
+                "summary": summary,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::node_probe",
+            kind = kind,
+            server = %server_id.0,
+            error = %e,
+            "audit_log row for alert.fire failed; alert row is still in admin_alerts"
+        );
+    }
+}
+
 async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
     let sink = match build_alert_sink(inv).await {
         Ok(Some(s)) => s,
@@ -544,20 +615,36 @@ pub async fn build_alert_sink(
                     .port(server.ssh_port);
                     sink = sink.with_via_ssh(ssh);
                 } else {
+                    // Operator explicitly chose proxy_via_server_id;
+                    // silently downgrading to direct mode re-enables
+                    // the network path they deliberately disabled
+                    // (e.g. РФ DPI scenario where api.telegram.org
+                    // is blocked from the daemon host). Per migration
+                    // 0015's «losing the transport silently is worse
+                    // than a loud failure» policy + bug-hunt finding
+                    // 2026-05-18 — return None so push becomes a
+                    // no-op AND the test-send button surfaces a
+                    // clear error to the operator.
                     tracing::warn!(
                         target = "vpnctld::alert_sink",
                         server_id = %server_id_str,
                         "configured proxy_via_server_id no longer in inventory; \
-                         falling back to direct mode"
+                         transport DISABLED (operator must pick a different proxy \
+                         server on /admin/settings or unset the field)"
                     );
+                    return Ok(None);
                 }
             }
             Err(e) => {
+                // Storage-layer failure — propagate, don't silently
+                // downgrade. Caller (test-send) will surface 500;
+                // production push-loop will log+swallow as before.
                 tracing::warn!(
                     target = "vpnctld::alert_sink",
                     error = %e,
-                    "list_servers failed; falling back to direct mode"
+                    "list_servers failed while resolving proxy_via_server_id"
                 );
+                return Err(e);
             }
         }
     }

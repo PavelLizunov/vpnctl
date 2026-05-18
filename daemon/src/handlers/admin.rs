@@ -5072,7 +5072,7 @@ pub(crate) async fn server_push_deploy_key(
         use vpnctl_core::SshTransport;
         match ssh.exec(&push_cmd).await {
             Ok(_) => {
-                let _ = state
+                if let Err(audit_err) = state
                     .inv
                     .audit(
                         "admin",
@@ -5085,7 +5085,18 @@ pub(crate) async fn server_push_deploy_key(
                             "reference_key_path": &ref_key,
                         })),
                     )
-                    .await;
+                    .await
+                {
+                    // Bug-hunt 2026-05-18 — was `let _ =`, silently
+                    // losing the operator action trail. Mirror the
+                    // sshpass-path warn block.
+                    tracing::warn!(
+                        target = "vpnctld::admin::server_push_deploy_key",
+                        server = %server_id_str,
+                        error = %audit_err,
+                        "audit row for server.push_deploy_key (reference-key success) failed; push succeeded"
+                    );
+                }
                 return Redirect::to(&format!(
                     "/admin/servers/{}#push-deploy-key",
                     path_segment_encode(&server_id_str)
@@ -5098,7 +5109,7 @@ pub(crate) async fn server_push_deploy_key(
                 // through to sshpass path; otherwise surface the
                 // reference-key failure with a hint.
                 if password.is_empty() {
-                    let _ = state
+                    if let Err(audit_err) = state
                         .inv
                         .audit(
                             "admin",
@@ -5111,7 +5122,15 @@ pub(crate) async fn server_push_deploy_key(
                                 "error": e.to_string(),
                             })),
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            target = "vpnctld::admin::server_push_deploy_key",
+                            server = %server_id_str,
+                            error = %audit_err,
+                            "audit row for server.push_deploy_key (reference-key failure) failed"
+                        );
+                    }
                     return error_resp(
                         StatusCode::BAD_GATEWAY,
                         &format!(

@@ -292,6 +292,31 @@ impl TelegramSink {
         Self::new(token, chat_id, proxy)
     }
 
+    /// Redact the bot token in an arbitrary error/log string.
+    /// Defense-in-depth: even with `-K -` stdin config, some curl
+    /// failure modes echo the URL into stderr — and our error path
+    /// surfaces that stderr into operator-readable places
+    /// (settings_telegram_test's 502 response + audit_log row).
+    ///
+    /// Mirrors `wizard_bootstrap::redact_password` for the password
+    /// path. Replaces every literal occurrence of the token with
+    /// `••••<last4>` so the operator still sees which credential
+    /// failed but the secret bytes don't leak. Empty-token guard
+    /// is defensive — constructor rejects empty tokens, so this
+    /// branch should be unreachable in practice.
+    ///
+    /// Bug-hunt agent finding 2026-05-18.
+    fn redact_token(&self, s: &str) -> String {
+        if self.token.is_empty() {
+            return s.to_string();
+        }
+        let last4: &str = self
+            .token
+            .get(self.token.len().saturating_sub(4)..)
+            .unwrap_or("");
+        s.replace(&self.token, &format!("••••{last4}"))
+    }
+
     /// Build the *remote* shell command that runs `curl` on the
     /// inventory server, reading the token-bearing URL from stdin
     /// via `curl -K -` (config-from-stdin). The body literal still
@@ -392,10 +417,16 @@ impl AlertSink for TelegramSink {
             // alert text, not a secret).
             let (remote_cmd, stdin) = self.build_remote_curl_invocation(&body);
             let bytes = ssh.exec_with_stdin(&remote_cmd, stdin).await.map_err(|e| {
+                // Redact token before surfacing stderr — some curl
+                // failure modes echo the URL (containing the token)
+                // into stderr, which would then leak via the 502
+                // response body + audit_log row. Bug-hunt finding
+                // 2026-05-18.
+                let redacted = self.redact_token(&e.to_string());
                 AlertSinkError::NonZeroExit {
                     tool: "ssh-then-curl",
                     code: None,
-                    stderr: classify_ssh_failure(&e.to_string()),
+                    stderr: classify_ssh_failure(&redacted),
                 }
             })?;
             String::from_utf8_lossy(&bytes).into_owned()
@@ -439,10 +470,13 @@ impl AlertSink for TelegramSink {
             if !res.status.success() {
                 let stderr = String::from_utf8_lossy(&res.stderr);
                 let truncated: String = stderr.chars().take(200).collect();
+                // Same token-redaction defense as the via_ssh
+                // branch — curl can echo the URL on some failure
+                // modes (cert errors, proxy CONNECT fails).
                 return Err(AlertSinkError::NonZeroExit {
                     tool: "curl",
                     code: res.status.code(),
-                    stderr: truncated,
+                    stderr: self.redact_token(&truncated),
                 });
             }
             String::from_utf8_lossy(&res.stdout).into_owned()
@@ -466,19 +500,30 @@ impl AlertSink for TelegramSink {
         // (sub-KiB); 64 KiB is generous + bounds memory.
         // Security-audit 2026-05-18 finding.
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-        let trimmed: &str = if response_body.len() > MAX_RESPONSE_BYTES {
+        // Truncate by CHAR boundary, not raw byte index. A raw byte
+        // slice at byte 65536 panics if it splits a multi-byte UTF-8
+        // sequence (channel-name Cyrillic, emoji, CJK in
+        // description). Bug-hunt agent 2026-05-18 caught this: my
+        // own «OOM defense» from yesterday introduced a DoS path
+        // that a malicious upstream could trigger by streaming
+        // non-ASCII payload past the cap. `chars().take(N)` walks
+        // by codepoint, no boundary issue.
+        let trimmed: String = if response_body.len() > MAX_RESPONSE_BYTES {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
                 got_bytes = response_body.len(),
                 cap = MAX_RESPONSE_BYTES,
                 "Telegram response body exceeded cap; truncating"
             );
-            &response_body[..MAX_RESPONSE_BYTES]
+            // Worst case: every char is 1 byte, so N chars ≤ N bytes
+            // — we'll never overshoot the cap. If chars are 4 bytes
+            // each, we trim earlier than the byte cap (fine).
+            response_body.chars().take(MAX_RESPONSE_BYTES).collect()
         } else {
-            &response_body
+            response_body.clone()
         };
         let parsed: serde_json::Value =
-            serde_json::from_str(trimmed).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(&trimmed).unwrap_or(serde_json::Value::Null);
         let ok_field = parsed.get("ok").and_then(serde_json::Value::as_bool);
         if ok_field != Some(true) {
             let truncated: String = response_body.chars().take(200).collect();
@@ -647,6 +692,31 @@ mod tests {
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
         let (args, _stdin) = s.build_curl_local_invocation("{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
+    }
+
+    #[test]
+    fn redact_token_replaces_with_last4_marker() {
+        // Bug-hunt 2026-05-18: defense-in-depth against curl/ssh
+        // stderr leaking the URL (which contains the token).
+        let s = TelegramSink::new("SECRETtoken12abcd".into(), "CHAT".into(), None).unwrap();
+        let leaked = "curl error: https://api.telegram.org/botSECRETtoken12abcd/sendMessage failed";
+        let safe = s.redact_token(leaked);
+        assert!(
+            !safe.contains("SECRETtoken12abcd"),
+            "token must be replaced: {safe}"
+        );
+        assert!(safe.contains("••••abcd"), "must include last4 marker: {safe}");
+        // Untouched parts survive.
+        assert!(safe.contains("curl error:"));
+        assert!(safe.contains("api.telegram.org"));
+    }
+
+    #[test]
+    fn redact_token_handles_short_token_gracefully() {
+        let s = TelegramSink::new("abc".into(), "CHAT".into(), None).unwrap();
+        let safe = s.redact_token("curl: abc fail");
+        // last4 of "abc" is just "abc" (whole token).
+        assert!(!safe.contains("abc fail") || safe.contains("••••abc"));
     }
 
     #[test]

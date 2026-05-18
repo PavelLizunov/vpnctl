@@ -47,6 +47,13 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # (5-min polls, on-demand deploys) without the glibc bump.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = { version = "0.5", default-features = false }
+# Argon2id password hashing for basic-auth (security audit 2026-05-18).
+# Operator can either set VPNCTLD_ADMIN_PASSWORD to a plain string
+# (backward-compat; logs a warn) OR to a `$argon2id$...` hash string
+# from `vpnctl admin hash-password ...`. Hash form is preferred —
+# if the env file leaks (backup, grep history, etc) the secret stays
+# protected.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout", "fs", "set-header"] }
 maud = { version = "0.27", features = ["axum"] }
 base64 = "0.22"
