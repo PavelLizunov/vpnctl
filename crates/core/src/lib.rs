@@ -5,6 +5,8 @@
 //! Это позволяет добавлять новое ядро (например, wgturn) **не трогая**
 //! existing inventory / cli / ssh / crypto-слои.
 
+pub mod humanize;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

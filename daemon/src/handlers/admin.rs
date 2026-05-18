@@ -17,6 +17,7 @@ use maud::{DOCTYPE, Markup, html};
 
 use crate::AppState;
 use crate::http_util::decode_form_value;
+use vpnctl_core::humanize::format_size_bytes;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
 const COOKIE_ACCENT: &str = "vpnctl_accent";
@@ -3062,23 +3063,14 @@ fn is_safe_snapshot_name(name: &str) -> bool {
     vpnctl_inventory::parse_snapshot_filename(name).is_some()
 }
 
-/// Render a byte count as a human-friendly short string. Used by
-/// the Settings page's snapshot table. Mirrors the `du -h`-ish
-/// format the operator already knows.
-fn format_size_bytes(n: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if n < KB {
-        format!("{n} B")
-    } else if n < MB {
-        format!("{:.1} KB", n as f64 / KB as f64)
-    } else if n < GB {
-        format!("{:.1} MB", n as f64 / MB as f64)
-    } else {
-        format!("{:.2} GB", n as f64 / GB as f64)
-    }
-}
+// `format_size_bytes` (storage sizes — JEDEC KB/MB/GB labels) moved
+// to `vpnctl_core::humanize::format_size_bytes` (2026-05-18, post-
+// host-fingerprint consolidation pass) — same fn was byte-identical
+// in `cli/src/cmd/backup.rs`. **NOTE:** the sibling `humanize_bytes`
+// (defined ~400 lines up, IEC KiB/MiB/GiB labels, 9 call sites for
+// traffic counts) is INTENTIONALLY a different helper — see the
+// crate-level rustdoc on `vpnctl_core::humanize` for the split
+// rationale (storage vs traffic, JEDEC vs IEC).
 
 /// `POST /admin/servers/{id}/protocols/{proto}/enable` — add a
 /// protocol to a server's `enabled_protocols`. Idempotent at SQL.

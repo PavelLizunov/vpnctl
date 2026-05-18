@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use crate::OutputFormat;
+use vpnctl_core::humanize::format_size_bytes;
 use vpnctl_inventory::{SqliteInventory, list_snapshots, prune_snapshots, snapshot_now};
 
 #[derive(Subcommand, Debug)]
@@ -174,19 +175,7 @@ fn db_path_from_arg(arg: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     Ok(arg.unwrap_or_else(|| PathBuf::from("/var/lib/vpnctl/inv.db")))
 }
 
-/// Same human-friendly formatter as the daemon Settings page uses,
-/// duplicated here because the daemon module isn't a CLI dep.
-fn format_size_bytes(n: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if n < KB {
-        format!("{n} B")
-    } else if n < MB {
-        format!("{:.1} KB", n as f64 / KB as f64)
-    } else if n < GB {
-        format!("{:.1} MB", n as f64 / MB as f64)
-    } else {
-        format!("{:.2} GB", n as f64 / GB as f64)
-    }
-}
+// `format_size_bytes` moved to `vpnctl_core::humanize::format_size_bytes`
+// (2026-05-18). The «duplicated here because the daemon module isn't
+// a CLI dep» note is no longer true — both surfaces now share
+// `vpnctl-core`, which has zero tokio/sqlx baggage.
