@@ -137,6 +137,25 @@ impl SubprocessSshTransport {
     /// `std::process::Command` in `spawn_blocking` keeps the async
     /// runtime free; the cost (~one task hop, microseconds) is
     /// negligible against the SSH round-trip itself.
+    /// Run `remote_cmd` over SSH with `stdin_bytes` piped to its
+    /// stdin. Public wrapper around the private [`Self::run`] so
+    /// callers outside the `SshTransport` trait (e.g.
+    /// `alert_sink::TelegramSink` via-server mode) can send the
+    /// Telegram URL via stdin instead of embedding the token-bearing
+    /// URL into the remote shell command (which would land in
+    /// `ps` on the remote server, visible to other tenants on a
+    /// shared VPS).
+    ///
+    /// `remote_cmd` is the shell command the remote `bash -c` runs;
+    /// `stdin_bytes` is fed to its stdin. Returns the command's
+    /// stdout as raw bytes (caller decodes).
+    ///
+    /// Security audit 2026-05-18 round 2 finding — extracted to keep
+    /// secrets out of argv.
+    pub async fn exec_with_stdin(&self, remote_cmd: &str, stdin_bytes: Vec<u8>) -> Result<Vec<u8>> {
+        self.run(remote_cmd.to_string(), Some(stdin_bytes)).await
+    }
+
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let args = self.build_ssh_args(&remote_cmd);
         let host = self.host.clone();

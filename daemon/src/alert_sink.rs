@@ -62,7 +62,7 @@
 use std::process::{Command, Stdio};
 
 use crate::ssh_subprocess::SubprocessSshTransport;
-use vpnctl_core::{SshTransport, shell::single_quote};
+use vpnctl_core::shell::single_quote;
 
 /// One sink transport. Implementors deliver alerts to wherever the
 /// operator wants to be notified. Delivery errors are returned via
@@ -293,40 +293,44 @@ impl TelegramSink {
     }
 
     /// Build the *remote* shell command that runs `curl` on the
-    /// inventory server. Single-quotes the URL + body so the remote
-    /// shell sees them as opaque tokens — relies on
-    /// `vpnctl_core::shell::single_quote`'s POSIX escape rules
-    /// (already pinned by 8 spec tests in `crates/core/src/shell.rs`).
+    /// inventory server, reading the token-bearing URL from stdin
+    /// via `curl -K -` (config-from-stdin). The body literal still
+    /// goes in argv via `--data` (not a secret — it's just chat_id
+    /// + alert text).
     ///
-    /// Public so a test can assert that:
-    ///   * the URL is single-quoted (so a token containing shell
-    ///     metacharacters can't escape),
-    ///   * the body is `--data` followed by a quoted JSON literal,
-    ///   * the same connect/max timeouts as the local path apply,
-    ///   * a `--` separator sits between the flag block and the URL
-    ///     (defense against a future refactor that puts the URL
-    ///     earlier).
-    pub fn build_remote_curl_command(&self, body_json: &str) -> String {
-        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
-        format!(
+    /// **Security:** before this refactor the token-bearing URL was
+    /// part of the remote shell command — visible to other tenants
+    /// on a shared VPS via `ps auxf` for the duration of the curl
+    /// call. With `-K -`, the URL travels via the SSH stdin
+    /// channel (encrypted in transit) and is consumed by curl
+    /// internally; never lands in argv. Security audit
+    /// 2026-05-18 round 2 fix.
+    ///
+    /// Returns `(remote_cmd, stdin_bytes)` so caller pipes them
+    /// together via `SubprocessSshTransport::exec_with_stdin`.
+    pub fn build_remote_curl_invocation(&self, body_json: &str) -> (String, Vec<u8>) {
+        let cmd = format!(
             "curl -sS --connect-timeout 10 --max-time 20 -X POST \
-             -H 'Content-Type: application/json' --data {body} -- {url}",
+             -H 'Content-Type: application/json' --data {body} -K -",
             body = single_quote(body_json),
-            url = single_quote(&url),
+        );
+        // curl config-file syntax: one option per line, `url = "..."`.
+        // Token never appears on the remote shell argv.
+        let stdin = format!(
+            "url = \"https://api.telegram.org/bot{}/sendMessage\"\n",
+            self.token
         )
+        .into_bytes();
+        (cmd, stdin)
     }
 
-    /// Construct the curl argv. Public so a test can pin the
-    /// invariants (proxy-flag-before-url; `-X POST`; the
-    /// Content-Type header is correct; we never pass the bare token
-    /// without the `bot` prefix; etc).
-    pub fn build_curl_args(&self, body_json: &str) -> Vec<String> {
+    /// Construct the curl argv for the LOCAL path + the stdin bytes
+    /// to feed via `-K -`. Public so a test can pin the invariants
+    /// (`-K -` present; URL in stdin not argv; token never in any
+    /// argv element).
+    pub fn build_curl_local_invocation(&self, body_json: &str) -> (Vec<String>, Vec<u8>) {
         let mut args: Vec<String> = vec![
-            // Quiet mode — no progress bars in our logs.
             "-sS".into(),
-            // 10s connect timeout, 20s total — fits inside the
-            // node-probe tick budget. A Telegram outage shouldn't
-            // freeze the daemon.
             "--connect-timeout".into(),
             "10".into(),
             "--max-time".into(),
@@ -342,16 +346,18 @@ impl TelegramSink {
             args.push("--proxy".into());
             args.push(p.clone());
         }
-        // POSIX getopt separator before the URL — defends against
-        // the (extremely unlikely) future where `token` starts with
-        // `-`. BotFather tokens never do, but the invariant is
-        // cheap to maintain.
-        args.push("--".into());
-        args.push(format!(
-            "https://api.telegram.org/bot{}/sendMessage",
+        // Read URL (containing the secret token) from stdin via
+        // curl's `-K` (config file) reading from `-` (stdin).
+        // Defense against `/proc/<pid>/cmdline` leak on the daemon
+        // host (same-user processes can read it).
+        args.push("-K".into());
+        args.push("-".into());
+        let stdin = format!(
+            "url = \"https://api.telegram.org/bot{}/sendMessage\"\n",
             self.token
-        ));
-        args
+        )
+        .into_bytes();
+        (args, stdin)
     }
 }
 
@@ -380,28 +386,45 @@ impl AlertSink for TelegramSink {
         // transport differs.
         let response_body: String = if let Some(ssh) = &self.via_ssh {
             // Via-server path: SSH to inventory server, run curl
-            // THERE. The remote command is built via
-            // `build_remote_curl_command` which single-quotes the
-            // URL + body so the remote shell sees them as opaque
-            // tokens regardless of metacharacters.
-            let remote_cmd = self.build_remote_curl_command(&body);
-            ssh.exec(&remote_cmd)
-                .await
-                .map_err(|e| AlertSinkError::NonZeroExit {
+            // THERE. The URL (with token) goes via SSH stdin →
+            // curl's `-K -` config-from-stdin → never in remote
+            // argv. Body literal still in argv (it's just chat_id +
+            // alert text, not a secret).
+            let (remote_cmd, stdin) = self.build_remote_curl_invocation(&body);
+            let bytes = ssh.exec_with_stdin(&remote_cmd, stdin).await.map_err(|e| {
+                AlertSinkError::NonZeroExit {
                     tool: "ssh-then-curl",
                     code: None,
                     stderr: classify_ssh_failure(&e.to_string()),
-                })?
+                }
+            })?;
+            String::from_utf8_lossy(&bytes).into_owned()
         } else {
-            // Local path: spawn curl directly.
-            let args = self.build_curl_args(&body);
+            // Local path: spawn curl directly. URL via stdin (-K -)
+            // for the same reason — keeps token out of
+            // /proc/<pid>/cmdline of any same-user process.
+            let (args, stdin) = self.build_curl_local_invocation(&body);
             let res = tokio::task::spawn_blocking(move || {
-                Command::new("curl")
+                use std::io::Write;
+                let mut child = Command::new("curl")
                     .args(&args)
-                    .stdin(Stdio::null())
+                    .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
-                    .output()
+                    .spawn()?;
+                // `take()` returning None would mean Stdio::piped
+                // was ignored — silently skipping the write would
+                // deadlock `wait_with_output` on EOF that never
+                // arrives. Same pattern as ssh_subprocess::run.
+                if let Some(mut sin) = child.stdin.take() {
+                    sin.write_all(&stdin)?;
+                    drop(sin); // EOF → curl proceeds
+                } else {
+                    return Err::<std::process::Output, std::io::Error>(std::io::Error::other(
+                        "curl stdin pipe missing (Stdio::piped was ignored?)",
+                    ));
+                }
+                child.wait_with_output()
             })
             .await
             .map_err(|e| AlertSinkError::Spawn {
@@ -534,59 +557,95 @@ mod tests {
         );
     }
 
+    // ─── Token-via-stdin contract (security-audit 2026-05-18) ───
+    //
+    // Tests below pin that NEITHER local nor via-ssh path puts the
+    // bot token in argv. The token MUST travel via curl's `-K -`
+    // config-from-stdin so `ps auxf` / `/proc/<pid>/cmdline` can't
+    // leak it to same-user processes (local) or other VPS tenants
+    // (via-ssh).
+
     #[test]
-    fn build_curl_args_includes_post_and_content_type() {
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        let args = s.build_curl_args(r#"{"x":1}"#);
+    fn local_invocation_argv_contains_no_token() {
+        let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
+        let (args, stdin) = s.build_curl_local_invocation(r#"{"x":1}"#);
         let joined = args.join(" ");
-        assert!(args.iter().any(|a| a == "POST"), "must POST");
         assert!(
-            args.iter().any(|a| a == "Content-Type: application/json"),
-            "must set content-type"
+            !joined.contains("SECRETTOKEN"),
+            "token MUST NOT appear in argv: {joined}"
         );
-        // Body literal must reach curl --data.
-        assert!(joined.contains(r#"{"x":1}"#));
+        let stdin_str = std::str::from_utf8(&stdin).unwrap();
+        assert!(
+            stdin_str.contains("SECRETTOKEN"),
+            "token MUST appear in stdin config: {stdin_str:?}"
+        );
+        // POST + content-type still in argv (those are public).
+        assert!(args.iter().any(|a| a == "POST"));
+        assert!(args.iter().any(|a| a == "Content-Type: application/json"));
+        // `-K -` switches curl to read config from stdin.
+        let k_pos = args
+            .iter()
+            .position(|a| a == "-K")
+            .expect("must include -K");
+        assert_eq!(
+            args.get(k_pos + 1).map(String::as_str),
+            Some("-"),
+            "argv MUST have `-K -` (config from stdin)"
+        );
     }
 
     #[test]
-    fn build_curl_args_includes_double_dash_before_url() {
-        // POSIX getopt separator defense — pin so a future refactor
-        // doesn't accidentally allow a `--proxy http://evil/` to be
-        // interpreted as a flag if the URL ever moves earlier in
-        // the argv.
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        let args = s.build_curl_args("{}");
-        let dash_pos = args
-            .iter()
-            .position(|a| a == "--")
-            .expect("must include `--`");
-        let url_pos = args
-            .iter()
-            .position(|a| a.starts_with("https://api.telegram.org/"))
-            .expect("must include the URL");
-        assert_eq!(url_pos, dash_pos + 1, "url MUST immediately follow `--`");
+    fn local_invocation_stdin_is_curl_config_url_line() {
+        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let (_args, stdin) = s.build_curl_local_invocation("{}");
+        let stdin_str = std::str::from_utf8(&stdin).unwrap();
+        // Format: `url = "<URL>"` followed by `\n`. Single line.
+        assert_eq!(
+            stdin_str, "url = \"https://api.telegram.org/botTOK123/sendMessage\"\n",
+            "stdin must be valid curl config syntax"
+        );
     }
 
     #[test]
-    fn build_curl_args_includes_proxy_when_set() {
-        // Explicit proxy param — no env-pollution; `new()` takes
-        // `Option<String>` directly because edition-2024 `unsafe_code`
-        // forbid rules out `std::env::set_var` in tests.
+    fn remote_invocation_does_not_embed_token_in_shell_command() {
+        let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
+        let (cmd, stdin) = s.build_remote_curl_invocation(r#"{"x":1}"#);
+        assert!(
+            !cmd.contains("SECRETTOKEN"),
+            "token MUST NOT appear in the remote shell command \
+             (would be visible via ps on the proxy server): {cmd}"
+        );
+        let stdin_str = std::str::from_utf8(&stdin).unwrap();
+        assert!(
+            stdin_str.contains("SECRETTOKEN"),
+            "token MUST appear in stdin config piped to remote curl"
+        );
+        // Remote cmd has `-K -` and body-literal in argv (body is
+        // not a secret).
+        assert!(cmd.contains(" -K -"), "must use config-from-stdin: {cmd}");
+        assert!(
+            cmd.contains(r#"--data '{"x":1}'"#),
+            "body must remain in argv as single-quoted literal: {cmd}"
+        );
+    }
+
+    #[test]
+    fn local_invocation_includes_proxy_when_set() {
         let s = TelegramSink::new(
             "TOK".into(),
             "CHAT".into(),
             Some("http://192.168.0.142:18080".into()),
         )
         .unwrap();
-        let args = s.build_curl_args("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("{}");
         assert!(args.iter().any(|a| a == "--proxy"));
         assert!(args.iter().any(|a| a == "http://192.168.0.142:18080"));
     }
 
     #[test]
-    fn build_curl_args_omits_proxy_when_none() {
+    fn local_invocation_omits_proxy_when_none() {
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        let args = s.build_curl_args("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
     }
 
@@ -595,64 +654,8 @@ mod tests {
         // Operator passing an env var set to "" should not produce a
         // `--proxy ""` argv element — filter at construction time.
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), Some(String::new())).unwrap();
-        let args = s.build_curl_args("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
-    }
-
-    #[test]
-    fn build_remote_curl_command_quotes_url_and_body() {
-        // Via-server proxy mode: the curl invocation is built as a
-        // single shell-string for SSH to execute remotely. Both the
-        // URL (contains the bot token) and the body (contains the
-        // operator's alert text, may include any UTF-8) must be
-        // wrapped in POSIX single-quotes so the remote shell sees
-        // them as opaque tokens.
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        let cmd = s.build_remote_curl_command(r#"{"x":1}"#);
-        // Body literal must appear as `--data '<body>'`.
-        assert!(
-            cmd.contains(r#"--data '{"x":1}'"#),
-            "body must be `--data` then single-quoted JSON: {cmd}"
-        );
-        // URL must appear as `'https://api.telegram.org/...'`.
-        assert!(
-            cmd.contains("'https://api.telegram.org/botTOK/sendMessage'"),
-            "URL must be single-quoted: {cmd}"
-        );
-        // `--` separator before URL — defense for a future refactor
-        // that reorders the args.
-        let dash_idx = cmd
-            .find(" -- ")
-            .expect("must include ` -- ` flag separator");
-        let url_idx = cmd.find("'https://").expect("must include URL");
-        assert!(dash_idx < url_idx, "`--` must come before URL");
-        // Same timeouts as the local path.
-        assert!(cmd.contains("--connect-timeout 10"));
-        assert!(cmd.contains("--max-time 20"));
-        assert!(cmd.contains("-X POST"));
-    }
-
-    #[test]
-    fn build_remote_curl_command_escapes_single_quote_in_body() {
-        // Defense: if the operator's alert text contains a `'`, the
-        // POSIX-single-quote escape from `vpnctl_core::shell::
-        // single_quote` (`'a'\''b'`) must survive into the command
-        // so the remote shell reassembles the original byte sequence.
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        // JSON literal with an embedded `'` in the text field.
-        let body = r#"{"text":"can't reach you"}"#;
-        let cmd = s.build_remote_curl_command(body);
-        // Expected single-quote pattern: original `'` becomes `'\''`.
-        // Raw string handles the literal backslash + double-quote
-        // bytes; the assertion is byte-equality against the
-        // expected single_quote output.
-        let expected_quoted = r#"'{"text":"can'\''t reach you"}'"#;
-        assert!(
-            cmd.contains(expected_quoted),
-            "embedded `'` must be escaped via close-escape-reopen trick\n\
-             expected substring: {expected_quoted}\n\
-             actual cmd:         {cmd}"
-        );
     }
 
     #[test]
