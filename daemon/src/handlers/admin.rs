@@ -4085,11 +4085,11 @@ fn decode_form_value(s: &str) -> String {
                 decoded.push(b' ');
                 i += 1;
             }
-            // Pre-fix bug had `i + 2 < bytes.len()` which dropped the
-            // trailing `%XX` when it ended the string ("abc%20" decoded
-            // the space but "abc%20" with cursor at the last byte
-            // would emit only "abc" instead of "abc "). `<=` covers
-            // the case where `%XX` IS the suffix.
+            // Bounds: `bytes[i+1]` and `bytes[i+2]` accessed below;
+            // need `i+2 < bytes.len()` (strict-less since `bytes.len()`
+            // is one past the last index). `"%20"` len 3 at i=0:
+            // `2 < 3` ✓ decodes; `"%2"` len 2 at i=0: `2 < 2` ✗ falls
+            // through to literal `%`. Both correct.
             b'%' if i + 2 < bytes.len() => {
                 if let Ok(h) = std::str::from_utf8(&bytes[i + 1..i + 3])
                     && let Ok(byte) = u8::from_str_radix(h, 16)
@@ -6051,16 +6051,47 @@ pub(crate) async fn server_set_fingerprint(
     let fingerprint_in = decode_form_value(fingerprint_raw);
 
     let (fp, source) = match mode.as_str() {
-        "keyscan" => match keyscan_fingerprint_blocking(&server.address, server.ssh_port) {
-            Ok(fp) => (fp, "ssh-keyscan"),
-            Err(e) => {
+        "keyscan" => {
+            // Defense-in-depth: re-validate the stored address before
+            // shelling out — `validate_address` runs on every wizard
+            // submit + server-quick-add, but a migrated row could
+            // predate the validator. Cheap; rejects with 400 before
+            // we spawn anything.
+            if let Err(reason) = crate::wizard::validate_address(&server.address) {
                 return (
-                    StatusCode::BAD_GATEWAY,
-                    error_text(&format!("ssh-keyscan failed: {e}")),
+                    StatusCode::BAD_REQUEST,
+                    error_text(&format!(
+                        "server '{server_id}' has an address that fails the validator ({reason}); \
+                         fix it in the inventory before running auto-detect"
+                    )),
                 )
                     .into_response();
             }
-        },
+            // Wrap blocking subprocess in spawn_blocking — otherwise an
+            // unreachable host pins the tokio worker thread for the
+            // ssh-keyscan default timeout (~5–10s), starving other
+            // requests on the small homelab runtime.
+            let addr = server.address.clone();
+            let port = server.ssh_port;
+            let scan_res =
+                tokio::task::spawn_blocking(move || keyscan_fingerprint_blocking(&addr, port))
+                    .await;
+            match scan_res {
+                Ok(Ok(fp)) => (fp, "ssh-keyscan"),
+                Ok(Err(e)) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        error_text(&format!("ssh-keyscan failed: {e}")),
+                    )
+                        .into_response();
+                }
+                Err(join_err) => {
+                    return internal_error(anyhow::anyhow!(
+                        "ssh-keyscan task panicked: {join_err}"
+                    ));
+                }
+            }
+        }
         "manual" => {
             if fingerprint_in.trim().is_empty() {
                 return (
@@ -6090,6 +6121,11 @@ pub(crate) async fn server_set_fingerprint(
             .into_response();
     }
 
+    // Capture previous fingerprint BEFORE overwriting — same forensic
+    // reasoning as the CLI side. A TOFU-pin rotation has very different
+    // implications depending on whether the operator rebuilt the node
+    // (legit) vs someone is MITM-rotating the key (attack).
+    let previous = server.trusted_host_fingerprint.clone();
     if let Err(e) = state.inv.update_trusted_fingerprint(&sid, &fp).await {
         return internal_error(anyhow::Error::new(e));
     }
@@ -6099,7 +6135,11 @@ pub(crate) async fn server_set_fingerprint(
             "admin",
             "server.set_fingerprint",
             Some(&server_id),
-            Some(&serde_json::json!({"fingerprint": fp, "source": source})),
+            Some(&serde_json::json!({
+                "fingerprint": fp,
+                "previous": previous,
+                "source": source,
+            })),
         )
         .await
     {
@@ -6131,18 +6171,22 @@ fn is_valid_sha256_fingerprint(fp: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
 }
 
-/// Spawn `ssh-keyscan + ssh-keygen -lf -` on the daemon host. Blocking
-/// I/O wrapped in `tokio::task::spawn_blocking` so the axum runtime
-/// stays responsive. Returns the SHA256:<base64> fingerprint or an
-/// error suitable for surfacing to the operator.
+/// Spawn `ssh-keyscan + ssh-keygen -lf -` on the daemon host.
+/// Synchronous helper — caller MUST wrap in `tokio::task::spawn_blocking`
+/// to avoid stalling the tokio worker thread on a slow / unreachable host.
+/// Returns the SHA256:<base64> fingerprint or an error suitable for
+/// surfacing to the operator.
+///
+/// **Security: `--` separator before `host` is mandatory.** Mirrors the
+/// CLI-side `fetch_fingerprint_via_keyscan` rationale — without it, an
+/// address starting with `-` is parsed by ssh-keyscan as a flag.
 fn keyscan_fingerprint_blocking(host: &str, port: u16) -> anyhow::Result<String> {
+    use std::io::Write;
     use std::process::{Command, Stdio};
-    // ssh-keyscan can be slow on unreachable hosts; daemon thread is
-    // OK to block here because the calling context is already in
-    // axum's request handler which can absorb a few seconds. If this
-    // grows past ~10s we'd want to wrap in tokio::time::timeout.
+    // `--` separator forces `host` to be positional. Even though argv
+    // is shell-safe, ssh-keyscan's own getopt parses leading `-`.
     let scan = Command::new("ssh-keyscan")
-        .args(["-t", "ed25519", "-p", &port.to_string(), host])
+        .args(["-t", "ed25519", "-p", &port.to_string(), "--", host])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
@@ -6159,10 +6203,15 @@ fn keyscan_fingerprint_blocking(host: &str, port: u16) -> anyhow::Result<String>
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(&scan.stdout)?;
-    }
+    // `.take()` returning None would mean Stdio::piped was ignored —
+    // silently skipping write would deadlock `wait_with_output` on an
+    // EOF that never arrives.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("ssh-keygen stdin pipe missing (Stdio::piped ignored?)"))?;
+    stdin.write_all(&scan.stdout)?;
+    drop(stdin); // explicit EOF — wait_with_output otherwise stalls
     let keygen = child
         .wait_with_output()
         .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;

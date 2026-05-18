@@ -43,6 +43,22 @@ use std::time::Duration;
 
 use vpnctl_inventory::SqliteInventory;
 
+/// Centralised "does this kernel expose the probe-able surface" check.
+/// Today only `sing-box` answers — AmneziaWG nodes don't run systemd
+/// `sing-box`, so the probe script's `systemctl is-active sing-box`
+/// would just emit `unknown` noise. Used by BOTH `node_probe_poller`
+/// (writes node_health) AND `health_monitor` (reads node_health) so
+/// the two surfaces never disagree on what's in scope.
+///
+/// **TODO(amneziawg)**: when the AmneziaWG kernel ships, either teach
+/// this fn to return `true` for it AND wire a per-kernel probe variant
+/// (`wg show` instead of `systemctl is-active sing-box`), OR keep the
+/// sing-box-only behaviour and add a sibling `probeable_amneziawg`.
+/// Today's grep target: `fn probeable`.
+pub(crate) fn probeable(server: &vpnctl_core::Server) -> bool {
+    server.kernels.iter().any(|k| k.0 == "sing-box")
+}
+
 /// Realistic homelab cadence for telemetry. Slower than clash-api
 /// (5 min) because node probe is "is the service alive + disk OK"
 /// rather than "what's happening NOW with user traffic" — 10 min
@@ -98,17 +114,17 @@ pub fn spawn_node_probe_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<
 /// Probe one server, insert the row. Pure side-effect, never panics.
 /// Every error is logged at warn-or-info and swallowed.
 async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) {
-    // Skip non-sing-box kernels for now. AmneziaWG nodes don't run
-    // systemd `sing-box`, and the probe script's `systemctl is-active
-    // sing-box` would just emit `SVC sing-box unknown` for the rest
-    // of the daemon's lifetime — noisy without value. Future work:
-    // a kernel-aware probe variant that asks the right questions per
-    // kernel (`wg show` for WireGuard, etc).
-    if !server.kernels.iter().any(|k| k.0 == "sing-box") {
-        tracing::debug!(
+    // Skip non-sing-box kernels for now via the centralised filter
+    // (see `probeable` doc-comment for the AmneziaWG TODO). Once-per-
+    // tick info log so the operator can grep + spot the no-op state
+    // when a new kernel lands without probe support — debug is too
+    // quiet (invisible by default).
+    if !probeable(server) {
+        tracing::info!(
             target = "vpnctld::node_probe",
             server = %server.id.0,
-            "skipping (no sing-box kernel)"
+            kernels = ?server.kernels.iter().map(|k| k.0.as_str()).collect::<Vec<_>>(),
+            "skipping probe — no probe-able kernel (today: sing-box only)"
         );
         return;
     }

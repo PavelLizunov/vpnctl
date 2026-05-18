@@ -1636,6 +1636,14 @@ impl SqliteInventory {
     /// whatever structured context they want (thresholds, prior
     /// values, observed timestamp) and pass the resulting JSON
     /// string. NULL = no extra context.
+    ///
+    /// **Do NOT serialise secrets** (`User.uuid`, `User.sub_token`,
+    /// `tuic_password`, `wireguard_private`, etc.) into
+    /// `payload_json`. The string is rendered verbatim in the
+    /// operator-facing `/admin/alerts` feed AND copied into the
+    /// `audit_log` row AND any future webhook payload (Phase G
+    /// chunk 3). Stick to thresholds, percentages, prior/current
+    /// values, and other operationally-relevant numbers.
     pub async fn insert_alert(
         &self,
         kind: &str,

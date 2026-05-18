@@ -2214,31 +2214,43 @@ async fn admin_alerts_empty_state_renders_with_copy_contract() {
 
 #[tokio::test]
 async fn admin_alerts_ack_unknown_id_returns_redirect_not_500() {
-    // Acking a non-existent id is idempotent — should redirect to the
-    // feed without 500ing. (Catches the bug where `inv.ack_alert(999)`
-    // would return `false` and the handler treats it as an error.)
+    // Phase G ack idempotency contract — every valid path through
+    // `alert_ack` redirects, never 500s. Three branches:
+    //   * id <= 0  → early redirect (negative-id guard).
+    //   * id > 0 but no such row → ack_alert returns false → redirect.
+    //   * id > 0 and row exists → ack + audit + redirect (covered
+    //     by full-lifecycle test when Phase G chunk 2 ships).
+    // This test exercises the first two — both paths must return a
+    // redirect, not a 4xx/5xx. The empty inventory means no row
+    // matches id=999.
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/alerts/999/ack")
-                .header("Origin", "http://127.0.0.1")
-                .header("Host", "127.0.0.1")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // 303 See Other from axum's `Redirect::to`.
-    assert!(
-        resp.status() == StatusCode::SEE_OTHER
-            || resp.status() == StatusCode::FOUND
-            || resp.status() == StatusCode::TEMPORARY_REDIRECT,
-        "expected redirect after ack POST, got {:?}",
-        resp.status()
-    );
+
+    for (uri, label) in [
+        ("/admin/alerts/999/ack", "unknown id"),
+        ("/admin/alerts/0/ack", "id=0 guard"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Origin", "http://127.0.0.1")
+                    .header("Host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == StatusCode::SEE_OTHER
+                || resp.status() == StatusCode::FOUND
+                || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+            "{label}: expected redirect, got {:?}",
+            resp.status()
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────

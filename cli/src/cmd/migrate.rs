@@ -217,7 +217,9 @@ pub(crate) async fn run_from_bash(
     // absent.
     let mut total_address_changes = 0usize;
     for plan in &plans {
-        total_address_changes += report_address_overwrite_warnings(&inv, plan).await?;
+        if report_address_overwrite_warnings(&inv, plan).await? {
+            total_address_changes += 1;
+        }
     }
     if args.overwrite_existing && total_address_changes > 0 && !args.i_really_mean_overwrite_address
     {
@@ -413,10 +415,11 @@ async fn report_overwrite_conflicts(
     Ok(conflicts.len())
 }
 
-/// L7 destructive-op gate. Reports each plan whose `Server.address`
-/// / `ssh_port` / `ssh_user` differs from what's already in inv.db
-/// for the same `Server.id`. Returns the count so the caller can
-/// require `--i-really-mean-overwrite-address` if non-zero.
+/// L7 destructive-op gate. Reports whether THIS plan would change
+/// the existing inv.db row's `address` / `ssh_port` / `ssh_user`.
+/// Returns `true` if any change is detected; caller sums into a
+/// count of affected plans and requires
+/// `--i-really-mean-overwrite-address` if non-zero.
 ///
 /// Prints BEFORE the apply phase runs so the operator can spot a
 /// wrong-target case (vps-is-01 ↔ 104 redux) and Ctrl-C without
@@ -426,15 +429,15 @@ async fn report_overwrite_conflicts(
 async fn report_address_overwrite_warnings(
     inv: &SqliteInventory,
     plan: &MigrationPlan,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<bool> {
     let Some(existing) = inv.get_server(&plan.server.id).await? else {
-        return Ok(0);
+        return Ok(false);
     };
     let addr_change = existing.address != plan.server.address;
     let port_change = existing.ssh_port != plan.server.ssh_port;
     let user_change = existing.ssh_user != plan.server.ssh_user;
     if !addr_change && !port_change && !user_change {
-        return Ok(0);
+        return Ok(false);
     }
     println!();
     println!(
@@ -463,7 +466,7 @@ async fn report_address_overwrite_warnings(
         );
     }
     println!("    Requires --i-really-mean-overwrite-address if --overwrite-existing is set.");
-    Ok(1)
+    Ok(true)
 }
 
 /// `$HOME` resolution that doesn't pull the `dirs` crate (we avoid

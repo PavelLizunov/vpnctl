@@ -301,6 +301,12 @@ pub(crate) async fn run(
                      output of `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -` (the 2nd column)"
                 );
             }
+            // Capture previous fingerprint BEFORE overwriting — a TOFU-pin
+            // rotation has very different forensic implications depending on
+            // whether the operator rebuilt the node (legit) or someone is
+            // MITM-rotating the key (attack). Audit row keeps both halves
+            // so future review can distinguish without grepping snapshots.
+            let previous = server.trusted_host_fingerprint.clone();
             inv.update_trusted_fingerprint(&sid, &fp).await?;
             inv.audit(
                 "cli",
@@ -308,6 +314,7 @@ pub(crate) async fn run(
                 Some(&id),
                 Some(&json!({
                     "fingerprint": fp,
+                    "previous": previous,
                     "source": if from_keyscan { "ssh-keyscan" } else { "operator-provided" },
                 })),
             )
@@ -337,16 +344,26 @@ fn is_valid_sha256_fingerprint(fp: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
 }
 
-/// Run `ssh-keyscan -t ed25519 -p <port> <host> | ssh-keygen -lf -`
+/// Run `ssh-keyscan -t ed25519 -p <port> -- <host> | ssh-keygen -lf -`
 /// in two stages via `std::process::Command` and return the SHA256
 /// fingerprint (second whitespace-token of `ssh-keygen -lf -` output).
 /// Errors map to `anyhow::Error` with the failing stage in the message
 /// so the operator can re-run by hand if either tool is unhappy.
+///
+/// **Security: `--` separator before `host` is mandatory.** Without
+/// it, an address starting with `-` (typo, IDN edge case, attacker-
+/// controlled inventory value) gets parsed by ssh-keyscan as a flag.
+/// `-fsomething` reads an attacker-controlled file. Argv is shell-safe
+/// (Command takes a slice, no shell interpolation) but ssh-keyscan's
+/// OWN getopt parser is the attack surface — `--` is the standard
+/// POSIX defense.
 fn fetch_fingerprint_via_keyscan(host: &str, port: u16) -> anyhow::Result<String> {
+    use std::io::Write;
     use std::process::{Command, Stdio};
-    // Stage 1: ssh-keyscan emits the public key on stdout.
+    // Stage 1: ssh-keyscan emits the public key on stdout. `--` separator
+    // forces `host` to be treated as positional even if it starts with `-`.
     let scan = Command::new("ssh-keyscan")
-        .args(["-t", "ed25519", "-p", &port.to_string(), host])
+        .args(["-t", "ed25519", "-p", &port.to_string(), "--", host])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
@@ -367,10 +384,16 @@ fn fetch_fingerprint_via_keyscan(host: &str, port: u16) -> anyhow::Result<String
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(&scan.stdout)?;
-    }
+    // Take stdin explicitly — `.take()` returning None means we configured
+    // the child wrong (Stdio::piped above was ignored?), and silently
+    // skipping the write would block `wait_with_output` forever waiting
+    // on an EOF nobody sends.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("ssh-keygen stdin pipe missing (Stdio::piped ignored?)"))?;
+    stdin.write_all(&scan.stdout)?;
+    drop(stdin); // explicit EOF — wait_with_output otherwise stalls
     let keygen = child
         .wait_with_output()
         .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;

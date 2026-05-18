@@ -271,7 +271,9 @@ pub async fn scan_once(
 ) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
     let servers = inv.list_servers().await?;
     for server in &servers {
-        if !server.kernels.iter().any(|k| k.0 == "sing-box") {
+        // Same filter as node_probe_poller — using the shared helper
+        // so the two surfaces never disagree on what's in scope.
+        if !crate::node_probe_poller::probeable(server) {
             continue;
         }
         // Two newest rows are enough for the diff. Looking back 24h is
@@ -337,7 +339,11 @@ pub async fn scan_once(
                     );
                     // Mirror into audit_log so /admin/audit's
                     // unified timeline includes alert firings.
-                    let _ = inv
+                    // Surface audit-write failure at warn — silent drop
+                    // would make the audit timeline lose the firing trail
+                    // with zero log signal (review-agent caught this on
+                    // the burst sweep).
+                    if let Err(e) = inv
                         .audit(
                             "vpnctld",
                             "alert.fire",
@@ -349,7 +355,16 @@ pub async fn scan_once(
                                 "summary": ev.summary,
                             })),
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            target = "vpnctld::health_monitor",
+                            alert_id,
+                            server = %server.id.0,
+                            error = %e,
+                            "alert.fire audit row failed; admin_alerts row exists but timeline will be missing this entry"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(

@@ -92,8 +92,15 @@ CREATE TABLE IF NOT EXISTS admin_alerts (
 -- frequently (one query per dashboard render). Partial index limits
 -- the index size to only currently-unacked rows AND lets SQLite
 -- satisfy the COUNT from the index alone (no row visits).
+--
+-- Index column is `acked_at` itself (always NULL on rows that match
+-- the partial WHERE) rather than `id` — the rowid is implicit in
+-- every SQLite index, so storing `id` would duplicate it. Same query
+-- plan, smaller index (~8 bytes/row vs ~16). The feed page's
+-- `ORDER BY id DESC LIMIT N` walks the PK in reverse with the same
+-- partial filter; rare path.
 CREATE INDEX IF NOT EXISTS idx_admin_alerts_unacked
-    ON admin_alerts(id) WHERE acked_at IS NULL;
+    ON admin_alerts(acked_at) WHERE acked_at IS NULL;
 
 -- Feed page `ORDER BY id DESC LIMIT N` uses the PK index directly,
 -- so no extra index needed for that path. But `?show=all` filter
