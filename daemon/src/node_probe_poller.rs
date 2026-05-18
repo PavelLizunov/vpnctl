@@ -362,16 +362,31 @@ pub async fn dispatch_alerts(
                 let banned_list = probe.fail2ban_banned_ips.clone().unwrap_or_default();
                 let our_ip = probe.probe_source_ip.clone().unwrap_or_default();
                 let ban_count_other = banned_list.len().saturating_sub(1);
+                // Daemon is LOCKED OUT — by definition it can't
+                // self-recover (it tried to SSH and got banned).
+                // The remediation must:
+                //   (a) substitute the actual IP literally (the
+                //       previous «<our_ip>» placeholder was a real
+                //       regression — review-agent caught it),
+                //   (b) live in `summary` (rendered by `alerts_table`),
+                //       NOT in `payload_json` (which `/admin/alerts`
+                //       never displays — only kind + summary + severity
+                //       are surfaced).
                 let payload = serde_json::json!({
                     "our_ip": our_ip,
                     "fail2ban_banned_ips": banned_list,
                     "ban_count_other": ban_count_other,
-                    "remediation_hint":
-                        "ssh into the node out-of-band and run `fail2ban-client set sshd unbanip <our_ip>`",
                 })
                 .to_string();
+                // Summary IS rendered; bake the unban command + the
+                // «hoster console» hint right into it so the operator
+                // sees it on /admin/alerts without drilling into the
+                // (currently un-rendered) payload.
                 let summary = format!(
-                    "daemon's outbound IP {our_ip} is in fail2ban's banned list for sshd — daemon may lose access on the next ban-cycle"
+                    "daemon's outbound IP {our_ip} is in fail2ban's banned list for sshd. \
+                     Daemon can't self-recover — use the hoster's console / KVM to run \
+                     `fail2ban-client set sshd unbanip {our_ip}` (the next probe \
+                     auto-clears this alert)."
                 );
                 match inv
                     .insert_alert_if_no_unacked(

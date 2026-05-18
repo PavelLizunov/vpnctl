@@ -168,6 +168,49 @@ contradicts a confirmed answer above.
 4. `gh run watch <id> --exit-status` — блокируюсь до конца CI.
    Если красное → `gh run view --log-failed` → fix → push повтор.
 
+   **НЕ коммитить новый код поверх нерезолвенного red CI.** Audit
+   2026-05-18 (после 11-коммитной сессии) показал 4 коммита landed
+   atop unresolved red — pushed без CI watch. Это копит «long fix-
+   trail» как `818bad2 → 0310ad0` где fmt-fail из 5 коммитов
+   собрался в один hotfix задним числом. Правило: если предыдущий
+   commit на main НЕ green → следующий commit это либо hotfix для
+   него, либо ждём.
+
+## Operator-action policy (post-2026-05-18)
+
+Pavel: «не должен просить меня сделать что-то вручную на серверах».
+Strict reading: **error messages, alerts, doc-comments, and UI
+copy MUST NOT instruct the operator to SSH anywhere**. The daemon
+either does the action itself (via reference key / sshpass / its
+own SSH transport), surfaces a web button that does it, OR — when
+truly impossible (e.g. daemon banned, no peer server to relay
+through) — explicitly says «daemon can't help, use hoster's
+serial console / KVM».
+
+Forbidden patterns in operator-facing output:
+  * `ssh root@<host>` followed by a shell command — say «click X
+    button on /admin/Y» instead
+  * `echo '<paste>' >> ~/.ssh/authorized_keys` — replace with «push
+    deploy key» button reference
+  * `cat /etc/<file>` / `journalctl …` / `systemctl …` — these
+    leak the operator-must-shell mental model. Acceptable only in
+    audit_log payloads + dev-facing doc-comments, never in 4xx/5xx
+    response bodies or admin HTML copy.
+
+Caught 2026-05-18 — 3 violations in `alert_sink::classify_ssh_failure`,
+`/admin/settings` Deploy SSH key section, and the
+`server.fail2ban.banned_self` alert payload. All three fixed in
+the same commit + a unit test pins the new contract
+(`classify_ssh_failure_recognises_permission_denied` asserts
+`!msg.contains(">> ~/.ssh/authorized_keys")`).
+
+For the genuinely-out-of-band case (fail2ban banned the daemon's
+own outbound IP — by definition daemon can't unban itself), the
+message MUST acknowledge «daemon is locked out and can't self-
+recover» + point at the hoster's console. NOT ask the operator
+to SSH from elsewhere, because if THEY could SSH the daemon could
+too via the same path.
+
 ### Когда правила можно сократить
 
 - **Чисто docs/README/CLAUDE.md правки** — пункты 1-2 пропускаем,

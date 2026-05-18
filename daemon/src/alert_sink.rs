@@ -149,9 +149,9 @@ pub fn classify_ssh_failure(stderr: &str) -> String {
     if stderr.contains("Permission denied (publickey") {
         format!(
             "deploy SSH key not authorised on the proxy server. \
-             Copy the public key from /admin/settings (Deploy SSH key section), \
-             then on the server run \
-             `mkdir -p ~/.ssh && echo '<paste>' >> ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys`. \
+             Open the server detail page → «Deploy SSH key — push to this server» \
+             section → click «push deploy key» (uses VPNCTLD_REFERENCE_SSH_KEY \
+             if set, or asks for root password). \
              Raw error: {stderr}"
         )
     } else if stderr.contains("Connection refused") {
@@ -655,13 +655,18 @@ mod tests {
             msg.contains("deploy SSH key not authorised"),
             "must classify permission-denied: {msg}"
         );
+        // Operator-facing remediation MUST point at the web UI (the
+        // «push deploy key» button on the server detail page) — NOT
+        // ask the operator to manually ssh + edit authorized_keys.
+        // Per Pavel's «не должен просить меня сделать что-то вручную
+        // на серверах» directive 2026-05-18.
         assert!(
-            msg.contains("/admin/settings"),
-            "must point operator at Deploy SSH key section: {msg}"
+            msg.contains("push deploy key"),
+            "must point operator at the «push deploy key» button: {msg}"
         );
         assert!(
-            msg.contains("authorized_keys"),
-            "must include the copy-paste hint: {msg}"
+            !msg.contains("echo '<paste>'") && !msg.contains(">> ~/.ssh/authorized_keys"),
+            "MUST NOT include manual `echo … >> authorized_keys` instructions: {msg}"
         );
         assert!(
             msg.contains(raw),

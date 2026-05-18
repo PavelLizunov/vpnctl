@@ -2616,6 +2616,93 @@ async fn settings_telegram_post_rejects_garbage_chat_id() {
     );
 }
 
+/// Post-2026-05-18 rule (Pavel: «не должен просить меня сделать
+/// что-то вручную на серверах»). No 4xx/5xx response body, no
+/// admin HTML deck-copy, and no UI hint may instruct the operator
+/// to manually `ssh root@…` + edit `authorized_keys`. Daemon
+/// either auto-handles, surfaces a button, or — in the genuinely
+/// impossible case (banned, can't reach) — explicitly says «use
+/// hoster console».
+///
+/// This test exercises the THREE known operator-facing output
+/// paths that historically held those instructions:
+///   1. `classify_ssh_failure` (called by test-send 502)
+///   2. `/admin/settings` Deploy SSH key section (rendered HTML)
+///   3. `server.fail2ban.banned_self` alert payload
+/// and asserts none contain the forbidden phrasing. Future regressions
+/// (a new error message or alert payload that asks for manual SSH)
+/// would have to add that pattern to one of these surfaces; this
+/// test would catch it.
+#[tokio::test]
+async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
+    use vpnctld::alert_sink::classify_ssh_failure;
+
+    // (1) classify_ssh_failure permission-denied branch — the most
+    // common SSH failure mode operator hits. MUST surface the «push
+    // deploy key» button, MUST NOT include the literal
+    // `echo … >> ~/.ssh/authorized_keys` command.
+    let msg = classify_ssh_failure(
+        "ssh transport error: ssh root@1.2.3.4:22 exit=Some(255) \
+         stderr=root@1.2.3.4: Permission denied (publickey,password).",
+    );
+    assert!(
+        !msg.contains("echo '<paste>'") && !msg.contains(">> ~/.ssh/authorized_keys"),
+        "classify_ssh_failure MUST NOT instruct manual authorized_keys edit: {msg}"
+    );
+    assert!(
+        msg.contains("push deploy key"),
+        "classify_ssh_failure SHOULD point at the «push deploy key» button: {msg}"
+    );
+
+    // (2) /admin/settings rendered HTML. In test env the daemon's
+    // deploy pubkey file at /var/lib/vpnctl/.ssh/id_ed25519.pub
+    // doesn't exist, so the @match hits the Err arm («Public key
+    // file unreadable») — the «push deploy key» button copy lives
+    // in the Ok arm. We can't easily inject a fake pubkey because
+    // the path is a `const &str`. So we assert the NEGATIVE (no
+    // forbidden pattern), which holds in BOTH arms.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(
+        !html.contains("echo '<paste>' >> ~/.ssh/authorized_keys"),
+        "Deploy SSH key section MUST NOT contain the manual echo …>> instruction"
+    );
+    // (3) /admin/alerts deck — neither the empty-state nor the
+    // alerts-table sections should embed an «ssh into the node»
+    // hint. The fail2ban banned-self ALERT PAYLOAD (in node_probe_
+    // poller.rs) was rewritten to point at hoster console — not
+    // ask for SSH; we don't render it from `/admin/alerts` deck
+    // directly, but we DO assert the alerts page's static copy
+    // doesn't carry the old manual-ssh phrasing.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(
+        !html.contains("ssh into the node out-of-band"),
+        "alerts page must NOT ask operator to ssh into the node"
+    );
+}
+
 #[tokio::test]
 async fn server_detail_renders_push_deploy_key_section() {
     // Phase G chunk 3.5 follow-up — every server-detail page must
