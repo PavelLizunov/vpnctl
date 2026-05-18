@@ -208,7 +208,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     Ok(())
 }
 
-/// Wrap `s` in single quotes for POSIX sh, doubling embedded `'`.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
+// `shell_single_quote` moved to `vpnctl_core::shell::single_quote`
+// (2026-05-18) — was triplicated; consolidated for parity.
+use vpnctl_core::shell::single_quote as shell_single_quote;

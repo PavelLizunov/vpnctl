@@ -6,6 +6,7 @@
 //! existing inventory / cli / ssh / crypto-слои.
 
 pub mod humanize;
+pub mod shell;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -109,26 +109,18 @@ impl SubprocessSshTransport {
     /// the remote command. Split into its own function so tests can
     /// assert the produced argv without running `ssh`.
     pub fn build_ssh_args(&self, remote_cmd: &str) -> Vec<String> {
-        vec![
+        let mut args: Vec<String> = vec![
             "-i".into(),
             self.key_path.to_string_lossy().into_owned(),
             "-p".into(),
             self.port.to_string(),
             "-o".into(),
             "BatchMode=yes".into(),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
-            "-o".into(),
-            format!("UserKnownHostsFile={}", self.known_hosts.display()),
-            "-o".into(),
-            "ConnectTimeout=10".into(),
-            "-o".into(),
-            "ServerAliveInterval=15".into(),
-            "-o".into(),
-            "ServerAliveCountMax=2".into(),
-            format!("{}@{}", self.user, self.host),
-            remote_cmd.to_string(),
-        ]
+        ];
+        args.extend(ssh_safety_opts(&self.known_hosts));
+        args.push(format!("{}@{}", self.user, self.host));
+        args.push(remote_cmd.to_string());
+        args
     }
 
     /// Spawn `ssh` (blocking, under `spawn_blocking`), optionally
@@ -230,6 +222,44 @@ impl SshTransport for SubprocessSshTransport {
                 ))
             })
     }
+}
+
+/// The five `-o` SSH options that both the daemon's pubkey-auth
+/// transport and the wizard's sshpass-mediated password-auth path
+/// share. Extracted so a future hardening tweak (raising
+/// `ServerAliveCountMax`, switching `StrictHostKeyChecking` to
+/// `yes` after the first connect, etc.) lands in exactly one place.
+///
+/// The options are, in order:
+///   * `StrictHostKeyChecking=accept-new` — first-connect accepts,
+///     subsequent connects verify against the pinned host key.
+///   * `UserKnownHostsFile=<path>` — daemon-owned per-process known
+///     hosts file, so we don't mutate the operator's `~/.ssh/`.
+///   * `ConnectTimeout=10` — cap on the TCP connect; default is
+///     OS-dependent and can sit for minutes on a black-holed route.
+///   * `ServerAliveInterval=15` + `ServerAliveCountMax=2` — caller
+///     side sends keepalive every 15 s and gives up after 2 missed
+///     replies (~30 s of silence kills the connection). Without this,
+///     a half-open connection across a stateful NAT can hang the
+///     transport's `wait_with_output` until the OS gives up (~2 h
+///     by default).
+///
+/// Each option is emitted as a separate `-o` flag so the argv shape
+/// matches a hand-typed `ssh -o KEY=VAL` invocation; `ssh` does NOT
+/// accept `-o KEY1=VAL1 KEY2=VAL2`.
+pub fn ssh_safety_opts(known_hosts: &std::path::Path) -> Vec<String> {
+    vec![
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+        "-o".into(),
+        format!("UserKnownHostsFile={}", known_hosts.display()),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=15".into(),
+        "-o".into(),
+        "ServerAliveCountMax=2".into(),
+    ]
 }
 
 /// Ensure vpnctld has a deploy key at `path`. If absent, generates a

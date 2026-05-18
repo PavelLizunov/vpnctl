@@ -94,7 +94,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::http_util::path_segment_encode;
-use crate::ssh_subprocess::SubprocessSshTransport;
+use crate::ssh_subprocess::{SubprocessSshTransport, ssh_safety_opts};
+use vpnctl_core::shell::single_quote as shell_single_quote;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
 use vpnctl_inventory::SqliteInventory;
 
@@ -649,36 +650,32 @@ async fn ssh_password_run(
     let host = host.to_string();
     let user = user.to_string();
     let cmd_owned = remote_cmd.to_string();
-    let kh = known_hosts.display().to_string();
     let port_s = port.to_string();
     let userhost = format!("{user}@{host}");
+
+    // Build argv BEFORE moving into spawn_blocking — `ssh_safety_opts`
+    // borrows `known_hosts: &Path` which is not `'static`, so the
+    // safety-opts block must be materialised here (owned Strings) and
+    // captured by move.
+    let mut args: Vec<String> = vec![
+        "-e".into(),
+        "ssh".into(),
+        "-o".into(),
+        "PreferredAuthentications=password".into(),
+        "-o".into(),
+        "PubkeyAuthentication=no".into(),
+    ];
+    args.extend(ssh_safety_opts(known_hosts));
+    args.push("-p".into());
+    args.push(port_s);
+    args.push(userhost);
+    args.push(cmd_owned);
 
     let pw_for_redact = pw.clone();
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new("sshpass");
         cmd.env("SSHPASS", &pw)
-            .args([
-                "-e",
-                "ssh",
-                "-o",
-                "PreferredAuthentications=password",
-                "-o",
-                "PubkeyAuthentication=no",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                &format!("UserKnownHostsFile={kh}"),
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=2",
-                "-p",
-                &port_s,
-                &userhost,
-                &cmd_owned,
-            ])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -712,26 +709,14 @@ async fn ssh_password_run(
 // sees the diff, so this third copy slipped through untouched.
 // Crate is the single source of truth.
 
-/// Single-quote a string for inclusion in a POSIX shell command
-/// (used for the pubkey when we append it to authorized_keys). Wraps
-/// the value in `'…'` and replaces internal `'` with `'\''`. Returns
-/// the fully-quoted token suitable for substitution into a remote
-/// shell command.
-fn shell_single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            // Close the single-quoted run, escape one literal quote,
-            // re-open.
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
+// `shell_single_quote` moved to `vpnctl_core::shell::single_quote`
+// (2026-05-18). Was triplicated across this file (verbose char-by-
+// char loop), `crates/ssh/src/russh_transport.rs::shell_quote`
+// (terse `format!`-based copy) and `cli/src/cmd/bootstrap.rs::
+// shell_single_quote` (also terse). All three produced identical
+// observable output; consolidated for parity. Imported via
+// `use vpnctl_core::shell::single_quote as shell_single_quote;`
+// at the top of this file so existing call sites stay byte-identical.
 
 // `path_segment_encode` moved to `crate::http_util::path_segment_encode`
 // (2026-05-18). The previous «duplicated rather than `pub`-exposed
@@ -744,22 +729,9 @@ fn shell_single_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn shell_single_quote_round_trips_simple_strings() {
-        assert_eq!(shell_single_quote("hello world"), "'hello world'");
-        assert_eq!(
-            shell_single_quote("ssh-ed25519 AAAA... vpnctld-deploy"),
-            "'ssh-ed25519 AAAA... vpnctld-deploy'"
-        );
-    }
-
-    #[test]
-    fn shell_single_quote_escapes_internal_quote() {
-        // Tricky case — passwords sometimes contain a literal '.
-        // Result must reopen the quoted run so the shell still sees
-        // a single token.
-        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
-    }
+    // shell_single_quote tests moved with the implementation to
+    // `crates/core/src/shell.rs::tests` — that module pins 8 cases
+    // including `$HOME` literalness and multi-quote escape chains.
 
     // ssh-keyscan + parse_keygen_fingerprint + pick_keyscan_line tests
     // moved with the implementations to
