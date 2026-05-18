@@ -209,6 +209,44 @@ pub struct AdminAlert {
     pub acked_at: Option<DateTime<Utc>>,
 }
 
+/// Phase G chunk 3 — Telegram bot transport config. Singleton row.
+/// Both fields are `Option<String>` because the schema allows either
+/// to be NULL; the dispatch loop treats either-None as «transport
+/// disabled». An «Enable» flow in the Settings UI requires BOTH set.
+///
+/// **`token` is a SECRET** — same care as `users.wireguard_private`.
+/// Never serialise into `audit_log.payload_json` or any
+/// operator-visible feed.
+///
+/// The Settings page renders `••••<last4>` + a «replace» button;
+/// the only place the full value goes is the outgoing HTTPS POST
+/// to `api.telegram.org`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramConfig {
+    pub token: Option<String>,
+    pub chat_id: Option<String>,
+}
+
+impl TelegramConfig {
+    /// True iff both halves are present — the dispatch loop should
+    /// only attempt a send when this is true.
+    pub fn is_enabled(&self) -> bool {
+        self.token.is_some() && self.chat_id.is_some()
+    }
+
+    /// Last 4 characters of the token, suitable for «••••<last4>»
+    /// rendering on the Settings page. Returns empty string when the
+    /// token is absent (caller should branch on `token.is_some()`
+    /// first; this is for rendering convenience).
+    pub fn token_last4(&self) -> String {
+        match &self.token {
+            Some(t) if t.len() >= 4 => t[t.len() - 4..].to_string(),
+            Some(t) => t.clone(),
+            None => String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pool: SqlitePool,
@@ -1831,6 +1869,55 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
+    }
+
+    // ── Phase G chunk 3 notification_settings ──────────────────────
+
+    /// Read the singleton notification-transport config. Both fields
+    /// are `Option<String>` because either can independently be NULL
+    /// in the schema; callers downstream (the dispatch loop, the
+    /// Settings UI) decide what to do with partial config.
+    ///
+    /// Returns `Ok(None)` if the singleton row is somehow missing
+    /// (shouldn't happen — migration 0014 seeds it — but defended
+    /// against so a corrupted DB doesn't crash-loop the daemon).
+    pub async fn get_telegram_config(&self) -> Result<Option<TelegramConfig>> {
+        let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT telegram_bot_token, telegram_chat_id
+             FROM notification_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(token, chat_id)| TelegramConfig { token, chat_id }))
+    }
+
+    /// Atomically set BOTH halves of the Telegram config. `None` for
+    /// a field clears it (transport disabled if either is None).
+    /// Caller-side validators (the Settings POST handler) reject the
+    /// «partial config» state of (Some(token), None) or vice versa
+    /// before reaching here — but the DB doesn't enforce it because
+    /// «clear» is a legitimate Set(None, None) call.
+    ///
+    /// Writes `updated_at` automatically via `strftime`. Does NOT
+    /// write to `audit_log` — caller is responsible for the audit
+    /// row (with `payload_json` that NEVER includes the token).
+    pub async fn set_telegram_config(
+        &self,
+        token: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE notification_settings
+             SET telegram_bot_token = ?1,
+                 telegram_chat_id   = ?2,
+                 updated_at         = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = 1",
+        )
+        .bind(token)
+        .bind(chat_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Drop ACKED alerts older than `days`. UNACKED alerts are NEVER

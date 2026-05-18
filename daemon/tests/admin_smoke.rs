@@ -2461,6 +2461,255 @@ async fn dispatch_alerts_recovery_auto_acks_open_unreachable() {
 }
 
 #[tokio::test]
+async fn settings_telegram_section_renders_with_disabled_status_by_default() {
+    // Phase G chunk 3 part 1 — fresh DB, Telegram section appears
+    // with «disabled» status + the input form.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        html.contains("Notifications — Telegram bot"),
+        "Telegram section eyebrow must render"
+    );
+    assert!(
+        html.contains("Status:") && html.contains("disabled"),
+        "fresh config must show disabled status"
+    );
+    assert!(
+        html.contains(r#"name="telegram_bot_token""#),
+        "form must include token input"
+    );
+    assert!(
+        html.contains(r#"name="telegram_chat_id""#),
+        "form must include chat_id input"
+    );
+    assert!(
+        html.contains(r#"action="/admin/settings/telegram""#),
+        "form must POST to the correct route"
+    );
+    assert!(
+        html.contains("@BotFather"),
+        "deck copy must point operator at BotFather for bot creation"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_save_roundtrip_masks_token_on_render() {
+    // POST a valid config, GET the page back, assert:
+    //   * status shows «enabled»
+    //   * token rendered as ••••<last4>, NOT verbatim
+    //   * chat_id rendered verbatim (operator wants to see it)
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let body = "telegram_bot_token=1234567890%3AABCDEFghijklmn&telegram_chat_id=987654321";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    // POST-redirect-GET pattern; expect 303 See Other.
+    assert!(
+        resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::OK,
+        "expected redirect or OK after POST, got {}",
+        resp.status()
+    );
+
+    // GET back the settings page.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    assert!(html.contains("enabled"), "status must flip to enabled");
+    // Token VERBATIM must NOT appear — last 4 only.
+    assert!(
+        !html.contains("1234567890:ABCDEFghijklmn"),
+        "verbatim token must NOT appear in rendered HTML — security"
+    );
+    assert!(
+        html.contains("klmn"),
+        "last 4 chars of token must appear (••••klmn rendering)"
+    );
+    // chat_id IS shown verbatim.
+    assert!(
+        html.contains("987654321"),
+        "chat_id must appear in rendered HTML"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_post_rejects_malformed_token() {
+    // Shape gate at the handler: bot token must contain `:` and be
+    // at least ~20 chars.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let body = "telegram_bot_token=tooshort&telegram_chat_id=123";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed token must 400"
+    );
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(
+        text.contains("@BotFather"),
+        "error body must point operator at BotFather"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_post_rejects_garbage_chat_id() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let body =
+        "telegram_bot_token=1234567890%3AABCDEFghijklmn&telegram_chat_id=not%20a%20chat%20id";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "garbage chat_id must 400"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_partial_config_renders_red_warning() {
+    // Phase G chunk 3 part 1 — when only one half is set (token OR
+    // chat_id but not both), the status line MUST surface this as
+    // a red «partial config» banner rather than collapsing into
+    // the bland «disabled» state. Catches the «I pasted only the
+    // token and walked away» mistake.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    // Set only the token; chat_id stays NULL.
+    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), None)
+        .await
+        .unwrap();
+
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("partial config"),
+        "stranded half must surface as 'partial config'"
+    );
+    assert!(
+        html.contains("chat-id missing"),
+        "must name which half is missing"
+    );
+    // Token NOT visible verbatim even in this state.
+    assert!(
+        !html.contains("1234567890:ABCDEFghijklmn"),
+        "verbatim token must NOT leak even in partial-config state"
+    );
+}
+
+#[tokio::test]
+async fn settings_telegram_clear_both_disables_transport() {
+    // Save valid config, then post two empty inputs → status flips
+    // back to «disabled».
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    // Enable.
+    let body = "telegram_bot_token=1234567890%3AABCDEFghijklmn&telegram_chat_id=987654321";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    app.clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+
+    // Clear.
+    let body = "telegram_bot_token=&telegram_chat_id=";
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/settings/telegram")
+        .header("content-type", "application/x-www-form-urlencoded");
+    req = add_same_origin(req);
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert!(resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::OK);
+
+    // GET back, expect disabled.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("disabled"),
+        "clearing both inputs must disable the transport"
+    );
+}
+
+#[tokio::test]
 async fn admin_alerts_renders_banned_self_kind_row() {
     // Phase G chunk 2 — seed a fail2ban banned-self alert row and
     // verify the feed renders it with the critical severity class.

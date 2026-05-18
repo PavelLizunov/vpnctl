@@ -738,6 +738,13 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts/{id}/ack", post(admin::alert_ack))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
+        // Phase G chunk 3 — Telegram bot config POST. Singleton row;
+        // empty inputs = clear/disable. CSRF middleware (Origin check)
+        // runs ahead of this, so a cross-origin form-post can't write.
+        .route(
+            "/admin/settings/telegram",
+            post(admin::settings_telegram),
+        )
         // Phase C-4 — manual snapshot trigger + per-file download.
         // Download is GET (so a normal `<a download>` works); snapshot
         // trigger is POST (it mutates filesystem state + writes an
