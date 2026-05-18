@@ -43,3 +43,32 @@ build-release:
 # Full local CI sweep — run before pushing
 ci: fmt-check clippy test deny
     @echo "✔ all CI gates passed"
+
+# ─── Tools from 2026-05-18 security audit ──────────────────────────
+
+# Secret scanner — catches accidental commits of inventory/*.env or
+# pasted bot tokens. Same tool the CI's `gitleaks` job uses. Run
+# locally before committing if you're paranoid.
+#
+# Requires `gitleaks` binary (Debian/Ubuntu: `sudo apt install gitleaks`,
+# macOS: `brew install gitleaks`).
+scan-secrets:
+    gitleaks detect --source . --config .gitleaks.toml --verbose
+
+# Mutation tester — injects bugs into the protocols crate's
+# share_link/server_inbound paths and checks whether the byte-
+# equality regression tests catch them. Surfaces «tests pass even
+# when impl is inverted» bug class (the db3998c-style mistake).
+#
+# Requires `cargo install --locked cargo-mutants` (~30s).
+mutants-protocols:
+    cargo mutants -p vpnctl-protocols --in-diff origin/main
+
+# Source-based coverage (LLVM). Reports per-region branch coverage
+# across the workspace. Surfaces error-path branches that have no
+# test exercising them — frequent regression source.
+#
+# Requires `cargo install cargo-llvm-cov` (~1 min).
+coverage:
+    cargo llvm-cov --workspace --html
+    @echo "→ HTML report: target/llvm-cov/html/index.html"

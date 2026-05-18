@@ -64,6 +64,25 @@ jobs:
   # AND honours our deny.toml `[advisories].ignore` list. Having both meant
   # double-failing on RUSTSEC-2023-0071 (Marvin Attack on `rsa` via russh).
 
+  # gitleaks — secret-scanner pre-merge gate (2026-05-18 security
+  # audit recommendation #1). Catches accidental commits of
+  # inventory/<IP>.env files, VPNCTLD_ADMIN_PASSWORD pastes in
+  # docs, leaked bot tokens, etc.
+  #
+  # Default ruleset covers Telegram bot tokens, AWS, GitHub, generic
+  # high-entropy strings. Repo-local allowlist in `.gitleaks.toml`
+  # excludes intentional examples (e.g. test fixtures).
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # required for `gitleaks detect` to scan history
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   e2e:
     name: e2e (testcontainers — Docker required)
     runs-on: ubuntu-latest

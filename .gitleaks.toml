@@ -1,0 +1,39 @@
+# gitleaks 8.x config — uses the default ruleset for Telegram tokens,
+# generic high-entropy strings, AWS, GitHub, etc. Repo-specific
+# allowlist below covers intentional examples + spec fixtures.
+
+[extend]
+# Inherit the bundled default ruleset (Telegram, AWS, GitHub, JWT,
+# generic high-entropy, etc).
+useDefault = true
+
+[allowlist]
+description = "vpnctl test fixtures + intentional placeholders"
+
+# Test fixtures use literal `SECRETTOKEN` / `SECRETtoken12abcd` etc
+# as DELIBERATE placeholders. They look high-entropy but are pinned
+# in the test source — there's no real secret to leak.
+regexes = [
+    # Test placeholders for the Telegram token + chat_id
+    '''SECRETTOKEN''',
+    '''SECRETtoken12abcd''',
+    '''1234567890:ABCDEFghijklmn''',     # admin_smoke + alert_sink tests
+    '''123456789''',                     # numeric chat_id placeholder
+    '''987654321''',                     # numeric chat_id placeholder
+    '''hunter2''',                       # canonical xkcd plain pw test
+    # Cargo / Rust crate hashes that look secret-shaped
+    '''checksum = "[a-f0-9]{64}"''',
+]
+
+# Paths that contain ONLY test data — full file exemption is safer
+# than per-line regex chasing.
+paths = [
+    '''Cargo\.lock''',                          # crate checksums
+    '''docs/BURST_REPORT_.*\.md''',             # operator-facing reports — never carry secrets
+    '''.*/migrations/.*\.sql''',                # schema-only files
+    '''target/.*''',                            # build artefacts
+    '''crates/inventory/tests/spec_.*\.rs''',   # test placeholders
+    '''daemon/tests/admin_smoke\.rs''',         # test placeholders
+    '''daemon/src/handlers/auth\.rs''',         # contains hunter2 + argon2 PHC in #[cfg(test)] only
+    '''daemon/src/alert_sink\.rs''',            # contains SECRETTOKEN placeholders in #[cfg(test)] only
+]
