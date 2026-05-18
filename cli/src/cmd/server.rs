@@ -286,16 +286,17 @@ pub(crate) async fn run(
                 (Some(f), false) => f,
                 (None, true) => {
                     println!(
-                        "→ ssh-keyscan -t ed25519 -p {} {} ...",
+                        "→ ssh-keyscan -t ed25519,rsa -p {} -- {} ...",
                         server.ssh_port, server.address
                     );
-                    fetch_fingerprint_via_keyscan(&server.address, server.ssh_port)?
+                    vpnctl_host_fingerprint::fetch_via_keyscan(&server.address, server.ssh_port)
+                        .map_err(|e| anyhow::anyhow!("ssh-keyscan: {e}"))?
                 }
                 _ => anyhow::bail!(
                     "supply either <FINGERPRINT> or --from-keyscan (not both, not neither)"
                 ),
             };
-            if !is_valid_sha256_fingerprint(&fp) {
+            if !vpnctl_host_fingerprint::validate_shape(&fp) {
                 anyhow::bail!(
                     "fingerprint '{fp}' doesn't look like SHA256:<43-char-base64>; expected the \
                      output of `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -` (the 2nd column)"
@@ -325,117 +326,9 @@ pub(crate) async fn run(
     }
 }
 
-/// Lightweight syntactic check for `SHA256:<base64>` — same shape
-/// validation as in the existing inventory `is_valid_fingerprint`
-/// (rejects shells of `SHA256:` with no body, MD5 prefixes, etc).
-/// We deliberately don't decode the base64 — at the CLI layer
-/// shape-equality is enough; the inventory layer applies the same
-/// check at INSERT/UPDATE time as the actual gate.
-fn is_valid_sha256_fingerprint(fp: &str) -> bool {
-    let Some(rest) = fp.strip_prefix("SHA256:") else {
-        return false;
-    };
-    // base64-url + base64 padding chars; allow a trailing `=` since
-    // some emitters keep it. SHA-256 = 32 bytes = 43 base64 chars.
-    if rest.is_empty() || rest.len() > 44 {
-        return false;
-    }
-    rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
-}
-
-/// Run `ssh-keyscan -t ed25519 -p <port> -- <host> | ssh-keygen -lf -`
-/// in two stages via `std::process::Command` and return the SHA256
-/// fingerprint (second whitespace-token of `ssh-keygen -lf -` output).
-/// Errors map to `anyhow::Error` with the failing stage in the message
-/// so the operator can re-run by hand if either tool is unhappy.
-///
-/// **Security: `--` separator before `host` is mandatory.** Without
-/// it, an address starting with `-` (typo, IDN edge case, attacker-
-/// controlled inventory value) gets parsed by ssh-keyscan as a flag.
-/// `-fsomething` reads an attacker-controlled file. Argv is shell-safe
-/// (Command takes a slice, no shell interpolation) but ssh-keyscan's
-/// OWN getopt parser is the attack surface — `--` is the standard
-/// POSIX defense.
-fn fetch_fingerprint_via_keyscan(host: &str, port: u16) -> anyhow::Result<String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    // Stage 1: ssh-keyscan emits the public key on stdout. `--` separator
-    // forces `host` to be treated as positional even if it starts with `-`.
-    let scan = Command::new("ssh-keyscan")
-        .args(["-t", "ed25519", "-p", &port.to_string(), "--", host])
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
-    if !scan.status.success() {
-        anyhow::bail!(
-            "ssh-keyscan exited {:?}; is the host reachable on port {port}?",
-            scan.status.code()
-        );
-    }
-    if scan.stdout.is_empty() {
-        anyhow::bail!("ssh-keyscan returned empty output (host unreachable or no ed25519 key?)");
-    }
-    // Stage 2: pipe into ssh-keygen -lf -.
-    let mut child = Command::new("ssh-keygen")
-        .args(["-lf", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
-    // Take stdin explicitly — `.take()` returning None means we configured
-    // the child wrong (Stdio::piped above was ignored?), and silently
-    // skipping the write would block `wait_with_output` forever waiting
-    // on an EOF nobody sends.
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("ssh-keygen stdin pipe missing (Stdio::piped ignored?)"))?;
-    stdin.write_all(&scan.stdout)?;
-    drop(stdin); // explicit EOF — wait_with_output otherwise stalls
-    let keygen = child
-        .wait_with_output()
-        .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;
-    if !keygen.status.success() {
-        anyhow::bail!("ssh-keygen -lf - exited {:?}", keygen.status.code());
-    }
-    // Output: `256 SHA256:+cuHezsj... root@host (ED25519)` — second
-    // whitespace-token is the fingerprint.
-    let text = String::from_utf8_lossy(&keygen.stdout);
-    text.split_whitespace()
-        .nth(1)
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("ssh-keygen output had no fingerprint token: {text}"))
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accepts_canonical_sha256_fingerprint() {
-        assert!(is_valid_sha256_fingerprint(
-            "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
-        ));
-    }
-
-    #[test]
-    fn rejects_md5_or_missing_prefix() {
-        assert!(!is_valid_sha256_fingerprint(
-            "MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
-        ));
-        assert!(!is_valid_sha256_fingerprint(
-            "+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
-        ));
-        assert!(!is_valid_sha256_fingerprint(""));
-        assert!(!is_valid_sha256_fingerprint("SHA256:"));
-    }
-
-    #[test]
-    fn rejects_oversized_body() {
-        let too_long = format!("SHA256:{}", "A".repeat(50));
-        assert!(!is_valid_sha256_fingerprint(&too_long));
-    }
-}
+// SHA256 shape validation + ssh-keyscan/-keygen fingerprint fetching live
+// in `vpnctl-host-fingerprint`. Three call-sites used to inline near-
+// duplicates of those routines — the wizard's copy was missing the `--`
+// flag-injection defense and the validators had drifted on URL-safe
+// base64 acceptance. The crate is the single source of truth; spec
+// tests for both functions live there.

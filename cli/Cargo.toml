@@ -19,6 +19,7 @@ vpnctl-hosters = { path = "../crates/hosters" }
 vpnctl-inventory = { path = "../crates/inventory" }
 vpnctl-crypto = { path = "../crates/crypto" }
 vpnctl-ssh = { path = "../crates/ssh" }
+vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }

@@ -5973,9 +5973,10 @@ pub(crate) async fn server_set_fingerprint(
             // requests on the small homelab runtime.
             let addr = server.address.clone();
             let port = server.ssh_port;
-            let scan_res =
-                tokio::task::spawn_blocking(move || keyscan_fingerprint_blocking(&addr, port))
-                    .await;
+            let scan_res = tokio::task::spawn_blocking(move || {
+                vpnctl_host_fingerprint::fetch_via_keyscan(&addr, port)
+            })
+            .await;
             match scan_res {
                 Ok(Ok(fp)) => (fp, "ssh-keyscan"),
                 Ok(Err(e)) => {
@@ -6011,7 +6012,7 @@ pub(crate) async fn server_set_fingerprint(
         }
     };
 
-    if !is_valid_sha256_fingerprint(&fp) {
+    if !vpnctl_host_fingerprint::validate_shape(&fp) {
         return (
             StatusCode::BAD_REQUEST,
             error_text(&format!(
@@ -6058,72 +6059,13 @@ pub(crate) async fn server_set_fingerprint(
     .into_response()
 }
 
-/// Same shape validator as `vpnctl server set-fingerprint` (CLI).
-/// `SHA256:` prefix + base64 body, 1..=44 chars, alpha-num + `+/-_=`.
-fn is_valid_sha256_fingerprint(fp: &str) -> bool {
-    let Some(rest) = fp.strip_prefix("SHA256:") else {
-        return false;
-    };
-    if rest.is_empty() || rest.len() > 44 {
-        return false;
-    }
-    rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '='))
-}
-
-/// Spawn `ssh-keyscan + ssh-keygen -lf -` on the daemon host.
-/// Synchronous helper — caller MUST wrap in `tokio::task::spawn_blocking`
-/// to avoid stalling the tokio worker thread on a slow / unreachable host.
-/// Returns the SHA256:<base64> fingerprint or an error suitable for
-/// surfacing to the operator.
-///
-/// **Security: `--` separator before `host` is mandatory.** Mirrors the
-/// CLI-side `fetch_fingerprint_via_keyscan` rationale — without it, an
-/// address starting with `-` is parsed by ssh-keyscan as a flag.
-fn keyscan_fingerprint_blocking(host: &str, port: u16) -> anyhow::Result<String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    // `--` separator forces `host` to be positional. Even though argv
-    // is shell-safe, ssh-keyscan's own getopt parses leading `-`.
-    let scan = Command::new("ssh-keyscan")
-        .args(["-t", "ed25519", "-p", &port.to_string(), "--", host])
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("ssh-keyscan failed to run: {e}"))?;
-    if !scan.status.success() || scan.stdout.is_empty() {
-        anyhow::bail!(
-            "ssh-keyscan exited {:?} or returned empty (host unreachable or no ed25519 key?)",
-            scan.status.code()
-        );
-    }
-    let mut child = Command::new("ssh-keygen")
-        .args(["-lf", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("ssh-keygen failed to spawn: {e}"))?;
-    // `.take()` returning None would mean Stdio::piped was ignored —
-    // silently skipping write would deadlock `wait_with_output` on an
-    // EOF that never arrives.
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("ssh-keygen stdin pipe missing (Stdio::piped ignored?)"))?;
-    stdin.write_all(&scan.stdout)?;
-    drop(stdin); // explicit EOF — wait_with_output otherwise stalls
-    let keygen = child
-        .wait_with_output()
-        .map_err(|e| anyhow::anyhow!("ssh-keygen wait failed: {e}"))?;
-    if !keygen.status.success() {
-        anyhow::bail!("ssh-keygen -lf - exited {:?}", keygen.status.code());
-    }
-    let text = String::from_utf8_lossy(&keygen.stdout);
-    text.split_whitespace()
-        .nth(1)
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("ssh-keygen output had no fingerprint token: {text}"))
-}
+// SHA256 shape validation + ssh-keyscan/-keygen fingerprint fetching
+// live in `vpnctl-host-fingerprint`. The two inline copies that used
+// to sit here had drifted on the `--` flag-injection defense (the
+// wizard's third copy was missing it entirely) and on the validator
+// alphabet (the inventory variant rejected URL-safe base64 the surface
+// validators accepted). Crate is the single source of truth; spec
+// tests live with it.
 
 fn server_detail_protocols_section(
     server: &vpnctl_core::Server,

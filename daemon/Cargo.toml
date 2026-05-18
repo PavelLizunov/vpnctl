@@ -22,6 +22,11 @@ vpnctl-kernels = { path = "../crates/kernels" }
 vpnctl-inventory = { path = "../crates/inventory" }
 # Phase C-3.2: web add-user form needs UUID + tuic-password generators.
 vpnctl-crypto = { path = "../crates/crypto" }
+# Single source of truth for ssh-keyscan + SHA256 fingerprint validation.
+# Replaces three near-duplicate inline implementations (wizard_bootstrap +
+# admin handler + cli set-fingerprint) that had drifted on the `--`
+# flag-injection defense and on the validator alphabet.
+vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
 # Track-3 chunk 1: clash-api client uses the SshTransport trait.
 async-trait = "0.1"
 thiserror = { workspace = true }

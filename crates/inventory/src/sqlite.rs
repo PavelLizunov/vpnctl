@@ -393,7 +393,13 @@ impl SqliteInventory {
         // Defensive validation — a malicious or buggy caller could otherwise
         // store an empty / arbitrary value, after which every future connect
         // silently rejects the real host key with a useless error.
-        if !is_valid_sha256_fingerprint(fp) {
+        //
+        // Shape check lives in `vpnctl-host-fingerprint` so the CLI, web
+        // handler, wizard SSE pipeline, and this final inventory gate all
+        // agree on what "valid" means (until 2026-05-18 they did not —
+        // the inventory variant rejected URL-safe base64 that the surface
+        // validators accepted, producing a confusing late failure).
+        if !vpnctl_host_fingerprint::validate_shape(fp) {
             return Err(SqliteInventoryError::Invalid(format!(
                 "fingerprint must look like 'SHA256:<base64-43>', got {fp:?}"
             )));
@@ -1846,19 +1852,10 @@ fn row_to_sub_access(r: sqlx::sqlite::SqliteRow) -> Result<SubAccessEntry> {
 // Owned `SqliteRow` is what `.map(...)` over `Vec<Row>` gives us — taking by
 // reference here would require a `.collect()` round-trip. Accepting by value
 // is correct.
-/// SSH host fingerprint sanity check — `SHA256:<base64-of-32-bytes>`.
-/// We don't try to decode the base64; just enforce the shape so a typo
-/// or empty string can't pass.
-fn is_valid_sha256_fingerprint(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("SHA256:") else {
-        return false;
-    };
-    // SHA-256 = 32 bytes; padded base64 is 44 chars, unpadded is 43.
-    matches!(rest.len(), 43 | 44)
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
-}
+//
+// The SHA256 fingerprint shape check that used to live here moved to
+// `vpnctl-host-fingerprint::validate_shape` so every surface (CLI / web /
+// wizard / this inventory gate) shares one canonical definition.
 
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {

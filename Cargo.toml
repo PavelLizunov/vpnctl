@@ -8,6 +8,7 @@ members = [
     "crates/kernels",
     "crates/hosters",
     "crates/inventory",
+    "crates/host-fingerprint",
     "cli",
     "daemon",
 ]

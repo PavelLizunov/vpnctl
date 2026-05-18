@@ -4548,6 +4548,7 @@ dependencies = [
  "tokio",
  "vpnctl-core",
  "vpnctl-crypto",
+ "vpnctl-host-fingerprint",
  "vpnctl-hosters",
  "vpnctl-inventory",
  "vpnctl-kernels",
@@ -4577,6 +4578,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vpnctl-host-fingerprint"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "vpnctl-hosters"
 version = "0.1.0"
 dependencies = [
@@ -4596,6 +4604,7 @@ dependencies = [
  "tokio",
  "vpnctl-core",
  "vpnctl-crypto",
+ "vpnctl-host-fingerprint",
 ]
 
 [[package]]
@@ -4663,6 +4672,7 @@ dependencies = [
  "tracing-subscriber",
  "vpnctl-core",
  "vpnctl-crypto",
+ "vpnctl-host-fingerprint",
  "vpnctl-inventory",
  "vpnctl-kernels",
  "vpnctl-protocols",

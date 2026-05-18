@@ -240,9 +240,31 @@ async fn bootstrap_pipeline(
         "fingerprint",
         "fetching host key fingerprint via ssh-keyscan…"
     );
-    let fingerprint = match ssh_keyscan_fingerprint(&plan.address, plan.ssh_port).await {
-        Ok(fp) => fp,
-        Err(e) => fail!("fingerprint", "{e}"),
+    // Wrap the blocking subprocess in spawn_blocking so a slow
+    // ssh-keyscan (~5–10s default `-T 10`) doesn't pin the tokio
+    // worker thread serving this SSE stream. Per the
+    // `vpnctl-host-fingerprint` doc-comment.
+    let addr = plan.address.clone();
+    let port = plan.ssh_port;
+    let fingerprint = match tokio::task::spawn_blocking(move || {
+        vpnctl_host_fingerprint::fetch_via_keyscan(&addr, port)
+    })
+    .await
+    {
+        Ok(Ok(fp)) => fp,
+        Ok(Err(e)) => fail!("fingerprint", "{e}"),
+        Err(join_err) => {
+            // `JoinError` fires on BOTH panic and runtime cancellation
+            // — distinguish them so the SSE operator sees the right
+            // failure cause (a cancelled wizard step is very different
+            // from a panicked subprocess).
+            let cause = if join_err.is_panic() {
+                "panicked"
+            } else {
+                "cancelled"
+            };
+            fail!("fingerprint", "ssh-keyscan task {cause}: {join_err}");
+        }
     };
     send_step!("fingerprint", "pinned {}", fingerprint);
 
@@ -681,101 +703,13 @@ async fn ssh_password_run(
     .map_err(|e| format!("spawn_blocking JoinError: {e}"))?
 }
 
-/// Fetch the host key via `ssh-keyscan` + hash via `ssh-keygen -lf -`,
-/// returning the `SHA256:<base64-43>` fingerprint the inventory's
-/// `update_trusted_fingerprint` will accept.
-///
-/// Prefers ed25519 over rsa (ed25519 is shorter + modern). Falls back
-/// to whatever ssh-keyscan returned if neither is matched.
-async fn ssh_keyscan_fingerprint(host: &str, port: u16) -> std::result::Result<String, String> {
-    let host_owned = host.to_string();
-    let port_s = port.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut scan = Command::new("ssh-keyscan");
-        scan.args(["-T", "10", "-p", &port_s, "-t", "ed25519,rsa", &host_owned])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let scan_out = scan
-            .output()
-            .map_err(|e| format!("spawning ssh-keyscan: {e}"))?;
-        if !scan_out.status.success() || scan_out.stdout.is_empty() {
-            let stderr = String::from_utf8_lossy(&scan_out.stderr);
-            return Err(format!(
-                "ssh-keyscan failed for {host_owned}:{port_s} — {}",
-                stderr.trim()
-            ));
-        }
-        let key_line = pick_keyscan_line(&String::from_utf8_lossy(&scan_out.stdout))
-            .ok_or_else(|| format!("ssh-keyscan returned no host key for {host_owned}:{port_s}"))?;
-
-        let mut keygen = Command::new("ssh-keygen");
-        keygen
-            .args(["-lf", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = keygen
-            .spawn()
-            .map_err(|e| format!("spawning ssh-keygen: {e}"))?;
-        if let Some(mut sin) = child.stdin.take() {
-            use std::io::Write;
-            sin.write_all(key_line.as_bytes())
-                .map_err(|e| format!("piping to ssh-keygen: {e}"))?;
-            drop(sin);
-        }
-        let kg_out = child
-            .wait_with_output()
-            .map_err(|e| format!("ssh-keygen wait: {e}"))?;
-        if !kg_out.status.success() {
-            return Err(format!(
-                "ssh-keygen exit={:?} stderr={}",
-                kg_out.status.code(),
-                String::from_utf8_lossy(&kg_out.stderr).trim()
-            ));
-        }
-        parse_keygen_fingerprint(&String::from_utf8_lossy(&kg_out.stdout)).ok_or_else(|| {
-            format!(
-                "ssh-keygen output didn't contain SHA256: — got {:?}",
-                String::from_utf8_lossy(&kg_out.stdout).trim()
-            )
-        })
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking JoinError: {e}"))?
-}
-
-/// Walk ssh-keyscan output (one "host key-type base64" line per
-/// algorithm). Prefer ed25519; fall back to the first non-comment
-/// line. Lines starting with `#` are comments emitted by ssh-keyscan
-/// in verbose mode — never pick those.
-fn pick_keyscan_line(stdout: &str) -> Option<String> {
-    let mut fallback: Option<String> = None;
-    for line in stdout.lines() {
-        let l = line.trim();
-        if l.is_empty() || l.starts_with('#') {
-            continue;
-        }
-        if l.contains("ssh-ed25519") {
-            return Some(l.to_string());
-        }
-        if fallback.is_none() {
-            fallback = Some(l.to_string());
-        }
-    }
-    fallback
-}
-
-/// Pull `SHA256:<base64>` out of an `ssh-keygen -lf -` line. Format:
-///   `256 SHA256:abc...= comment (ED25519)`
-fn parse_keygen_fingerprint(stdout: &str) -> Option<String> {
-    for token in stdout.split_whitespace() {
-        if token.starts_with("SHA256:") {
-            return Some(token.to_string());
-        }
-    }
-    None
-}
+// ssh-keyscan/-keygen fingerprint fetching + ed25519 line picking +
+// SHA256-token extraction live in `vpnctl-host-fingerprint`. The
+// inline implementation that used to sit here was missing the `--`
+// flag-injection defense that landed in the CLI + admin handler
+// copies during review on commit `9819538` — the review-agent only
+// sees the diff, so this third copy slipped through untouched.
+// Crate is the single source of truth.
 
 /// Single-quote a string for inclusion in a POSIX shell command
 /// (used for the pubkey when we append it to authorized_keys). Wraps
@@ -840,46 +774,10 @@ mod tests {
         assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
     }
 
-    #[test]
-    fn parse_keygen_fingerprint_extracts_sha256_token() {
-        let out = "256 SHA256:k3UkbVfprvXJ9F8x+iZ7eHmGvY/N4MAR2EkjGHy1IS0 vpnctld@host (ED25519)";
-        let fp = parse_keygen_fingerprint(out).unwrap();
-        assert_eq!(fp, "SHA256:k3UkbVfprvXJ9F8x+iZ7eHmGvY/N4MAR2EkjGHy1IS0");
-    }
-
-    #[test]
-    fn parse_keygen_fingerprint_returns_none_on_md5_only_output() {
-        // ssh-keygen with -E md5 emits MD5: form. We only accept SHA256.
-        let out = "256 MD5:01:23:45:67 comment (ED25519)";
-        assert!(parse_keygen_fingerprint(out).is_none());
-    }
-
-    #[test]
-    fn pick_keyscan_line_prefers_ed25519_over_rsa() {
-        let scan = "\
-# example.com:22 SSH-2.0-OpenSSH_9.2\n\
-example.com ssh-rsa AAAARSAKEY...\n\
-example.com ssh-ed25519 AAAAED25519KEY...\n\
-";
-        let picked = pick_keyscan_line(scan).unwrap();
-        assert!(picked.contains("ssh-ed25519"));
-    }
-
-    #[test]
-    fn pick_keyscan_line_falls_back_to_first_non_comment() {
-        let scan = "\
-# 198.51.100.1:22 SSH-2.0-OpenSSH_8.4\n\
-198.51.100.1 ssh-rsa AAAARSAKEY...\n\
-";
-        let picked = pick_keyscan_line(scan).unwrap();
-        assert!(picked.starts_with("198.51.100.1 ssh-rsa"));
-    }
-
-    #[test]
-    fn pick_keyscan_line_skips_comment_only_output() {
-        let scan = "# 198.51.100.1:22 SSH-2.0-OpenSSH_8.4\n";
-        assert!(pick_keyscan_line(scan).is_none());
-    }
+    // ssh-keyscan + parse_keygen_fingerprint + pick_keyscan_line tests
+    // moved with the implementations to
+    // `crates/host-fingerprint/tests/spec_host_fingerprint.rs` — that's
+    // now the single source of truth for both behaviours.
 
     #[test]
     fn derive_server_id_keeps_ipv4_unchanged() {
