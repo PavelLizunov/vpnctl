@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use maud::{DOCTYPE, Markup, html};
 
 use crate::AppState;
-use crate::http_util::decode_form_value;
+use crate::http_util::{form_field, path_segment_encode};
 use vpnctl_core::humanize::format_size_bytes;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
@@ -1089,24 +1089,11 @@ fn mask_secret(s: &str) -> String {
     format!("{head}…{tail} ({n} chars)")
 }
 
-/// Percent-encode a string for use as a single URL path segment. Keeps
-/// RFC 3986 unreserved chars (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`)
-/// verbatim; everything else is `%XX`-escaped. Avoids pulling
-/// percent-encoding as a direct dep — sub_token / user_id / server_id
-/// rarely need this in practice but it costs ~10 lines to be safe
-/// against operator-typed `?`, `#`, `/`, spaces.
-fn path_segment_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
+// `path_segment_encode` moved to `crate::http_util::path_segment_encode`
+// (2026-05-18, post-host-fingerprint consolidation pass) — same
+// implementation was byte-identical in `daemon/src/wizard_bootstrap.rs`
+// (the wizard's doc-comment explicitly admitted the duplication).
+// Both surfaces now route through the shared helper.
 
 /// Per-user row in the users list. Keeps the editorial cadence — one
 /// `<article>` per row with id / uuid prefix / sub-token preview / grant
@@ -3231,15 +3218,11 @@ pub(crate) async fn user_set_traffic_limit(
 
     // Parse form. Two fields, both optional in the wire format —
     // missing limit_gib = clear, missing threshold = use default.
-    let limit_gib: f64 = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("limit_gib="))
-        .and_then(|s| decode_form_value(s).parse().ok())
+    let limit_gib: f64 = form_field(&body, "limit_gib")
+        .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
-    let threshold_pct: u8 = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("threshold_pct="))
-        .and_then(|s| decode_form_value(s).parse().ok())
+    let threshold_pct: u8 = form_field(&body, "threshold_pct")
+        .and_then(|s| s.parse().ok())
         .map(|v: u32| v.clamp(1, 100) as u8)
         .unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
 
@@ -3575,13 +3558,15 @@ pub(crate) async fn server_deploy(
 /// DIFFERENT flow (it ssh-pushes our key and installs the kernel from
 /// scratch — only useful for fresh nodes).
 pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String) -> Response {
-    // Tiny form parser — same shape as the other admin POST handlers.
-    let id_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("id="))
-        .unwrap_or("")
-        .trim();
-    let id = decode_form_value(id_raw);
+    // Tiny form parser via the shared `form_field` helper. Note:
+    // `form_field` decodes BEFORE trim (whereas the legacy inline
+    // pattern trimmed BEFORE decode); strictly stricter — `%20`-
+    // encoded whitespace at the edges is now normalised the same as
+    // literal whitespace, so a paste like `"  vps-de1  "` and
+    // `"%20vps-de1%20"` both produce `"vps-de1"`.
+    let id: String = form_field(&body, "id")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     if !valid_user_id(&id) {
         // Reuse user-id validator — same allowed alphabet (alphanumerics,
         // . _ -). Length cap 64 is reasonable for server ids too.
@@ -3594,12 +3579,9 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
             .into_response();
     }
 
-    let address_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("address="))
-        .unwrap_or("")
-        .trim();
-    let address = decode_form_value(address_raw);
+    let address: String = form_field(&body, "address")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     if address.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -3618,10 +3600,8 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
             .into_response();
     }
 
-    let ssh_port: u16 = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("ssh_port="))
-        .and_then(|s| decode_form_value(s).parse().ok())
+    let ssh_port: u16 = form_field(&body, "ssh_port")
+        .and_then(|s| s.parse().ok())
         .unwrap_or(22);
 
     // Default kernel = sing-box; protocols = ALL it supports. This
@@ -3846,12 +3826,14 @@ fn valid_user_id(id: &str) -> bool {
 /// admin router (Origin must match Host). Audit row written on
 /// success only.
 pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> Response {
-    let id_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("id="))
-        .unwrap_or("")
-        .trim();
-    let id_decoded = decode_form_value(id_raw);
+    // `form_field` already routes through `decode_form_value`, so this
+    // gives us the decoded value directly — no need for the prior
+    // trim-then-decode dance. Trim normalises both literal and
+    // `%20`-encoded leading/trailing whitespace (strictly safer than
+    // the legacy pattern's trim-before-decode).
+    let id_decoded: String = form_field(&body, "id")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
     if !valid_user_id(&id_decoded) {
         return (
@@ -4126,11 +4108,7 @@ pub(crate) async fn user_delete(
     Path(user_id_str): Path<String>,
     body: String,
 ) -> Response {
-    let confirm_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("confirm="))
-        .unwrap_or("");
-    let confirm = decode_form_value(confirm_raw);
+    let confirm = form_field(&body, "confirm").unwrap_or_default();
     if confirm != user_id_str {
         return (
             StatusCode::BAD_REQUEST,
@@ -4972,17 +4950,12 @@ fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     None
 }
 
-/// Parse a single named field out of an `application/x-www-form-urlencoded`
-/// body. Returns the URL-decoded value (`+` → space, `%XX` → byte).
-/// Returns `None` if the field isn't present. Same minimal-parser
-/// pattern as `user_create` — no need for a full form-decoder when the
-/// wizard step has exactly two fields.
-fn form_field(body: &str, name: &str) -> Option<String> {
-    let prefix = format!("{name}=");
-    body.split('&')
-        .find_map(|kv| kv.strip_prefix(&prefix))
-        .map(decode_form_value)
-}
+// `form_field(body, name) -> Option<String>` moved to
+// `crate::http_util::form_field` (2026-05-18) — same shape, now the
+// single source of truth. The wizard's local copy was identical;
+// `user_create` / `server_quick_add` / `set_traffic_limit` and 7
+// other handlers used a different inline pattern (`unwrap_or("")` +
+// `decode_form_value`) that's now `form_field(...).unwrap_or_default()`.
 
 /// `GET /admin/servers/new` — render the wizard's step-1 form.
 ///
@@ -5931,16 +5904,8 @@ pub(crate) async fn server_set_fingerprint(
 
     // Same `&`-split + decode_form_value pattern as user_create /
     // server_quick_add — doesn't pull a form-extractor feature.
-    let mode_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("mode="))
-        .unwrap_or("");
-    let mode = decode_form_value(mode_raw);
-    let fingerprint_raw = body
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("fingerprint="))
-        .unwrap_or("");
-    let fingerprint_in = decode_form_value(fingerprint_raw);
+    let mode = form_field(&body, "mode").unwrap_or_default();
+    let fingerprint_in = form_field(&body, "fingerprint").unwrap_or_default();
 
     let (fp, source) = match mode.as_str() {
         "keyscan" => {

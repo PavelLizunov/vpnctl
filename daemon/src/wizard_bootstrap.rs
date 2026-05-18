@@ -93,6 +93,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::http_util::path_segment_encode;
 use crate::ssh_subprocess::SubprocessSshTransport;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
 use vpnctl_inventory::SqliteInventory;
@@ -732,25 +733,11 @@ fn shell_single_quote(s: &str) -> String {
     out
 }
 
-/// Same path-segment encoder as `daemon/src/handlers/admin.rs` — keeps
-/// the wizard's success-redirect URL byte-identical to the URL the
-/// handlers themselves emit (so an operator clicking "back to
-/// servers" lands on the same page they'd have arrived at via the
-/// servers list). Duplicated rather than `pub`-exposed because
-/// admin.rs's copy is `pub(crate)` and the handler module isn't
-/// re-exported.
-fn path_segment_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
+// `path_segment_encode` moved to `crate::http_util::path_segment_encode`
+// (2026-05-18). The previous «duplicated rather than `pub`-exposed
+// because admin.rs's copy is `pub(crate)`» justification is no
+// longer true — the shared copy in `http_util` is `pub` and the
+// module is `pub mod http_util;` in `lib.rs`.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -796,17 +783,9 @@ mod tests {
         assert_eq!(derive_server_id("foo bar; rm -rf"), "foobarrm-rf");
     }
 
-    #[test]
-    fn path_segment_encode_passes_alphanumerics_through() {
-        assert_eq!(path_segment_encode("vps-de1"), "vps-de1");
-        assert_eq!(path_segment_encode("198.51.100.42"), "198.51.100.42");
-    }
-
-    #[test]
-    fn path_segment_encode_percent_escapes_unsafe_bytes() {
-        // Colon, slash and space all get %-encoded.
-        assert_eq!(path_segment_encode("a:b/c d"), "a%3Ab%2Fc%20d");
-    }
+    // path_segment_encode tests moved with the implementation to
+    // `daemon/src/http_util.rs::path_segment_encode_tests` — that's
+    // now the single source of truth.
 
     /// `BootstrapPlan` is the contract between handler and engine —
     /// the test confirms we can build one without any axum types in
