@@ -46,6 +46,10 @@ For Pavel's wake-up. Skip to the **TL;DR** if you want the punch line first.
 | `9819538` | fix(burst): apply 3-agent review findings — 2 critical + 5 important |
 | `ef2eb6f` | fix(inventory): split index improvement into 0012 — sqlx checksum |
 | `5841628` | fix(migrations): restore 0011 byte-for-byte (sqlx checksum) |
+| `cf79184` | docs(burst): append fix-trail + sqlx-migration takeaway |
+| `486dcd7` | docs(claude.md): review-agent must grep codebase for new-fn duplicates |
+| `fdba9e0` | refactor(daemon): extract decode_form_value to http_util module |
+| `ec275c5` | refactor: extract vpnctl-host-fingerprint crate — single source of truth |
 
 ## Fix trail after the review
 
@@ -86,6 +90,85 @@ that DROPs + recreates. Daemon up + healthy by 00:08 UTC.
 Methodology takeaway pinned in `5841628` commit message: **never
 edit an applied sqlx migration in place** — always add a follow-up
 migration, even for internal index reshuffles.
+
+## Post-burst cleanup (morning of 2026-05-18)
+
+Pavel asked «нашёл что-то нелогичное или излишнее в кодовой базе?».
+Honest audit produced four findings + a methodology blind spot. Three
+fixes shipped, one logged for next session, plus the prompt-template
+update.
+
+**Methodology blind spot — review-agent only sees the diff.** During
+the overnight burst I introduced `cli/src/cmd/server.rs::fetch_
+fingerprint_via_keyscan` and `daemon/src/handlers/admin.rs::keyscan_
+fingerprint_blocking` in commit `2fda5c6`. Both were near-duplicates
+of `daemon/src/wizard_bootstrap.rs::ssh_keyscan_fingerprint` shipped
+months earlier in Phase E (`4477199`). The review-agent flagged real
+bugs in the two NEW copies (`--` flag-injection defense, spawn_
+blocking wrap) and I fixed them in `9819538` — but the wizard's
+copy stayed broken because it was outside the diff. Same blind spot
+caught a triplicated `is_valid_sha256_fingerprint` where the three
+copies had drifted on the accepted base64 alphabet (URL-safe `_-`
+allowed by some, rejected by others) — meaning a fingerprint
+accepted by the web validator could be rejected by the inventory's
+INSERT-time gate, producing a confusing late failure.
+
+Both consolidated into the new `vpnctl-host-fingerprint` crate
+(commit `ec275c5`, +76 / −339 net LOC). The crate exports
+`validate_shape`, `fetch_via_keyscan`, `build_keyscan_args` (pub
+to pin the `--` invariant in tests), and three Display-implementing
+error variants. 26 spec tests including 3 that pin
+flag-injection / `-t ed25519,rsa` / `-T 10` invariants. Review-
+agent on this commit returned 3 minors — all fixed in-band:
+positional algo-token match (substring match would mis-pin a
+fingerprint on a DNS-legal hostname containing `ssh-ed25519`);
+the argv-test extraction itself; `JoinError::is_panic()` to
+distinguish panic from cancellation in the wizard's error report.
+
+CLAUDE.md `review-agent` prompt template now includes a **new
+category #4 DUPLICATION across codebase** (`486dcd7`) directing
+the agent to grep the whole repo for similar implementations of
+any new ≥20-LOC function. Test-pinned by example so the keyscan
+triplication couldn't slip past a future review.
+
+Background-agent parallelism: while I built the host-fingerprint
+crate, a second agent extracted `decode_form_value` from
+`admin.rs` to a new `daemon/src/http_util.rs` module (`fdba9e0`).
+Pure move + 6 spec tests relocated. Set up so future surfaces
+(CLI `vpnctl post`, future `/api/v1/*` form endpoint) don't
+reinvent the function with the same Latin-1 bug the prior version
+had before `aef1c6b`. Concurrent cargo invocations briefly
+corrupted `target/debug/` and one Cargo.lock write — both
+recovered cleanly (cargo regenerates incrementals; git checkout
+restored the lock).
+
+**Architectural audit** — 3 parallel review-agents on the burst
+diff found no overengineering severity > cosmetic. Net architecture
+verdict from the wider pass: **the system is well-fit for the
+solo-operator scope.** Specific non-findings worth recording:
+trait abstractions all have ≥1 real impl, no async wrappers
+around sync code, no Repository pattern bloat, schema columns
+all live, generic parameters all multiply instantiated, background
+tasks unified in one `app::build` instead of scattered. Three
+cosmetic smells logged below.
+
+**Follow-ups (not blocking, deferred):**
+
+  * `format_size_bytes(u64) -> String` is byte-identical at
+    `daemon/src/handlers/admin.rs:3067` and `cli/src/cmd/backup.rs:179`
+    — with a comment at the CLI site explicitly admitting the
+    duplication. Should move to a shared `vpnctl-fmt` mini-crate
+    next time we touch either site.
+  * `crates/hosters/` (67 LOC, 3 hardcoded impls) is mostly data,
+    not behaviour — could fold into `crates/core` or inline into the
+    wizard. Pure organisational cleanup, no behaviour change.
+  * `daemon/src/handlers/admin.rs` is 6 361 LOC in one file (now
+    closer to 6 260 after this morning's extractions). Mechanical
+    split into `admin/{dashboard,users,servers,wizard,audit,
+    alerts,monitoring,backup,settings}.rs` would be a low-risk
+    1-2 hour move-only refactor with no behaviour change — useful
+    once we hit 7K LOC or the next time a feature touches >3
+    section.
 
 ## Methodology run
 
