@@ -143,6 +143,26 @@ contradicts a confirmed answer above.
 3. **Локальные gates**: `just ci` (fmt-check + clippy -D warnings + test
    + deny). Без зелёного — коммит не делать.
 
+   **Особое внимание `cargo fmt --check`** — самый частый CI-killer
+   в текущей сессии. Сценарии, которые НЕ выглядят как «надо
+   проверить fmt», но всё равно требуют его:
+
+   * **Тесты от test-writer-agent** — агент пишет код «как удобно»
+     (длинные строки, custom multi-line layout); rustfmt их обычно
+     перепаковывает. Caught 2026-05-18: spec_admin_alerts.rs
+     слетел в CI на cbb4d41.
+   * **Mass-replace через Python/sed скрипт** — мой собственный
+     `error_helper_migrate.py` оставил indent drift, который
+     rustfmt бы переписал. Если только cargo build + clippy
+     зелёные — этого мало; `cargo fmt --check` тоже обязателен.
+   * **Любой commit с ≥2 файлами правок** — увеличивает шанс что
+     rustfmt захочет переупаковать какой-то блок.
+
+   Дешевле всего: запускать `cargo fmt --all` (НЕ только `--check`)
+   ДО прогона тестов — fmt всё равно нужен, и если что-то меняется
+   локально, лучше сразу включить в тот же коммит, а не получить
+   отдельный «fmt-only» hotfix.
+
 ### После push
 
 4. `gh run watch <id> --exit-status` — блокируюсь до конца CI.
