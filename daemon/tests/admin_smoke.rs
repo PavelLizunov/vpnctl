@@ -976,6 +976,28 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
         "expected share-links section, got snippet: {}",
         &html[..html.len().min(800)]
     );
+
+    // Regression for the 2026-05-19 QR-jump bug Pavel screenshotted:
+    // the inline <style> that forces all QR SVGs to a uniform 220×220
+    // display size MUST be present AND its selector must NOT be
+    // HTML-escaped. Pre-fix the selector was `.vpnctl-qr-frame > svg`
+    // and Maud escaped `>` to `&gt;` → invalid selector → CSS never
+    // applied → QR cards stayed at native SVG dimensions (short URL
+    // → 225 px, long wireguard:// → 300+ px, visible jumps).
+    assert!(
+        html.contains("vpnctl-qr-frame"),
+        "QR frame wrapper class must be present so the inline style can target it"
+    );
+    assert!(
+        html.contains(".vpnctl-qr-frame svg") || html.contains(".vpnctl-qr-frame > svg"),
+        "inline CSS targeting the QR's SVG child must be present"
+    );
+    assert!(
+        !html.contains(".vpnctl-qr-frame &gt; svg"),
+        "Maud escaped `>` in the QR CSS selector — selector is invalid and \
+         the size-normalisation CSS will silently fail. Use a descendant \
+         selector (no `>`) or wrap the CSS string in PreEscaped."
+    );
 }
 
 /// User ids containing URL-special chars (`?`, `#`, `/`, space, `&`)
@@ -2946,6 +2968,70 @@ async fn server_push_deploy_key_rejects_empty_password_without_reference_key() {
 // The section is now info-only, explaining the operator-facing
 // contract for the operator + sketching the user-facing CLI step
 // the user runs on their device.
+
+/// Pavel 2026-05-19: «не очень понимаю логику взаимодействия с
+/// server, если я включаю trojan, мне нужно жать deploy или он
+/// сразу при клики включается, по поводу kernel тот же вопрос».
+/// Both the Kernels and the Enabled-protocols sections MUST carry
+/// a loud (accent-bordered) banner explaining that toggles touch
+/// inventory only and a subsequent click of «deploy →» is needed
+/// to push the change to the live node. Anchor href to the deploy
+/// button so it works as a scroll-to-top link.
+#[tokio::test]
+async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("dx".into()),
+            address: "203.0.113.30".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/dx")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    // Deploy button has an anchor id so the banner-links can target it.
+    assert!(
+        html.contains("id=\"deploy-button\""),
+        "Deploy button container must have id=\"deploy-button\""
+    );
+    // The banner phrase appears TWICE — once in Kernels, once in
+    // Enabled protocols (deliberately duplicated; operators jump
+    // straight to whichever section they're touching).
+    let banner_marker = "toggle here = inventory only";
+    let occurrences = html.matches(banner_marker).count();
+    assert_eq!(
+        occurrences, 2,
+        "expected the «toggle = inventory only» banner in BOTH Kernels and Protocols sections; \
+         got {occurrences}"
+    );
+    // Each banner links back to the deploy button (#deploy-button
+    // anchor) so a one-click scroll takes the operator to the
+    // button without keyboard navigation.
+    assert!(
+        html.matches("href=\"#deploy-button\"").count() >= 2,
+        "each banner must include a link to #deploy-button so click → scroll-to-top works"
+    );
+}
 
 #[tokio::test]
 async fn server_detail_omits_wgturn_section_for_non_wgturn_kernels() {

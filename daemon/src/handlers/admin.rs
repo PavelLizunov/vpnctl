@@ -1498,16 +1498,27 @@ fn qr_svg(url: &str) -> Markup {
                  border: 1px solid var(--rule); width: {card_px}px; height: {card_px}px; \
                  box-sizing: border-box;"
             );
-            // Scoped <style> — selector targets the inner frame's
-            // direct SVG child. `!important` overcomes the SVG's own
-            // width/height attrs which some browsers honour over
-            // CSS. Inline style block sits inside the wrapper so it
-            // ships only when a QR is rendered (no penalty to other
-            // pages).
+            // Scoped <style> — targets the QR frame's SVG child.
+            // `!important` overcomes the SVG's own intrinsic
+            // width/height attrs which some browsers honour over CSS.
+            //
+            // The selector is `.vpnctl-qr-frame svg` (descendant, no
+            // child combinator) because Maud HTML-escapes text inside
+            // `style { "..." }` — a literal `>` would become `&gt;` and
+            // the selector would silently match nothing. (Caught
+            // 2026-05-19: previous version used `> svg` and the CSS
+            // never applied → QR cards stayed at native SVG sizes →
+            // visible-jump bug Pavel screenshotted.) Wrapping the CSS
+            // string in `PreEscaped` would also work but the descendant
+            // selector is semantically equivalent (frame has exactly
+            // one SVG child) and harder to break.
+            //
+            // Inline style block sits inside the wrapper so it ships
+            // only when a QR is rendered (no penalty to other pages).
             html! {
                 div style=(wrapper_style) {
                     style {
-                        ".vpnctl-qr-frame > svg { \
+                        ".vpnctl-qr-frame svg { \
                           width: 100% !important; \
                           height: 100% !important; \
                           display: block; \
@@ -6259,7 +6270,7 @@ pub(crate) async fn server_detail(
         // untouched; already-installed kernels skip apt-get; config
         // render is deterministic so a redeploy with no changes is a
         // no-op systemctl restart.
-        div style="margin: 12px 0 18px;" {
+        div id="deploy-button" style="margin: 12px 0 18px;" {
             form method="post"
                  action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                  style="display: inline;" {
@@ -6498,12 +6509,28 @@ fn server_detail_kernels_section(
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow { "Kernels" }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
             "Daemons running on this node. One physical VPS can host multiple "
-            "(sing-box on 443/TCP + amneziawg on 51820/UDP cohabit cleanly). "
-            "Each kernel installs/restarts independently; "
-            span.ed-mono { "vpnctl deploy " (server.id.0) }
-            " loops through every enabled kernel."
+            "(sing-box on 443/TCP + amneziawg on 51820/UDP cohabit cleanly)."
+        }
+        // Loud deploy-required notice (Pavel 2026-05-19:
+        // «не очень понимаю логику взаимодействия с server, если я
+        // включаю trojan, мне нужно жать deploy или он сразу при клики
+        // включается»). The toggle ONLY mutates inventory; the live
+        // node sees the change after `deploy →` is clicked above.
+        // Accent border + ⚠ glyph make this hard to miss vs the
+        // pre-2026-05-19 mute-italic «takes effect on next deploy»
+        // tooltip that Pavel didn't read.
+        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
+            b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
+                "⚠ toggle here = inventory only"
+            }
+            " — the live node sees the change only after you click "
+            a href="#deploy-button"
+              style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
+                span.ed-mono { "deploy →" }
+            }
+            " at the top of this page. We never SSH-push a config without an explicit operator click (no surprise redeploys)."
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for kid in &all_kernels {
@@ -6933,10 +6960,27 @@ fn server_detail_protocols_section(
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow { "Enabled protocols" }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "Check what runs on this node. Toggle takes effect on the next "
-            span.ed-mono { "vpnctl deploy " (server.id.0) }
-            " — inventory mutation doesn't push a config by itself (intentional: no surprise redeploys)."
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
+            "Check what runs on this node. Protocols are wire formats; their kernels (one or more) are picked from the section above."
+        }
+        // Same deploy-required notice as the Kernels section above —
+        // duplicated deliberately so an operator who scrolls straight
+        // to «Enabled protocols» (the more frequently-touched section)
+        // doesn't miss it.
+        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
+            b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
+                "⚠ toggle here = inventory only"
+            }
+            " — clicking "
+            span.ed-mono { "enable" }
+            " / "
+            span.ed-mono { "disable" }
+            " only writes to vpnctl's database. The actual sing-box config on the node is rewritten when you click "
+            a href="#deploy-button"
+              style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
+                span.ed-mono { "deploy →" }
+            }
+            " at the top. So: toggle → click deploy → wait for SSE log to finish → live."
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for pid in &all_protocols {
