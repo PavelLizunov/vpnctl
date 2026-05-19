@@ -335,29 +335,16 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
         // migration `0016_grants_per_server_uuid.sql`). The user's
         // global `uuid` is their IDENTITY; the server-specific
         // `grants.client_uuid` is the AUTH secret the server's
-        // sing-box expects in Reality handshakes from this user. For
-        // every existing grant the two values match (backfilled at
-        // migration time), so this branch is byte-identical to the
-        // pre-Phase-1 rendering until a Phase 2 import sets distinct
-        // per-server uuids.
-        //
-        // On the unlikely-but-possible race where the grant was
-        // revoked between `servers_for_user` above and this lookup,
-        // we keep the user's global uuid — `client_config` will then
-        // render a link the server doesn't recognise, which a
-        // subsequent /sub fetch (after the grant is re-added or the
-        // server is dropped from servers_for_user) corrects.
-        let per_server_user = match state
+        // sing-box expects in Reality handshakes from this user.
+        // `user_with_per_server_uuid` returns the user unchanged when
+        // no override is set, so this branch is byte-identical to
+        // the pre-Phase-1 rendering until a Phase 2 import sets
+        // distinct per-server uuids.
+        let per_server_user = state
             .inv
-            .client_uuid_for(&user.id, &server.id)
+            .user_with_per_server_uuid(&user, &server.id)
             .await
-            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
-        {
-            Some(client_uuid) if client_uuid != user.uuid => {
-                user.with_per_server_uuid(&client_uuid)
-            }
-            _ => user.clone(),
-        };
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 
         for pid in &server.enabled_protocols {
             let Some(proto) = state.registry.protocol(pid) else {

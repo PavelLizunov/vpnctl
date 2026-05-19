@@ -862,14 +862,26 @@ impl SqliteInventory {
             )));
         }
 
-        // Snapshot the previous value for the audit payload. NULL
-        // (never overridden) is represented as serde_json::Null so
-        // a later replay knows the override is fresh, not a no-op.
+        // Transaction wraps the SELECT-then-UPDATE so two concurrent
+        // callers can't interleave (read old=A, read old=A, write B,
+        // write C → audit log loses B as the «intermediate» state).
+        // Phase 2's import script is single-threaded so the race
+        // window is empty in the primary use-case; the transaction
+        // exists for future callers + defence in depth. SQLite's
+        // single-writer model already serialises the inner write,
+        // so the cost here is just one extra BEGIN/COMMIT round-trip.
+        //
+        // Audit row is emitted INSIDE the same transaction so an
+        // «I changed this» row never survives a write that didn't
+        // commit (e.g. FK violation surfaced too late). On UPDATE
+        // returning 0 rows we roll back via early-return + tx drop.
+        let mut tx = self.pool.begin().await?;
+
         let old_uuid: Option<String> =
             sqlx::query("SELECT client_uuid FROM grants WHERE user_id = ?1 AND server_id = ?2")
                 .bind(&user.0)
                 .bind(&server.0)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .and_then(|row| {
                     row.try_get::<Option<String>, _>("client_uuid")
@@ -884,31 +896,76 @@ impl SqliteInventory {
         .bind(&user.0)
         .bind(&server.0)
         .bind(client_uuid)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
+            // tx drops without commit → SELECT side-effect is rolled
+            // back (snapshot read had no side effect anyway, but the
+            // shape stays «atomic from caller's perspective»).
             return Err(SqliteInventoryError::Invalid(format!(
                 "no grant for user={} server={}; cannot set client_uuid",
                 user.0, server.0
             )));
         }
 
-        // Audit AFTER the successful UPDATE so a failure (e.g. FK
-        // violation that surfaced too late) doesn't leave a misleading
-        // «I changed this» row. Target = user id so the entry sorts
-        // alongside other per-user mutations on /admin/audit?target=…
-        self.audit(
-            "admin",
-            "grant.set_client_uuid",
-            Some(&user.0),
-            Some(&serde_json::json!({
-                "server_id": server.0,
-                "old_client_uuid": old_uuid,
-                "new_client_uuid": client_uuid,
-            })),
+        // Audit row inside the same transaction. Note: the payload
+        // logs both old + new client_uuid in plaintext. The VLESS
+        // client_uuid IS the Reality auth secret on the corresponding
+        // server, so an admin-audit reader sees that secret. This is
+        // acceptable for the LAN-only single-operator deployment
+        // (admin gate + actor=admin everywhere), but if vpnctld ever
+        // gets multi-tenant or externally-exposed audit, the payload
+        // should switch to a short fingerprint (e.g. first 8 chars +
+        // sha256 suffix) and the full UUID move to a separate
+        // auth-gated detail endpoint.
+        let audit_payload = serde_json::json!({
+            "server_id": server.0,
+            "old_client_uuid": old_uuid,
+            "new_client_uuid": client_uuid,
+        });
+        let payload_str = serde_json::to_string(&audit_payload)?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
         )
+        .bind("admin")
+        .bind("grant.set_client_uuid")
+        .bind(&user.0)
+        .bind(&payload_str)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
         Ok(())
+    }
+
+    /// Return a `User` clone with `uuid` swapped to the per-server
+    /// VLESS uuid override stored in `grants.client_uuid`. When no
+    /// override is set (NULL → COALESCE returns `users.uuid`) the
+    /// returned User has the same uuid as the input — the helper is
+    /// safe to call unconditionally at render time.
+    ///
+    /// Use this at every share-link / `client_config` rendering
+    /// callsite that has both the `User` (e.g. from `find_user_by_sub_token`)
+    /// AND a target `ServerId`. Avoids the three-way clone-and-swap
+    /// duplication between `cli/cmd/sub.rs` and `daemon/handlers/sub.rs`
+    /// (admin uses the peers-list path, which already has the
+    /// override applied by `users_for_server`'s COALESCE — that
+    /// callsite keeps its own helper).
+    ///
+    /// Returns the original user clone (uuid unchanged) when no grant
+    /// exists for the pair — same fallback as the inline pattern
+    /// being replaced. This is the safe choice: a /sub renderer that
+    /// hit an inconsistent state (servers_for_user returned a server
+    /// the user got revoked from between calls) still produces a
+    /// link rather than crashing the whole response.
+    pub async fn user_with_per_server_uuid(&self, user: &User, server: &ServerId) -> Result<User> {
+        match self.client_uuid_for(&user.id, server).await? {
+            Some(client_uuid) if client_uuid != user.uuid => {
+                Ok(user.with_per_server_uuid(&client_uuid))
+            }
+            _ => Ok(user.clone()),
+        }
     }
 
     pub async fn servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {

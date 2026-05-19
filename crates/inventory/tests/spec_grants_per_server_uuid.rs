@@ -527,7 +527,117 @@ async fn remove_user_cascades_to_grant_and_client_uuid() {
     );
 }
 
-// Rule 10 — `User::with_per_server_uuid` (the shared helper extracted
+// Rule 10 — fresh grant rows post-migration have NULL `client_uuid`
+// in the raw column (NOT a COALESCE'd value masking a missing
+// backfill). The runtime correctness in earlier tests depends on
+// COALESCE picking up users.uuid when client_uuid is NULL — those
+// tests would still pass if the column was somehow populated with
+// the user's uuid by something OTHER than the migration backfill
+// (e.g. a future trigger or an over-eager `grant()` change). This
+// test reads the raw column via direct sqlx, so an inverted impl
+// (column always written) would be caught here.
+#[tokio::test]
+async fn fresh_grant_starts_with_null_client_uuid() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    inv.add_server(&server("vps-x")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.grant(&UserId("alice".into()), &ServerId("vps-x".into()))
+        .await
+        .unwrap();
+
+    // Open a raw sqlx pool to the same DB and SELECT the column
+    // directly — bypass the COALESCE that the public API applies.
+    use sqlx::Row;
+    let url = format!("sqlite://{}?mode=ro", db_path(&dir).display());
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    let row = sqlx::query(
+        "SELECT client_uuid FROM grants WHERE user_id = 'alice' AND server_id = 'vps-x'",
+    )
+    .fetch_one(&raw)
+    .await
+    .unwrap();
+    let raw_value: Option<String> = row.try_get("client_uuid").unwrap();
+    assert_eq!(
+        raw_value, None,
+        "fresh grant must have NULL client_uuid; if this test starts \
+         failing, an implementation change is auto-populating the column \
+         on insert — that breaks the «override» semantics (operator can no \
+         longer distinguish «never overridden» from «explicitly set to \
+         users.uuid»)"
+    );
+
+    // Sanity: the public read path still returns users.uuid via
+    // COALESCE — the override semantics work end-to-end.
+    let public = inv
+        .client_uuid_for(&UserId("alice".into()), &ServerId("vps-x".into()))
+        .await
+        .unwrap();
+    assert_eq!(public.as_deref(), Some("global-uuid-of-alice"));
+    raw.close().await;
+}
+
+// Rule 11 — `SqliteInventory::user_with_per_server_uuid` swaps the
+// user's uuid to the per-server override OR returns the original
+// (cloned) when no grant or no override. This is the consolidated
+// helper used by both `cli/cmd/sub.rs` and `daemon/handlers/sub.rs`
+// (extracted to kill 3-way duplication).
+#[tokio::test]
+async fn user_with_per_server_uuid_swaps_only_when_override_differs() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    inv.add_server(&server("vps-x")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    let alice = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    inv.grant(&UserId("alice".into()), &ServerId("vps-x".into()))
+        .await
+        .unwrap();
+
+    // Case 1 — no override yet: helper returns user with global uuid
+    // (other fields preserved verbatim).
+    let got = inv
+        .user_with_per_server_uuid(&alice, &ServerId("vps-x".into()))
+        .await
+        .unwrap();
+    assert_eq!(got.uuid, "global-uuid-of-alice");
+    assert_eq!(got.id, alice.id);
+
+    // Case 2 — override set: helper returns user with overridden uuid.
+    inv.set_grant_client_uuid(
+        &UserId("alice".into()),
+        &ServerId("vps-x".into()),
+        "11111111-2222-3333-4444-555555555555",
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .user_with_per_server_uuid(&alice, &ServerId("vps-x".into()))
+        .await
+        .unwrap();
+    assert_eq!(got.uuid, "11111111-2222-3333-4444-555555555555");
+    // The user we PASSED IN is unmutated — helper clones.
+    assert_eq!(alice.uuid, "global-uuid-of-alice");
+
+    // Case 3 — no grant: returns user unchanged (safe fallback for
+    // a /sub render path that hit an inconsistent state).
+    let got = inv
+        .user_with_per_server_uuid(&alice, &ServerId("nope".into()))
+        .await
+        .unwrap();
+    assert_eq!(got.uuid, "global-uuid-of-alice");
+}
+
+// Rule 12 — `User::with_per_server_uuid` (the shared helper extracted
 // to vpnctl-core) replaces `User.uuid` and leaves every other field
 // untouched. Pinned here because every share-link / client_config
 // call-site (cli/sub, daemon/sub, daemon/admin × 2) depends on this
