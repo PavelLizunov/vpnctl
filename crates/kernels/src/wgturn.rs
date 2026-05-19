@@ -349,23 +349,26 @@ UNIT
         // add-server-wizard time):
         //   * `wgturn:server_wg_private` — WG-style base64 private
         //     key the bundled `wgturnsrv` backend uses
-        //   * `wgturn:vk_link` — VK call invite URL the operator
-        //     pastes once. REQUIRED before deploy.
         //   * `wgturn:listen_port` (optional, default 56000)
         //   * `wgturn:mode`        (optional, default proxy_v2)
+        //
+        // **VK link is INTENTIONALLY ABSENT from the server config**
+        // (Pavel 2026-05-19: «пользователь сам вставляет свою ссылку,
+        // так как у каждого звонка ограниченное кол-во потоков»).
+        // Per upstream `pkg/wgshare/doc.go`: «NOT IN: any VK Calls
+        // link. The VK invite that drives the proxy's credential
+        // rotation is a runtime parameter the user supplies on each
+        // connect — both because it changes more often than the wg
+        // keys, and because the share URL is meant to be portable
+        // across users / devices.» Each VK call has limited
+        // concurrent streams, so a shared per-server link would
+        // saturate; client-side per-user supply is the correct
+        // design. Pre-2026-05-19 we erroneously required a per-
+        // server `wgturn:vk_link` secret — removed.
         let server_wg_private = ctx.secrets.get("wgturn:server_wg_private").ok_or_else(|| {
             CoreError::Render(
                 "wgturn kernel: missing secret `wgturn:server_wg_private` — \
                  mint via the add-server wizard, or set via /admin/servers/<id>"
-                    .into(),
-            )
-        })?;
-        let vk_link = ctx.secrets.get("wgturn:vk_link").ok_or_else(|| {
-            CoreError::Render(
-                "wgturn kernel: missing secret `wgturn:vk_link` — paste a fresh \
-                 VK Calls invite URL (https://vk.com/call/join/...) before deploy. \
-                 The VK link is operator-input (captcha-gated) and cannot be \
-                 auto-generated."
                     .into(),
             )
         })?;
@@ -413,15 +416,17 @@ UNIT
         // the daemon-rendered TOML).
         let _ = users;
         let mode_esc = toml_escape_basic(mode);
-        let vk_link_esc = toml_escape_basic(vk_link);
         let server_wg_private_esc = toml_escape_basic(server_wg_private);
 
         let mut out = String::with_capacity(512);
         out.push_str("# Rendered by vpnctl. Do not hand-edit \u{2014} your changes\n");
-        out.push_str("# will be overwritten on next `vpnctl deploy`.\n\n");
+        out.push_str("# will be overwritten on next `vpnctl deploy`.\n");
+        out.push_str("# Note: VK Calls invite link is supplied by the END USER at\n");
+        out.push_str("# connect time (`wgturn-cli connect-url ... --vk-link <url>`),\n");
+        out.push_str("# NOT embedded here. Each VK call has limited concurrent\n");
+        out.push_str("# streams, so each user must hand-supply their own link.\n\n");
         out.push_str(&format!("listen_addr = \"0.0.0.0:{listen_port}\"\n"));
         out.push_str(&format!("mode = \"{mode_esc}\"\n"));
-        out.push_str(&format!("vk_link = \"{vk_link_esc}\"\n"));
         out.push_str("\n[backend.wireguard]\n");
         out.push_str(&format!("private_key = \"{server_wg_private_esc}\"\n"));
         out.push_str("listen_port = 51821\n");
@@ -514,14 +519,13 @@ mod tests {
     }
 
     fn complete_secrets() -> HashMap<String, String> {
+        // Post-2026-05-19: only `wgturn:server_wg_private` is required
+        // server-side; VK link moved to client-side (each user supplies
+        // their own at connect time — see kernel render_config comment).
         let mut s = HashMap::new();
         s.insert(
             "wgturn:server_wg_private".into(),
             "AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNn=".into(),
-        );
-        s.insert(
-            "wgturn:vk_link".into(),
-            "https://vk.com/call/join/abc123def456".into(),
         );
         s
     }
@@ -542,25 +546,39 @@ mod tests {
     }
 
     #[test]
-    fn render_config_requires_vk_link_secret() {
-        // Operator MUST paste a VK link before deploy can render
-        // config — it's captcha-gated and can't be auto-generated.
-        // Missing secret produces a Render error pointing at where
-        // to set it.
-        let mut secrets = complete_secrets();
-        secrets.remove("wgturn:vk_link");
+    fn render_config_does_not_emit_vk_link() {
+        // Pavel 2026-05-19 + upstream `pkg/wgshare/doc.go`: VK link
+        // is a CLIENT-SIDE parameter supplied at connect time, not a
+        // per-server secret. Pre-2026-05-19 we erroneously baked it
+        // into server.toml. Pin the new contract: rendered config
+        // must NOT contain a `vk_link` key, and the comment block
+        // must explain why so a future maintainer doesn't add it back.
         let server = dummy_server();
+        // Even if a stale `wgturn:vk_link` secret lingers in the
+        // table (left over from before this design change), the
+        // renderer MUST ignore it.
+        let mut secrets = complete_secrets();
+        secrets.insert(
+            "wgturn:vk_link".into(),
+            "https://vk.com/call/join/stale-row".into(),
+        );
         let ctx = RenderCtx::new(&server, &secrets);
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
-        let msg = format!("{err}");
+        let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
+        let toml = String::from_utf8(bytes).unwrap();
         assert!(
-            msg.contains("wgturn:vk_link"),
-            "error must name the missing key: {msg}"
+            !toml.contains("vk_link"),
+            "rendered TOML must not carry vk_link (now client-side):\n{toml}"
         );
         assert!(
-            msg.contains("VK Calls"),
-            "error must explain operator-input requirement: {msg}"
+            !toml.contains("stale-row"),
+            "stale `wgturn:vk_link` secret must not leak into the rendered config:\n{toml}"
+        );
+        // The header comment must explain WHY vk_link isn't here so a
+        // future operator reading server.toml doesn't think it's a bug.
+        assert!(
+            toml.contains("END USER") || toml.contains("end user"),
+            "header must explain that VK link is end-user-supplied: {toml}"
         );
     }
 
@@ -594,10 +612,6 @@ mod tests {
         assert!(
             toml.contains("mode = \"proxy_v2\""),
             "default mode is proxy_v2: {toml}"
-        );
-        assert!(
-            toml.contains("vk_link = \"https://vk.com/call/join/abc123def456\""),
-            "vk_link embedded from secrets: {toml}"
         );
         assert!(
             toml.contains("[backend.wireguard]"),
@@ -668,44 +682,12 @@ mod tests {
         assert_eq!(toml_escape_basic("abc-123_xyz=:/"), "abc-123_xyz=:/");
     }
 
-    #[test]
-    fn render_config_escapes_malicious_vk_link() {
-        // Operator-pasted vk_link with a quote + newline + injected
-        // TOML section. Without escaping, the second line would
-        // become a new top-level key. With escaping, the whole thing
-        // round-trips as a single string literal.
-        let mut secrets = complete_secrets();
-        let evil = "https://vk.com/x\"\n[evil]\ny=\"x";
-        secrets.insert("wgturn:vk_link".into(), evil.into());
-        let server = dummy_server();
-        let ctx = RenderCtx::new(&server, &secrets);
-        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
-        let toml = String::from_utf8(bytes).unwrap();
-
-        // The injection attempt must NOT appear as a bare TOML
-        // section header — the `[evil]` would have to be on its own
-        // line at column 0 to be parsed as a section. Escaping the
-        // newline keeps it on the vk_link line.
-        let no_injection = !toml
-            .lines()
-            .any(|line| line.trim_start().starts_with("[evil]"));
-        assert!(
-            no_injection,
-            "vk_link injection broke out into a TOML section:\n{toml}"
-        );
-        // The escaped literal must include `\\n` and `\\\"` (the
-        // double-backslashes are escape-of-escape inside the Rust
-        // source).
-        assert!(
-            toml.contains("\\n"),
-            "newline must be escaped as \\n: {toml}"
-        );
-        assert!(
-            toml.contains("\\\""),
-            "embedded quote must be escaped as \\\": {toml}"
-        );
-    }
+    // (`render_config_escapes_malicious_vk_link` was removed 2026-05-19
+    // — vk_link is no longer in the rendered config. The
+    // `render_config_escapes_malicious_mode` test below still exercises
+    // `toml_escape_basic` via the server_wg_private path; the escape
+    // contract itself is also unit-tested in
+    // `toml_escape_basic_escapes_*`.)
 
     #[test]
     fn render_config_escapes_malicious_mode() {

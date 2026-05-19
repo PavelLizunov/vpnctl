@@ -564,12 +564,12 @@ pub async fn bootstrap_server_secrets(
     }
 
     // wgturn-core: Curve25519 keypair for the bundled `wgturnsrv`
-    // WireGuard backend. The VK link (`wgturn:vk_link`) is operator-
-    // pasted via /admin/servers/<id>/secrets (captcha-gated, can't
-    // be minted server-side) so we deliberately DO NOT mint a
-    // placeholder — `render_config` fails loud at deploy time with a
-    // clear «paste a fresh VK link» pointer instead of silently
-    // shipping a broken config.
+    // WireGuard backend. **VK link is NOT minted here** — per Pavel
+    // 2026-05-19 + upstream `pkg/wgshare/doc.go`, the VK invite is a
+    // CLIENT-SIDE parameter the end user supplies when running
+    // `wgturn-cli connect-url … --vk-link <url>`. Each VK call has
+    // limited concurrent streams so a shared per-server link would
+    // saturate; per-user end-user-supplied is the correct model.
     //
     // Key naming uses `wgturn:` (colon) to match the kernel's
     // `render_config` look-ups — that's intentional kernel-namespace

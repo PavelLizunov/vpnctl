@@ -579,13 +579,10 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/set-fingerprint",
             post(admin::server_set_fingerprint),
         )
-        // wgturn iter 2 — operator pastes a fresh VK Calls invite URL
-        // that the wgturn kernel embeds in its server.toml. Captcha-
-        // gated upstream → operator-input only.
-        .route(
-            "/admin/servers/{id}/wgturn/vk-link",
-            post(admin::server_set_wgturn_vk_link),
-        )
+        // (route `/admin/servers/{id}/wgturn/vk-link` removed
+        // 2026-05-19 — VK link is now end-user-supplied at connect
+        // time, not a per-server admin input. See
+        // crates/kernels/src/wgturn.rs render_config comment.)
         // Quick-add — register an existing server in inventory with
         // default kernel + protocols. Distinct from the
         // Phase-E wizard at `/admin/servers/new` (which bootstraps a

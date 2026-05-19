@@ -1447,22 +1447,75 @@ fn share_link_card(link: &str, footnote: &Markup) -> Markup {
     }
 }
 
+/// Fixed display side of every share-link QR, in CSS pixels. Picked
+/// to fit on a phone screen at scan distance while keeping the
+/// user-detail page's Flow column narrow enough that the textarea
+/// doesn't wrap awkwardly.
+const QR_DISPLAY_PX: u32 = 220;
+
 fn qr_svg(url: &str) -> Markup {
     use qrcode::QrCode;
     use qrcode::render::svg;
 
     match QrCode::new(url.as_bytes()) {
         Ok(code) => {
+            // Render at a sensible native size — the actual pixel
+            // dimensions vary by URL length (denser matrix → larger
+            // intrinsic SVG with `min_dimensions`). We don't care
+            // because the CSS wrapper below forces the on-screen
+            // size to a fixed `QR_DISPLAY_PX` regardless of the
+            // intrinsic SVG dimensions.
+            //
+            // Pre-2026-05-19 the wrapper had NO fixed size: Flow A's
+            // shortish subscription URL produced a ~220px SVG, but
+            // Flow B's full wireguard:// (~600 chars base64) produced
+            // a ~280-320px SVG. The three cards (A / B / C) jumped
+            // 60-90px in width and the layout «прыгает» (Pavel
+            // 2026-05-19).
             let svg_str = code
                 .render::<svg::Color<'_>>()
-                .min_dimensions(220, 220)
+                .min_dimensions(QR_DISPLAY_PX, QR_DISPLAY_PX)
                 .quiet_zone(true)
                 .dark_color(svg::Color("#1a1611"))
                 .light_color(svg::Color("#f5efe6"))
                 .build();
+            // Wrapper: padded card + inner fixed-size frame. The
+            // `> svg` selector with `!important` overrides the
+            // hard-coded `width=` / `height=` attributes that
+            // `qrcode`'s SVG builder writes — CSS scales the SVG to
+            // QR_DISPLAY_PX uniformly. Matrix density still varies
+            // visually (denser = finer modules) but the CARD width
+            // is constant across all flows.
+            //
+            // Container width = QR + 2*padding (12px each side).
+            let card_px = QR_DISPLAY_PX + 24;
+            let inner_style = format!(
+                "width: {QR_DISPLAY_PX}px; height: {QR_DISPLAY_PX}px; \
+                 display: flex; align-items: stretch;"
+            );
+            let wrapper_style = format!(
+                "display: inline-block; padding: 12px; background: var(--paper); \
+                 border: 1px solid var(--rule); width: {card_px}px; height: {card_px}px; \
+                 box-sizing: border-box;"
+            );
+            // Scoped <style> — selector targets the inner frame's
+            // direct SVG child. `!important` overcomes the SVG's own
+            // width/height attrs which some browsers honour over
+            // CSS. Inline style block sits inside the wrapper so it
+            // ships only when a QR is rendered (no penalty to other
+            // pages).
             html! {
-                div style="display: inline-block; padding: 12px; background: var(--paper); border: 1px solid var(--rule);" {
-                    (maud::PreEscaped(svg_str))
+                div style=(wrapper_style) {
+                    style {
+                        ".vpnctl-qr-frame > svg { \
+                          width: 100% !important; \
+                          height: 100% !important; \
+                          display: block; \
+                        }"
+                    }
+                    div class="vpnctl-qr-frame" style=(inner_style) {
+                        (maud::PreEscaped(svg_str))
+                    }
                 }
             }
         }
@@ -2056,8 +2109,21 @@ pub(crate) async fn user_detail(
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
                 @for s in &all_servers {
                     li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        // Server id → link to /admin/servers/{id} in a
+                        // new tab (Pavel 2026-05-19: «хочу чтоб через
+                        // пользователя можно было открыть страницу
+                        // сервера в отдельном окне»). `target="_blank"`
+                        // + `rel="noopener"` so the new tab doesn't
+                        // share window.opener with the user-detail
+                        // page (security hygiene + tab-isolation).
                         span style="flex: 1;" {
-                            b { (s.id.0) }
+                            a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
+                              target="_blank"
+                              rel="noopener"
+                              title=(format!("Open /admin/servers/{} in a new tab", s.id.0))
+                              style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
+                                b { (s.id.0) }
+                            }
                             " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
                             (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
                             ")"
@@ -6279,8 +6345,16 @@ pub(crate) async fn server_detail(
                     @let uid_enc = path_segment_encode(&u.id.0);
                     li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                         span style="flex: 1;" {
+                            // Pavel 2026-05-19: «и наоборот» — open the
+                            // user-detail page in a new tab from
+                            // the server-detail's Grants section.
+                            // Mirrors the user-detail → server link
+                            // for cross-navigation symmetry.
                             a href=(format!("/admin/users/{uid_enc}"))
-                              style="color: var(--ink); text-decoration: none;" {
+                              target="_blank"
+                              rel="noopener"
+                              title=(format!("Open /admin/users/{} in a new tab", u.id.0))
+                              style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
                                 b { (u.id.0) }
                             }
                         }
@@ -6768,203 +6842,64 @@ pub(crate) async fn server_set_fingerprint(
 // validators accepted). Crate is the single source of truth; spec
 // tests live with it.
 
-/// Validate an operator-pasted `wgturn:vk_link` value. The kernel
-/// expects a fresh VK Calls invite URL, which has the shape
-/// `https://vk.com/call/join/<32-char-token>` (sometimes with
-/// additional query params for hash / role).
-///
-/// We enforce:
-///   * exact prefix `https://vk.com/call/join/` — the kernel's
-///     `render_config` error message tells operators that shape
-///     explicitly, so anything else is a paste mistake.
-///   * length 26 (prefix) < len ≤ 512 — VK's tokens fit comfortably
-///     under 200 chars; 512 leaves headroom for query params.
-///   * no control chars / no whitespace inside the link — caught by
-///     `c.is_control()` (covers `\n`, `\r`, `\t`, `\0` etc).
-///
-/// Returns `Ok(trimmed_link)` on success, `Err(reason)` for a 400
-/// response body explaining the rejection. The trimmed form is what
-/// gets stored.
-pub(crate) fn validate_wgturn_vk_link(raw: &str) -> std::result::Result<&str, &'static str> {
-    const PREFIX: &str = "https://vk.com/call/join/";
-    let s = raw.trim();
-    if s.is_empty() {
-        return Err("empty — paste the URL from your VK Calls invite");
-    }
-    if !s.starts_with(PREFIX) {
-        return Err("must start with 'https://vk.com/call/join/' — paste the full invite URL");
-    }
-    // Reject the bare-prefix case: a paste of just `https://vk.com/
-    // call/join/` is operator-noise the kernel would happily render
-    // into a non-functional config (review-agent finding 2 — important).
-    if s.len() <= PREFIX.len() {
-        return Err(
-            "token missing after 'https://vk.com/call/join/' — paste the full invite link including its token",
-        );
-    }
-    if s.len() > 512 {
-        return Err("link too long (>512 chars) — paste only the VK invite URL, no extra text");
-    }
-    if s.chars().any(|c| c.is_control() || c == ' ') {
-        return Err(
-            "link contains whitespace / control chars — paste a single line, no extra spaces",
-        );
-    }
-    Ok(s)
-}
+// (`validate_wgturn_vk_link` was removed 2026-05-19 — VK link is no
+// longer a per-server operator input; each END USER supplies their
+// own at `wgturn-cli connect-url … --vk-link <url>` time because
+// each VK call has a limited concurrent-stream count. See the
+// kernel's render_config comment for the upstream
+// `pkg/wgshare/doc.go` quote.)
 
-/// Render the wgturn-specific settings section on `/admin/servers/{id}`.
+/// Render the wgturn-specific info section on `/admin/servers/{id}`.
 ///
 /// The section is OMITTED entirely when the server doesn't have the
 /// `wgturn` kernel — keeps the page short for the common case where
 /// most nodes are sing-box only. When wgturn IS in `server.kernels`,
-/// the section surfaces:
-///   * Current state of `wgturn:vk_link` (set ✓ / unset) — never
-///     renders the actual value (VK invite grants call-join + thus
-///     relay bandwidth).
-///   * Form to paste / re-paste a fresh VK Calls invite URL.
-///   * Inline note explaining that the daemon CANNOT mint this
-///     itself (captcha-gated → operator-input only).
+/// the section explains the operator-facing wgturn UX:
+///   * VK link is END-USER-supplied at connect time, NOT operator
+///     input here (Pavel 2026-05-19 + upstream `pkg/wgshare/doc.go`).
+///   * Each VK call has limited concurrent streams → per-user
+///     end-user-supplied is the correct model.
+///   * Operator hands the user `wgturn://…` share-link from the
+///     user-detail page; user pastes their own VK link into
+///     `wgturn-cli connect-url … --vk-link <url>` on their device.
 fn server_detail_wgturn_section(
     server: &vpnctl_core::Server,
-    secrets: &std::collections::HashMap<String, String>,
+    _secrets: &std::collections::HashMap<String, String>,
 ) -> Markup {
     let has_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
     if !has_wgturn {
         return html! {};
     }
-    let sid_enc = path_segment_encode(&server.id.0);
-    let vk_link_set = secrets.contains_key("wgturn:vk_link");
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "wgturn settings" }
+        div.ed-art-eyebrow { "wgturn — emergency channel" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "VK Calls invite that "
+            "VK-TURN-relayed WireGuard. The server-side daemon "
             span.ed-mono { "wgturn-cli serve" }
-            " uses as the TURN relay credential. Captcha-gated on vk.com — "
-            "the daemon cannot mint it. Paste once here; "
+            " is configured automatically when you click "
             span.ed-mono { "deploy →" }
-            " reads it from the server-secrets row on every render."
+            " — no operator input is needed here."
         }
-        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
-            @if vk_link_set {
-                "current: " span style="color: var(--accent);" { "set ✓" }
-                " (value masked — re-paste below to replace)"
-            } @else {
-                em style="color: var(--mute);" {
-                    "(no VK link set — deploy will refuse until you paste one)"
-                }
+        div style="font-family: var(--serif); font-size: 13px; line-height: 1.6; padding: 10px 14px; background: var(--paper-tint); border-left: 3px solid var(--accent);" {
+            b { "VK link is supplied by the END USER, not the operator." }
+            " Each VK call has limited concurrent streams, so a shared per-server link would saturate. "
+            "Each user creates their own VK call invite on vk.com, then runs (or pastes the URL into "
+            "their wgturn-cli)"
+            br {}
+            span.ed-mono style="display: inline-block; margin: 6px 0; padding: 4px 8px; background: var(--paper); font-size: 11px;" {
+                "wgturn-cli connect-url '<wgturn://...>' --vk-link '<https://vk.com/call/join/...>'"
             }
-        }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/wgturn/vk-link"))
-             style="display: flex; gap: 8px; align-items: center;" {
-            input type="url"
-                  name="vk_link"
-                  required
-                  pattern="https://vk\\.com/call/join/.+"
-                  placeholder="https://vk.com/call/join/..."
-                  title="Paste a fresh VK Calls invite URL"
-                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            button type="submit"
-                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                "save vk link →"
-            }
+            br {}
+            "The "
+            span.ed-mono { "wgturn://" }
+            " share-link itself lives on the user-detail page under «Per-protocol share links»."
         }
     }
 }
 
-/// `POST /admin/servers/{id}/wgturn/vk-link` — store the operator-
-/// pasted VK Calls invite URL in `server_secrets` under the
-/// `wgturn:vk_link` key. The kernel's `render_config` reads from
-/// there at every deploy.
-///
-/// Validation (see `validate_wgturn_vk_link`): exact `https://vk.com/
-/// call/join/` prefix + length 26..=512 + no whitespace/control
-/// chars. Bad input → 400 with a precise message; valid input →
-/// `set_server_secret` + audit row + 303 to the server-detail page.
-///
-/// Audit payload OMITS the link itself — VK invites grant TURN-
-/// relay bandwidth and the `/admin/audit.csv` export serialises
-/// `payload_json` verbatim to a downloaded file. Same convention as
-/// tuic_password / wireguard_private / sub_token (pinned by
-/// `audit_summary_never_leaks_secret_fields`). For forensics we
-/// store the link's length + a SHA-256 prefix (8 hex chars) so a
-/// later compromise can be cross-referenced against the live
-/// `server_secrets` value without leaking it in the audit trail.
-pub(crate) async fn server_set_wgturn_vk_link(
-    axum::extract::Path(server_id): axum::extract::Path<String>,
-    State(state): State<AppState>,
-    body: String,
-) -> Response {
-    let sid = vpnctl_core::ServerId(server_id.clone());
-    let server = match state.inv.get_server(&sid).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return not_found(&format!("no such server '{server_id}'"));
-        }
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-
-    // Refuse to set the VK link if the server doesn't actually have
-    // the wgturn kernel enabled — clearer error than letting the
-    // secret rot in the table forever.
-    if !server.kernels.iter().any(|k| k.0 == "wgturn") {
-        return bad_request(&format!(
-            "server '{server_id}' has no wgturn kernel enabled; the VK link \
-             would never be read. Enable the kernel in the Kernels section first."
-        ));
-    }
-
-    let raw = match crate::http_util::form_field(&body, "vk_link") {
-        Some(v) => v,
-        None => return bad_request("missing 'vk_link' field"),
-    };
-    let link = match validate_wgturn_vk_link(&raw) {
-        Ok(l) => l.to_string(),
-        Err(reason) => return bad_request(&format!("vk_link rejected: {reason}")),
-    };
-
-    if let Err(e) = state
-        .inv
-        .set_server_secret(&sid, "wgturn:vk_link", &link)
-        .await
-    {
-        return internal_error(anyhow::Error::new(e));
-    }
-    // NEVER include `link` itself or any substring of it in the
-    // payload — review-agent finding 1 (critical): /admin/audit.csv
-    // exports payload_json verbatim. We record bool + length only.
-    // Forensics get the timestamp + actor + the row's existence;
-    // a previous attempt at storing the «last N chars» bled the
-    // entire token for short tokens, so the tail field is gone.
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.set_wgturn_vk_link",
-            Some(&server_id),
-            Some(&serde_json::json!({
-                "server_id": server_id,
-                "vk_link_set": true,
-                "vk_link_len": link.len(),
-            })),
-        )
-        .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin::server_set_wgturn_vk_link",
-            error = %e,
-            "set_wgturn_vk_link succeeded but audit row failed"
-        );
-    }
-
-    Redirect::to(&format!(
-        "/admin/servers/{}",
-        path_segment_encode(&server_id)
-    ))
-    .into_response()
-}
+// (`server_set_wgturn_vk_link` POST handler removed 2026-05-19 —
+// VK link is no longer a per-server admin input; see
+// server_detail_wgturn_section above for the new operator copy.)
 
 fn server_detail_protocols_section(
     server: &vpnctl_core::Server,
