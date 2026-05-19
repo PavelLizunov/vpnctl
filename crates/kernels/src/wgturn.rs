@@ -2,12 +2,12 @@
 //!
 //! `wgturn` is an Apache-2.0 Go library + CLI from
 //! github.com/PavelLizunov/wgturn-core (v0.1.0, May 2026). The
-//! server-side daemon (`wgturn-cli serve`) listens on a UDP port,
-//! demultiplexes per-Session-ID streams arriving via TURN-relayed
-//! DTLS, and forwards into the bundled `pkg/wgturnsrv` WireGuard
-//! backend. Clients run `wgturn-cli connect-url '<wgturn://...>'
-//! --vk-link '<https://vk.com/call/join/...>'` and the request
-//! traffic gets relayed through VK Calls' anonymous TURN servers.
+//! server-side daemon (`wgturn-cli serve`) listens on a UDP port and
+//! terminates DTLS sessions arriving over VK-TURN, then forwards the
+//! inner WireGuard payload to a **separate local WireGuard daemon**
+//! on loopback. Clients run `wgturn-cli connect-url '<wgturn://...>'
+//! --vk-link '<https://vk.com/call/join/...>'` and traffic is relayed
+//! through VK Calls' anonymous TURN servers.
 //!
 //! ## Why this kernel exists
 //!
@@ -28,19 +28,33 @@
 //! Position as an **emergency channel** beside an xray/REALITY +
 //! WireGuard daily-driver — when those get blocked, fall to this.
 //!
-//! ## Phase 1 (this commit) vs Phase 2
+//! ## Architecture (post-2026-05-19 rewrite)
 //!
-//! **Phase 1** ships the kernel skeleton (`ensure_installed` +
-//! `apply_config` + `status`) plus a stub `WgTurn` protocol whose
-//! `share_link` returns a render-error «not yet generated offline».
-//! Operator can deploy the kernel and bring `wgturn-cli serve` up;
-//! user provisioning stays manual via `wgturn-cli provision-url` on
-//! the server until phase 2.
+//! `wgturn-cli serve` is a **thin DTLS relay** — NOT a complete
+//! VPN server. It needs a separate WireGuard daemon listening on a
+//! loopback port to terminate the inner WG handshake. Architecture:
 //!
-//! **Phase 2** (next session) ports `pkg/wgshare`'s `wgturn://`
-//! URL encoder to Rust so per-user share-links generate offline from
-//! `RenderCtx::secrets`. Then the admin user-detail page gets the same
-//! one-button share UX as VLESS / TUIC / etc.
+//! ```text
+//! Internet (UDP 56000)
+//!     │
+//!     ▼  DTLS+STUN over VK-TURN
+//! wgturn-cli serve  ── forwards inner WG payload via UDP ──▶ wg-quick@wgturn-be
+//!                                                            (127.0.0.1:51821,
+//!                                                             interface wgturn-be,
+//!                                                             [Peer] per user)
+//! ```
+//!
+//! We therefore deploy + manage TWO systemd units per server:
+//!   * `wgturn.service` — wgturn-cli serve, public UDP 56000
+//!   * `wg-quick@wgturn-be.service` — backend WG, loopback UDP 51821,
+//!     authenticates clients via their `[Peer]` pubkey
+//!
+//! The previously-tried TOML schema was a guess; upstream actually
+//! parses **wg-quick INI with `#@wgt:` metadata comments** via
+//! `pkg/wgconf`. Three keys are required for `serve`:
+//!   * `#@wgt:EnableServer = true`
+//!   * `#@wgt:Listen = 0.0.0.0:<port>`
+//!   * `#@wgt:Backend = udp:127.0.0.1:51821`
 //!
 //! ## Versions tested
 //!
@@ -48,6 +62,20 @@
 //! - Go 1.25+ required (apt-installs `golang-go` on bookworm — system
 //!   ships 1.22; pin via /usr/local/go if newer is needed).
 //! - Debian 12 bookworm (the only deploy target today).
+//! - wireguard-tools (apt-installable on bookworm) for the wg-quick
+//!   backend.
+//!
+//! ## Multi-file deploy bundle
+//!
+//! Unlike sing-box / amneziawg (one config file each), wgturn needs
+//! TWO files on every deploy:
+//!   1. `/etc/wgturn/server.conf` — wgturn-cli serve config (INI)
+//!   2. `/etc/wireguard/wgturn-be.conf` — backend WG-quick config (INI)
+//!
+//! The `Kernel::render_config` trait returns `Vec<u8>` (one blob).
+//! We use a delimited multi-file format below; `apply_config` parses
+//! the delimiter, writes each file separately, then orchestrates both
+//! `systemctl restart` calls. See `BUNDLE_DELIMITER` for the format.
 //!
 //! ## Kernel orthogonality
 //!
@@ -57,11 +85,9 @@
 //!   * `crates/protocols/src/wgturn.rs` (companion stub protocol)
 //!   * `crates/protocols/src/lib.rs` (`mod` + `pub use`)
 //!   * `cli/src/registry.rs` + `daemon/src/app.rs::build_registry`
-//!     — one `register_*` line each (the duplication is pre-existing,
-//!     documented at the daemon site)
+//!     — one `register_*` line each
 //!   * `daemon/src/wizard_bootstrap.rs::bootstrap_server_secrets` —
-//!     a new gated block that mints `wgturn:*` secrets when the
-//!     kernel is enabled
+//!     mints `wgturn:server_wg_{private,public}` keypair
 //!
 //! No edits to `core`, `ssh`, `crypto`, `inventory`, `hosters`, or
 //! `cli/src/cmd/*` per CLAUDE.md's Kernel × Protocol invariant.
@@ -72,22 +98,34 @@ use vpnctl_core::{
     SshTransport, User,
 };
 
-/// Default UDP port `wgturn-cli serve` listens on. Matches the
-/// upstream's documented default + the operator-pasted port hint in
+/// Default public UDP port `wgturn-cli serve` listens on for the
+/// DTLS+STUN VK-TURN relay traffic. Matches upstream's documented
+/// default + the operator-pasted port hint in
 /// `cmd/wgturn-cli/main.go` server mode.
 const DEFAULT_LISTEN_PORT: u16 = 56000;
 
-/// Default peer-type — the wire-compatible multi-user mode with
-/// DTLS + Session-ID handshake. `proxy_v1` and `wireguard` modes
-/// are legacy / debug; production = `proxy_v2`.
-const DEFAULT_PEER_TYPE: &str = "proxy_v2";
+/// Loopback UDP port the backend `wg-quick@wgturn-be` daemon listens
+/// on. `wgturn-cli serve` forwards inner WG payload here via
+/// `#@wgt:Backend = udp:127.0.0.1:<this>`.
+///
+/// Chosen distinct from AmneziaWG's typical 51820 so a single VPS
+/// hosting BOTH kernels doesn't collide. Loopback-only — never
+/// exposed publicly.
+const DEFAULT_BACKEND_PORT: u16 = 51821;
 
-/// Whitelist of accepted `wgturn:mode` values. Operator-pasted via
-/// /admin/servers/<id>/secrets; we hard-reject anything outside this
-/// set rather than passing it through to wgturn-cli, where a bad
-/// value surfaces only after an 8-second `is-active` poll failure.
-/// (Review-agent finding 5 — important.)
-const ALLOWED_MODES: &[&str] = &["proxy_v2", "proxy_v1", "wireguard"];
+/// Per-user `/32` octet base: each granted user gets `10.7.0.<2 +
+/// index>/24`. Mirrors the share-link encoder in
+/// `crates/protocols/src/wgturn.rs` so the [Peer] AllowedIPs we
+/// write into wgturn-be.conf match the client's tunnel address from
+/// its `wgturn://` URL. Octet >254 (i.e. 254-peer cap) fails the
+/// render with a clear error.
+const BACKEND_BASE_OCTET: u16 = 2;
+
+/// CIDR + interface name for the backend WG. `/24` matches the
+/// share-link encoder. Interface name is what `wg-quick@<NAME>`
+/// systemd template resolves to.
+const BACKEND_INTERFACE_NAME: &str = "wgturn-be";
+const BACKEND_SERVER_CIDR: &str = "10.7.0.1/24";
 
 /// Pinned upstream commit hash for `wgturn-core`. Required to prevent
 /// any future compromise of github.com/PavelLizunov/wgturn-core from
@@ -102,39 +140,36 @@ const ALLOWED_MODES: &[&str] = &["proxy_v2", "proxy_v1", "wireguard"];
 /// packages; this kernel can't rely on that.
 const WGTURN_CORE_PINNED_SHA: &str = "af0f209f99f8381356fbae82d9b0f64d4af4bdcf";
 
-/// Escape a string for embedding inside a TOML *basic* (double-quoted)
-/// string literal. Implements the minimal escape set from TOML 1.0:
-/// `\\` `"` `\n` `\r` `\t` `\b` `\f` plus other C0 control codes via
-/// `\u00XX`. Prevents operator-pasted secrets from breaking out of
-/// their `"..."` envelope (review-agent finding 1 — critical, TOML
-/// injection).
+/// Multi-file bundle delimiter. `render_config` emits text in this
+/// format; `apply_config` parses it. Format:
 ///
-/// We hand-roll rather than depending on the `toml` crate to keep
-/// the kernels-crate dep graph minimal (only `vpnctl-core`, `serde`,
-/// `async-trait` today). The escape set is deliberately a strict
-/// SUPERSET of what TOML 1.0 requires — over-escaping is safe; under-
-/// escaping breaks the file.
-fn toml_escape_basic(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            // Other C0 controls (0x00..=0x1F minus the named ones above)
-            // and DEL (0x7F): emit as \u00XX. TOML 1.0 explicitly bans
-            // bare control chars inside basic strings.
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04X}", c as u32));
-            }
-            c => out.push(c),
-        }
+/// ```text
+/// ====FILE: <absolute path>====
+/// <file bytes>
+/// ====FILE: <another absolute path>====
+/// <file bytes>
+/// ```
+///
+/// Each path line MUST start at column 0 with `====FILE: ` and end
+/// `====`. File body is everything between two such markers (or
+/// between the last marker and end-of-buffer). We do NOT escape `==`
+/// runs in file bodies because wg-quick INI files don't legally
+/// contain them (they're either `Key = Value` or `#` comments).
+const BUNDLE_DELIMITER: &str = "====FILE: ";
+const BUNDLE_DELIMITER_END: &str = "====";
+
+/// Compute the per-user backend host octet — same arithmetic as
+/// `crates/protocols/src/wgturn.rs::host_octet_for` so the server's
+/// [Peer] AllowedIPs match the client's tunnel address from its
+/// share-link.
+fn backend_octet_for(idx: usize, user_id: &str) -> Result<u16> {
+    let octet = BACKEND_BASE_OCTET.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
+    if octet > 254 {
+        return Err(CoreError::Render(format!(
+            "wgturn /24 has only 253 peer slots; user '{user_id}' index {idx} would overflow"
+        )));
     }
-    out
+    Ok(octet)
 }
 
 #[derive(Debug, Default)]
@@ -160,32 +195,29 @@ impl Kernel for WgTurn {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // wgturn-core is a Go project; we build from source on the
-        // VPN server itself. Reasons:
-        //   * upstream doesn't publish release binaries yet (v0.1.0
-        //     alpha); pin to a tag once they do.
-        //   * apt-installable `golang-go` on bookworm is glibc-safe
-        //     — runs on the VPN server, never the daemon host.
-        //   * build artefact is one static binary; we install it to
-        //     /usr/local/bin/wgturn-cli and ship a minimal systemd
-        //     unit.
+        // ensure_installed sets up THREE things on the server:
+        //   1. wgturn-cli binary (build from pinned wgturn-core source)
+        //   2. wireguard-tools (apt — for the backend wg-quick daemon)
+        //   3. systemd unit for `wgturn.service` (the DTLS relay)
         //
-        // Idempotent — re-running ensure_installed on an already-
-        // provisioned server is a near-no-op:
-        //   * The apt+git+go-build block is GUARDED by
-        //     `command -v wgturn-cli` so on re-deploy we don't reinstall
-        //     the toolchain, re-clone, or rebuild (review-agent finding 4
-        //     — important, wasted bandwidth + state mutation on every
-        //     deploy).
-        //   * `useradd` is wrapped in `id -u wgturn` so it's idempotent
-        //     for free.
+        // The backend `wg-quick@wgturn-be.service` is enabled by
+        // apply_config, not here — that's because the .conf file the
+        // template references doesn't exist until render_config has
+        // run. ensure_installed is meant to be «config-independent
+        // setup»; apply_config is «config-dependent setup + reload».
+        //
+        // Supply-chain pin: `git checkout WGTURN_CORE_PINNED_SHA` +
+        // post-checkout HEAD verification (rejects a hijacked git
+        // client / proxy that substitutes another SHA).
+        //
+        // Idempotency:
+        //   * The apt + git + go-build block is GUARDED by an
+        //     installed-SHA marker file; re-deploy with same pin is
+        //     a no-op.
+        //   * `useradd` is wrapped in `id -u wgturn` so it's
+        //     idempotent for free.
         //   * Systemd unit is rewritten unconditionally — cheap, lets
         //     us push hardening updates without operator action.
-        //
-        // Supply-chain pin: we check out `WGTURN_CORE_PINNED_SHA`
-        // explicitly rather than tracking `origin/main`. Bumping
-        // requires editing the Rust constant + redeploy (review-agent
-        // finding 2 — critical, supply-chain).
         let pinned_sha = WGTURN_CORE_PINNED_SHA;
         let script = format!(
             r#"
@@ -195,10 +227,15 @@ impl Kernel for WgTurn {
             REPO_DIR=/opt/wgturn-core
             BINARY=/usr/local/bin/wgturn-cli
 
-            # ── Toolchain + source + build (skip if binary already at
-            #    the pinned SHA). The marker file records WHICH sha is
-            #    installed so a pin-bump in the Rust constant triggers
-            #    a rebuild without an operator-side flush.
+            # ── 1. apt prerequisites (toolchain + wg-tools).
+            #    Always run apt-get install -y (idempotent, fast on
+            #    already-installed packages). `wireguard-tools` is for
+            #    the backend `wg-quick@wgturn-be` daemon.
+            apt-get update -qq
+            apt-get install -y wireguard-tools
+
+            # ── 2. wgturn-cli build (skip if binary already at the
+            #    pinned SHA).
             INSTALLED_SHA_FILE=/etc/wgturn/.installed-sha
             need_rebuild=1
             if [ -x "$BINARY" ] && [ -f "$INSTALLED_SHA_FILE" ] \
@@ -207,75 +244,51 @@ impl Kernel for WgTurn {
             fi
 
             if [ "$need_rebuild" = "1" ]; then
-                # Apt prerequisites. golang-go on bookworm ships 1.22;
-                # if upstream's go.mod requires newer, this will fail
-                # loud via `go build` exit non-zero — operator's signal
-                # to install a newer toolchain manually.
-                apt-get update -qq
                 apt-get install -y golang-go git ca-certificates
 
-                # Clone or pull. Either way, hard-reset to the PINNED
-                # SHA — refuses to pick up unknown changes on `main`.
                 if [ -d "$REPO_DIR/.git" ]; then
                     git -C "$REPO_DIR" fetch --quiet origin
                     git -C "$REPO_DIR" checkout --quiet "$PINNED_SHA"
                 else
-                    # `--depth 1` is incompatible with checkout-by-sha;
-                    # do a regular clone, then checkout. The repo is
-                    # tiny (~200 KB).
                     git clone --quiet \
                         https://github.com/PavelLizunov/wgturn-core.git \
                         "$REPO_DIR"
                     git -C "$REPO_DIR" checkout --quiet "$PINNED_SHA"
                 fi
 
-                # Verify HEAD matches the pin — defense against a
-                # compromised git client / proxy substituting another
-                # ref under our nose.
                 ACTUAL_SHA=$(git -C "$REPO_DIR" rev-parse HEAD)
                 if [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
                     echo "wgturn-core HEAD is $ACTUAL_SHA, expected $PINNED_SHA — aborting" >&2
                     exit 1
                 fi
 
-                # Build the CLI. GOFLAGS=-trimpath strips build-host
-                # paths from the binary; GOCACHE under /tmp because
-                # the system user `wgturn` doesn't have a home.
                 cd "$REPO_DIR"
                 GOFLAGS=-trimpath GOCACHE=/tmp/wgturn-gocache \
                     go build -o "$BINARY" ./cmd/wgturn-cli
 
-                # Record the installed SHA so the next ensure_installed
-                # can short-circuit.
-                install -d -m 0750 /etc/wgturn
+                install -d -m 0755 /etc/wgturn
                 echo "$PINNED_SHA" > "$INSTALLED_SHA_FILE"
-                chmod 0640 "$INSTALLED_SHA_FILE"
+                chmod 0644 "$INSTALLED_SHA_FILE"
             fi
 
-            # Non-root system user. wgturn-cli serve listens on a
-            # high UDP port (56000 default), so no CAP_NET_BIND
-            # needed.
+            # ── 3. system user. wgturn-cli serve runs as `wgturn`
+            #    (no privileges needed: high UDP port + no kernel
+            #    interface).
             id -u wgturn >/dev/null 2>&1 \
                 || useradd -r -s /usr/sbin/nologin -d /var/lib/wgturn -m wgturn
 
-            install -d -m 0750 -o wgturn -g wgturn /etc/wgturn
-            chown wgturn:wgturn "$INSTALLED_SHA_FILE" 2>/dev/null || true
+            install -d -m 0755 /etc/wgturn
+            install -d -m 0755 -o wgturn -g wgturn /var/lib/wgturn
 
-            # Systemd unit. Mirrors `vpnctld`'s 2026-05-18 hardening
-            # — drop caps, restrict address families, syscall filter,
-            # UMask 0077.
-            #
-            # `MemoryDenyWriteExecute` is OMITTED here because Go's
-            # runtime maps W+X pages for its goroutine signal-stack
-            # trampolines on some architectures, and the directive
-            # crashes the binary at startup (review-agent finding 3
-            # — important; the directive was copy-pasted from
-            # vpnctld which is Rust + has no such requirement).
+            # ── 4. systemd unit for wgturn-cli serve (the DTLS relay).
+            #    Hardened mirroring vpnctld's 2026-05-18 audit pattern
+            #    minus MemoryDenyWriteExecute (Go runtime needs W+X
+            #    pages on some arches — directive crashes the binary).
             cat > /etc/systemd/system/wgturn.service <<'UNIT'
 [Unit]
 Description=wgturn-core relay (VK-TURN-relayed WireGuard)
 Documentation=https://github.com/PavelLizunov/wgturn-core
-After=network-online.target
+After=network-online.target wg-quick@{iface}.service
 Wants=network-online.target
 
 [Service]
@@ -283,7 +296,7 @@ Type=simple
 User=wgturn
 Group=wgturn
 WorkingDirectory=/var/lib/wgturn
-ExecStart=/usr/local/bin/wgturn-cli serve --config /etc/wgturn/server.toml
+ExecStart=/usr/local/bin/wgturn-cli serve /etc/wgturn/server.conf
 Restart=on-failure
 RestartSec=5
 
@@ -320,7 +333,9 @@ UNIT
             # produced an empty binary or PATH inversion.
             command -v wgturn-cli
             test -x /usr/local/bin/wgturn-cli
-        "#
+            command -v wg-quick
+        "#,
+            iface = BACKEND_INTERFACE_NAME,
         );
         ssh.exec(&script).await?;
         Ok(())
@@ -345,26 +360,15 @@ UNIT
                 )
             })?;
 
-        // Per-server secrets (set by `bootstrap_server_secrets` at
-        // add-server-wizard time):
-        //   * `wgturn:server_wg_private` — WG-style base64 private
-        //     key the bundled `wgturnsrv` backend uses
-        //   * `wgturn:listen_port` (optional, default 56000)
-        //   * `wgturn:mode`        (optional, default proxy_v2)
+        // Per-server secret minted at add-server-wizard time:
+        //   * `wgturn:server_wg_private` — Curve25519 private key for
+        //     the BACKEND wg-quick@wgturn-be daemon. Public half is
+        //     stored separately as `wgturn:server_wg_public` and is
+        //     what the per-user share-link's `sp` field carries.
         //
-        // **VK link is INTENTIONALLY ABSENT from the server config**
-        // (Pavel 2026-05-19: «пользователь сам вставляет свою ссылку,
-        // так как у каждого звонка ограниченное кол-во потоков»).
-        // Per upstream `pkg/wgshare/doc.go`: «NOT IN: any VK Calls
-        // link. The VK invite that drives the proxy's credential
-        // rotation is a runtime parameter the user supplies on each
-        // connect — both because it changes more often than the wg
-        // keys, and because the share URL is meant to be portable
-        // across users / devices.» Each VK call has limited
-        // concurrent streams, so a shared per-server link would
-        // saturate; client-side per-user supply is the correct
-        // design. Pre-2026-05-19 we erroneously required a per-
-        // server `wgturn:vk_link` secret — removed.
+        // VK link is INTENTIONALLY ABSENT (Pavel 2026-05-19 + upstream
+        // `pkg/wgshare/doc.go` confirm: client-side, supplied at
+        // connect time).
         let server_wg_private = ctx.secrets.get("wgturn:server_wg_private").ok_or_else(|| {
             CoreError::Render(
                 "wgturn kernel: missing secret `wgturn:server_wg_private` — \
@@ -387,104 +391,224 @@ UNIT
             })?,
         };
 
-        // Validate mode against an explicit whitelist — wgturn-cli
-        // accepts only `proxy_v2` / `proxy_v1` / `wireguard`; anything
-        // else is a typo that we want to catch at render time, not
-        // after a service crash-loop.
-        let mode = ctx.or_default("wgturn:mode", DEFAULT_PEER_TYPE);
-        if !ALLOWED_MODES.contains(&mode) {
-            return Err(CoreError::Render(format!(
-                "wgturn kernel: invalid `wgturn:mode` value {mode:?} — \
-                 must be one of {ALLOWED_MODES:?}"
-            )));
+        // ── 1. Render /etc/wgturn/server.conf — the wgturn-cli serve
+        //    config (wg-quick INI + `#@wgt:` metadata).
+        //    Required keys per upstream `pkg/wgconf/parse.go`:
+        //      #@wgt:EnableServer = true
+        //      #@wgt:Listen = 0.0.0.0:<port>
+        //      #@wgt:Backend = udp:127.0.0.1:<backend port>
+        //    Anything else in this file is silently ignored.
+        let mut server_conf = String::with_capacity(512);
+        server_conf.push_str("# Rendered by vpnctl. Do not hand-edit — your changes\n");
+        server_conf.push_str("# will be overwritten on next `vpnctl deploy`.\n");
+        server_conf.push_str("#\n");
+        server_conf.push_str("# This is `wgturn-cli serve` config: a thin DTLS relay that\n");
+        server_conf.push_str("# forwards inner WG payload to the backend `wg-quick@");
+        server_conf.push_str(BACKEND_INTERFACE_NAME);
+        server_conf.push_str("`\n# daemon on loopback (rendered separately below).\n");
+        server_conf.push_str("# Note: VK Calls invite link is supplied by the END USER at\n");
+        server_conf.push_str("# connect time (`wgturn-cli connect-url ... --vk-link <url>`),\n");
+        server_conf.push_str("# NOT embedded here.\n\n");
+        server_conf.push_str("#@wgt:EnableServer = true\n");
+        server_conf.push_str(&format!("#@wgt:Listen = 0.0.0.0:{listen_port}\n"));
+        server_conf.push_str(&format!(
+            "#@wgt:Backend = udp:127.0.0.1:{DEFAULT_BACKEND_PORT}\n"
+        ));
+
+        // ── 2. Render /etc/wireguard/wgturn-be.conf — the BACKEND
+        //    wg-quick config. Real WireGuard daemon listening on
+        //    127.0.0.1:51821, with [Interface] holding our keypair
+        //    + [Peer] section per granted user.
+        //
+        //    The user's wireguard_pubkey is the `[Peer] PublicKey =`
+        //    that authenticates them. AllowedIPs is the /32 derived
+        //    from their index in the granted-users list (same arith-
+        //    metic as `crates/protocols/src/wgturn.rs::host_octet_for`).
+        //
+        //    Users with no wireguard_pubkey are silently skipped (same
+        //    convention as wireguard.rs::server_inbound). Malformed
+        //    pubkey is a hard error.
+        let mut be_conf = String::with_capacity(1024);
+        be_conf.push_str("# Rendered by vpnctl. Do not hand-edit — your changes\n");
+        be_conf.push_str("# will be overwritten on next `vpnctl deploy`.\n");
+        be_conf.push_str("#\n");
+        be_conf.push_str("# Loopback-only WireGuard daemon. `wgturn-cli serve` forwards\n");
+        be_conf.push_str("# DTLS-decapsulated payload here via `udp:127.0.0.1:");
+        be_conf.push_str(&DEFAULT_BACKEND_PORT.to_string());
+        be_conf.push_str("`.\n");
+        be_conf.push_str("# Never bind to a public interface.\n\n");
+        be_conf.push_str("[Interface]\n");
+        be_conf.push_str(&format!("PrivateKey = {server_wg_private}\n"));
+        be_conf.push_str(&format!("Address = {BACKEND_SERVER_CIDR}\n"));
+        be_conf.push_str(&format!("ListenPort = {DEFAULT_BACKEND_PORT}\n"));
+        be_conf.push_str("# Bind to loopback only via wg-quick PreUp/PostUp:\n");
+        be_conf.push_str("# the [Interface] doesn't have a native «bind only to lo» knob,\n");
+        be_conf.push_str("# but the port is firewalled to 127.0.0.1 by iptables below.\n");
+        be_conf.push_str("PreUp = iptables -I INPUT 1 -p udp --dport ");
+        be_conf.push_str(&DEFAULT_BACKEND_PORT.to_string());
+        be_conf.push_str(" ! -i lo -j DROP\n");
+        be_conf.push_str("PostDown = iptables -D INPUT -p udp --dport ");
+        be_conf.push_str(&DEFAULT_BACKEND_PORT.to_string());
+        be_conf.push_str(" ! -i lo -j DROP || true\n");
+        be_conf.push('\n');
+
+        let mut peer_count = 0;
+        for (idx, u) in users.iter().enumerate() {
+            let Some(pubkey) = u.wireguard_pubkey.as_deref() else {
+                continue;
+            };
+            // Shape gate — matches wireguard.rs::is_valid_wg_pubkey.
+            if pubkey.len() != 44 || !pubkey.ends_with('=') {
+                return Err(CoreError::Render(format!(
+                    "user '{}' has malformed wireguard pubkey (must be 44 base64 chars ending '='): {pubkey:?}",
+                    u.id.0
+                )));
+            }
+            let octet = backend_octet_for(idx, &u.id.0)?;
+            be_conf.push_str(&format!("# Peer: {}\n", u.id.0));
+            be_conf.push_str("[Peer]\n");
+            be_conf.push_str(&format!("PublicKey = {pubkey}\n"));
+            be_conf.push_str(&format!("AllowedIPs = 10.7.0.{octet}/32\n"));
+            be_conf.push('\n');
+            peer_count += 1;
         }
+        let _ = peer_count; // informational only
 
-        // TOML rendering — exact key names will need verification
-        // against `cmd/wgturn-cli/main.go` server mode in phase 2.
-        // Until then, use a documented superset that the upstream
-        // parser tolerates.
-        //
-        // ALL operator-controlled strings are run through
-        // `toml_escape_basic` before interpolation so a pasted secret
-        // containing `"` / `\` / `\n` can't break out of its
-        // double-quoted envelope and inject arbitrary TOML keys
-        // (review-agent finding 1 — critical, TOML injection).
-        //
-        // The `users` slice is intentionally unused at config-
-        // render time — user-grant provisioning lives in
-        // `wgturn-cli provision-url` (server-side state, not in
-        // the daemon-rendered TOML).
-        let _ = users;
-        let mode_esc = toml_escape_basic(mode);
-        let server_wg_private_esc = toml_escape_basic(server_wg_private);
-
-        let mut out = String::with_capacity(512);
-        out.push_str("# Rendered by vpnctl. Do not hand-edit \u{2014} your changes\n");
-        out.push_str("# will be overwritten on next `vpnctl deploy`.\n");
-        out.push_str("# Note: VK Calls invite link is supplied by the END USER at\n");
-        out.push_str("# connect time (`wgturn-cli connect-url ... --vk-link <url>`),\n");
-        out.push_str("# NOT embedded here. Each VK call has limited concurrent\n");
-        out.push_str("# streams, so each user must hand-supply their own link.\n\n");
-        out.push_str(&format!("listen_addr = \"0.0.0.0:{listen_port}\"\n"));
-        out.push_str(&format!("mode = \"{mode_esc}\"\n"));
-        out.push_str("\n[backend.wireguard]\n");
-        out.push_str(&format!("private_key = \"{server_wg_private_esc}\"\n"));
-        out.push_str("listen_port = 51821\n");
-        Ok(out.into_bytes())
+        // ── 3. Assemble the multi-file bundle.
+        let mut bundle = String::with_capacity(server_conf.len() + be_conf.len() + 256);
+        bundle.push_str(BUNDLE_DELIMITER);
+        bundle.push_str("/etc/wgturn/server.conf");
+        bundle.push_str(BUNDLE_DELIMITER_END);
+        bundle.push('\n');
+        bundle.push_str(&server_conf);
+        if !server_conf.ends_with('\n') {
+            bundle.push('\n');
+        }
+        bundle.push_str(BUNDLE_DELIMITER);
+        bundle.push_str("/etc/wireguard/");
+        bundle.push_str(BACKEND_INTERFACE_NAME);
+        bundle.push_str(".conf");
+        bundle.push_str(BUNDLE_DELIMITER_END);
+        bundle.push('\n');
+        bundle.push_str(&be_conf);
+        if !be_conf.ends_with('\n') {
+            bundle.push('\n');
+        }
+        Ok(bundle.into_bytes())
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        ssh.upload("/etc/wgturn/server.toml.new", config).await?;
-        // Same atomic-rename + `systemctl is-active` 8-second poll +
-        // journalctl-dump-on-fail pattern as `sing_box::apply_config`
-        // and `amnezia_wg::apply_config` (CLAUDE.md staging-deploy
-        // lesson #3 — `systemctl reload-or-restart` returns 0 even
-        // when the service immediately exits).
-        let cmd = r#"
+        // Upload the bundle as a single staging file; the unpacker
+        // script below parses + writes each member file then restarts
+        // both systemd units. Atomic-rename + 8s is-active poll +
+        // journalctl-on-fail pattern mirrors sing_box / amnezia_wg.
+        ssh.upload("/etc/wgturn/.deploy-bundle.new", config).await?;
+        let iface = BACKEND_INTERFACE_NAME;
+        let cmd = format!(
+            r#"
             set -eu
-            # No `wgturn-cli check` exists in v0.1.0; the server
-            # parser is run at startup time. Atomic-rename and let
-            # the is-active poll surface a parse error.
-            mv /etc/wgturn/server.toml.new /etc/wgturn/server.toml
-            chown wgturn:wgturn /etc/wgturn/server.toml
-            chmod 0600 /etc/wgturn/server.toml
 
+            BUNDLE=/etc/wgturn/.deploy-bundle.new
+            test -f "$BUNDLE"
+
+            # Unpack the bundle. Format documented in
+            # `crates/kernels/src/wgturn.rs::BUNDLE_DELIMITER`. Parser
+            # is a small awk that splits on the marker line and writes
+            # each member into its declared path (atomic via mv).
+            awk '
+                BEGIN {{ path = ""; outfile = ""; }}
+                /^====FILE: .*====$/ {{
+                    # Flush previous file if any.
+                    if (outfile != "") {{ close(outfile); }}
+                    # Extract path between "====FILE: " and "===="
+                    path = $0
+                    sub(/^====FILE: /, "", path)
+                    sub(/====$/, "", path)
+                    outfile = path ".new"
+                    next
+                }}
+                {{
+                    if (outfile != "") {{ print > outfile }}
+                }}
+            ' "$BUNDLE"
+
+            # Move each ".new" sibling into place atomically. Files we
+            # know about: /etc/wgturn/server.conf and
+            # /etc/wireguard/{iface}.conf.
+            install -d -m 0755 /etc/wireguard
+            install -d -m 0755 /etc/wgturn
+            mv /etc/wgturn/server.conf.new /etc/wgturn/server.conf
+            chown wgturn:wgturn /etc/wgturn/server.conf
+            chmod 0640 /etc/wgturn/server.conf
+            mv /etc/wireguard/{iface}.conf.new /etc/wireguard/{iface}.conf
+            chown root:root /etc/wireguard/{iface}.conf
+            chmod 0600 /etc/wireguard/{iface}.conf
+            rm -f "$BUNDLE"
+
+            # Enable + restart the backend WG first (wgturn relay
+            # depends on it being reachable on 127.0.0.1:51821).
+            systemctl enable wg-quick@{iface} >/dev/null 2>&1 || true
+            systemctl restart wg-quick@{iface}
+
+            # Then the relay itself.
             systemctl enable wgturn >/dev/null 2>&1 || true
-            systemctl reload-or-restart wgturn
+            systemctl restart wgturn
 
-            # 8-second wait for the service to settle.
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active wgturn 2>/dev/null || true)
-                if [ "$state" = "active" ]; then
-                    exit 0
+            # 8-second wait for BOTH services to settle.
+            for s in wg-quick@{iface} wgturn; do
+                ok=0
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active "$s" 2>/dev/null || true)
+                    if [ "$state" = "active" ]; then
+                        ok=1
+                        break
+                    fi
+                    sleep 1
+                done
+                if [ "$ok" != "1" ]; then
+                    echo "$s did not become active. Last 20 log lines:" >&2
+                    journalctl -u "$s" --no-pager -n 20 >&2 || true
+                    exit 1
                 fi
-                sleep 1
             done
-            echo "wgturn did not become active. Last 20 log lines:" >&2
-            journalctl -u wgturn --no-pager -n 20 >&2 || true
-            exit 1
-        "#;
-        ssh.exec(cmd).await?;
+        "#,
+            iface = iface,
+        );
+        ssh.exec(&cmd).await?;
         Ok(())
     }
 
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()> {
-        ssh.exec("systemctl restart wgturn").await?;
+        // Restart BOTH services — relay depends on backend.
+        ssh.exec(&format!(
+            "systemctl restart wg-quick@{iface} wgturn",
+            iface = BACKEND_INTERFACE_NAME,
+        ))
+        .await?;
         Ok(())
     }
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
-        let active = ssh
+        // Active iff BOTH services are active. wgturn-cli serve will
+        // start even if the backend is down (it can't tell from a
+        // UDP socket whether anyone's listening), so the combined
+        // check is the honest one.
+        let relay = ssh
             .exec("systemctl is-active wgturn")
             .await?
             .trim()
             .eq("active");
-        // `wgturn-cli --version` exits 0 on stdout like
-        // `wgturn-cli vX.Y.Z (commit abc1234)`. We don't have a
-        // version constant to compare against; the operator-visible
-        // value is informational only.
+        let backend = ssh
+            .exec(&format!(
+                "systemctl is-active wg-quick@{iface}",
+                iface = BACKEND_INTERFACE_NAME,
+            ))
+            .await?
+            .trim()
+            .eq("active");
+        let active = relay && backend;
         let version = ssh
-            .exec("wgturn-cli --version 2>/dev/null | head -1")
+            .exec("wgturn-cli version 2>/dev/null | head -1")
             .await
             .ok()
             .map(|s| s.trim().to_string());
@@ -501,7 +625,7 @@ UNIT
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use vpnctl_core::{Server, ServerId};
+    use vpnctl_core::{Server, ServerId, UserId};
 
     fn dummy_server() -> Server {
         Server {
@@ -519,15 +643,23 @@ mod tests {
     }
 
     fn complete_secrets() -> HashMap<String, String> {
-        // Post-2026-05-19: only `wgturn:server_wg_private` is required
-        // server-side; VK link moved to client-side (each user supplies
-        // their own at connect time — see kernel render_config comment).
         let mut s = HashMap::new();
         s.insert(
             "wgturn:server_wg_private".into(),
             "AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNn=".into(),
         );
         s
+    }
+
+    fn dummy_user_with_pubkey(name: &str) -> User {
+        User {
+            id: UserId(name.into()),
+            uuid: format!("{name}-uuid"),
+            tuic_password: None,
+            wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+            wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+            sub_token: None,
+        }
     }
 
     #[test]
@@ -537,49 +669,9 @@ mod tests {
 
     #[test]
     fn supported_protocols_is_singleton_wgturn() {
-        // The wgturn kernel hosts exactly one protocol shape — its
-        // own «WG-inside-TURN» wire format. Plain wireguard is the
-        // AmneziaWg kernel's job.
         let protos = WgTurn::new().supported_protocols();
         assert_eq!(protos.len(), 1);
         assert_eq!(protos[0], ProtocolId("wgturn".into()));
-    }
-
-    #[test]
-    fn render_config_does_not_emit_vk_link() {
-        // Pavel 2026-05-19 + upstream `pkg/wgshare/doc.go`: VK link
-        // is a CLIENT-SIDE parameter supplied at connect time, not a
-        // per-server secret. Pre-2026-05-19 we erroneously baked it
-        // into server.toml. Pin the new contract: rendered config
-        // must NOT contain a `vk_link` key, and the comment block
-        // must explain why so a future maintainer doesn't add it back.
-        let server = dummy_server();
-        // Even if a stale `wgturn:vk_link` secret lingers in the
-        // table (left over from before this design change), the
-        // renderer MUST ignore it.
-        let mut secrets = complete_secrets();
-        secrets.insert(
-            "wgturn:vk_link".into(),
-            "https://vk.com/call/join/stale-row".into(),
-        );
-        let ctx = RenderCtx::new(&server, &secrets);
-        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
-        let toml = String::from_utf8(bytes).unwrap();
-        assert!(
-            !toml.contains("vk_link"),
-            "rendered TOML must not carry vk_link (now client-side):\n{toml}"
-        );
-        assert!(
-            !toml.contains("stale-row"),
-            "stale `wgturn:vk_link` secret must not leak into the rendered config:\n{toml}"
-        );
-        // The header comment must explain WHY vk_link isn't here so a
-        // future operator reading server.toml doesn't think it's a bug.
-        assert!(
-            toml.contains("END USER") || toml.contains("end user"),
-            "header must explain that VK link is end-user-supplied: {toml}"
-        );
     }
 
     #[test]
@@ -591,32 +683,134 @@ mod tests {
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
         let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
         let msg = format!("{err}");
-        assert!(
-            msg.contains("wgturn:server_wg_private"),
-            "error must name the missing key: {msg}"
-        );
+        assert!(msg.contains("wgturn:server_wg_private"));
     }
 
     #[test]
-    fn render_config_emits_listen_port_and_mode_defaults() {
+    fn render_config_rejects_missing_wgturn_protocol() {
+        let server = dummy_server();
+        let secrets = complete_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let protos: Vec<&dyn Protocol> = vec![];
+        let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("wgturn protocol"));
+    }
+
+    #[test]
+    fn render_config_emits_multi_file_bundle() {
+        // Pavel 2026-05-19 + upstream `pkg/wgconf/parse.go`: wgturn-cli
+        // serve parses wg-quick INI with `#@wgt:` metadata, NOT TOML.
+        // The kernel emits a TWO-file bundle: server.conf for the
+        // relay + backend.conf for the loopback wg-quick daemon.
         let server = dummy_server();
         let secrets = complete_secrets();
         let ctx = RenderCtx::new(&server, &secrets);
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
         let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
-        let toml = String::from_utf8(bytes).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
+
+        // Bundle structure — both file markers present.
         assert!(
-            toml.contains("listen_addr = \"0.0.0.0:56000\""),
-            "default listen port is 56000: {toml}"
+            body.contains("====FILE: /etc/wgturn/server.conf===="),
+            "server.conf marker missing: {body}"
         );
         assert!(
-            toml.contains("mode = \"proxy_v2\""),
-            "default mode is proxy_v2: {toml}"
+            body.contains("====FILE: /etc/wireguard/wgturn-be.conf===="),
+            "backend conf marker missing: {body}"
+        );
+
+        // server.conf required keys (per upstream wgconf parser).
+        assert!(
+            body.contains("#@wgt:EnableServer = true"),
+            "EnableServer key missing: {body}"
         );
         assert!(
-            toml.contains("[backend.wireguard]"),
-            "backend section present: {toml}"
+            body.contains("#@wgt:Listen = 0.0.0.0:56000"),
+            "Listen key missing or wrong port: {body}"
         );
+        assert!(
+            body.contains("#@wgt:Backend = udp:127.0.0.1:51821"),
+            "Backend key missing or wrong loopback port: {body}"
+        );
+
+        // backend.conf required structure.
+        assert!(
+            body.contains("[Interface]"),
+            "backend [Interface] section missing: {body}"
+        );
+        assert!(
+            body.contains("PrivateKey = AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNn="),
+            "backend private key not embedded: {body}"
+        );
+        assert!(
+            body.contains("ListenPort = 51821"),
+            "backend ListenPort wrong: {body}"
+        );
+        assert!(
+            body.contains("Address = 10.7.0.1/24"),
+            "backend Address wrong: {body}"
+        );
+    }
+
+    #[test]
+    fn render_config_emits_peer_per_user_with_pubkey() {
+        let server = dummy_server();
+        let secrets = complete_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
+        let users = vec![
+            dummy_user_with_pubkey("alice"),
+            dummy_user_with_pubkey("bob"),
+        ];
+        let bytes = WgTurn::new().render_config(&ctx, &users, &protos).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
+
+        // Two [Peer] blocks, each with the same pubkey + a distinct
+        // /32 AllowedIPs (octet 2 for alice, octet 3 for bob).
+        let peer_count = body.matches("[Peer]").count();
+        assert_eq!(peer_count, 2, "expected 2 [Peer] blocks: {body}");
+        assert!(body.contains("# Peer: alice"), "alice peer comment missing");
+        assert!(body.contains("# Peer: bob"), "bob peer comment missing");
+        assert!(
+            body.contains("AllowedIPs = 10.7.0.2/32"),
+            "alice /32 missing: {body}"
+        );
+        assert!(
+            body.contains("AllowedIPs = 10.7.0.3/32"),
+            "bob /32 missing: {body}"
+        );
+    }
+
+    #[test]
+    fn render_config_skips_users_without_pubkey() {
+        let server = dummy_server();
+        let secrets = complete_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
+        let mut no_key = dummy_user_with_pubkey("charlie");
+        no_key.wireguard_pubkey = None;
+        let users = vec![dummy_user_with_pubkey("alice"), no_key];
+        let bytes = WgTurn::new().render_config(&ctx, &users, &protos).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
+        let peer_count = body.matches("[Peer]").count();
+        assert_eq!(peer_count, 1, "only alice should have a peer block");
+        assert!(!body.contains("# Peer: charlie"));
+    }
+
+    #[test]
+    fn render_config_rejects_malformed_pubkey() {
+        let server = dummy_server();
+        let secrets = complete_secrets();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
+        let mut bad = dummy_user_with_pubkey("eve");
+        bad.wireguard_pubkey = Some("not-a-valid-wg-key".into());
+        let err = WgTurn::new()
+            .render_config(&ctx, &[bad], &protos)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("malformed wireguard pubkey"));
     }
 
     #[test]
@@ -627,102 +821,15 @@ mod tests {
         let ctx = RenderCtx::new(&server, &secrets);
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
         let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
-        let toml = String::from_utf8(bytes).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
         assert!(
-            toml.contains("listen_addr = \"0.0.0.0:56777\""),
-            "operator-set listen port wins: {toml}"
-        );
-    }
-
-    #[test]
-    fn render_config_rejects_missing_wgturn_protocol() {
-        // Defense-in-depth — even if Registry::validate_server
-        // missed the inconsistency, the kernel itself rejects a
-        // protocol list without `wgturn`.
-        let server = dummy_server();
-        let secrets = complete_secrets();
-        let ctx = RenderCtx::new(&server, &secrets);
-        let protos: Vec<&dyn Protocol> = vec![]; // empty
-        let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("wgturn protocol"));
-    }
-
-    // ── Review-agent round-1 regression tests ──────────────────────
-    // The tests below pin the four mitigations applied 2026-05-18
-    // for review-agent's critical + important findings:
-    //   - TOML injection via operator-pasted vk_link/mode
-    //   - listen_port parse validation
-    //   - mode whitelist enforcement
-    //   - toml_escape_basic byte-stability
-
-    #[test]
-    fn toml_escape_basic_escapes_quote_and_backslash() {
-        // The two characters that can break out of a `"..."` envelope
-        // in TOML basic strings.
-        assert_eq!(toml_escape_basic("ab\"cd"), "ab\\\"cd");
-        assert_eq!(toml_escape_basic("ab\\cd"), "ab\\\\cd");
-    }
-
-    #[test]
-    fn toml_escape_basic_escapes_newline_and_control_chars() {
-        assert_eq!(toml_escape_basic("a\nb"), "a\\nb");
-        assert_eq!(toml_escape_basic("a\rb"), "a\\rb");
-        assert_eq!(toml_escape_basic("a\tb"), "a\\tb");
-        // C0 control without a named escape — must come out as \u00XX.
-        assert_eq!(toml_escape_basic("a\u{01}b"), "a\\u0001b");
-        // DEL (0x7F) is also banned in basic strings.
-        assert_eq!(toml_escape_basic("a\u{7f}b"), "a\\u007Fb");
-    }
-
-    #[test]
-    fn toml_escape_basic_passes_through_safe_chars() {
-        // ASCII alphanumeric + common punctuation must NOT be touched
-        // — over-eager escaping would make the rendered TOML noisy.
-        assert_eq!(toml_escape_basic("abc-123_xyz=:/"), "abc-123_xyz=:/");
-    }
-
-    // (`render_config_escapes_malicious_vk_link` was removed 2026-05-19
-    // — vk_link is no longer in the rendered config. The
-    // `render_config_escapes_malicious_mode` test below still exercises
-    // `toml_escape_basic` via the server_wg_private path; the escape
-    // contract itself is also unit-tested in
-    // `toml_escape_basic_escapes_*`.)
-
-    #[test]
-    fn render_config_escapes_malicious_mode() {
-        // The mode field is whitelist-rejected (see below test), but
-        // BEFORE the whitelist would have stopped it, a `"` in the
-        // pasted value would still need escaping if a future refactor
-        // weakened the whitelist. This test pins the escape behaviour
-        // for a value that DOES pass the whitelist —
-        // `proxy_v2` then a quote tacked on would fail whitelist, so
-        // we exercise `toml_escape_basic` indirectly via
-        // server_wg_private which has no whitelist.
-        let mut secrets = complete_secrets();
-        secrets.insert(
-            "wgturn:server_wg_private".into(),
-            "fakekey\"injected = true\nx = \"".into(),
-        );
-        let server = dummy_server();
-        let ctx = RenderCtx::new(&server, &secrets);
-        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
-        let toml = String::from_utf8(bytes).unwrap();
-        let no_injection = !toml
-            .lines()
-            .any(|line| line.trim_start() == "injected = true");
-        assert!(
-            no_injection,
-            "server_wg_private injection broke out:\n{toml}"
+            body.contains("#@wgt:Listen = 0.0.0.0:56777"),
+            "operator-set listen port wins: {body}"
         );
     }
 
     #[test]
     fn render_config_rejects_non_numeric_listen_port() {
-        // Review-agent finding 5 — important: an invalid listen_port
-        // value must fail at render time with a clear error, not
-        // silently emit garbage and crash wgturn-cli 8 seconds later.
         let mut secrets = complete_secrets();
         secrets.insert("wgturn:listen_port".into(), "not-a-number".into());
         let server = dummy_server();
@@ -730,76 +837,31 @@ mod tests {
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
         let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
         let msg = format!("{err}");
-        assert!(
-            msg.contains("wgturn:listen_port"),
-            "error must name the bad key: {msg}"
-        );
-        assert!(
-            msg.contains("not-a-number"),
-            "error must quote the bad value: {msg}"
-        );
+        assert!(msg.contains("wgturn:listen_port"));
+        assert!(msg.contains("not-a-number"));
     }
 
     #[test]
-    fn render_config_rejects_out_of_range_listen_port() {
-        let mut secrets = complete_secrets();
-        // 99999 > u16::MAX → parse should fail.
-        secrets.insert("wgturn:listen_port".into(), "99999".into());
+    fn render_config_does_not_emit_vk_link() {
+        // VK link is client-side per upstream `pkg/wgshare/doc.go`;
+        // even if a stale secret lingers in the table, the renderer
+        // must not echo it.
         let server = dummy_server();
+        let mut secrets = complete_secrets();
+        secrets.insert(
+            "wgturn:vk_link".into(),
+            "https://vk.com/call/join/stale-row".into(),
+        );
         let ctx = RenderCtx::new(&server, &secrets);
         let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("wgturn:listen_port"), "got: {msg}");
-    }
-
-    #[test]
-    fn render_config_rejects_unknown_mode() {
-        // mode whitelist enforcement — only `proxy_v2` / `proxy_v1`
-        // / `wireguard` accepted.
-        let mut secrets = complete_secrets();
-        secrets.insert("wgturn:mode".into(), "ssh-banana".into());
-        let server = dummy_server();
-        let ctx = RenderCtx::new(&server, &secrets);
-        let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-        let err = WgTurn::new().render_config(&ctx, &[], &protos).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("wgturn:mode"), "got: {msg}");
-        assert!(
-            msg.contains("ssh-banana"),
-            "must quote the bad value: {msg}"
-        );
-        assert!(
-            msg.contains("proxy_v2") || msg.contains("proxy_v1"),
-            "must list the allowed values: {msg}"
-        );
-    }
-
-    #[test]
-    fn render_config_accepts_each_whitelisted_mode() {
-        for mode in ["proxy_v2", "proxy_v1", "wireguard"] {
-            let mut secrets = complete_secrets();
-            secrets.insert("wgturn:mode".into(), mode.into());
-            let server = dummy_server();
-            let ctx = RenderCtx::new(&server, &secrets);
-            let protos: Vec<&dyn Protocol> = vec![&vpnctl_protocols::WgTurn];
-            let bytes = WgTurn::new()
-                .render_config(&ctx, &[], &protos)
-                .unwrap_or_else(|e| panic!("mode={mode} rejected: {e}"));
-            let toml = String::from_utf8(bytes).unwrap();
-            assert!(
-                toml.contains(&format!("mode = \"{mode}\"")),
-                "mode {mode:?} not embedded: {toml}"
-            );
-        }
+        let bytes = WgTurn::new().render_config(&ctx, &[], &protos).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(!body.contains("vk_link"), "vk_link leaked: {body}");
+        assert!(!body.contains("stale-row"), "stale value leaked: {body}");
     }
 
     #[test]
     fn ensure_installed_script_pins_to_known_sha() {
-        // Defense-in-depth: the pinned SHA literal must NOT be the
-        // empty string and must be a 40-char hex (full git SHA-1).
-        // A pin-bump removing the constant by accident (e.g. via
-        // search-replace) would fail this test before deploy.
         assert_eq!(
             WGTURN_CORE_PINNED_SHA.len(),
             40,

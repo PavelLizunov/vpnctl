@@ -160,6 +160,79 @@ LR
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
+        // ── PRE-APPLY DIFF GUARD (post-2026-05-19 incident) ───────
+        //
+        // Compare the LIVE /etc/sing-box/config.json with the new
+        // rendered one. If the new config REMOVES any user UUID
+        // from inbounds[*].users[*] AND the operator has not
+        // explicitly set VPNCTLD_ALLOW_USER_REMOVAL=1, REFUSE the
+        // deploy with the lost UUIDs spelled out.
+        //
+        // Why this exists: 2026-05-18 deploy on vps-de-01 silently
+        // dropped UUID `b25684c3-…` (the claude-chat-proxy service
+        // user that wasn't in vpnctld's inventory). Result: every
+        // outbound HTTPS request from .142 containers — including
+        // the entire claude-chat → api.anthropic.com path —
+        // started failing tcpdump-silent at Reality handshake.
+        // Pavel had to manually patch the live config back.
+        //
+        // The fix: vpnctld now reads the existing config before
+        // rewriting it. If reconciling inventory → live would lose
+        // any UUID, the operator sees a precise list with the
+        // remediation paths (add to inventory OR override).
+        //
+        // Guard runs ONLY when the file already exists (fresh-node
+        // first deploy has nothing to lose). Parse failures on
+        // the OLD config are non-fatal — we log + proceed (the
+        // file might be hand-edited into a non-standard shape;
+        // refusing forever would itself be a footgun).
+        if let Ok(old_bytes) = ssh.read_file("/etc/sing-box/config.json").await {
+            match user_uuid_diff(&old_bytes, config) {
+                Ok(removed) if !removed.is_empty() => {
+                    let allow = std::env::var("VPNCTLD_ALLOW_USER_REMOVAL")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    if !allow {
+                        let preview: Vec<&String> = removed.iter().take(5).collect();
+                        return Err(CoreError::Render(format!(
+                            "sing-box apply_config: refusing to deploy a config that would \
+                             REMOVE {} user UUID(s) from inbounds[*].users[]: {:?}{}. \
+                             These users exist on the LIVE server but are missing from vpnctld's \
+                             inventory. Either:\n  \
+                             1. Add the missing user(s) to inventory (admin UI → Add user with \
+                                the SAME UUID, then grant on this server), OR\n  \
+                             2. Set VPNCTLD_ALLOW_USER_REMOVAL=1 in /etc/vpnctl/vpnctld.env and \
+                                restart vpnctld to bypass this gate for this deploy cycle.",
+                            removed.len(),
+                            preview,
+                            if removed.len() > preview.len() {
+                                format!(" (+{} more)", removed.len() - preview.len())
+                            } else {
+                                String::new()
+                            },
+                        )));
+                    }
+                }
+                Ok(_) => { /* no removals, proceed */ }
+                Err(e) => {
+                    // Defensive — old config is hand-edited / malformed.
+                    // We don't fail closed here because that'd brick
+                    // deploys forever on any node with a non-standard
+                    // /etc/sing-box/config.json. Operator's signal is
+                    // this stderr warn that journald captures into
+                    // `journalctl -u vpnctld`. (Can't use `tracing!`
+                    // — the kernels crate intentionally has zero
+                    // logging deps; daemon-side logging happens at
+                    // the handler layer.)
+                    eprintln!(
+                        "WARN vpnctl::kernels::sing_box: pre-apply diff guard could not \
+                         parse old /etc/sing-box/config.json ({e}); skipping guard \
+                         (deploy proceeds)"
+                    );
+                }
+            }
+        }
+
         ssh.upload("/etc/sing-box/config.json.new", config).await?;
         // Атомарная замена + валидация перед перезагрузкой + ВЕРИФИКАЦИЯ
         // что сервис реально поднялся. Без последнего блока deploy'и
@@ -210,6 +283,39 @@ LR
             uptime_seconds: None,
         })
     }
+}
+
+/// Extract every `uuid` value found in `inbounds[*].users[*]` of a
+/// sing-box JSON config. Tolerant of non-VLESS inbounds (which don't
+/// carry a `users` array) and of inbounds whose users use a different
+/// auth shape — only entries with a real `"uuid"` string key are
+/// returned. Used by the pre-apply diff guard.
+fn extract_user_uuids(config_bytes: &[u8]) -> Result<std::collections::HashSet<String>> {
+    let v: serde_json::Value = serde_json::from_slice(config_bytes).map_err(CoreError::from)?;
+    let mut out = std::collections::HashSet::new();
+    let Some(inbounds) = v.get("inbounds").and_then(|x| x.as_array()) else {
+        return Ok(out);
+    };
+    for inbound in inbounds {
+        let Some(users) = inbound.get("users").and_then(|x| x.as_array()) else {
+            continue;
+        };
+        for u in users {
+            if let Some(uuid) = u.get("uuid").and_then(|x| x.as_str()) {
+                out.insert(uuid.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Compute the set of user UUIDs that are present in the OLD config
+/// but absent from the NEW config — i.e. would be REMOVED if we
+/// proceeded with the apply. Empty result = safe to proceed.
+fn user_uuid_diff(old: &[u8], new: &[u8]) -> Result<std::collections::HashSet<String>> {
+    let old_uuids = extract_user_uuids(old)?;
+    let new_uuids = extract_user_uuids(new)?;
+    Ok(old_uuids.difference(&new_uuids).cloned().collect())
 }
 
 #[cfg(test)]
@@ -272,5 +378,110 @@ mod tests {
         assert_eq!(out.len(), 2, "outbounds should be [direct, block]");
         assert_eq!(out[0]["type"], "direct");
         assert_eq!(out[1]["type"], "block");
+    }
+
+    // ── Pre-apply diff guard (post-2026-05-19 vps-de-01 incident) ──
+    //
+    // Pavel reported: «Все Anthropic API запросы из claude-chat
+    // падали тихо». Root cause: a sing-box deploy on vps-de-01
+    // dropped the `claude-chat-proxy` service user UUID
+    // (b25684c3-…) from `inbounds[0].users[]` because it wasn't in
+    // vpnctld's inventory. The pre-apply diff guard refuses any
+    // apply that would REMOVE a live UUID (unless the operator
+    // explicitly opts in via VPNCTLD_ALLOW_USER_REMOVAL=1).
+
+    fn make_config(uuids: &[&str]) -> Vec<u8> {
+        let users: Vec<Value> = uuids
+            .iter()
+            .map(|u| {
+                serde_json::json!({
+                    "name": "u",
+                    "uuid": u,
+                    "flow": "xtls-rprx-vision",
+                })
+            })
+            .collect();
+        let cfg = serde_json::json!({
+            "inbounds": [
+                { "type": "vless", "users": users }
+            ]
+        });
+        serde_json::to_vec(&cfg).unwrap()
+    }
+
+    #[test]
+    fn extract_user_uuids_finds_every_uuid_across_inbounds() {
+        let cfg = serde_json::json!({
+            "inbounds": [
+                { "type": "vless", "users": [
+                    {"uuid": "aaa", "name": "a"},
+                    {"uuid": "bbb", "name": "b"},
+                ]},
+                { "type": "tuic", "users": [{"uuid": "ccc", "password": "x"}] },
+                { "type": "trojan", "users": [{"password": "no-uuid-here"}] },
+            ]
+        });
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let got = extract_user_uuids(&bytes).unwrap();
+        let expected: std::collections::HashSet<String> = ["aaa", "bbb", "ccc"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn extract_user_uuids_returns_empty_on_no_inbounds() {
+        let bytes = b"{}".to_vec();
+        let got = extract_user_uuids(&bytes).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn extract_user_uuids_returns_err_on_invalid_json() {
+        let bytes = b"not json".to_vec();
+        assert!(extract_user_uuids(&bytes).is_err());
+    }
+
+    #[test]
+    fn user_uuid_diff_empty_when_new_is_superset() {
+        let old = make_config(&["a", "b"]);
+        let new = make_config(&["a", "b", "c"]);
+        assert!(user_uuid_diff(&old, &new).unwrap().is_empty());
+    }
+
+    #[test]
+    fn user_uuid_diff_lists_only_removed_uuids() {
+        let old = make_config(&["a", "b", "c"]);
+        let new = make_config(&["a", "c"]);
+        let lost = user_uuid_diff(&old, &new).unwrap();
+        assert_eq!(lost.len(), 1, "lost: {lost:?}");
+        assert!(lost.contains("b"));
+    }
+
+    #[test]
+    fn user_uuid_diff_lists_the_pavel_2026_05_19_case() {
+        // The exact incident: live config has claude-chat-proxy's
+        // UUID; new rendered config (built from inventory that didn't
+        // include the service user) lacks it.
+        let live = make_config(&[
+            "af6f36aa-2a51-45c7-82dd-5cd362ed970b",
+            "b25684c3-90d6-454a-a911-4e0abba568b0", // claude-chat-proxy
+        ]);
+        let rendered = make_config(&["af6f36aa-2a51-45c7-82dd-5cd362ed970b"]);
+        let lost = user_uuid_diff(&live, &rendered).unwrap();
+        assert_eq!(lost.len(), 1);
+        assert!(lost.contains("b25684c3-90d6-454a-a911-4e0abba568b0"));
+    }
+
+    #[test]
+    fn user_uuid_diff_empty_when_old_has_no_users() {
+        // Fresh node: no /etc/sing-box/config.json yet → empty old set
+        // → cannot lose anyone. (In production this path is the
+        // ssh.read_file `Err` branch which skips the guard entirely;
+        // this test pins the empty-set semantics.)
+        let old = b"{\"inbounds\":[]}".to_vec();
+        let new = make_config(&["a", "b"]);
+        assert!(user_uuid_diff(&old, &new).unwrap().is_empty());
     }
 }
