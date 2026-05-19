@@ -4659,6 +4659,7 @@ dependencies = [
  "futures-core",
  "http-body-util",
  "maud",
+ "percent-encoding",
  "qrcode",
  "serde",
  "serde_json",

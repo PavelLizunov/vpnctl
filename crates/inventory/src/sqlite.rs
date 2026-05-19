@@ -939,6 +939,112 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Look up a user by their 32-hex `vpn_router_device_id` — the
+    /// canonical lookup key in the ninitux URL format. Returns `None`
+    /// when no user carries that device_id (the column is partially
+    /// unique so at most one row can match). Backs the
+    /// `GET /api/v1/app/config/{device_id}` handler in
+    /// `daemon::handlers::vpn_router`.
+    ///
+    /// Caller is expected to validate the input first via
+    /// `vpnctl_crypto::is_valid_vpn_router_device_id` — this method
+    /// just runs a parameterised SELECT and returns the row (or None).
+    /// Refusing malformed input at the handler keeps the SQL fast-path
+    /// uniform regardless of garbage input.
+    pub async fn find_user_by_vpn_router_device_id(&self, device_id: &str) -> Result<Option<User>> {
+        let row = sqlx::query(
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
+             FROM users WHERE vpn_router_device_id = ?1",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_user).transpose()
+    }
+
+    /// Pin a 32-hex `vpn_router_device_id` on an existing user. The
+    /// user must already exist (call `add_user` first). Setting the
+    /// same value twice is a no-op SQL-wise; setting to a different
+    /// value rotates the device_id (rare — happens if subscription-
+    /// server's `clients.device_id` for that named client gets
+    /// rotated for some reason, then re-imported).
+    ///
+    /// `device_id` MUST be syntactically valid (32 lowercase hex chars,
+    /// validated via `vpnctl_crypto::is_valid_vpn_router_device_id`).
+    /// Anything else returns `Invalid`. An empty string is rejected
+    /// before the gate, so this method cannot accidentally clear an
+    /// existing override — use the dedicated `clear` path if you want
+    /// to disconnect a user from the vpn-router endpoint.
+    ///
+    /// Audit: writes `user.set_vpn_router_device_id` row with old +
+    /// new values. Same transaction-wrapped pattern as
+    /// `set_grant_client_uuid` — SELECT + UPDATE + INSERT all under
+    /// one BEGIN…COMMIT so concurrent callers can't interleave.
+    pub async fn set_vpn_router_device_id(&self, user: &UserId, device_id: &str) -> Result<()> {
+        if !vpnctl_crypto::is_valid_vpn_router_device_id(device_id) {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "device_id {device_id:?} is not 32 lowercase hex chars; refusing to write"
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let old_device_id: Option<String> =
+            sqlx::query("SELECT vpn_router_device_id FROM users WHERE id = ?1")
+                .bind(&user.0)
+                .fetch_optional(&mut *tx)
+                .await?
+                .and_then(|row| {
+                    row.try_get::<Option<String>, _>("vpn_router_device_id")
+                        .ok()
+                        .flatten()
+                });
+
+        // Map SQLite's UNIQUE constraint violation (a different user
+        // already pinned this device_id, blocked by the partial
+        // index added in migration 0017) to a clean `AlreadyExists`
+        // — same shape as `add_user`'s duplicate-id error. Without
+        // this mapping the caller would see a raw sqlx error code
+        // 2067 wrapped in `Sqlx(...)`, which is hard to handle.
+        let res = map_unique(
+            sqlx::query("UPDATE users SET vpn_router_device_id = ?2 WHERE id = ?1")
+                .bind(&user.0)
+                .bind(device_id)
+                .execute(&mut *tx)
+                .await,
+            format!("vpn_router_device_id {device_id}"),
+        )?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}; cannot set vpn_router_device_id",
+                user.0
+            )));
+        }
+
+        // Audit row. device_id is NOT a secret (it's a public lookup
+        // key — anyone hitting `https://ninitux.com/api/v1/app/config/<id>`
+        // already knows it), so logging both old + new in plaintext is
+        // safe for the admin-gated audit feed.
+        let audit_payload = serde_json::json!({
+            "old_vpn_router_device_id": old_device_id,
+            "new_vpn_router_device_id": device_id,
+        });
+        let payload_str = serde_json::to_string(&audit_payload)?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("admin")
+        .bind("user.set_vpn_router_device_id")
+        .bind(&user.0)
+        .bind(&payload_str)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Return a `User` clone with `uuid` swapped to the per-server
     /// VLESS uuid override stored in `grants.client_uuid`. When no
     /// override is set (NULL → COALESCE returns `users.uuid`) the

@@ -30,6 +30,22 @@ pub fn is_valid_uuid(s: &str) -> bool {
     !s.is_empty() && Uuid::parse_str(s).is_ok()
 }
 
+/// `true` if `s` is a 32-character lowercase hex string — the exact
+/// shape ninitux's `clients.device_id` uses (e.g.
+/// `a92b915032b48a2ed45ef72f4171e5f4`). Surfaces in the vpn-router
+/// compat path: the Phase 3 inventory column
+/// `users.vpn_router_device_id` and the handler at
+/// `GET /api/v1/app/config/{device_id}` both gate on this shape so a
+/// stray uuid or arbitrary string can't be written / looked up via
+/// the wrong code path. Matches the nginx route's `[0-9a-f]+` regex
+/// (we tighten it to exactly 32 chars to mirror subscription-server's
+/// `_HEX32 = re.compile(r"^[0-9a-f]{32}$")`).
+pub fn is_valid_vpn_router_device_id(s: &str) -> bool {
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Криптостойкий пароль из URL-safe base64. Длина задаётся в байтах энтропии.
 pub fn gen_password(entropy_bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0u8; entropy_bytes];

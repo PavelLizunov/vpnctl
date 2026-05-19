@@ -517,6 +517,16 @@ pub fn router(state: AppState) -> Router {
             get(handlers::stats::sub_access),
         )
         .route("/sub/{token}", get(handlers::sub::get))
+        // Phase 3 — ninitux subscription-server compat endpoint
+        // (`https://ninitux.com/api/v1/app/config/<device_id>`). Same
+        // response shape as subscription-server; nginx on 192.168.0.207
+        // cuts over from subscription-server:8100 → vpnctld:18402 in
+        // Phase 5. See `docs/COMPREHENSIVE_AUDIT_2026-05-19.md` and
+        // `handlers/vpn_router.rs` for the byte-equivalence contract.
+        .route(
+            "/api/v1/app/config/{device_id}",
+            get(handlers::vpn_router::get_config),
+        )
         .with_state(state)
         .merge(admin_router)
         .layer(TimeoutLayer::with_status_code(

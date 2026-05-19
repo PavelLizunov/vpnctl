@@ -3,3 +3,9 @@
 .DS_Store
 *.swp
 *.swo
+# Core dumps from linker bus errors (caught 2026-05-19 — `ld`
+# segfaulted under disk pressure and dropped a 0-byte `core` file at
+# repo root that got accidentally staged by `git add -A`). Ignore so
+# future segfaults can't recur it.
+/core
+/core.*
