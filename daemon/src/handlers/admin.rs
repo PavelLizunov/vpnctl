@@ -1427,10 +1427,26 @@ fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
 /// supports; the `title` attribute spells out both interactions.
 fn share_link_card(link: &str, footnote: &Markup) -> Markup {
     html! {
-        div style="display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px;" {
+        // `min-height: 244px` matches the QR card's outer dimension
+        // (220 QR + 12 padding × 2 = 244). Forces every Flow card
+        // (A/B/C) to the same row height regardless of URL length,
+        // so the three-column grid above is visually aligned.
+        //
+        // The right-side `min-width: 0` is required so the flex child
+        // can shrink below its natural width — otherwise long URLs in
+        // the textarea push the column wider than its grid-track.
+        div style="display: flex; gap: 14px; align-items: stretch; margin-bottom: 14px; min-height: 244px;" {
             (qr_svg(link))
             div style="flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0;" {
-                div style="font-family: var(--mono); font-size: 11px; color: var(--soft); word-break: break-all;" {
+                // Masked-preview is single-line with ellipsis. Pre-
+                // 2026-05-19 it had `word-break: break-all` which let
+                // long URLs wrap onto 2-3 lines — Flow A (short sub
+                // URL = 1 line) and Flow B/C (long wireguard:// /
+                // vpn:// = 2-3 lines) ended up with different
+                // right-side heights, breaking the column alignment
+                // Pavel screenshotted.
+                div style="font-family: var(--mono); font-size: 11px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                     title=(mask_secret(link)) {
                     (mask_secret(link))
                 }
                 textarea readonly="readonly" rows="3"
@@ -1885,6 +1901,14 @@ pub(crate) async fn user_detail(
                             }
                             @match (&sub_token, &sub_url_str) {
                                 (Some(_), Some(url)) => {
+                                    // Sub-header parallel to Flow B/C's
+                                    // «server X · .conf» line — keeps the
+                                    // three columns vertically aligned
+                                    // (Pavel 2026-05-19: «высота разная у
+                                    // A отличается от B и C»).
+                                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                        "all granted servers · refreshes on its own"
+                                    }
                                     (share_link_card(url, &html! {
                                         "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. "
                                         b { "Recommended default — one URL covers everything." }
@@ -2049,15 +2073,33 @@ pub(crate) async fn user_detail(
                             } @else {
                                 @for (sid, link) in &amnezia_links {
                                     div style="margin-bottom: 18px;" {
+                                        // Pavel 2026-05-19: «почему гдя B
+                                        // можно скачать конфиг а для C
+                                        // нельзя» — the `.conf` file is
+                                        // universal (any WG client incl
+                                        // AmneziaVPN's «File with settings»
+                                        // imports it). Mirror Flow B's
+                                        // sub-header layout with the same
+                                        // download link so the operator
+                                        // doesn't have to scroll back to
+                                        // Flow B to grab the same file.
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
                                             "server " (sid.0)
+                                            " · "
+                                            a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                            path_segment_encode(&user.id.0),
+                                                            path_segment_encode(&sid.0)))
+                                              download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                              style="color: var(--mute); text-decoration: underline;" {
+                                                ".conf"
+                                            }
                                         }
                                         (share_link_card(link, &html! {
-                                            "QR / paste opens in AmneziaVPN; the deep link is " (link.len()) " chars (zlib-compressed JSON-container inside). The same "
+                                            "QR / paste opens in AmneziaVPN; the deep link is " (link.len()) " chars (zlib-compressed JSON-container inside). The "
                                             span.ed-mono { ".conf" }
-                                            " file under Flow B also imports via AmneziaVPN's "
+                                            " link above is a fallback for AmneziaVPN's "
                                             em { "File with settings" }
-                                            " button as a fallback."
+                                            " import path."
                                         }))
                                     }
                                 }
