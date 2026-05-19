@@ -135,3 +135,43 @@ jobs:
           # which we want surfaced as an annotation, not a hard fail.
           cargo mutants -p vpnctl-protocols --in-diff origin/main \
             --timeout-multiplier 3 --no-shuffle || true
+
+  # layout-check — programmatic bounding-box assertions over the
+  # rendered admin pages. Pinned in `scripts/layout_check.py`. This
+  # CI job runs them in HEADLESS mode against a CI-local vpnctld
+  # instance is non-trivial (needs Chrome + a running daemon with
+  # seeded inventory), so for now the gate is GITHUB-side syntax /
+  # smoke ONLY — verifies the script parses + that its CHECKS list
+  # references known selectors. Live execution stays manual via
+  # `python3 scripts/layout_check.py http://192.168.0.236:18402
+  # "slovn:$ADMIN_PW"` against the homelab daemon (Layer 6.5 of the
+  # methodology).
+  #
+  # `continue-on-error: true` matches cargo-mutants — annotations
+  # only, not blocking.
+  layout-check-smoke:
+    name: layout-check (script smoke, soft-fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: parse + import-check
+        run: |
+          python3 -m py_compile scripts/layout_check.py
+          # Verify the CHECKS list compiles as valid Python and
+          # references the helper functions it claims.
+          python3 -c "
+          import sys, ast
+          src = open('scripts/layout_check.py').read()
+          ast.parse(src)
+          # Defined helpers must include the assertions referenced by
+          # CHECKS — surfaces 'I renamed a helper and forgot CHECKS'.
+          required = {'all_equal_width', 'all_equal_height', 'all_start_at_same_y', 'at_least_one'}
+          tree = ast.parse(src)
+          defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+          missing = required - defs
+          if missing:
+              print(f'MISSING: {missing}', file=sys.stderr)
+              sys.exit(1)
+          print(f'ok: all {len(required)} assertion helpers present')
+          "

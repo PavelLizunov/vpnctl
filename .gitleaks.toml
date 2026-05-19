@@ -21,6 +21,14 @@ regexes = [
     '''123456789''',                     # numeric chat_id placeholder
     '''987654321''',                     # numeric chat_id placeholder
     '''hunter2''',                       # canonical xkcd plain pw test
+    # Test-only WireGuard private-key placeholders. Real WG privkeys
+    # are 44 base64 chars ending `=`; the literal `AAA...NNNn=` is
+    # plainly a sequenced placeholder that's pinned in
+    # `crates/kernels/src/wgturn.rs` tests for the multi-file bundle
+    # contract. (Pavel 2026-05-19 — caught by gitleaks.)
+    '''AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNn=''',
+    '''qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=''',  # WG pubkey shape test fixture
+    '''0000000000000000000000000000000000000000000=''',  # all-zero test privkey placeholder
     # Cargo / Rust crate hashes that look secret-shaped
     '''checksum = "[a-f0-9]{64}"''',
 ]
@@ -36,4 +44,6 @@ paths = [
     '''daemon/tests/admin_smoke\.rs''',         # test placeholders
     '''daemon/src/handlers/auth\.rs''',         # contains hunter2 + argon2 PHC in #[cfg(test)] only
     '''daemon/src/alert_sink\.rs''',            # contains SECRETTOKEN placeholders in #[cfg(test)] only
+    '''crates/kernels/src/wgturn\.rs''',        # contains WG keypair placeholders in #[cfg(test)] only
+    '''crates/protocols/src/wgturn\.rs''',      # same — share-link encoder unit tests use the same fixtures
 ]

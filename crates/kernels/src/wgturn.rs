@@ -244,7 +244,25 @@ impl Kernel for WgTurn {
             fi
 
             if [ "$need_rebuild" = "1" ]; then
-                apt-get install -y golang-go git ca-certificates
+                apt-get install -y git ca-certificates curl
+
+                # Install Go 1.24+ via official tarball. Bookworm's
+                # apt-package `golang-go` ships 1.19 which is too old
+                # for wgturn-core's deps (crypto/ecdh ≥1.20,
+                # crypto/hkdf ≥1.24, crypto/mlkem ≥1.24, math/rand/v2
+                # ≥1.22, slices ≥1.21). Live deploy 2026-05-19 caught
+                # this. Tarball install is idempotent — re-run with the
+                # same pinned version is a no-op via the version probe.
+                GO_PINNED_VERSION="go1.24.4"
+                GO_TARBALL="${{GO_PINNED_VERSION}}.linux-amd64.tar.gz"
+                if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "${{GO_PINNED_VERSION}}"; then
+                    cd /tmp
+                    curl -fsSL -o "$GO_TARBALL" "https://go.dev/dl/$GO_TARBALL"
+                    rm -rf /usr/local/go
+                    tar -C /usr/local -xzf "$GO_TARBALL"
+                    rm -f "$GO_TARBALL"
+                fi
+                export PATH=/usr/local/go/bin:$PATH
 
                 if [ -d "$REPO_DIR/.git" ]; then
                     git -C "$REPO_DIR" fetch --quiet origin
@@ -264,7 +282,7 @@ impl Kernel for WgTurn {
 
                 cd "$REPO_DIR"
                 GOFLAGS=-trimpath GOCACHE=/tmp/wgturn-gocache \
-                    go build -o "$BINARY" ./cmd/wgturn-cli
+                    /usr/local/go/bin/go build -o "$BINARY" ./cmd/wgturn-cli
 
                 install -d -m 0755 /etc/wgturn
                 echo "$PINNED_SHA" > "$INSTALLED_SHA_FILE"
