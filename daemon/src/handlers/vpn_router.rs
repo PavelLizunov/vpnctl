@@ -321,25 +321,98 @@ fn json_response<T: Serialize>(value: &T) -> Response {
     }
 }
 
-/// Axum handler — entry point for `GET /api/v1/app/config/{device_id}`.
-pub(crate) async fn get_config(
-    State(state): State<AppState>,
-    Path(device_id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
+/// Read the UA header + compute `now` + return `empty_response` —
+/// the byte-canonical `device_not_registered` shape (or empty raw
+/// for VPN client UAs). One helper used by every error / catchall
+/// branch in this module: when adding a new error path, call this
+/// instead of inlining the 4-line preamble (review-agent flagged
+/// drift risk between `get_config_root_catchall` and `get_config`).
+fn unregistered_response(headers: &HeaderMap) -> Response {
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let want_raw = is_vpn_client_ua(ua);
     let now = now_unix_secs();
+    empty_response(want_raw, now)
+}
+
+/// Axum handler — catch-all for `/api/v1/app/config` and
+/// `/api/v1/app/config/` (no device_id at all). See the doc-comment
+/// on `get_config` below for the defence-in-depth rationale.
+pub(crate) async fn get_config_root_catchall(headers: HeaderMap) -> Response {
+    unregistered_response(&headers)
+}
+
+/// Axum handler — entry point for `GET /api/v1/app/config/{*tail}`.
+/// `tail` captures one OR MORE path segments (axum/matchit `*name`
+/// semantics). Behaviour:
+///
+///   * `tail = "<32-lowercase-hex>"` (single segment, valid shape) →
+///     existing happy path: device lookup + URI rendering. Byte-
+///     equivalent to subscription-server for registered users.
+///   * `tail = "<anything-with-a-slash>"` (multi-segment) → catch-
+///     all. Never touches inventory; returns the canonical
+///     `device_not_registered` shape (or empty-raw for VPN client
+///     UAs) directly.
+///   * `tail = "<single-segment-bad-shape>"` (e.g. uppercase, too
+///     short, has non-hex) → also caught by the existing path-shape
+///     gate `vpnctl_crypto::is_valid_vpn_router_device_id(...)` →
+///     same `empty_response`.
+///
+/// Defense-in-depth rationale: without the multi-segment branch
+/// here, paths like `/api/v1/app/config/<id>/extra` would surface
+/// as a 404 from axum's router (the previous route was the
+/// strict-single-segment `/api/v1/app/config/{device_id}`). nginx
+/// in front of vpnctld already rewrites the upstream URI to short-
+/// circuit this case (Phase 5 post-cutover hardening, 2026-05-19),
+/// but the daemon must also be safe if any future upstream forgets
+/// the rewrite or if a probe lands directly on port 18402 on the
+/// LAN. NEVER a 401 / NEVER a `WWW-Authenticate: Basic realm="vpnctl
+/// admin"` header for these paths — that header would identify the
+/// backend as vpnctld.
+///
+/// Why one route instead of `{device_id}` + `{*tail}` split: axum
+/// 0.8's matchit 0.8.4 panics at router build time with `Insertion
+/// failed due to conflict with previously registered route` when a
+/// single-segment `{name}` and a wildcard `{*name}` share the same
+/// prefix. The unified handler is the workaround.
+pub(crate) async fn get_config(
+    State(state): State<AppState>,
+    Path(tail): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    // Multi-segment defence-in-depth: any `/` in `tail` means the
+    // request was /api/v1/app/config/<seg1>/<seg2>[/...]. NEVER a
+    // valid device_id; return the same bytes as the unregistered
+    // single-segment case. NB: axum's `Path<String>` percent-decodes
+    // the captured tail, so `foo%2Fbar` arrives here as `foo/bar`
+    // and ALSO trips this gate (verified by spec test).
+    if tail.contains('/') || tail.is_empty() {
+        return unregistered_response(&headers);
+    }
+
+    let device_id = tail;
 
     // Path-shape gate. Invalid device_id → same response as a
     // valid-but-unregistered device. Mirrors subscription-server's
     // dummy `0`*32 lookup path.
     if !vpnctl_crypto::is_valid_vpn_router_device_id(&device_id) {
-        return empty_response(want_raw, now);
+        return unregistered_response(&headers);
     }
+
+    // From here on we KNOW `tail` is a valid 32-hex device_id; the
+    // remaining branches inherit `want_raw` + `now` for the happy
+    // path. Keep the explicit variables (rather than re-deriving via
+    // `unregistered_response`) so the happy-path JSON wrapper still
+    // carries the SAME `timestamp` as any subsequent error
+    // `empty_response` call for this request.
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let want_raw = is_vpn_client_ua(ua);
+    let now = now_unix_secs();
 
     let user = match state
         .inv

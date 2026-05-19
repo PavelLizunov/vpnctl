@@ -523,9 +523,27 @@ pub fn router(state: AppState) -> Router {
         // cuts over from subscription-server:8100 → vpnctld:18402 in
         // Phase 5. See `docs/COMPREHENSIVE_AUDIT_2026-05-19.md` and
         // `handlers/vpn_router.rs` for the byte-equivalence contract.
+        // Phase 3 happy path + defense-in-depth catch-all in ONE
+        // wildcard route. The handler dispatches based on `tail`
+        // shape (single 32-hex segment → device lookup; anything
+        // else → canonical `device_not_registered` shape). See
+        // `handlers/vpn_router.rs::get_config` for the dispatch
+        // contract + why we can't split this into `{device_id}` +
+        // `{*tail}` separate routes (matchit 0.8.4 panics on the
+        // overlap). Bare-prefix routes (no device_id at all) point
+        // at a sibling `get_config_root_catchall` because the `*tail`
+        // wildcard requires ≥1 segment.
         .route(
-            "/api/v1/app/config/{device_id}",
+            "/api/v1/app/config/{*tail}",
             get(handlers::vpn_router::get_config),
+        )
+        .route(
+            "/api/v1/app/config",
+            get(handlers::vpn_router::get_config_root_catchall),
+        )
+        .route(
+            "/api/v1/app/config/",
+            get(handlers::vpn_router::get_config_root_catchall),
         )
         .with_state(state)
         .merge(admin_router)
