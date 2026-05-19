@@ -829,9 +829,26 @@ fn admin_router(state: AppState) -> Router {
             axum::http::header::X_FRAME_OPTIONS,
             axum::http::HeaderValue::from_static("DENY"),
         ))
+        // Referrer-Policy: SAME-ORIGIN, not no-referrer.
+        //
+        // The 2026-05-18 security-audit shipped `no-referrer` which
+        // stripped Referer from EVERY outbound request — including
+        // our own same-origin form POSTs. Combined with browsers
+        // that send `Origin: null` for opaque-origin contexts
+        // (privacy mode, sandboxed iframe, certain extensions), this
+        // 100%-bricks the CSRF middleware: both Origin and Referer
+        // are unusable → every POST/PUT/DELETE/PATCH gets blocked
+        // with «Origin (or Referer) header required and must match
+        // Host». Pavel hit this in prod 2026-05-19 and couldn't
+        // mutate ANYTHING through /admin/*.
+        //
+        // `same-origin` keeps the privacy guarantee that nothing
+        // leaks to external sites (admin tree doesn't link out
+        // anyway) AND keeps Referer alive on our own POSTs so the
+        // CSRF middleware's Origin→Referer fallback works.
         .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::header::REFERRER_POLICY,
-            axum::http::HeaderValue::from_static("no-referrer"),
+            axum::http::HeaderValue::from_static("same-origin"),
         ))
         // `Permissions-Policy` deprecates Feature-Policy. Block every
         // sensor + device API we don't use (= all of them).

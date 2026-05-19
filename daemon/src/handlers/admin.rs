@@ -1251,37 +1251,17 @@ pub(crate) async fn users(
             "Open a row for the QR you'll point a phone at."
         }
 
-        // Phase C-3.2 — add-user form. UUID + tuic_password + sub_token
-        // are all mint-on-server; the operator only types the human-
-        // readable id. **All secrets — UUID, tuic_password, sub_token,
-        // AND the WireGuard keypair — are generated unconditionally**
-        // (per CLAUDE.md "users are assumed maximally low-tech" one-
-        // action ceiling: creation = type id + Enter, no checkboxes
-        // for the operator either). Per-key management (rotate WG,
-        // replace with operator-provided pubkey, etc.) lives on the
-        // user-detail page.
-        div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
-            form method="post" action="/admin/users"
-                 style="display: flex; gap: 10px; align-items: baseline;" {
-                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "add user"
-                }
-                input type="text" name="id" required="required"
-                      placeholder="alice"
-                      pattern="[A-Za-z0-9._-]+"
-                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
-                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                button type="submit"
-                       title="Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible"
-                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "create"
-                }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    "→ all keys are auto-generated and shown on the user page"
-                }
-            }
-        }
-
+        // Search FIRST, add-user SECOND. Pre-2026-05-19 the order
+        // was reversed — Pavel hit the case where typing a query
+        // into «add user» (placement default = first input on the
+        // page → mouse-less keyboard flow lands there) accidentally
+        // POSTed and tried to create a user. Putting search first
+        // means: (a) the autofocus cursor lands on a SAFE field,
+        // (b) misplaced Enter routes to a GET search not a POST
+        // create, (c) the destructive «create» action gets a
+        // visually distinct (dashed) container so it's harder to
+        // confuse for the input box you wanted.
+        //
         // Pavel iter C2: search + sort. Search is a GET form so the
         // resulting URL is shareable / bookmarkable. Sort links live
         // next to the search and pin the current direction.
@@ -1294,6 +1274,7 @@ pub(crate) async fn users(
                     }
                     input type="text" name="q" value=(q_lower)
                           placeholder="user id substring"
+                          autofocus
                           style="max-width: 200px; padding: 3px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                     @if !sort_kind.is_empty() && sort_kind != "id" {
                         input type="hidden" name="sort" value=(sort_kind);
@@ -1329,6 +1310,47 @@ pub(crate) async fn users(
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                         "showing " (visible_users) " of " (total_users)
                     }
+                }
+            }
+        }
+
+        // Phase C-3.2 — add-user form, now SECOND in the page (after
+        // search) per the «accidentally typed brat in add-user» bug
+        // 2026-05-19. UUID + tuic_password + sub_token are all
+        // mint-on-server; the operator only types the human-readable
+        // id. **All secrets — UUID, tuic_password, sub_token, AND
+        // the WireGuard keypair — are generated unconditionally**
+        // (per CLAUDE.md "users are maximally low-tech" one-action
+        // ceiling: creation = type id + Enter, no checkboxes for the
+        // operator either). Per-key management (rotate WG, replace
+        // with operator-provided pubkey, etc.) lives on the
+        // user-detail page.
+        //
+        // Visual distinction (dashed border + accent eyebrow tag)
+        // signals «destructive: creates a new row». The search
+        // container above uses no surround at all, so they're hard
+        // to confuse at a glance.
+        div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px dashed var(--accent); background: var(--paper);" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                "↓ create a NEW user (mints UUID + keys) ↓"
+            }
+            form method="post" action="/admin/users"
+                 style="display: flex; gap: 10px; align-items: baseline;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    "new id"
+                }
+                input type="text" name="id" required="required"
+                      placeholder="alice"
+                      pattern="[A-Za-z0-9._-]+"
+                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes. Becomes a NEW user — not a search field."
+                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                button type="submit"
+                       title="Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible"
+                       style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    "create user"
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                    "→ all keys are auto-generated and shown on the user page"
                 }
             }
         }

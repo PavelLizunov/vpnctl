@@ -68,20 +68,60 @@ pub(crate) async fn require_same_origin(req: Request, next: Next) -> Response {
     match (host, claimed) {
         (Some(h), Some(c)) if h.eq_ignore_ascii_case(c) => next.run(req).await,
         _ => {
+            // Pull the raw header values for the error body so the
+            // operator can diagnose without `journalctl` (per CLAUDE.md
+            // Operator-action policy — error messages must NOT instruct
+            // shell access).
+            let origin_raw = req
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(absent)");
+            let referer_raw = req
+                .headers()
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(absent)");
+            let host_raw = host.unwrap_or("(absent)");
             tracing::warn!(
                 target = "vpnctld::csrf",
                 method = %req.method(),
                 path = %req.uri().path(),
-                host = ?host,
-                origin = ?req.headers().get(header::ORIGIN),
-                referer = ?req.headers().get(header::REFERER),
+                host = ?host_raw,
+                origin = ?origin_raw,
+                referer = ?referer_raw,
                 "rejecting cross-origin or origin-less mutating request"
             );
-            (
-                StatusCode::FORBIDDEN,
-                "vpnctl admin: csrf — Origin (or Referer) header required and must match Host\n",
-            )
-                .into_response()
+            // Body carries the values + a plausible cause for the
+            // three most-seen failure modes:
+            //   * Origin: null  → opaque-origin context (sandboxed
+            //     iframe, certain privacy extensions, file:// open)
+            //   * Origin: absent + Referer: absent → operator
+            //     curl/wget hitting POST without --header
+            //   * Origin/Referer points at a different host → genuine
+            //     cross-origin attempt (or proxy rewriting Host)
+            let likely_cause = if origin_raw == "null" {
+                "  likely cause: Origin: null — browser treats this document as an opaque origin\n  \
+                 (sandboxed iframe / privacy extension / file:// open). Open the admin URL\n  \
+                 directly in a normal tab — same hostname + port as bookmarked.\n"
+            } else if origin_raw == "(absent)" && referer_raw == "(absent)" {
+                "  likely cause: no Origin and no Referer — this looks like curl/wget without\n  \
+                 a browser. Add `-H 'Origin: http://<host>:<port>'` matching your daemon URL.\n"
+            } else {
+                "  likely cause: Origin / Referer points at a different host than Host.\n  \
+                 If you're behind a reverse proxy, ensure it passes Origin through unchanged.\n"
+            };
+            let body = format!(
+                "vpnctl admin: csrf — Origin (or Referer) must match Host\n\
+                 \n\
+                 received:\n  \
+                 Host:    {host_raw}\n  \
+                 Origin:  {origin_raw}\n  \
+                 Referer: {referer_raw}\n\
+                 \n\
+                 {likely_cause}"
+            );
+            (StatusCode::FORBIDDEN, body).into_response()
         }
     }
 }

@@ -2666,7 +2666,13 @@ async fn admin_responses_carry_security_headers() {
     );
     assert_eq!(
         headers.get("referrer-policy").map(|v| v.to_str().unwrap()),
-        Some("no-referrer")
+        // `same-origin` (NOT `no-referrer`): the strict version
+        // bricked the CSRF middleware in prod 2026-05-19 by
+        // stripping Referer from same-origin POSTs that browsers
+        // send with `Origin: null`. `same-origin` keeps the no-
+        // external-leakage guarantee while preserving the
+        // Origin-→-Referer fallback inside our own admin tree.
+        Some("same-origin")
     );
     let perm = headers
         .get("permissions-policy")
@@ -3866,6 +3872,180 @@ async fn admin_csrf_referer_fallback_when_origin_absent() {
         resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::TEMPORARY_REDIRECT,
         "same-origin Referer (no Origin) must pass CSRF, got {:?}",
         resp.status()
+    );
+}
+
+/// Regression for the 2026-05-19 broken-admin bug: when the browser
+/// sends `Origin: null` (opaque-origin context — sandboxed iframe,
+/// privacy extension, file:// open), the Referer fallback MUST work
+/// because that's the only remaining signal. Pre-fix:
+/// Referrer-Policy was `no-referrer` which stripped Referer from
+/// every same-origin POST → CSRF middleware bricked admin UI.
+#[tokio::test]
+async fn admin_csrf_referer_fallback_when_origin_is_literal_null() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/theme")
+                .header("host", "test.example")
+                // `Origin: null` is what privacy-mode browsers actually
+                // send for opaque-origin documents (per the Fetch spec).
+                .header("origin", "null")
+                .header("referer", "http://test.example/admin/users")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("value=foxed"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::TEMPORARY_REDIRECT,
+        "`Origin: null` + same-origin Referer must pass CSRF \
+         (this exact scenario bricked prod 2026-05-19), got {:?}",
+        resp.status()
+    );
+}
+
+/// Regression for the 2026-05-19 Pavel-debugged-via-journalctl pain:
+/// when CSRF rejects, the response body MUST include the actual
+/// Host + Origin + Referer values + a likely-cause hint, so the
+/// operator can self-diagnose without shell access (per CLAUDE.md
+/// Operator-action policy).
+#[tokio::test]
+async fn admin_csrf_403_body_shows_host_origin_referer_and_cause() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/tweak/theme")
+                .header("host", "real.example")
+                // `Origin: null` (opaque origin), no Referer — exact
+                // shape Pavel saw in the prod logs 2026-05-19.
+                .header("origin", "null")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("value=foxed"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+
+    // Body lists the three header values verbatim — operator can
+    // see exactly what mismatched.
+    assert!(
+        text.contains("Host:    real.example"),
+        "Host missing from body: {text}"
+    );
+    assert!(
+        text.contains("Origin:  null"),
+        "Origin (literal `null`) missing: {text}"
+    );
+    assert!(
+        text.contains("Referer: (absent)"),
+        "Referer state missing: {text}"
+    );
+    // Likely-cause hint for the `Origin: null` shape — points operator
+    // at the opaque-origin diagnosis instead of leaving them guessing.
+    assert!(
+        text.contains("opaque origin"),
+        "must explain the `Origin: null` case in plain English: {text}"
+    );
+}
+
+/// Regression: the 2026-05-18 security audit shipped
+/// `Referrer-Policy: no-referrer` which stripped Referer from every
+/// outbound request — including our own same-origin form POSTs. Pinned
+/// at `same-origin` so the CSRF middleware's Referer fallback survives.
+/// A regression to `no-referrer` would re-brick admin UI for any
+/// browser sending `Origin: null`.
+#[tokio::test]
+async fn admin_referrer_policy_header_is_same_origin_not_no_referrer() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let policy = resp
+        .headers()
+        .get("referrer-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        policy, "same-origin",
+        "Referrer-Policy must be `same-origin` (NOT `no-referrer` — that bricks the CSRF middleware)"
+    );
+}
+
+/// Regression for the 2026-05-19 «typed brat in add-user» UX bug:
+/// on /admin/users the search form MUST appear before the add-user
+/// form in the rendered HTML. Otherwise a keyboard-focused operator
+/// who types + hits Enter accidentally creates a user instead of
+/// searching.
+#[tokio::test]
+async fn admin_users_renders_search_form_before_add_user_form() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Need ≥ 1 user — the search bar only renders when the list is
+    // non-empty (the bug only manifests once you have users to
+    // search through).
+    st.inv
+        .add_user(&vpnctl_core::User {
+            id: vpnctl_core::UserId("seed".into()),
+            uuid: "11111111-1111-1111-1111-111111111111".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: Some("seed-token".into()),
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    let search_idx = html
+        .find(r#"method="get" action="/admin/users""#)
+        .expect("search form (method=get) missing");
+    let add_idx = html
+        .find(r#"method="post" action="/admin/users""#)
+        .expect("add-user form (method=post) missing");
+    assert!(
+        search_idx < add_idx,
+        "search form (at {search_idx}) must appear BEFORE add-user form (at {add_idx}) — \
+         else accidental Enter from search-flow creates a user (Pavel-2026-05-19 bug)"
+    );
+    // The add-user container must carry visual «destructive» styling
+    // — dashed border + accent eyebrow — so it's unmistakable for a
+    // search input.
+    assert!(
+        html.contains("border: 1px dashed var(--accent)"),
+        "add-user container must use dashed-accent styling to distinguish from search"
     );
 }
 
