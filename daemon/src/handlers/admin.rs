@@ -1748,6 +1748,14 @@ pub(crate) async fn user_detail(
         .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wireguard"))
         .map(|s| &s.id)
         .collect();
+    // Sibling tally for wgturn — same shape as wg_capable_granted
+    // / wg_capable_inventory but for the wgturn protocol. Drives
+    // Flow D's conditional rendering and its empty-state copy.
+    let wgturn_capable_granted: Vec<&vpnctl_core::ServerId> = servers
+        .iter()
+        .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wgturn"))
+        .map(|s| &s.id)
+        .collect();
 
     // Phase Track-1 abuse-detection signal: how many distinct IPs hit
     // this user's /sub URL in the last 24h / 7d, plus the recent
@@ -1870,12 +1878,17 @@ pub(crate) async fn user_detail(
                         }
                     }
 
-                    // Three-column distribution panel — one column per
-                    // client app. Same secret material, three wire
-                    // formats:
+                    // Distribution panel — one column per client app.
+                    // Same secret material, several wire formats:
                     //   * Flow A — sing-box JSON via /sub/<token> URL
                     //   * Flow B — wireguard:// (official WG app, Hiddify)
                     //   * Flow C — vpn://    (AmneziaVPN)
+                    //   * Flow D — wgturn:// (wgturn-cli, VK-TURN relay)
+                    //                  — only when a granted server has
+                    //                  the wgturn protocol enabled. Lives
+                    //                  here so the operator hands the
+                    //                  user one artefact per client app,
+                    //                  same UX as A/B/C.
                     //
                     // Plus a .conf-file download per WG-capable server
                     // as a universal fallback (drag-drop into ANY WG
@@ -1888,7 +1901,13 @@ pub(crate) async fn user_detail(
                     // with ErrorCode 900 («нет контейнеров») — Amnezia
                     // expects its own `vpn://<base64(qCompress(json))>`
                     // deep-link. Split into B + C; honest labels.
-                    div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
+                    //
+                    // Grid uses `auto-fit minmax(340px, 1fr)` so the
+                    // column count adapts to viewport + Flow D's
+                    // conditional presence (3 cols for non-wgturn
+                    // users, 4 for wgturn users; wraps to 2x2 on
+                    // narrower viewports).
+                    div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
                         // Flow A — sing-box / Hiddify subscription URL.
                         // The QR renders the same sub_url shown in the
                         // Subscription block at the top of the page;
@@ -2101,6 +2120,67 @@ pub(crate) async fn user_detail(
                                             em { "File with settings" }
                                             " import path."
                                         }))
+                                    }
+                                }
+                            }
+                        }
+                        // Flow D — wgturn (VK-TURN relayed WG).
+                        // Separate from Flow A/B/C because:
+                        //   * sing-box CAN'T parse `type: wgturn` —
+                        //     the protocol is filtered out of /sub
+                        //     (`appears_in_sing_box_sub() = false`),
+                        //     so Flow A doesn't deliver it.
+                        //   * wgturn:// URL is consumed by the
+                        //     dedicated `wgturn-cli` client, not the
+                        //     official WireGuard app (Flow B) or
+                        //     AmneziaVPN (Flow C).
+                        // The card ONLY renders when at least one
+                        // granted server has the wgturn protocol; for
+                        // most users (sing-box-only) this column is
+                        // omitted entirely (grid auto-fits).
+                        @if !wgturn_capable_granted.is_empty() {
+                            div {
+                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                    "Flow D — wgturn-cli (VK-TURN relay)"
+                                }
+                                @let wgt_links: Vec<_> = share_links
+                                    .iter()
+                                    .filter(|(_, pid, _)| pid.0 == "wgturn")
+                                    .collect();
+                                @if wgt_links.is_empty() {
+                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                        "Granted wgturn servers "
+                                        @for (i, sid) in wgturn_capable_granted.iter().enumerate() {
+                                            @if i > 0 { ", " }
+                                            span.ed-mono { (sid.0) }
+                                        }
+                                        " — but the share-link render failed. Most likely missing "
+                                        span.ed-mono { "wgturn:server_wg_public" }
+                                        " server secret or the user has no "
+                                        span.ed-mono { "wireguard_private" }
+                                        " (create the user with "
+                                        span.ed-mono { "--gen-wireguard" }
+                                        ")."
+                                    }
+                                } @else {
+                                    @for (sid, _pid, link) in &wgt_links {
+                                        div style="margin-bottom: 18px;" {
+                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                "server " (sid.0)
+                                                " · ~200 KB/s emergency"
+                                            }
+                                            (share_link_card(link, &html! {
+                                                "Opens in "
+                                                span.ed-mono { "wgturn-cli" }
+                                                " — the user pastes the link AND their own VK Calls invite at connect time: "
+                                                br {}
+                                                span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10.5px;" {
+                                                    "wgturn-cli connect-url '<this-link>' --vk-link '<https://vk.com/call/join/...>'"
+                                                }
+                                                br {}
+                                                "Each VK call has a limited concurrent-stream count, so each user supplies their own. ~200 KB/s ceiling per device — position as an emergency channel beside Flow A/B/C, not a daily driver."
+                                            }))
+                                        }
                                     }
                                 }
                             }

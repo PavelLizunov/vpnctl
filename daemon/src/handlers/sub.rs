@@ -340,6 +340,22 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
                 );
                 continue;
             };
+            // Skip protocols that are not sing-box-native (today:
+            // wgturn — its `type: "wgturn"` outbound is unknown to
+            // sing-box / Hiddify and would make the WHOLE sub config
+            // unparseable, dropping every legit route too). Such
+            // protocols are still surfaced in admin UI's per-protocol
+            // share-links section via their own client (e.g. wgturn-cli
+            // connect-url '<wgturn://...>').
+            if !proto.appears_in_sing_box_sub() {
+                tracing::debug!(
+                    target = "vpnctld::sub",
+                    server = %server.id,
+                    protocol = %pid,
+                    "protocol declared non-sing-box; skipping in sub config"
+                );
+                continue;
+            }
             match proto.client_config(&ctx, &user) {
                 Ok(mut value) => {
                     let tag = format!("{}-{}", server.id.0, pid.0);

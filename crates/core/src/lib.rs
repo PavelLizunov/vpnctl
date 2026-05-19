@@ -393,6 +393,31 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
         &[]
     }
+
+    /// Does this protocol's `client_config` produce a sing-box-
+    /// compatible outbound JSON object? Default `true` — almost every
+    /// protocol in this crate today does (VLESS / TUIC / Hysteria2 /
+    /// Trojan / AnyTLS / Shadowsocks-2022 / WireGuard). The `/sub/<token>`
+    /// endpoint assembles a sing-box `outbounds` array and serves it
+    /// to Hiddify / sing-box clients; **any outbound with an
+    /// unrecognised `type` makes the entire config invalid** and the
+    /// client either refuses to start OR silently drops the route.
+    ///
+    /// Protocols that ARE NOT sing-box-native (today: wgturn —
+    /// delivered via the dedicated `wgturn-cli connect-url` flow
+    /// with its own `wgturn://` share link) MUST override this to
+    /// `false`. The sub handler then skips them when assembling the
+    /// sing-box config, but they still appear in the per-protocol
+    /// share-links section of the admin UI (their own «Flow D»-style
+    /// card).
+    ///
+    /// (Pavel 2026-05-19: «wgturn находится внутри обычной подписки,
+    /// это не будет проблемой? он же не поддерживается в рамках
+    /// sing-box?» — yes, it was a problem; this is the trait-level
+    /// fix.)
+    fn appears_in_sing_box_sub(&self) -> bool {
+        true
+    }
 }
 
 //

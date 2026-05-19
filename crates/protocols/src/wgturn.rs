@@ -192,6 +192,16 @@ impl Protocol for WgTurn {
         &[("udp", WGTURN_PORT)]
     }
 
+    fn appears_in_sing_box_sub(&self) -> bool {
+        // wgturn is delivered via the dedicated `wgturn-cli` client +
+        // its own `wgturn://` share-link, NOT via sing-box. Sing-box
+        // has no idea what `type: "wgturn"` is — if we let this slip
+        // into the /sub config the whole sub envelope becomes
+        // unparseable and Hiddify drops EVERY route (including the
+        // working VLESS / TUIC ones). Hard `false` is correct.
+        false
+    }
+
     fn server_inbound(&self, _ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
         // wgturn-core renders its OWN TOML via the kernel's
         // `render_config`; the protocol doesn't contribute a sing-box-
@@ -313,6 +323,21 @@ mod tests {
         let p = WgTurn::new();
         let ports = p.listen_ports();
         assert_eq!(ports, &[("udp", 56000_u16)]);
+    }
+
+    #[test]
+    fn appears_in_sing_box_sub_is_false() {
+        // CRITICAL: wgturn's `type: "wgturn"` outbound is NOT
+        // sing-box-native. If the /sub handler doesn't skip it,
+        // every Hiddify / sing-box client fed the resulting envelope
+        // refuses to start with «unknown outbound type wgturn» (or
+        // worse, silently drops every route including the legit
+        // VLESS / TUIC ones). Pin the trait override.
+        // (Pavel 2026-05-19 bug report.)
+        assert!(
+            !WgTurn::new().appears_in_sing_box_sub(),
+            "wgturn must opt OUT of the sing-box subscription"
+        );
     }
 
     #[test]
