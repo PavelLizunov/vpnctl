@@ -759,9 +759,25 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Users granted on `server`, with `uuid` already overridden to the
+    /// per-server `grants.client_uuid` if one is set (Phase 1 of the
+    /// ninitux merge — see migration `0016_grants_per_server_uuid.sql`).
+    ///
+    /// Returned `User.uuid` is the value the SERVER expects to see in
+    /// VLESS Reality handshakes from this user. It MAY differ between
+    /// servers for the same `user.id` once Phase 2 has imported the
+    /// per-(user, server) uuids harvested from subscription-server's
+    /// `client_server_links` table.
+    ///
+    /// All OTHER `User` fields (`tuic_password`, `wireguard_pubkey`,
+    /// `wireguard_private`, `sub_token`) keep their per-user values —
+    /// only `uuid` is per-server. TUIC and WireGuard don't need
+    /// per-server differentiation (TUIC carries password + per-user
+    /// uuid; WG identifies peers by pubkey not name) so leaving them
+    /// global is correct and avoids needless schema bloat.
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token
+            "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
@@ -771,6 +787,128 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_user).collect()
+    }
+
+    /// Effective VLESS uuid for a (user, server) grant — the value the
+    /// server's sing-box would expect in a Reality handshake from this
+    /// user. Returns `None` if no grant exists for the pair.
+    ///
+    /// `COALESCE(grants.client_uuid, users.uuid)`. The override path:
+    /// if Phase 2's import has set a per-server `client_uuid` on the
+    /// grant (e.g. when ninitux carried a distinct uuid per server for
+    /// the same user), that wins; otherwise the user's global uuid is
+    /// returned — preserving pre-Phase-1 behaviour byte-for-byte.
+    ///
+    /// Use this instead of `get_user(id).uuid` when you're about to
+    /// render a vless:// share-link OR push a sing-box `inbounds[*].users[*]`
+    /// entry for a specific server. The global `users.uuid` is still the
+    /// user IDENTITY (used in audit log targets, sub-token lookups, etc),
+    /// but it's no longer guaranteed to be the AUTH secret on every
+    /// server the user is granted to.
+    pub async fn client_uuid_for(
+        &self,
+        user: &UserId,
+        server: &ServerId,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT COALESCE(g.client_uuid, u.uuid) AS uuid
+             FROM grants g
+             INNER JOIN users u ON u.id = g.user_id
+             WHERE g.user_id = ?1 AND g.server_id = ?2",
+        )
+        .bind(&user.0)
+        .bind(&server.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(r.try_get("uuid")?)),
+        }
+    }
+
+    /// Set the per-server VLESS uuid override on an existing grant. The
+    /// grant must already exist (call `grant` first if not). Idempotent —
+    /// setting to the same value is a no-op SQL-wise; setting to a
+    /// different value overwrites.
+    ///
+    /// `client_uuid` MUST be a syntactically valid RFC 4122 UUID
+    /// (validated via `vpnctl_crypto::is_valid_uuid`). An empty /
+    /// malformed value would silently brick the user on the server
+    /// (Reality handshake rejects, no telemetry signals the cause) —
+    /// the gate here means a Phase 2 import script that hits one bad
+    /// row fails loudly per-row instead of silently degrading.
+    ///
+    /// Errors:
+    ///   * `Invalid` when `client_uuid` doesn't pass the UUID-shape
+    ///     check.
+    ///   * `Invalid` when the (user, server) pair has no grant row —
+    ///     callers should NOT silently create the grant here. The
+    ///     Phase 2 import script grants first, then sets the per-server
+    ///     uuid as a separate step (so audit log clearly reflects each
+    ///     mutation).
+    ///
+    /// Audit: writes a `grant.set_client_uuid` row with both old + new
+    /// uuid values in the payload, so the operator can trace «when did
+    /// this user's vps-de-01 uuid change?» in the audit timeline.
+    pub async fn set_grant_client_uuid(
+        &self,
+        user: &UserId,
+        server: &ServerId,
+        client_uuid: &str,
+    ) -> Result<()> {
+        if !vpnctl_crypto::is_valid_uuid(client_uuid) {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "client_uuid {client_uuid:?} is not a valid UUID; refusing to write"
+            )));
+        }
+
+        // Snapshot the previous value for the audit payload. NULL
+        // (never overridden) is represented as serde_json::Null so
+        // a later replay knows the override is fresh, not a no-op.
+        let old_uuid: Option<String> =
+            sqlx::query("SELECT client_uuid FROM grants WHERE user_id = ?1 AND server_id = ?2")
+                .bind(&user.0)
+                .bind(&server.0)
+                .fetch_optional(&self.pool)
+                .await?
+                .and_then(|row| {
+                    row.try_get::<Option<String>, _>("client_uuid")
+                        .ok()
+                        .flatten()
+                });
+
+        let res = sqlx::query(
+            "UPDATE grants SET client_uuid = ?3
+             WHERE user_id = ?1 AND server_id = ?2",
+        )
+        .bind(&user.0)
+        .bind(&server.0)
+        .bind(client_uuid)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no grant for user={} server={}; cannot set client_uuid",
+                user.0, server.0
+            )));
+        }
+
+        // Audit AFTER the successful UPDATE so a failure (e.g. FK
+        // violation that surfaced too late) doesn't leave a misleading
+        // «I changed this» row. Target = user id so the entry sorts
+        // alongside other per-user mutations on /admin/audit?target=…
+        self.audit(
+            "admin",
+            "grant.set_client_uuid",
+            Some(&user.0),
+            Some(&serde_json::json!({
+                "server_id": server.0,
+                "old_client_uuid": old_uuid,
+                "new_client_uuid": client_uuid,
+            })),
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {

@@ -1567,6 +1567,46 @@ fn qr_svg(url: &str) -> Markup {
 /// page still renders. The empty-state classifier in the Flow C card
 /// distinguishes "no grants" from "no WG-capable server" from "render
 /// failed" using the same `wg_capable_granted` tally as Flow B.
+/// For each server in `peers`, pick `user`'s per-server uuid out of
+/// the peers list (migration 0016 made `users_for_server` return User
+/// rows with `uuid` already overridden by `grants.client_uuid`). The
+/// returned User has its `uuid` swapped to the per-server value; all
+/// other fields stay at the user's global values.
+///
+/// `server_id` is for diagnostics only — we log a WARN when peers is
+/// non-empty AND `user.id` is missing from it, because that means
+/// some caller built the peers list for the wrong server OR a grant
+/// got revoked between fetch + render. Either case would silently
+/// render a wrong-uuid share-link (the byte-equivalent of pre-Phase-1
+/// behaviour, but masking a real bug) — surfacing it as a warn
+/// matches the wg_addressing::peer_octet_in_slash24 contract.
+fn user_for_server_render(
+    user: &vpnctl_core::User,
+    peers: &[vpnctl_core::User],
+    server_id: &vpnctl_core::ServerId,
+) -> vpnctl_core::User {
+    let per_server_uuid = peers
+        .iter()
+        .find(|p| p.id == user.id)
+        .map(|p| p.uuid.as_str());
+    match per_server_uuid {
+        Some(uuid) => user.with_per_server_uuid(uuid),
+        None => {
+            if !peers.is_empty() {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    server = %server_id,
+                    user = %user.id,
+                    "peer list for server does not contain target user; \
+                     falling back to global user.uuid (caller bug — peers \
+                     built for wrong server, or grant revoked mid-render)"
+                );
+            }
+            user.clone()
+        }
+    }
+}
+
 fn collect_amnezia_links(
     user: &vpnctl_core::User,
     servers: &[vpnctl_core::Server],
@@ -1590,7 +1630,8 @@ fn collect_amnezia_links(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
-        match vpnctl_protocols::amnezia_share_link(&ctx, user) {
+        let per_server_user = user_for_server_render(user, peers, &server.id);
+        match vpnctl_protocols::amnezia_share_link(&ctx, &per_server_user) {
             Ok(link) => out.push((server.id.clone(), link)),
             Err(e) => {
                 tracing::warn!(
@@ -1627,12 +1668,13 @@ fn collect_share_links(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        let per_server_user = user_for_server_render(user, peers, &server.id);
         for pid in &server.enabled_protocols {
             let Some(proto) = state.registry.protocol(pid) else {
                 tracing::warn!(target = "vpnctld::admin", protocol = %pid, "protocol not registered");
                 continue;
             };
-            match proto.share_link(&ctx, user) {
+            match proto.share_link(&ctx, &per_server_user) {
                 Ok(link) => out.push((server.id.clone(), pid.clone(), link)),
                 Err(e) => {
                     tracing::warn!(

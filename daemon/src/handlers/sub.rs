@@ -331,6 +331,34 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
             .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
         let ctx = RenderCtx::new(server, &secrets);
 
+        // Per-server UUID override (Phase 1 of the ninitux merge —
+        // migration `0016_grants_per_server_uuid.sql`). The user's
+        // global `uuid` is their IDENTITY; the server-specific
+        // `grants.client_uuid` is the AUTH secret the server's
+        // sing-box expects in Reality handshakes from this user. For
+        // every existing grant the two values match (backfilled at
+        // migration time), so this branch is byte-identical to the
+        // pre-Phase-1 rendering until a Phase 2 import sets distinct
+        // per-server uuids.
+        //
+        // On the unlikely-but-possible race where the grant was
+        // revoked between `servers_for_user` above and this lookup,
+        // we keep the user's global uuid — `client_config` will then
+        // render a link the server doesn't recognise, which a
+        // subsequent /sub fetch (after the grant is re-added or the
+        // server is dropped from servers_for_user) corrects.
+        let per_server_user = match state
+            .inv
+            .client_uuid_for(&user.id, &server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
+        {
+            Some(client_uuid) if client_uuid != user.uuid => {
+                user.with_per_server_uuid(&client_uuid)
+            }
+            _ => user.clone(),
+        };
+
         for pid in &server.enabled_protocols {
             let Some(proto) = state.registry.protocol(pid) else {
                 tracing::warn!(
@@ -356,7 +384,7 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
                 );
                 continue;
             }
-            match proto.client_config(&ctx, &user) {
+            match proto.client_config(&ctx, &per_server_user) {
                 Ok(mut value) => {
                     let tag = format!("{}-{}", server.id.0, pid.0);
                     if let Some(obj) = value.as_object_mut() {

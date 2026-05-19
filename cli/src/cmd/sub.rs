@@ -40,15 +40,32 @@ pub(crate) async fn run(
         let secrets = inv.list_server_secrets(&server.id).await?;
         // WireGuard's share_link reads `ctx.peers` to assign the right
         // /32 per user — pass the granted-users list. Other protocols
-        // ignore the field.
+        // ignore the field. `users_for_server` already overrides each
+        // peer's `uuid` to the per-server `grants.client_uuid` value
+        // (migration 0016) so this list matches what the server's
+        // sing-box expects.
         let peers = inv.users_for_server(&server.id).await?;
         let ctx = RenderCtx::with_peers(server, &secrets, &peers);
+
+        // Per-server UUID override for the user we're about to mint
+        // share-links for (Phase 1 of the ninitux merge — see
+        // migration `0016_grants_per_server_uuid.sql`). For grants
+        // that haven't had their `client_uuid` overridden the lookup
+        // returns the user's global uuid — byte-identical rendering
+        // to the pre-Phase-1 behaviour.
+        let per_server_user = match inv.client_uuid_for(&uid, &server.id).await? {
+            Some(client_uuid) if client_uuid != user.uuid => {
+                user.with_per_server_uuid(&client_uuid)
+            }
+            _ => user.clone(),
+        };
+
         for pid in &server.enabled_protocols {
             let Some(proto) = registry.protocol(pid) else {
                 eprintln!("warn: protocol '{pid}' not registered, skipping");
                 continue;
             };
-            match proto.share_link(&ctx, &user) {
+            match proto.share_link(&ctx, &per_server_user) {
                 Ok(link) => entries.push(LinkEntry {
                     server: server.id.0.clone(),
                     protocol: pid.0.clone(),

@@ -16,6 +16,20 @@ pub fn gen_uuid() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// `true` if `s` is a syntactically valid RFC 4122 UUID (any version,
+/// hyphenated). Used as a write-boundary gate for inputs that get
+/// embedded into `inbounds[*].users[*].uuid` on a sing-box node — an
+/// empty / malformed value would silently brick that user (Reality
+/// handshake rejects, no telemetry signals the cause). Variant /
+/// version are NOT enforced; sing-box accepts any non-empty
+/// UUID-shaped string. Surfaces in `vpnctl-inventory`'s
+/// `set_grant_client_uuid` (per-server UUID overrides — Phase 1 of
+/// the ninitux merge) where the caller is a one-time Python import
+/// script with no other sanity gate.
+pub fn is_valid_uuid(s: &str) -> bool {
+    !s.is_empty() && Uuid::parse_str(s).is_ok()
+}
+
 /// Криптостойкий пароль из URL-safe base64. Длина задаётся в байтах энтропии.
 pub fn gen_password(entropy_bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0u8; entropy_bytes];

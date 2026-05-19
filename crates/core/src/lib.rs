@@ -150,6 +150,27 @@ pub struct User {
     pub sub_token: Option<String>,
 }
 
+impl User {
+    /// Return a clone of `self` with `uuid` replaced by `new_uuid`. Used
+    /// at every share-link / sing-box rendering call-site to apply the
+    /// per-(user, server) UUID override stored in `grants.client_uuid`
+    /// (Phase 1 of the ninitux merge — see migration
+    /// `0016_grants_per_server_uuid.sql` in `vpnctl-inventory`).
+    ///
+    /// The user's GLOBAL identity (`User::id`, sub_token lookups, audit
+    /// targets) stays pinned to the original `User`; this helper only
+    /// produces a per-server VIEW for protocol rendering. When
+    /// `new_uuid` equals the existing `uuid` the original is cloned
+    /// unchanged — safe to call unconditionally; callers don't need to
+    /// short-circuit identity overrides.
+    #[must_use]
+    pub fn with_per_server_uuid(&self, new_uuid: &str) -> Self {
+        let mut out = self.clone();
+        out.uuid = new_uuid.to_string();
+        out
+    }
+}
+
 // Manual Debug: derived would print sub_token / tuic_password /
 // wireguard_private verbatim, which leaks credential-equivalents
 // into logs / panics / anyhow chains. Companion to `#[serde(skip_serializing)]`
