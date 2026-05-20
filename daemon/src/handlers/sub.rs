@@ -373,7 +373,20 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
             }
             match proto.client_config(&ctx, &per_server_user) {
                 Ok(mut value) => {
-                    let tag = format!("{}-{}", server.id.0, pid.0);
+                    // Outbound tag user sees in their sing-box client's
+                    // outbound list. Format: `{Country} {Protocol}`
+                    // (e.g. `Germany VLESS`, `Iceland TUIC`). Post-rename
+                    // 2026-05-20 server IDs are ISO country codes — see
+                    // `vpn_router::country_display_name` for the
+                    // canonical mapping. Protocol IDs come from each
+                    // `impl Protocol` registration (`vless+reality`,
+                    // `tuic-v5`, `hysteria2`, …) — we transform to the
+                    // user-facing label here so the Protocol trait
+                    // doesn't need to know about display strings.
+                    let server_display =
+                        crate::handlers::vpn_router::country_display_name(&server.id.0);
+                    let proto_display = protocol_display_name(&pid.0);
+                    let tag = format!("{server_display} {proto_display}");
                     if let Some(obj) = value.as_object_mut() {
                         obj.insert("tag".into(), json!(tag));
                     }
@@ -395,6 +408,28 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
 
     let cfg = build_client_envelope(&user, outbounds, &tags);
     Ok((user_id, cfg))
+}
+
+/// Map a protocol ID (`vless+reality`, `tuic-v5`, …) to the user-facing
+/// label rendered in sing-box outbound tags. Stable across versions:
+/// what the operator's user sees in their app's outbound list MUST NOT
+/// drift on a vpnctl deploy unless the protocol itself changed.
+///
+/// Conservative naming — full word for well-known protocols, short
+/// abbreviation only for verbose names (Hysteria2, Shadowsocks-2022).
+/// Unknown protocols fall back to uppercased ID — operator can read it.
+fn protocol_display_name(protocol_id: &str) -> String {
+    match protocol_id {
+        "vless+reality" => "VLESS".into(),
+        "tuic-v5" => "TUIC".into(),
+        "hysteria2" => "HY2".into(),
+        "shadowsocks-2022" => "SS-22".into(),
+        "trojan" => "Trojan".into(),
+        "anytls" => "AnyTLS".into(),
+        "wireguard" => "WireGuard".into(),
+        "wgturn" => "WGTurn".into(),
+        other => other.to_ascii_uppercase(),
+    }
 }
 
 /// Wrap the per-server outbounds in a minimal sing-box client envelope:

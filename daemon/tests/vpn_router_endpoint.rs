@@ -53,7 +53,10 @@ async fn seed_state(dir: &TempDir) -> AppState {
     // order. Both carry the vless+reality secrets; one server (`stg`)
     // is granted but has NO vless.public_key — should be skipped
     // silently, not crash the whole response.
-    for sid in ["vps-de-01", "vps-is-01"] {
+    // Post-2026-05-20 rename: server IDs are ISO country codes.
+    // `country_display_name` in vpn_router.rs maps these to user-facing
+    // labels (de→Germany, is→Iceland). Tests use the new IDs end-to-end.
+    for sid in ["de", "is"] {
         let server = Server {
             id: ServerId(sid.into()),
             address: format!("{sid}.example.com"),
@@ -104,12 +107,8 @@ async fn seed_state(dir: &TempDir) -> AppState {
     inv.set_vpn_router_device_id(&user.id, TEST_DEVICE_ID)
         .await
         .unwrap();
-    inv.grant(&user.id, &ServerId("vps-de-01".into()))
-        .await
-        .unwrap();
-    inv.grant(&user.id, &ServerId("vps-is-01".into()))
-        .await
-        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("is".into())).await.unwrap();
     inv.grant(&user.id, &ServerId("bare".into())).await.unwrap();
 
     let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
@@ -168,13 +167,13 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
     assert_eq!(lines.len(), 2, "expected 2 vless URIs, got: {s}");
     // Order is determined by `servers_for_user` which `ORDER BY g.server_id`.
     assert!(
-        lines[0].contains("@vps-de-01.example.com:443"),
-        "first URI = vps-de-01: {}",
+        lines[0].contains("@de.example.com:443"),
+        "first URI = de: {}",
         lines[0]
     );
     assert!(
-        lines[1].contains("@vps-is-01.example.com:443"),
-        "second URI = vps-is-01: {}",
+        lines[1].contains("@is.example.com:443"),
+        "second URI = is: {}",
         lines[1]
     );
     // Both URIs use the user's global uuid (no per-server override
@@ -183,8 +182,8 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
         assert!(line.contains("11111111-2222-3333-4444-555555555555"));
     }
     // Fragment has stripped server tag + port + client_name.
-    assert!(lines[0].contains("#de-01%20443%20tester-1"));
-    assert!(lines[1].contains("#is-01%20443%20tester-1"));
+    assert!(lines[0].contains("#Germany%20VLESS"));
+    assert!(lines[1].contains("#Iceland%20VLESS"));
 }
 
 #[tokio::test]
@@ -350,7 +349,7 @@ async fn vpn_router_per_server_uuid_override_lands_in_uri() {
         .inv
         .set_grant_client_uuid(
             &UserId("tester-1".into()),
-            &ServerId("vps-de-01".into()),
+            &ServerId("de".into()),
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         )
         .await
@@ -372,11 +371,11 @@ async fn vpn_router_per_server_uuid_override_lands_in_uri() {
     // The de-01 URI uses the overridden uuid; the is-01 URI uses
     // the user's global uuid (no override pinned there).
     assert!(
-        s.contains("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@vps-de-01.example.com"),
+        s.contains("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@de.example.com"),
         "de-01 should use override uuid: {s}"
     );
     assert!(
-        s.contains("vless://11111111-2222-3333-4444-555555555555@vps-is-01.example.com"),
+        s.contains("vless://11111111-2222-3333-4444-555555555555@is.example.com"),
         "is-01 should fall back to global uuid: {s}"
     );
 }

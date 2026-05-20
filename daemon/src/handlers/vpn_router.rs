@@ -179,16 +179,45 @@ fn render_vless_uri(
         "type=tcp&security=reality&pbk={pbk_e}&fp=chrome&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
     );
 
-    let label = format!("{server_tag} {port} {client_name}");
+    let label = format!("{server_tag} VLESS");
     let fragment = utf8_percent_encode(&label, NINITUX_QUOTE);
 
+    let _ = client_name; // kept in signature for caller compat; intentionally not in label
     format!("vless://{client_uuid}@{server_ip}:{port}?{params}#{fragment}")
 }
 
-/// Strip a leading `vps-` from the server name to match the label
-/// subscription-server uses in its fragments.
-fn strip_vps_prefix(s: &str) -> &str {
-    s.strip_prefix("vps-").unwrap_or(s)
+/// Map an ISO-3166-1 alpha-2 server id to a user-facing country name.
+///
+/// Server IDs in vpnctld inventory follow the convention (post-2026-05-20
+/// rename): two-letter lowercase ISO codes for production country nodes
+/// (`de`, `is`, `fi`, `nl`, `us`, …). The label rendered into the
+/// subscription URI fragment (`#Germany VLESS`) is what end-users see
+/// in their mobile app's outbound list — Pavel's UX requirement: «по
+/// названию легко понять для чего конфиг и что за сервер».
+///
+/// Unknown IDs (legacy multi-segment slugs, test servers, ad-hoc
+/// names) fall back to uppercased ID — operator-debugging-friendly,
+/// still distinct from production country names. When adding a new
+/// production country, extend the match arm here AND rename the
+/// inventory row (`UPDATE servers SET id='nl' WHERE id='vps-nl-01'`).
+///
+/// Hard-coded mapping (not a `servers.display_name` column) because:
+///   1. ISO country codes are an external standard, not operator data
+///   2. Adding a column + UI form for editing is scope creep — the
+///      country mapping is stable (Germany was Germany 50 years ago)
+///   3. Compiled mapping means typos surface at build time
+pub(crate) fn country_display_name(server_id: &str) -> String {
+    match server_id {
+        "de" => "Germany".into(),
+        "is" => "Iceland".into(),
+        "fi" => "Finland".into(),
+        "se" => "Sweden".into(),
+        "nl" => "Netherlands".into(),
+        "us" => "United States".into(),
+        "gb" => "United Kingdom".into(),
+        "fr" => "France".into(),
+        other => other.to_ascii_uppercase(),
+    }
 }
 
 /// Look up all server-grant rows for `user_id` and turn each into a
@@ -241,7 +270,7 @@ async fn collect_vless_uris_for_user(
             None => continue,
         };
 
-        let server_tag = strip_vps_prefix(&server.id.0);
+        let server_display = country_display_name(&server.id.0);
         uris.push(render_vless_uri(
             &server.address,
             443,
@@ -249,7 +278,7 @@ async fn collect_vless_uris_for_user(
             pbk,
             sid,
             &client_uuid,
-            server_tag,
+            &server_display,
             client_name,
         ));
     }
@@ -498,26 +527,27 @@ mod tests {
     }
 
     #[test]
-    fn strip_vps_prefix_removes_only_leading_vps_dash() {
-        assert_eq!(strip_vps_prefix("vps-de-01"), "de-01");
-        assert_eq!(strip_vps_prefix("vps-is-01"), "is-01");
-        // No leading `vps-` → unchanged.
-        assert_eq!(strip_vps_prefix("stg"), "stg");
-        assert_eq!(strip_vps_prefix("not-vps-x"), "not-vps-x");
-        // Edge: empty string + just the prefix.
-        assert_eq!(strip_vps_prefix(""), "");
-        assert_eq!(strip_vps_prefix("vps-"), "");
+    fn country_display_name_maps_iso_codes() {
+        assert_eq!(country_display_name("de"), "Germany");
+        assert_eq!(country_display_name("is"), "Iceland");
+        assert_eq!(country_display_name("fi"), "Finland");
+        // Unknown id → uppercased fallback (legacy or test server).
+        assert_eq!(country_display_name("stg"), "STG");
+        assert_eq!(country_display_name("vps-de-01"), "VPS-DE-01");
+        assert_eq!(country_display_name(""), "");
     }
 
     #[test]
-    fn render_vless_uri_matches_ninitux_byte_format() {
-        // Live byte sample from
-        // https://ninitux.com/api/v1/app/config/a92b915032b48a2ed45ef72f4171e5f4
-        // for client `tester-1` on `vps-de-01`. Pinned here so any
-        // future refactor that drifts on param order / encoding /
-        // fragment shape fails loudly.
-        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#de-01%20443%20tester-1";
-
+    fn render_vless_uri_post_rename_fragment_format() {
+        // Post-2026-05-20 rename: fragment is `{Country} VLESS` without
+        // port (visible from host) or client_name (user already knows
+        // their own name). Pre-rename format was
+        // `{server_tag} {port} {client_name}` byte-equivalent with
+        // subscription-server — that contract intentionally retired
+        // when subscription-server was decommissioned + the operator
+        // requirement shifted to user-friendly labels («чтоб
+        // пользователь по названию легко мог понять для чего конфиг
+        // и что за сервер»).
         let got = render_vless_uri(
             "104.194.156.93",
             443,
@@ -525,11 +555,12 @@ mod tests {
             "gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A",
             "d86e92a0c6dd2271",
             "60063863-d2be-4d57-bc0b-aef4da88528b",
-            "de-01",
-            "tester-1",
+            "Germany",
+            "tester-1", // ignored in label — kept for signature compat
         );
 
-        assert_eq!(got, expected, "vless URI byte format drifted from ninitux");
+        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS";
+        assert_eq!(got, expected, "vless URI fragment drifted");
     }
 
     #[test]
