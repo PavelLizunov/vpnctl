@@ -8509,8 +8509,8 @@ async fn nm10_server_detail_post_hide_persists_and_redirects() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/servers/hsrv",
-        "303 must redirect back to /admin/servers/{{id}}"
+        location, "/admin/servers/hsrv#enabled-protocols",
+        "303 must redirect back to /admin/servers/{{id}}#enabled-protocols so the browser scrolls the operator back to the section they just clicked in (Pavel 2026-05-20: «каждый раз когда я жму disable меня выкидывает в верх страницы»)"
     );
     assert!(
         inv.is_server_protocol_hidden(
@@ -8800,8 +8800,8 @@ async fn nm10_user_detail_post_block_persists_and_redirects() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/users/erin",
-        "303 must redirect back to /admin/users/{{uid}}"
+        location, "/admin/users/erin#server-access",
+        "303 must redirect back to /admin/users/{{uid}}#server-access so the browser scrolls the operator back to the per-protocol grid they just clicked in"
     );
     let overrides = inv
         .list_protocol_overrides_for_user(&UserId("erin".into()))
@@ -9275,4 +9275,284 @@ async fn nm12_user_detail_grid_renders_dpi_chip_and_weak_shrinks_to_10px() {
         html.contains("font-size: 10px"),
         "Weak protocol row in user-detail grid must shrink to 10px"
     );
+}
+
+// ─── NM-12 follow-up: scroll-preserve via Location fragment ──────────
+//
+// Pavel 2026-05-20: «каждый раз когда я жму disable меня выкидывает
+// в верх страницы». PRG (Post/Redirect/Get) loses the operator's
+// scroll position when the redirect target is a bare path — the
+// browser GETs the page and resets to top. Fix: every visibility-
+// toggle handler appends `#enabled-protocols` (server-detail) or
+// `#server-access` (user-detail) to the Location header, and the
+// section heading carries the matching `id=`. Browser scrolls to
+// the anchor instead of the top.
+//
+// These tests pin BOTH halves of the contract so a regression
+// removing the fragment OR the id would fail.
+
+#[tokio::test]
+async fn nm12_followup_server_detail_section_carries_enabled_protocols_anchor() {
+    // The redirects all assume an anchor element with
+    // id="enabled-protocols" exists on the server-detail page.
+    // Without the id the fragment redirect lands at the top of
+    // the page anyway (browsers silently ignore unmatched
+    // fragments). This pins the markup half of the contract.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("anchsrv".into()),
+            address: "203.0.113.27".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/anchsrv").await;
+    assert!(
+        html.contains(r#"id="enabled-protocols""#),
+        "server-detail must carry an id=\"enabled-protocols\" anchor for the visibility-toggle handlers to scroll back into"
+    );
+}
+
+#[tokio::test]
+async fn nm12_followup_user_detail_section_carries_server_access_anchor() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("ivy".into()),
+            uuid: "00000000-0000-0000-0000-000000000009".to_string(),
+            sub_token: Some("t9".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/ivy").await;
+    assert!(
+        html.contains(r#"id="server-access""#),
+        "user-detail must carry an id=\"server-access\" anchor for the grant-toggle handlers to scroll back into"
+    );
+}
+
+#[tokio::test]
+async fn nm12_followup_server_protocol_unhide_redirects_with_fragment() {
+    // server_protocol_hide is already covered by
+    // nm10_server_detail_post_hide_persists_and_redirects (updated
+    // to assert the fragment). Unhide is the symmetric handler —
+    // pin it separately so a copy-paste regression deleting the
+    // fragment from only one of the two would fail.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("uhsrv".into()),
+            address: "203.0.113.28".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    inv.set_server_protocol_hidden(
+        &ServerId("uhsrv".into()),
+        &ProtocolId("tuic-v5".into()),
+        true,
+    )
+    .await
+    .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/uhsrv/protocols/tuic-v5/unhide"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(loc, "/admin/servers/uhsrv#enabled-protocols");
+}
+
+#[tokio::test]
+async fn nm12_followup_grant_protocol_enable_redirects_with_fragment() {
+    // grant_protocol_disable already covered by
+    // nm10_user_detail_post_block_persists_and_redirects (updated
+    // to assert the fragment). Enable is the symmetric handler.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_user(&User {
+            id: UserId("ji".into()),
+            uuid: "00000000-0000-0000-0000-000000000010".to_string(),
+            sub_token: Some("t10".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("jsrv".into()),
+            address: "203.0.113.29".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    inv.grant(&UserId("ji".into()), &ServerId("jsrv".into()))
+        .await
+        .unwrap();
+    inv.set_grant_protocol_override(
+        &UserId("ji".into()),
+        &ServerId("jsrv".into()),
+        &ProtocolId("vless+reality".into()),
+        true,
+    )
+    .await
+    .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/ji/grants/jsrv/protocols/vless%2Breality/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(loc, "/admin/users/ji#server-access");
+}
+
+#[tokio::test]
+async fn nm12_followup_legacy_server_disable_protocol_also_carries_fragment() {
+    // The pre-existing `server_disable_protocol` handler (NOT part
+    // of NM-10 — it removes the protocol from `enabled_protocols`
+    // entirely, requires a `deploy` to take effect on the node)
+    // also gets the fragment so the operator stays anchored after
+    // a click on the [disable] (not [hide]) button. This is the
+    // button Pavel was actually using when he reported the scroll
+    // bug — pinning it separately so we never lose the fix.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("lsrv".into()),
+            address: "203.0.113.30".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/lsrv/protocols/tuic-v5/disable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(loc, "/admin/servers/lsrv#enabled-protocols");
+}
+
+#[tokio::test]
+async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
+    // Symmetric to the [disable] test above.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("esrv2".into()),
+            address: "203.0.113.31".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/esrv2/protocols/anytls/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(loc, "/admin/servers/esrv2#enabled-protocols");
 }

@@ -2416,7 +2416,11 @@ pub(crate) async fn user_detail(
         // click, server returns 303 to this same detail page so the
         // operator sees the post-mutation state immediately.
         div.ed-rule {}
-        div.ed-art-eyebrow { "Server access" }
+        // NM-12 follow-up: the per-grant disable/enable buttons in
+        // the per-protocol grid below redirect with the
+        // `#server-access` fragment so the operator stays anchored
+        // here after a click instead of being scrolled to the top.
+        div.ed-art-eyebrow id="server-access" { "Server access" }
         @if all_servers.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
                 "No servers in the inventory yet. Run "
@@ -3580,7 +3584,7 @@ pub(crate) async fn server_enable_protocol(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}#enabled-protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -3631,7 +3635,7 @@ pub(crate) async fn server_disable_protocol(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}#enabled-protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -7316,7 +7320,13 @@ fn server_detail_protocols_section(
     let sid_enc = path_segment_encode(&server.id.0);
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Enabled protocols" }
+        // NM-12 follow-up (Pavel 2026-05-20: «каждый раз когда я
+        // жму disable меня выкидывает в верх страницы»): all 4
+        // visibility-toggle handlers below this row redirect to
+        // `/admin/servers/{id}#enabled-protocols`. The browser
+        // honours the fragment and scrolls the operator back to
+        // THIS section instead of resetting to the page top.
+        div.ed-art-eyebrow id="enabled-protocols" { "Enabled protocols" }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
             "Check what runs on this node. Protocols are wire formats; their kernels (one or more) are picked from the section above."
         }
@@ -7748,7 +7758,7 @@ pub(crate) async fn server_protocol_hide(
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
     match state.inv.set_server_protocol_hidden(&sid, &pid, true).await {
         Ok(()) => Redirect::to(&format!(
-            "/admin/servers/{}",
+            "/admin/servers/{}#enabled-protocols",
             path_segment_encode(&server_id_str)
         ))
         .into_response(),
@@ -7772,7 +7782,7 @@ pub(crate) async fn server_protocol_unhide(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/servers/{}",
+            "/admin/servers/{}#enabled-protocols",
             path_segment_encode(&server_id_str)
         ))
         .into_response(),
@@ -7798,7 +7808,7 @@ pub(crate) async fn grant_protocol_disable(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/users/{}",
+            "/admin/users/{}#server-access",
             path_segment_encode(&user_id_str)
         ))
         .into_response(),
@@ -7823,7 +7833,7 @@ pub(crate) async fn grant_protocol_enable(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/users/{}",
+            "/admin/users/{}#server-access",
             path_segment_encode(&user_id_str)
         ))
         .into_response(),
