@@ -9516,6 +9516,123 @@ async fn nm12_followup_legacy_server_disable_protocol_also_carries_fragment() {
 }
 
 #[tokio::test]
+async fn nm12_followup_servers_list_reflects_hidden_state() {
+    // Pavel 2026-05-20: «нужно сделаить на /admin/servers чтоб это
+    // отобразилось, сейчас показано что там все протоколы, хотя я
+    // сделал hide». Pre-fix the server-card on /admin/servers
+    // rendered `Server.enabled_protocols` straight (in-memory
+    // cache, no awareness of `server_protocols.hidden`). Post-fix
+    // it splits visible vs hidden via the new bulk matrix and
+    // renders them in two distinct rows.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("lpsrv".into()),
+            address: "203.0.113.40".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            // 3 enabled: vless+reality (visible), tuic-v5 + anytls
+            // (will be hidden below).
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("tuic-v5".into()),
+                ProtocolId("anytls".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("lpsrv".into()),
+            &ProtocolId("tuic-v5".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("lpsrv".into()),
+            &ProtocolId("anytls".into()),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers").await;
+
+    // The "protocols" row must list ONLY visible (vless+reality),
+    // not the 2 hidden ones.
+    let proto_block = html
+        .split("<dt>protocols</dt>")
+        .nth(1)
+        .expect("protocols dt must appear");
+    let visible_dd = proto_block.split("</dd>").next().expect("dd must close");
+    assert!(
+        visible_dd.contains("vless+reality"),
+        "protocols dd should list vless+reality, got: {visible_dd}"
+    );
+    assert!(
+        !visible_dd.contains("tuic-v5"),
+        "protocols dd MUST NOT list hidden tuic-v5, got: {visible_dd}"
+    );
+    assert!(
+        !visible_dd.contains("anytls"),
+        "protocols dd MUST NOT list hidden anytls, got: {visible_dd}"
+    );
+
+    // A separate "hidden" row must surface tuic-v5 + anytls plus
+    // the count hint (1 visible, 2 hidden).
+    assert!(
+        html.contains("hidden") && html.contains("tuic-v5") && html.contains("anytls"),
+        "list page must surface hidden protocols somewhere on the card"
+    );
+    assert!(
+        html.contains("2 hidden, 1 visible"),
+        "list page must show the (N hidden, M visible) count hint"
+    );
+}
+
+#[tokio::test]
+async fn nm12_followup_servers_list_no_hidden_row_when_all_visible() {
+    // Symmetric: when no protocol is hidden on a server, the
+    // `dt { "hidden" }` row must NOT render — keeps the card
+    // compact for the happy-path operator. A regression that
+    // always emits the row (even with 0 hidden) would clutter
+    // the list page.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("vsrv".into()),
+            address: "203.0.113.41".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers").await;
+    // The hidden dt label only appears when there's at least one
+    // hidden protocol. Search for the literal `<dt style="color:
+    // var(--acc);">hidden</dt>` substring.
+    assert!(
+        !html.contains(r#"<dt style="color: var(--acc);">hidden</dt>"#),
+        "no protocols are hidden — the hidden dt row must NOT render"
+    );
+}
+
+#[tokio::test]
 async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
     // Symmetric to the [disable] test above.
     let dir = TempDir::new().unwrap();

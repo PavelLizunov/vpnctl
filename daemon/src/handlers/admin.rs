@@ -935,15 +935,38 @@ fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
 /// Editorial server card — one per row, matches `.ed-server` from the
 /// design source. Renders the inventory's `Server` plus the per-server
 /// user count looked up from `users_count_per_server` (defaulting to 0).
-fn server_card(idx: usize, s: &vpnctl_core::Server, user_count: i64) -> Markup {
-    let proto_list = if s.enabled_protocols.is_empty() {
+fn server_card(
+    idx: usize,
+    s: &vpnctl_core::Server,
+    user_count: i64,
+    hidden_matrix: &std::collections::HashMap<
+        (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
+        bool,
+    >,
+) -> Markup {
+    // Split `enabled_protocols` into visible + hidden by consulting
+    // the `server_protocols` table (via the pre-loaded bulk matrix).
+    // Defaults to `not hidden` when the matrix doesn't know about a
+    // pid — same defensive fallback the server-detail page uses
+    // (NM-10 review-agent note: in-memory cache vs on-disk table
+    // can diverge only via raw SQL; the safe default is "show it").
+    let mut visible_protos: Vec<&str> = Vec::with_capacity(s.enabled_protocols.len());
+    let mut hidden_protos: Vec<&str> = Vec::new();
+    for p in &s.enabled_protocols {
+        let is_hidden = hidden_matrix
+            .get(&(s.id.clone(), p.clone()))
+            .copied()
+            .unwrap_or(false);
+        if is_hidden {
+            hidden_protos.push(p.0.as_str());
+        } else {
+            visible_protos.push(p.0.as_str());
+        }
+    }
+    let visible_str = if visible_protos.is_empty() {
         "—".to_string()
     } else {
-        s.enabled_protocols
-            .iter()
-            .map(|p| p.0.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+        visible_protos.join(", ")
     };
     let jump = match &s.jump_via {
         Some(j) => j.0.clone(),
@@ -982,7 +1005,27 @@ fn server_card(idx: usize, s: &vpnctl_core::Server, user_count: i64) -> Markup {
                 }
             }
             dl.ed-server__meta {
-                dt { "protocols" }   dd { (proto_list) }
+                dt { "protocols" }   dd { (visible_str) }
+                // NM-12 follow-up (Pavel 2026-05-20: «нужно сделаить
+                // на /admin/servers чтоб это отобразилось, сейчас
+                // показано что там все протоколы, хотя я сделал
+                // hide»). Pre-fix this row used `enabled_protocols`
+                // and didn't reflect hidden state at all. Now: only
+                // VISIBLE protocols make it into the main "protocols"
+                // dd; hidden ones get a separate dotted row in --acc
+                // colour so the operator's eye catches them — matches
+                // the "✓ on · hidden" treatment on server-detail.
+                @if !hidden_protos.is_empty() {
+                    dt style="color: var(--acc);" { "hidden" }
+                    dd style="color: var(--acc); font-style: italic;"
+                       title="These protocols are still enabled on the node (sing-box inbound keeps listening, cached client URIs continue to work) but the subscription render path stops emitting them. Adjust on the server detail page." {
+                        (hidden_protos.join(", "))
+                        " · " span.ed-mono style="font-size: 10px;" {
+                            "(" (hidden_protos.len()) " hidden, "
+                            (visible_protos.len()) " visible)"
+                        }
+                    }
+                }
                 dt { "fingerprint" } dd style="font-family: var(--mono); font-size: 11px;" { (fp) }
                 dt { "usage ×" }     dd { (format!("{:.2}", s.usage_coefficient)) }
             }
@@ -996,9 +1039,20 @@ pub(crate) async fn servers(
 ) -> Result<Markup, Response> {
     let (theme, accent) = theme_accent(&headers);
 
-    let (server_list, user_counts) =
-        tokio::try_join!(state.inv.list_servers(), state.inv.users_count_per_server())
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    // Fan out three reads concurrently — server list, the grants
+    // count per server, AND the bulk (server, protocol) → hidden
+    // matrix. The hidden matrix lets `server_card` split each
+    // server's `enabled_protocols` into a visible-list + a
+    // hidden-list, matching the truth that the subscription render
+    // sees instead of the in-memory cache. Pavel 2026-05-20 caught
+    // the discrepancy after his bulk hides on fi/is — the list page
+    // still showed every enabled protocol with no marker.
+    let (server_list, user_counts, hidden_matrix) = tokio::try_join!(
+        state.inv.list_servers(),
+        state.inv.users_count_per_server(),
+        state.inv.list_all_server_protocols_with_hidden(),
+    )
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let body = html! {
         div.ed-art-eyebrow { "Servers" }
@@ -1073,7 +1127,12 @@ pub(crate) async fn servers(
         } @else {
             div {
                 @for (idx, s) in server_list.iter().enumerate() {
-                    (server_card(idx, s, user_counts.get(&s.id).copied().unwrap_or(0)))
+                    (server_card(
+                        idx,
+                        s,
+                        user_counts.get(&s.id).copied().unwrap_or(0),
+                        &hidden_matrix,
+                    ))
                 }
             }
         }

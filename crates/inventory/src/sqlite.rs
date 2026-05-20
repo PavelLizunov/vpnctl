@@ -829,6 +829,37 @@ impl SqliteInventory {
         Ok(out)
     }
 
+    /// All-servers variant of `list_server_protocols_with_hidden` —
+    /// one round-trip returns the full `(server, protocol) → hidden`
+    /// matrix. Used by the `/admin/servers` list page so the server
+    /// cards can render an accurate "visible vs hidden" breakdown
+    /// without N queries (the per-server bulk helper would N+1 over
+    /// the inventory). Empty map for servers that have no
+    /// `server_protocols` rows yet — caller should fall back to a
+    /// dash in that case.
+    ///
+    /// (Pavel 2026-05-20: «нужно сделаить на /admin/servers чтоб
+    /// это отобразилось, сейчас показано что там все протоколы,
+    /// хотя я сделал hide» — the list page was rendering from
+    /// `Server.enabled_protocols` (in-memory cache, which doesn't
+    /// know about hidden) instead of from this table, so post-hide
+    /// state never reached the operator's eye.)
+    pub async fn list_all_server_protocols_with_hidden(
+        &self,
+    ) -> Result<HashMap<(ServerId, ProtocolId), bool>> {
+        let rows = sqlx::query("SELECT server_id, protocol_id, hidden FROM server_protocols")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let sid: String = r.try_get("server_id")?;
+            let pid: String = r.try_get("protocol_id")?;
+            let hidden: i64 = r.try_get("hidden")?;
+            out.insert((ServerId(sid), ProtocolId(pid)), hidden != 0);
+        }
+        Ok(out)
+    }
+
     /// Map of (server_id, protocol_id) → `true` for every disabled
     /// override the user has set. Useful for rendering the admin UI
     /// checkboxes pre-populated. Empty map = no overrides = inherit
@@ -2977,6 +3008,94 @@ mod tests {
         inv.remove_user(&UserId("alice".into())).await?;
         let users = inv.users_for_server(&ServerId("srv".into())).await?;
         assert!(users.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_all_server_protocols_with_hidden_returns_full_matrix() -> Result<()> {
+        // Pavel 2026-05-20 follow-up: the /admin/servers list page
+        // needs the (server, protocol) → hidden matrix in ONE round
+        // trip. Per-server bulk helper would N+1 over the inventory.
+        // This test exercises the multi-server happy path: 2 servers,
+        // 3 protocols each, 2 of them hidden across the matrix.
+        let inv = fresh().await;
+
+        // Server A: vless+reality + tuic-v5 (sample_server defaults)
+        // → hide tuic-v5.
+        inv.add_server(&sample_server("alpha")).await?;
+        inv.set_server_protocol_hidden(
+            &ServerId("alpha".into()),
+            &ProtocolId("tuic-v5".into()),
+            true,
+        )
+        .await?;
+
+        // Server B: vless+reality + tuic-v5, both visible. Plus we
+        // add anytls then hide it — exercises the
+        // add_server_protocol + set_server_protocol_hidden path.
+        inv.add_server(&sample_server("beta")).await?;
+        inv.add_server_protocol(&ServerId("beta".into()), &ProtocolId("anytls".into()))
+            .await?;
+        inv.set_server_protocol_hidden(
+            &ServerId("beta".into()),
+            &ProtocolId("anytls".into()),
+            true,
+        )
+        .await?;
+
+        let matrix = inv.list_all_server_protocols_with_hidden().await?;
+
+        // Total entries: alpha (2) + beta (3) = 5.
+        assert_eq!(
+            matrix.len(),
+            5,
+            "matrix should hold 5 entries (2 alpha + 3 beta), got {}",
+            matrix.len()
+        );
+        // Spot-check the 4 distinctive cells.
+        assert_eq!(
+            matrix
+                .get(&(ServerId("alpha".into()), ProtocolId("vless+reality".into())))
+                .copied(),
+            Some(false),
+            "alpha.vless+reality must be visible"
+        );
+        assert_eq!(
+            matrix
+                .get(&(ServerId("alpha".into()), ProtocolId("tuic-v5".into())))
+                .copied(),
+            Some(true),
+            "alpha.tuic-v5 must be hidden"
+        );
+        assert_eq!(
+            matrix
+                .get(&(ServerId("beta".into()), ProtocolId("tuic-v5".into())))
+                .copied(),
+            Some(false),
+            "beta.tuic-v5 must be visible (NOT hidden — only anytls is)"
+        );
+        assert_eq!(
+            matrix
+                .get(&(ServerId("beta".into()), ProtocolId("anytls".into())))
+                .copied(),
+            Some(true),
+            "beta.anytls must be hidden"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_all_server_protocols_with_hidden_empty_on_fresh_inventory() -> Result<()> {
+        // Defensive: no servers, no protocols → empty map. The
+        // /admin/servers caller relies on this for the "no servers
+        // yet" empty-state to render without panicking.
+        let inv = fresh().await;
+        let matrix = inv.list_all_server_protocols_with_hidden().await?;
+        assert!(
+            matrix.is_empty(),
+            "empty inventory must produce empty matrix, got {} entries",
+            matrix.len()
+        );
         Ok(())
     }
 
