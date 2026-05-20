@@ -1001,6 +1001,99 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
     );
 }
 
+/// Anti-fingerprint regression (caught by pre-monitoring vuln scan
+/// 2026-05-20): the auth / CSRF / security-headers middleware was
+/// applied via `.layer()` instead of `.route_layer()`, which in
+/// axum's contract wraps the router's default 404 fallback too. Any
+/// unrelated path on the daemon (e.g. `/etc/passwd`, `/`, `/.env`,
+/// `/wp-login.php`) returned `401 WWW-Authenticate: Basic realm=
+/// "vpnctl admin"` for GETs and `403 vpnctl admin: csrf …` for
+/// POSTs, plus the admin-only CSP / X-Frame-Options / Permissions-
+/// Policy headers on EVERY 404 — all distinctive backend
+/// fingerprints. Fix swapped `.layer` → `.route_layer` so the
+/// middleware applies only to matched admin routes.
+///
+/// This test pins the no-leak invariant. Note: the test runs
+/// without `VPNCTLD_ADMIN_PASSWORD` set, so the auth layer is
+/// skipped entirely — what we're really pinning here is that
+/// CSRF + security-headers ALSO use `route_layer` (the only ones
+/// that fire without the env var). The auth-layer no-leak is
+/// covered by the live-verify in the same commit.
+#[tokio::test]
+async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    for path in [
+        "/etc/passwd",
+        "/",
+        "/foo",
+        "/.env",
+        "/wp-login.php",
+        "/api/v2/something",
+    ] {
+        // GET: must not carry the admin-tree CSP / X-Frame-Options /
+        // Permissions-Policy headers — those are distinctive.
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let headers = resp.headers().clone();
+        assert!(
+            headers.get("content-security-policy").is_none(),
+            "GET {path} leaks CSP header (admin fingerprint)"
+        );
+        assert!(
+            headers.get("x-frame-options").is_none(),
+            "GET {path} leaks X-Frame-Options (admin fingerprint)"
+        );
+        assert!(
+            headers.get("permissions-policy").is_none(),
+            "GET {path} leaks Permissions-Policy (admin fingerprint)"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            !s.contains("vpnctl admin"),
+            "GET {path} leaks 'vpnctl admin' in body: {s}"
+        );
+
+        // POST: same — CSRF middleware should NOT fire on unmatched
+        // paths. Pre-fix, POST returned 403 with body
+        // "vpnctl admin: csrf — Origin (or Referer) must match Host"
+        // + dump of Host/Origin/Referer headers.
+        let req = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("x=1"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            !s.contains("vpnctl admin"),
+            "POST {path} leaks 'vpnctl admin' in body: {s}"
+        );
+        assert!(
+            !s.contains("csrf"),
+            "POST {path} leaks CSRF copy in body: {s}"
+        );
+    }
+
+    // Positive control: an actual admin path STILL produces admin-shaped
+    // responses (the fix must not break the legitimate path). Without
+    // auth env var, /admin renders the page directly (200 + CSP header).
+    let req = Request::builder()
+        .uri("/admin")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("content-security-policy").is_some(),
+        "admin pages MUST still carry CSP — security-headers layer broken"
+    );
+}
+
 /// User ids containing URL-special chars (`?`, `#`, `/`, space, `&`)
 /// must be percent-encoded in the detail-link href, otherwise the
 /// browser would interpret them as path/query/fragment separators and

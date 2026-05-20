@@ -814,7 +814,16 @@ fn admin_router(state: AppState) -> Router {
     // also means the 403 lands without consuming the auth check, so an
     // attacker can't probe whether a given user/password combo is valid
     // via a CSRF flow.
-    let with_csrf = with_admin.layer(axum::middleware::from_fn(
+    // `route_layer` (NOT `layer`) for the same anti-fingerprinting
+    // reason as the auth layer below: `.layer()` wraps the router's
+    // default 404 fallback, so a POST to any unrelated path (e.g.
+    // /etc/passwd) returned `403 vpnctl admin: csrf — Origin (or
+    // Referer) must match Host` + the Host/Origin/Referer dump —
+    // identifying the backend as vpnctld. Caught by pre-monitoring
+    // vuln scan 2026-05-20. `route_layer` confines the CSRF check
+    // to matched admin routes; unmatched paths fall through to
+    // axum's default 404 with no body.
+    let with_csrf = with_admin.route_layer(axum::middleware::from_fn(
         crate::handlers::csrf::require_same_origin,
     ));
 
@@ -831,8 +840,17 @@ fn admin_router(state: AppState) -> Router {
     //     exfil via fetch() to evil.com.
     //   * `frame-ancestors 'none'` is the modern equivalent of
     //     X-Frame-Options: DENY; we set both for old browsers.
+    // All five `SetResponseHeaderLayer`s use `route_layer` so the
+    // headers attach ONLY to responses from matched admin routes.
+    // With `.layer()` the headers also flowed into axum's default
+    // 404 fallback, producing a distinctive header fingerprint on
+    // any unrelated path (CSP with `frame-ancestors 'none'; form-
+    // action 'self'`, Permissions-Policy with the full sensor-deny
+    // list, etc) — `curl -I http://192.168.0.236:18402/etc/passwd`
+    // returned an HTML-admin-shaped 404 with admin-only response
+    // headers. Caught by pre-monitoring vuln scan 2026-05-20.
     let with_security_headers = with_csrf
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        .route_layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::header::CONTENT_SECURITY_POLICY,
             axum::http::HeaderValue::from_static(
                 "default-src 'self'; \
@@ -846,11 +864,11 @@ fn admin_router(state: AppState) -> Router {
                  form-action 'self'",
             ),
         ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        .route_layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             axum::http::HeaderValue::from_static("nosniff"),
         ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        .route_layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::header::X_FRAME_OPTIONS,
             axum::http::HeaderValue::from_static("DENY"),
         ))
@@ -871,13 +889,13 @@ fn admin_router(state: AppState) -> Router {
         // leaks to external sites (admin tree doesn't link out
         // anyway) AND keeps Referer alive on our own POSTs so the
         // CSRF middleware's Origin→Referer fallback works.
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        .route_layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::header::REFERRER_POLICY,
             axum::http::HeaderValue::from_static("same-origin"),
         ))
         // `Permissions-Policy` deprecates Feature-Policy. Block every
         // sensor + device API we don't use (= all of them).
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        .route_layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
             axum::http::HeaderName::from_static("permissions-policy"),
             axum::http::HeaderValue::from_static(
                 "accelerometer=(), camera=(), geolocation=(), gyroscope=(), \
@@ -886,7 +904,20 @@ fn admin_router(state: AppState) -> Router {
         ));
 
     if let Some(auth) = BasicAuth::from_env() {
-        with_security_headers.layer(axum::middleware::from_fn_with_state(
+        // `route_layer` (NOT `layer`) so the auth challenge fires ONLY
+        // on matched admin routes. With `.layer()` the middleware
+        // wrapped axum's fallback too: every unrelated path (e.g.
+        // `/etc/passwd`, `/`, `/foo`) reaching this router returned
+        // `401 WWW-Authenticate: Basic realm="vpnctl admin"` —
+        // identifying the backend as vpnctld to any probe. Caught by
+        // pre-monitoring vuln scan 2026-05-20 (`curl
+        // http://192.168.0.236:18402/etc/passwd` → 401 admin realm).
+        //
+        // `route_layer` leaves unmatched paths with axum's default
+        // 404 (no body, no admin realm). Matched `/admin/*` routes
+        // still get the auth check — same UX for legitimate operators,
+        // no fingerprint leak for probes hitting random paths.
+        with_security_headers.route_layer(axum::middleware::from_fn_with_state(
             auth,
             crate::handlers::auth::require_basic_auth,
         ))
