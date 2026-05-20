@@ -807,6 +807,28 @@ impl SqliteInventory {
             .collect()
     }
 
+    /// Bulk-fetch every enabled (server, protocol) row with its
+    /// `hidden` flag for a given server. Useful for admin UI rendering
+    /// without N+1 calls into `is_server_protocol_hidden`. Returns an
+    /// empty map if the server has no enabled protocols.
+    pub async fn list_server_protocols_with_hidden(
+        &self,
+        sid: &ServerId,
+    ) -> Result<HashMap<ProtocolId, bool>> {
+        let rows =
+            sqlx::query("SELECT protocol_id, hidden FROM server_protocols WHERE server_id = ?1")
+                .bind(&sid.0)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let pid: String = r.try_get("protocol_id")?;
+            let hidden: i64 = r.try_get("hidden")?;
+            out.insert(ProtocolId(pid), hidden != 0);
+        }
+        Ok(out)
+    }
+
     /// Map of (server_id, protocol_id) → `true` for every disabled
     /// override the user has set. Useful for rendering the admin UI
     /// checkboxes pre-populated. Empty map = no overrides = inherit

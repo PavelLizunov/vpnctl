@@ -1775,8 +1775,24 @@ pub(crate) async fn user_detail(
     // per-user `/32` octet matches the server's `[Peer]` block 1:1
     // (review-agent 2026-05-17 caught a hard-coded `10.66.0.2` that
     // collided across multiple WG users on the same server).
+    //
+    // Also pre-fetch the (server, protocol) hidden map for every
+    // granted server in the same loop (migration 0018 / NM-10).
+    // Used by the per-protocol delivery grid below the "Server
+    // access" toggles — without it the grid would either N+1-query
+    // `is_server_protocol_hidden` per cell or omit the hidden-state
+    // label entirely. Loop body now issues 3 sequential queries
+    // per granted server (secrets / peers / hidden); servers count
+    // is bounded (≤3 in production, ≤10 in any realistic homelab),
+    // so each query × server is cheap. If this ever stretches into
+    // dozens of granted servers per user, fold the three reads into
+    // one JOIN-based helper.
     let mut secrets_per_server = std::collections::HashMap::new();
     let mut peers_per_server = std::collections::HashMap::new();
+    let mut hidden_per_server: std::collections::HashMap<
+        vpnctl_core::ServerId,
+        std::collections::HashMap<vpnctl_core::ProtocolId, bool>,
+    > = std::collections::HashMap::new();
     for s in &servers {
         let secrets = state
             .inv
@@ -1790,7 +1806,22 @@ pub(crate) async fn user_detail(
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?;
         peers_per_server.insert(s.id.clone(), peers);
+        let hidden = state
+            .inv
+            .list_server_protocols_with_hidden(&s.id)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+        hidden_per_server.insert(s.id.clone(), hidden);
     }
+    // Per-user override map (server_id, protocol_id) → disabled.
+    // One query for the whole user; small (typically 0 entries until
+    // the operator clicks "block" on a protocol). Empty map = no
+    // overrides = inherit every server's visibility verbatim.
+    let user_overrides = state
+        .inv
+        .list_protocol_overrides_for_user(&uid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let share_links = collect_share_links(
         &state,
@@ -2395,52 +2426,77 @@ pub(crate) async fn user_detail(
         } @else {
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
                 @for s in &all_servers {
-                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        // Server id → link to /admin/servers/{id} in a
-                        // new tab (Pavel 2026-05-19: «хочу чтоб через
-                        // пользователя можно было открыть страницу
-                        // сервера в отдельном окне»). `target="_blank"`
-                        // + `rel="noopener"` so the new tab doesn't
-                        // share window.opener with the user-detail
-                        // page (security hygiene + tab-isolation).
-                        span style="flex: 1;" {
-                            a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
-                              target="_blank"
-                              rel="noopener"
-                              title=(format!("Open /admin/servers/{} in a new tab", s.id.0))
-                              style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                b { (s.id.0) }
+                    // Outer li wraps BOTH the grant toggle row AND
+                    // (for granted servers only) the per-protocol
+                    // delivery grid. Single `border-bottom` keeps the
+                    // visual rule between *servers*, not between the
+                    // grant toggle and its own grid below.
+                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        div style="display: flex; align-items: baseline; gap: 12px;" {
+                            // Server id → link to /admin/servers/{id} in a
+                            // new tab (Pavel 2026-05-19: «хочу чтоб через
+                            // пользователя можно было открыть страницу
+                            // сервера в отдельном окне»). `target="_blank"`
+                            // + `rel="noopener"` so the new tab doesn't
+                            // share window.opener with the user-detail
+                            // page (security hygiene + tab-isolation).
+                            span style="flex: 1;" {
+                                a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
+                                  target="_blank"
+                                  rel="noopener"
+                                  title=(format!("Open /admin/servers/{} in a new tab", s.id.0))
+                                  style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
+                                    b { (s.id.0) }
+                                }
+                                " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
+                                (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+                                ")"
                             }
-                            " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
-                            (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
-                            ")"
+                            @if granted_ids.contains(&s.id) {
+                                span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
+                                form method="post"
+                                     action=(format!("/admin/users/{}/grants/{}/revoke",
+                                                     path_segment_encode(&user.id.0),
+                                                     path_segment_encode(&s.id.0)))
+                                     style="margin: 0;" {
+                                    button type="submit"
+                                           title=(format!("Revoke {}'s access to {}", user.id.0, s.id.0))
+                                           style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                        "revoke"
+                                    }
+                                }
+                            } @else {
+                                span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
+                                form method="post"
+                                     action=(format!("/admin/users/{}/grants/{}",
+                                                     path_segment_encode(&user.id.0),
+                                                     path_segment_encode(&s.id.0)))
+                                     style="margin: 0;" {
+                                    button type="submit"
+                                           title=(format!("Grant {} access to {}", user.id.0, s.id.0))
+                                           style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                        "grant"
+                                    }
+                                }
+                            }
                         }
+                        // Per-(user, server, protocol) delivery grid
+                        // (migration 0018 / NM-10). Renders ONLY for
+                        // GRANTED servers — ungranted ones have no
+                        // (user, server) row to attach overrides to,
+                        // so `set_grant_protocol_override` would
+                        // refuse with Invalid. Each protocol cell
+                        // shows its current delivery state +
+                        // block/unblock button. Server-hidden
+                        // protocols are flagged read-only (operator
+                        // adjusts those on /admin/servers/{id}).
                         @if granted_ids.contains(&s.id) {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
-                            form method="post"
-                                 action=(format!("/admin/users/{}/grants/{}/revoke",
-                                                 path_segment_encode(&user.id.0),
-                                                 path_segment_encode(&s.id.0)))
-                                 style="margin: 0;" {
-                                button type="submit"
-                                       title=(format!("Revoke {}'s access to {}", user.id.0, s.id.0))
-                                       style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                    "revoke"
-                                }
-                            }
-                        } @else {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
-                            form method="post"
-                                 action=(format!("/admin/users/{}/grants/{}",
-                                                 path_segment_encode(&user.id.0),
-                                                 path_segment_encode(&s.id.0)))
-                                 style="margin: 0;" {
-                                button type="submit"
-                                       title=(format!("Grant {} access to {}", user.id.0, s.id.0))
-                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                    "grant"
-                                }
-                            }
+                            (user_detail_per_protocol_grid(
+                                &user.id,
+                                s,
+                                hidden_per_server.get(&s.id),
+                                &user_overrides,
+                            ))
                         }
                     }
                 }
@@ -6486,6 +6542,16 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Per-(server, protocol) hidden state (migration 0018 / NM-10).
+    // One bulk SELECT keyed on server_id → HashMap<ProtocolId, bool>
+    // so the Enabled-protocols section can render the hide/unhide
+    // chip without N+1 calls into `is_server_protocol_hidden`.
+    let hidden_map = state
+        .inv
+        .list_server_protocols_with_hidden(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -6592,7 +6658,11 @@ pub(crate) async fn server_detail(
         // `vpnctl deploy <server>` — inventory mutation alone doesn't
         // touch the live sing-box config (deliberate: we never push
         // without operator-initiated deploy).
-        (server_detail_protocols_section(&server, &state.registry))
+        // `hidden_map` (migration 0018 / NM-10) drives the per-row
+        // hide / unhide chip: hidden=1 keeps the sing-box inbound
+        // running but stops emitting the protocol from `/sub/<token>`
+        // and `/api/v1/app/config/<device_id>`.
+        (server_detail_protocols_section(&server, &state.registry, &hidden_map))
 
         // Trusted host fingerprint — TOFU pin for the daemon's SSH
         // probe + clash-api poller + deploy. The CLAUDE.md note from
@@ -7216,6 +7286,7 @@ fn server_detail_wgturn_section(
 fn server_detail_protocols_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
+    hidden_map: &std::collections::HashMap<vpnctl_core::ProtocolId, bool>,
 ) -> Markup {
     let enabled: std::collections::HashSet<&vpnctl_core::ProtocolId> =
         server.enabled_protocols.iter().collect();
@@ -7271,6 +7342,14 @@ fn server_detail_protocols_section(
             @for pid in &all_protocols {
                 @let is_on = enabled.contains(pid);
                 @let compatible = kernel_supports.contains(pid);
+                // Migration 0018 / NM-10: per-(server, protocol)
+                // hidden flag. Only meaningful for `is_on=true` rows
+                // (hidden state on an off-protocol is silently
+                // ignored by the render path). Defaults to false
+                // when the bulk-loader didn't return a row for this
+                // pid (e.g. add_protocol invariant on enabled but
+                // schema-missing row).
+                @let is_hidden = hidden_map.get(pid).copied().unwrap_or(false);
                 li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                     span style=(if compatible { "flex: 1; color: var(--ink);" } else { "flex: 1; color: var(--mute);" }) {
                         (pid.0)
@@ -7288,8 +7367,20 @@ fn server_detail_protocols_section(
                         }
                     }
                     @if is_on {
-                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                            "✓ on"
+                        @if is_hidden {
+                            // Distinct chip when the protocol is hidden
+                            // from public render. Using --acc (accent
+                            // colour, usually orange) so the operator's
+                            // eye catches the row without it being
+                            // mistaken for an error state. Wrapped in
+                            // brackets to read as a status label.
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
+                                "✓ on · hidden"
+                            }
+                        } @else {
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
+                                "✓ on"
+                            }
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/protocols/{}/disable", sid_enc, path_segment_encode(&pid.0)))
@@ -7298,6 +7389,42 @@ fn server_detail_protocols_section(
                                    title=(format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0))
                                    style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                                 "disable"
+                            }
+                        }
+                        // Hide / unhide chip (migration 0018 / NM-10).
+                        // Separate POST endpoints + 303-redirect-back-
+                        // here. Renders ONLY for enabled + compatible
+                        // protocols — hiding an incompatible-but-on
+                        // row (kernel doesn't support the wire format)
+                        // would surface a button with no observable
+                        // effect, and the operator's actual remedy is
+                        // [disable] which removes the orphan row.
+                        @if !compatible {
+                            // No-op label so the row width matches the
+                            // compatible rows. Caught by review-agent
+                            // 2026-05-20.
+                            span style="font-family: var(--mono); font-size: 10px; color: var(--mute); font-style: italic;" {
+                                "(disable to clear)"
+                            }
+                        } @else if is_hidden {
+                            form method="post"
+                                 action=(format!("/admin/servers/{}/protocols/{}/unhide", sid_enc, path_segment_encode(&pid.0)))
+                                 style="margin: 0; padding: 0;" {
+                                button type="submit"
+                                       title=(format!("Resume emitting {} in this server's subscription URLs. Live sing-box inbound was never stopped; this just unmutes the render.", pid.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                    "unhide"
+                                }
+                            }
+                        } @else {
+                            form method="post"
+                                 action=(format!("/admin/servers/{}/protocols/{}/hide", sid_enc, path_segment_encode(&pid.0)))
+                                 style="margin: 0; padding: 0;" {
+                                button type="submit"
+                                       title=(format!("Stop emitting {} in this server's subscription URLs WITHOUT removing the live inbound. Existing client URIs keep working until they re-pull.", pid.0))
+                                       style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                    "hide"
+                                }
                             }
                         }
                     } @else if compatible {
@@ -7318,6 +7445,122 @@ fn server_detail_protocols_section(
                         // span so the row width is consistent.
                         span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                             "incompatible"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Per-(user, server, protocol) delivery grid — renders inside the
+/// "Server access" section of /admin/users/{id}, one block per
+/// granted server. Each protocol the server has enabled gets a row
+/// with its current delivery state (delivered / user-blocked /
+/// server-hidden) and a block/unblock button (no-op for
+/// server-hidden rows — those are toggled on /admin/servers/{id}).
+///
+/// Migration 0018 / NM-10: the two axes are server.hidden (set on
+/// server-detail) and grant_protocol_overrides.state='disabled'
+/// (set here). Visibility resolution is OR-semantics — either axis
+/// suppresses the protocol from this user's subscription URL.
+///
+/// `hidden_map = None` is treated as an empty map (server has no
+/// enabled protocols at all — render an empty-state explainer).
+fn user_detail_per_protocol_grid(
+    uid: &vpnctl_core::UserId,
+    server: &vpnctl_core::Server,
+    hidden_map: Option<&std::collections::HashMap<vpnctl_core::ProtocolId, bool>>,
+    user_overrides: &std::collections::HashMap<
+        (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
+        bool,
+    >,
+) -> Markup {
+    let uid_enc = path_segment_encode(&uid.0);
+    let sid_enc = path_segment_encode(&server.id.0);
+    // Iterate the `server_protocols` table directly (not the in-memory
+    // `enabled_protocols` field) so the OR-semantics deny resolution
+    // matches `visible_protocols_for_subscription` BYTE-for-BYTE.
+    // Review-agent 2026-05-20: a divergence between the in-memory
+    // `enabled_protocols` cache and the on-disk `server_protocols`
+    // rows would silently lie about what the operator's clients see
+    // on next pull. Sort alphabetically to match the canonical
+    // query's `ORDER BY sp.protocol_id`.
+    let mut pids: Vec<&vpnctl_core::ProtocolId> =
+        hidden_map.map(|m| m.keys().collect()).unwrap_or_default();
+    pids.sort_by(|a, b| a.0.cmp(&b.0));
+    html! {
+        div style="margin: 8px 0 4px 16px; padding: 8px 12px 6px; border-left: 2px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.6;" {
+            div style="color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; font-size: 10px; margin-bottom: 6px;" {
+                "Per-protocol delivery"
+            }
+            @if pids.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 0; font-size: 12px;" {
+                    "No protocols enabled on this server yet. Add one on the "
+                    a href=(format!("/admin/servers/{sid_enc}"))
+                      target="_blank"
+                      rel="noopener"
+                      style="color: var(--ink);" { "server detail page" }
+                    " — then the per-protocol toggles will appear here."
+                }
+            } @else {
+                ul style="list-style: none; padding: 0; margin: 0;" {
+                    @for pid in &pids {
+                        @let is_hidden = hidden_map
+                            .and_then(|m| m.get(*pid).copied())
+                            .unwrap_or(false);
+                        @let is_user_blocked = user_overrides
+                            .get(&(server.id.clone(), (*pid).clone()))
+                            .copied()
+                            .unwrap_or(false);
+                        @let pid_enc = path_segment_encode(&pid.0);
+                        li style="display: flex; align-items: baseline; gap: 10px; padding: 2px 0;" {
+                            span style="flex: 1; color: var(--ink);" { (pid.0) }
+                            @if is_hidden && is_user_blocked {
+                                // Both axes deny — show both, but the
+                                // server-hidden flag is the binding
+                                // one (operator can't un-block via
+                                // this row alone).
+                                span style="color: var(--mute);" { "server-hidden + user-blocked" }
+                                form method="post"
+                                     action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/enable"))
+                                     style="margin: 0;" {
+                                    button type="submit"
+                                           title="Clear this user's override. Server-hidden flag remains — adjust on the server detail page."
+                                           style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
+                                        "unblock (user)"
+                                    }
+                                }
+                            } @else if is_hidden {
+                                // Server-hidden only — no per-user
+                                // button (clicking "block" would
+                                // record a redundant override; the
+                                // operator's intent is unambiguous
+                                // when only one axis is set).
+                                span style="color: var(--mute);" { "server-hidden (read-only here)" }
+                            } @else if is_user_blocked {
+                                span style="color: var(--acc);" { "✗ user-blocked" }
+                                form method="post"
+                                     action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/enable"))
+                                     style="margin: 0;" {
+                                    button type="submit"
+                                           title=(format!("Deliver {} to {} again on {}", pid.0, uid.0, server.id.0))
+                                           style="padding: 1px 6px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
+                                        "unblock"
+                                    }
+                                }
+                            } @else {
+                                span style="color: var(--acc);" { "✓ delivered" }
+                                form method="post"
+                                     action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/disable"))
+                                     style="margin: 0;" {
+                                    button type="submit"
+                                           title=(format!("Stop delivering {} to {} on {} (per-user override; other users keep getting it)", pid.0, uid.0, server.id.0))
+                                           style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
+                                        "block"
+                                    }
+                                }
+                            }
                         }
                     }
                 }

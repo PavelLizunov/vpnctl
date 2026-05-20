@@ -8377,3 +8377,577 @@ async fn admin_backup_download_404_on_missing_snapshot() {
         resp.status()
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// NM-10 — protocol visibility UI (server-detail hide/unhide chip +
+// user-detail per-protocol delivery grid). Backend handlers landed in
+// cd71cf9; these tests pin the corresponding UI surfaces so a future
+// HTML refactor can't silently drop the toggle. Each test exercises a
+// distinct rule: hidden-chip render, visible-chip render, POST mutation
+// round-trip, per-grant grid presence, server-hidden read-only marker,
+// override-blocks-render check, ungranted-server-suppression.
+
+#[tokio::test]
+async fn nm10_server_detail_visible_protocol_shows_hide_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hidesrv".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/hidesrv").await;
+    // Visible (hidden=0) protocol: shows "✓ on" without the "· hidden"
+    // suffix AND offers a hide button (no unhide).
+    assert!(
+        html.contains("✓ on") && !html.contains("✓ on · hidden"),
+        "visible enabled protocol should show plain ✓ on marker"
+    );
+    assert!(
+        html.contains(r#"/admin/servers/hidesrv/protocols/vless%2Breality/hide"#),
+        "visible protocol must offer a hide button (POST /hide)"
+    );
+    assert!(
+        !html.contains(r#"/admin/servers/hidesrv/protocols/vless%2Breality/unhide"#),
+        "visible protocol must NOT offer an unhide button"
+    );
+}
+
+#[tokio::test]
+async fn nm10_server_detail_hidden_protocol_shows_unhide_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hidesrv".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("hidesrv".into()),
+            &ProtocolId("tuic-v5".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/hidesrv").await;
+    assert!(
+        html.contains("✓ on · hidden"),
+        "hidden protocol must surface the · hidden suffix on its status chip"
+    );
+    assert!(
+        html.contains(r#"/admin/servers/hidesrv/protocols/tuic-v5/unhide"#),
+        "hidden protocol must offer an unhide button (POST /unhide)"
+    );
+    assert!(
+        !html.contains(r#"/admin/servers/hidesrv/protocols/tuic-v5/hide""#),
+        "hidden protocol must NOT offer a redundant hide button"
+    );
+}
+
+#[tokio::test]
+async fn nm10_server_detail_post_hide_persists_and_redirects() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hsrv".into()),
+            address: "203.0.113.11".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/hsrv/protocols/vless%2Breality/hide"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/admin/servers/hsrv",
+        "303 must redirect back to /admin/servers/{{id}}"
+    );
+    assert!(
+        inv.is_server_protocol_hidden(
+            &ServerId("hsrv".into()),
+            &ProtocolId("vless+reality".into())
+        )
+        .await
+        .unwrap(),
+        "hidden flag must persist after POST /hide"
+    );
+    let audit = inv.recent_audit(5).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|a| a.action == "server_protocol.set_hidden"),
+        "POST /hide must write an audit row"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_per_protocol_grid_renders_for_granted_server() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "00000000-0000-0000-0000-000000000001".to_string(),
+            sub_token: Some("t1".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            tuic_password: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("gridsrv".into()),
+            address: "203.0.113.12".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("tuic-v5".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("alice".into()), &ServerId("gridsrv".into()))
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/alice").await;
+    assert!(
+        html.contains("Per-protocol delivery"),
+        "grid heading must appear under the granted server's row"
+    );
+    // Default state = delivered + block button per protocol.
+    assert!(
+        html.contains("✓ delivered"),
+        "default delivery state should be ✓ delivered"
+    );
+    assert!(
+        html.contains(r#"/admin/users/alice/grants/gridsrv/protocols/vless%2Breality/disable"#),
+        "vless+reality must have a disable (block) form"
+    );
+    assert!(
+        html.contains(r#"/admin/users/alice/grants/gridsrv/protocols/tuic-v5/disable"#),
+        "tuic-v5 must have a disable (block) form"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_grid_hides_when_server_not_granted() {
+    // Ungranted server should NOT render the per-protocol grid —
+    // overrides would refuse with Invalid anyway, and surfacing the
+    // buttons creates a confusing "click does nothing" UX.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("bob".into()),
+            uuid: "00000000-0000-0000-0000-000000000002".to_string(),
+            sub_token: Some("t2".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            tuic_password: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("notgranted".into()),
+            address: "203.0.113.13".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // No grant() call.
+    let html = fetch_html(router(s), "/admin/users/bob").await;
+    assert!(
+        !html.contains(r#"/admin/users/bob/grants/notgranted/protocols/vless%2Breality/disable"#),
+        "ungranted server must NOT expose the per-protocol disable form"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_grid_marks_server_hidden_readonly() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("carol".into()),
+            uuid: "00000000-0000-0000-0000-000000000003".to_string(),
+            sub_token: Some("t3".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            tuic_password: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hidsrv".into()),
+            address: "203.0.113.14".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("carol".into()), &ServerId("hidsrv".into()))
+        .await
+        .unwrap();
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("hidsrv".into()),
+            &ProtocolId("tuic-v5".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/carol").await;
+    // Server-hidden + no override → read-only label, NO block button.
+    assert!(
+        html.contains("server-hidden (read-only here)"),
+        "server-hidden protocol must surface read-only marker in the grid"
+    );
+    assert!(
+        !html.contains(r#"/admin/users/carol/grants/hidsrv/protocols/tuic-v5/disable"#),
+        "server-hidden + no override should suppress the block button (would be a redundant override)"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_grid_shows_user_blocked_marker_and_unblock_form() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("dave".into()),
+            uuid: "00000000-0000-0000-0000-000000000004".to_string(),
+            sub_token: Some("t4".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            tuic_password: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("dsrv".into()),
+            address: "203.0.113.15".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("dave".into()), &ServerId("dsrv".into()))
+        .await
+        .unwrap();
+    s.inv
+        .set_grant_protocol_override(
+            &UserId("dave".into()),
+            &ServerId("dsrv".into()),
+            &ProtocolId("vless+reality".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/dave").await;
+    assert!(
+        html.contains("✗ user-blocked"),
+        "user-blocked override must surface the ✗ marker"
+    );
+    assert!(
+        html.contains(r#"/admin/users/dave/grants/dsrv/protocols/vless%2Breality/enable"#),
+        "user-blocked protocol must offer an unblock (enable) button"
+    );
+    assert!(
+        !html.contains(r#"/admin/users/dave/grants/dsrv/protocols/vless%2Breality/disable"#),
+        "user-blocked protocol must NOT redundantly offer a block button"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_post_block_persists_and_redirects() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    s.inv
+        .add_user(&User {
+            id: UserId("erin".into()),
+            uuid: "00000000-0000-0000-0000-000000000005".to_string(),
+            sub_token: Some("t5".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            tuic_password: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("esrv".into()),
+            address: "203.0.113.16".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("erin".into()), &ServerId("esrv".into()))
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/erin/grants/esrv/protocols/vless%2Breality/disable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/admin/users/erin",
+        "303 must redirect back to /admin/users/{{uid}}"
+    );
+    let overrides = inv
+        .list_protocol_overrides_for_user(&UserId("erin".into()))
+        .await
+        .unwrap();
+    assert!(
+        overrides
+            .get(&(ServerId("esrv".into()), ProtocolId("vless+reality".into())))
+            .copied()
+            .unwrap_or(false),
+        "POST /disable must insert a disabled override"
+    );
+    // Auditable-write invariant (CLAUDE.md): every inventory mutation
+    // writes one audit_log row. Mirrors the parallel assert on the
+    // server-hide test above.
+    let audit = inv.recent_audit(5).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|a| a.action == "grant_protocol.set_override"),
+        "POST /disable must write a grant_protocol.set_override audit row, got: {:?}",
+        audit.iter().map(|a| &a.action).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_grid_renders_both_axes_branch() {
+    // The "server-hidden + user-blocked" branch (line 7501 in admin.rs)
+    // is the only label where BOTH axes deny the protocol. A regression
+    // collapsing the branch into "server-hidden (read-only)" would lose
+    // the "unblock (user)" button — the operator's only path to clear
+    // a stale per-user override on a server-hidden protocol. This test
+    // pins that label + the unblock-user form so the branch can't be
+    // silently deleted.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("frank".into()),
+            uuid: "00000000-0000-0000-0000-000000000006".to_string(),
+            sub_token: Some("t6".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("fsrv".into()),
+            address: "203.0.113.17".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("frank".into()), &ServerId("fsrv".into()))
+        .await
+        .unwrap();
+    // Set BOTH axes — server-hide AND user-block. Canonical render
+    // omits via OR-semantics; UI must surface both flags so the
+    // operator's mental model matches.
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("fsrv".into()),
+            &ProtocolId("vless+reality".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_grant_protocol_override(
+            &UserId("frank".into()),
+            &ServerId("fsrv".into()),
+            &ProtocolId("vless+reality".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/frank").await;
+    assert!(
+        html.contains("server-hidden + user-blocked"),
+        "both-axes-deny branch must render the compound label"
+    );
+    assert!(
+        html.contains(r#"/admin/users/frank/grants/fsrv/protocols/vless%2Breality/enable"#),
+        "both-axes branch must STILL offer the unblock-user form (operator clears the user-axis here; server-axis on server detail)"
+    );
+}
+
+#[tokio::test]
+async fn nm10_user_detail_grid_iterates_table_not_in_memory_enabled_protocols() {
+    // Defensive: the grid iterates `hidden_map.keys()` (the
+    // `server_protocols` table rows) rather than the in-memory
+    // `Server.enabled_protocols` cache, so OR-semantics resolution
+    // matches `visible_protocols_for_subscription` BYTE-for-BYTE
+    // even in the (rare/impossible-in-production) case where the
+    // cache and table diverge. This test exercises the happy path:
+    // a server with two protocols renders both rows in alphabetical
+    // order matching the canonical query's ORDER BY.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("gina".into()),
+            uuid: "00000000-0000-0000-0000-000000000007".to_string(),
+            sub_token: Some("t7".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("gsrv".into()),
+            address: "203.0.113.18".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            // Out of order on purpose — render should still sort.
+            enabled_protocols: vec![
+                ProtocolId("tuic-v5".into()),
+                ProtocolId("vless+reality".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("gina".into()), &ServerId("gsrv".into()))
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/gina").await;
+    let tuic_pos = html.find("tuic-v5").expect("tuic row present");
+    let vless_pos = html.find("vless+reality").expect("vless row present");
+    assert!(
+        tuic_pos < vless_pos,
+        "grid rows must be alphabetically sorted by protocol_id to match visible_protocols_for_subscription ORDER BY"
+    );
+}
