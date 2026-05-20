@@ -423,8 +423,16 @@ pub(crate) async fn get_config_root_catchall(headers: HeaderMap) -> Response {
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Path(tail): Path<String>,
-    headers: HeaderMap,
+    // Request must come last (owns body). We pull ConnectInfo from
+    // extensions manually — same pattern as sub.rs handler. In
+    // production axum injects ConnectInfo via
+    // `into_make_service_with_connect_info::<SocketAddr>()`; in test
+    // rigs (oneshot) the extension is absent and we fall back to
+    // 0.0.0.0 (sub_access_log row still lands so downstream tests
+    // can assert the write happened).
+    request: axum::extract::Request,
 ) -> Response {
+    let headers = request.headers().clone();
     // Multi-segment defence-in-depth: any `/` in `tail` means the
     // request was /api/v1/app/config/<seg1>/<seg2>[/...]. NEVER a
     // valid device_id; return the same bytes as the unregistered
@@ -481,6 +489,44 @@ pub(crate) async fn get_config(
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);
     };
+
+    // Phase Track-1 abuse signal — production endpoint visibility.
+    // Without this enqueue, EVERY ninitux pull from a mobile client
+    // is invisible to the operator (sub_access_log fills only from
+    // the legacy `/sub/<token>` path which the new clients don't use
+    // post-Phase-5 cutover). Same back-pressure pattern as `sub.rs`:
+    // bounded mpsc channel drained by a dedicated writer task;
+    // `try_send` is non-blocking so the HTTP response never waits
+    // on the SQLite write, and a saturated channel drops the row
+    // with a warn rather than OOM'ing the process. Logged metadata:
+    // user_id (from device_id lookup we already did), source IP
+    // (cardinality bound for abuse-detection bucketing), UA (for
+    // Layer-3 client-fingerprint clustering), status 200, response
+    // bytes for traffic-distribution histograms. Caught 2026-05-20
+    // by Pavel's post-Phase-7 audit: "сколько у него ip, сколько
+    // интернета, с каких девайсов".
+    let peer_ip: Option<std::net::IpAddr> = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let ip_for_log = peer_ip
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+    let ua_for_log: Option<String> = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let bytes_for_log = u64::try_from(config.len()).unwrap_or(u64::MAX);
+    let _ = crate::access_log::try_enqueue(
+        &state.access_log_tx,
+        crate::access_log::AccessLogRecord {
+            user_id: user.id.clone(),
+            ip: ip_for_log,
+            ua: ua_for_log,
+            status: 200,
+            bytes: bytes_for_log,
+        },
+    );
 
     if want_raw {
         return (
