@@ -178,6 +178,94 @@ contradicts a confirmed answer above.
    commit на main НЕ green → следующий commit это либо hotfix для
    него, либо ждём.
 
+## Server invariant — deploy-key authorization (post-2026-05-20)
+
+**Hard invariant** (confirmed by Pavel 2026-05-20):
+
+  **Every server visible in `/admin/servers` MUST have vpnctld's
+  deploy pubkey in its `root@<host>:~/.ssh/authorized_keys`.**
+
+The pubkey is:
+
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGeysXLLw9o1GtUjYUbxuA/D3A9RSDo1y+aZOstAkIja vpnctld-deploy
+```
+
+Live on 236 at `/var/lib/vpnctl/.ssh/id_ed25519` (private)
++ `.pub` (public). Read via `sudo cat`.
+
+### Why this matters
+
+Without the key, `vpnctl deploy <server>` fails silently in the
+exact failure mode caught 2026-05-20: a grant added in inv.db
+(`INSERT INTO grants(user_id, server_id) …`) is visible to the
+ninitux endpoint immediately (`/api/v1/app/config/<device_id>`
+emits a vless URI for the server) — but the sing-box config on
+the server is never updated → user's UUID is not in
+`vless-in.users[]` → Reality TLS handshake succeeds → VLESS auth
+rejects unknown UUID → client connection drops with no useful
+diagnostic.
+
+This is the same shape of silent-failure as DG-1
+(`SingBox::apply_config` users[] diff guard), just one layer
+earlier: DG-1 catches *removals* at apply-time, but a server
+that vpnctld can't reach gets NO apply-time at all.
+
+### When adding a new server
+
+The wizard flow (Phase E) already pushes the deploy key as
+step 1 of bootstrap. For servers added by any OTHER path —
+bash-migrate import, manual `vpnctl server add`, hand-INSERT
+into inv.db — the key MUST be pushed before any user grants are
+made visible. Otherwise the operator's first sign that the
+deploy doesn't reach is a confused user reporting "URL appears in
+my app but doesn't connect".
+
+### When auditing existing servers
+
+```bash
+ssh user@192.168.0.236 \
+  "sudo cat /var/lib/vpnctl/.ssh/id_ed25519.pub" \
+  | tee /tmp/vpnctld-deploy.pub
+
+# For each server in `vpnctl server list` (or
+# `sudo sqlite3 /var/lib/vpnctl/inv.db 'SELECT id, address, ssh_port, ssh_user FROM servers'`)
+# probe with vpnctld's key:
+ssh -i /var/lib/vpnctl/.ssh/id_ed25519 -o BatchMode=yes \
+    -p <port> <ssh_user>@<address> "hostname"
+# success → key already authorized.
+# `Permission denied (publickey)` → key NOT present; push it.
+```
+
+### Push procedure (when claude-chat key is authorized)
+
+```bash
+PUB=$(ssh user@192.168.0.236 "sudo cat /var/lib/vpnctl/.ssh/id_ed25519.pub")
+ssh root@<server> "grep -qxF '$PUB' ~/.ssh/authorized_keys || echo '$PUB' >> ~/.ssh/authorized_keys"
+```
+
+(The `grep -qxF` makes the push idempotent — running twice
+doesn't duplicate the line.)
+
+### When the operator can't be SSH'd to either
+
+If neither vpnctld's key nor the operator's recovery key
+(`claude-chat`) works, the daemon is locked out of that node.
+Per the operator-action policy below, the error message MUST
+acknowledge this and point at the hoster's serial console /
+KVM — NOT instruct the operator to SSH from elsewhere (if the
+operator could SSH, the daemon could too via the same path).
+
+### Future runtime enforcement (deferred)
+
+A dashboard alert `server.deploy_key_missing` (Phase G-2) would
+catch this at probe-time: vpnctld's node_probe SSH attempt
+returns `Permission denied (publickey)` → fire a critical alert.
+Storage + state-machine already exist (`admin_alerts` table,
+Phase G chunk 1); just needs the probe classifier to recognise
+this specific error string. Caught 2026-05-20 on the `stg` host
+(84.19.3.104).
+
 ## Operator-action policy (post-2026-05-18)
 
 Pavel: «не должен просить меня сделать что-то вручную на серверах».
