@@ -479,6 +479,109 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     fn appears_in_sing_box_sub(&self) -> bool {
         true
     }
+
+    /// How well this protocol resists DPI / active-probing in
+    /// censorship environments (RU/IR/CN ASNs in 2026). Used by the
+    /// admin UI to render a coloured risk chip next to each enabled
+    /// protocol, downscale the font of `Weak` rows, and surface an
+    /// explainer tooltip — operator decides whether to keep the
+    /// protocol on, `hide` it (NM-10), or hard-disable it.
+    ///
+    /// Default is `Moderate` — every protocol's `server_inbound` is
+    /// some flavour of obfuscated TLS / QUIC, so a moderate default
+    /// reflects "not trivially fingerprintable, but not certified
+    /// best-of-breed either". Implementations that have a clearer
+    /// position (REALITY's `dest:` active-probe forwarding; raw
+    /// WireGuard's fixed 4-byte handshake type tag; Shadowsocks-2022's
+    /// high-entropy first byte) override.
+    ///
+    /// NM-12 (Pavel 2026-05-20): «давай начнём с того что ты уберёшь
+    /// чтото плохие протоколы и пометишь их в ui как плохие и можешь
+    /// даже шрифт меньше сделать у них». This is the trait-level
+    /// substrate for that UI work — the admin templates read
+    /// `Registry::protocol(pid).map(|p| p.dpi_risk())` and render
+    /// accordingly. Adding a new protocol that wants risk coverage is
+    /// one method override here; no admin / inventory edits needed.
+    fn dpi_risk(&self) -> DpiRisk {
+        DpiRisk::Moderate
+    }
+}
+
+/// DPI / active-probing resilience tier. Stored only in the registry
+/// (compile-time const per protocol impl); never persisted.
+///
+/// - `Strong` — well-camouflaged: REALITY (TLS handshake to a real
+///   upstream, active-probe defence via `dest:` forwarding), wgturn
+///   (obfuscated WireGuard, no fixed handshake type tag).
+/// - `Moderate` — recognisable on careful active probing but not
+///   trivially fingerprintable: TUIC v5, Hysteria2, AnyTLS, Trojan.
+/// - `Weak` — known DPI-fingerprintable in 2026 RU/IR/CN:
+///   Shadowsocks-2022 (high-entropy random from byte 0), raw
+///   WireGuard (fixed `0x01 0x00 0x00 0x00` handshake initiation tag
+///   trivially matched by TSPU / GFW).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiRisk {
+    Strong,
+    Moderate,
+    Weak,
+}
+
+impl DpiRisk {
+    /// Short label for the admin UI chip (≤10 chars to fit the
+    /// existing row layout).
+    pub fn label(self) -> &'static str {
+        match self {
+            DpiRisk::Strong => "DPI: strong",
+            DpiRisk::Moderate => "DPI: moderate",
+            DpiRisk::Weak => "DPI: weak",
+        }
+    }
+
+    /// One-sentence explainer for the UI tooltip — surfaces the
+    /// specific fingerprint or defence so the operator knows why
+    /// the protocol earned its tier.
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            DpiRisk::Strong => {
+                "Active-probe-resistant: TLS handshake to a real upstream / no fixed wire signature. Recommended."
+            }
+            DpiRisk::Moderate => {
+                "Recognisable on careful active probing (QUIC version, AEAD-on-port-N) but not trivially blocked. Useful as a fallback."
+            }
+            DpiRisk::Weak => {
+                "Trivially fingerprintable in RU/IR/CN 2026 (Shadowsocks high-entropy first byte, raw WireGuard 0x01 handshake tag, Trojan-without-fallback self-signed cert, Hysteria2-without-obfs QUIC). Consider hiding via NM-10."
+            }
+        }
+    }
+
+    /// CSS variable name for the chip's border + text colour. Single
+    /// source of truth — the admin UI's chip rendering calls these
+    /// instead of repeating the `match` arms inline. Adding a future
+    /// tier (e.g. `Critical`) is a one-spot edit. Review-agent NM-12
+    /// flagged the original 4× duplication.
+    ///
+    /// The `var(--name, #hex)` fallback is the literal colour because
+    /// `admin.css` doesn't (yet) define `--acc-good` / `--acc-bad` in
+    /// `:root` — a theme that wants to override the palette can add
+    /// them and these chips re-tint automatically.
+    pub fn border_css(self) -> &'static str {
+        match self {
+            DpiRisk::Strong => "var(--acc-good, #2c5f2d)",
+            DpiRisk::Moderate => "var(--rule)",
+            DpiRisk::Weak => "var(--acc-bad, #97233f)",
+        }
+    }
+
+    /// Text colour for the chip. Strong + Weak use the same value as
+    /// their border (high-contrast "ok"/"bad" badge); Moderate uses
+    /// `--mute` so the chip recedes into the dotted rule.
+    pub fn text_css(self) -> &'static str {
+        match self {
+            DpiRisk::Strong => "var(--acc-good, #2c5f2d)",
+            DpiRisk::Moderate => "var(--mute)",
+            DpiRisk::Weak => "var(--acc-bad, #97233f)",
+        }
+    }
 }
 
 //

@@ -192,6 +192,17 @@ impl Protocol for WgTurn {
         &[("udp", WGTURN_PORT)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // Custom WireGuard variant with the VK-TURN demuxer prepended
+        // — the canonical raw-WG 0x01 handshake-initiation type tag is
+        // wrapped / obfuscated by the demuxer, so the trivial
+        // `first 4 bytes == 0x01 0x00 0x00 0x00` DPI rule that drops
+        // raw WireGuard on TSPU does NOT match. Active probing requires
+        // the demuxer secret, which we don't share. Reported working in
+        // RU through 2025 + Q1 2026.
+        vpnctl_core::DpiRisk::Strong
+    }
+
     fn appears_in_sing_box_sub(&self) -> bool {
         // wgturn is delivered via the dedicated `wgturn-cli` client +
         // its own `wgturn://` share-link, NOT via sing-box. Sing-box

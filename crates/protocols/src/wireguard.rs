@@ -137,6 +137,20 @@ impl Protocol for WireGuard {
         &[("udp", WIREGUARD_PORT)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // Raw WireGuard's handshake initiation message is ALWAYS a
+        // 148-byte UDP datagram that begins with `0x01 0x00 0x00 0x00`
+        // (message_type=1 + 3 zero bytes for reserved). This is a
+        // hard-coded constant in the WG protocol spec — it CANNOT be
+        // changed without breaking the wire format. TSPU exploited
+        // this since 2023 and now drops bare WireGuard 100% in RU
+        // residential ASNs; GFW (CN) the same. The IR DPI blocks it
+        // on similar grounds. Use `wgturn` (this crate's obfuscated
+        // variant) or `amneziawg` (kernel-level junk-packet injection)
+        // when WG-style transport is needed in a hostile environment.
+        vpnctl_core::DpiRisk::Weak
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Server-side material — required.
         let private_key = ctx.require("wireguard.server_private_key")?;

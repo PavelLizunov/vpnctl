@@ -47,6 +47,16 @@ impl Protocol for VlessReality {
         &[("tcp", 443)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // REALITY serves a real TLS handshake to a real upstream
+        // (`dest:` SNI, default www.microsoft.com); any probe that
+        // doesn't carry valid VLESS-flow auth gets transparently
+        // forwarded to Microsoft, so DPI sees authentic www.microsoft.com
+        // HTML and cannot distinguish our server from a real visitor.
+        // This is the gold-standard 2026 anti-probing posture.
+        vpnctl_core::DpiRisk::Strong
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;

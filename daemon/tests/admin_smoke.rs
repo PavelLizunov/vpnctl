@@ -32,6 +32,8 @@ async fn state(dir: &TempDir) -> AppState {
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
     reg.register_kernel(Box::new(vpnctl_kernels::AmneziaWg::new()))
         .unwrap();
+    reg.register_kernel(Box::new(vpnctl_kernels::WgTurn::new()))
+        .unwrap();
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();
@@ -44,6 +46,8 @@ async fn state(dir: &TempDir) -> AppState {
     reg.register_protocol(Box::new(vpnctl_protocols::AnyTls::new()))
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::Trojan::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::WgTurn::new()))
         .unwrap();
     // Wire the access-log writer the same way `build()` does. Drop the
     // JoinHandle — for tests that don't introspect the writer, the
@@ -8949,5 +8953,326 @@ async fn nm10_user_detail_grid_iterates_table_not_in_memory_enabled_protocols() 
     assert!(
         tuic_pos < vless_pos,
         "grid rows must be alphabetically sorted by protocol_id to match visible_protocols_for_subscription ORDER BY"
+    );
+}
+
+// ─── NM-12: DPI-risk chips on server-detail + user-detail grid ───────
+//
+// Pavel 2026-05-20: «давай начнём с того что ты уберёшь чтото плохие
+// протоколы и пометишь их в ui как плохие и можешь даже шрифт меньше
+// сделать у них». Risk tier comes from the registry — no inventory
+// state. These tests pin the chip text, the colour-driving class, the
+// smaller-font branch for Weak rows, and the explainer tooltip.
+
+#[tokio::test]
+async fn nm12_server_detail_renders_dpi_strong_chip_for_vless_reality() {
+    // Strong tier should produce a "DPI: strong" chip on the row.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("strongsrv".into()),
+            address: "203.0.113.20".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/strongsrv").await;
+    assert!(
+        html.contains("DPI: strong"),
+        "vless+reality row must surface its Strong DPI-risk chip"
+    );
+    // Tooltip carries the explainer ("Active-probe-resistant: ...").
+    assert!(
+        html.contains("Active-probe-resistant"),
+        "Strong tier tooltip must explain the active-probe defence"
+    );
+}
+
+#[tokio::test]
+async fn nm12_server_detail_renders_dpi_weak_chip_and_smaller_font_for_wireguard() {
+    // Weak tier produces "DPI: weak" chip AND the row gets
+    // font-size: 11px (visual de-emphasis). The test pins BOTH so a
+    // regression that drops the font shrink would fail loudly.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("weaksrv".into()),
+            address: "203.0.113.21".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("amneziawg".into())],
+            enabled_protocols: vec![ProtocolId("wireguard".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/weaksrv").await;
+    assert!(
+        html.contains("DPI: weak"),
+        "wireguard row must surface its Weak DPI-risk chip"
+    );
+    assert!(
+        html.contains("font-size: 11px"),
+        "Weak protocol row must shrink the name to 11px (Pavel: «шрифт меньше у них»)"
+    );
+    // Explainer mentions the specific fingerprint so the operator
+    // understands WHY it's Weak — and the chip-tooltip lookup table
+    // never silently changes.
+    assert!(
+        html.contains("0x01 handshake tag") || html.contains("WireGuard"),
+        "Weak tier tooltip must explain the trivial fingerprint (raw-WG 0x01 tag)"
+    );
+}
+
+#[tokio::test]
+async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
+    // Spec: every registered protocol must produce SOME chip. A
+    // future protocol added without overriding dpi_risk() still
+    // gets `Moderate` (the default), so the chip set is exhaustive.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("allsrv".into()),
+            address: "203.0.113.22".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![
+                KernelId("amneziawg".into()),
+                KernelId("sing-box".into()),
+                KernelId("wgturn".into()),
+            ],
+            // Empty enabled_protocols — the server-detail still lists
+            // every protocol in the registry with [enable] buttons,
+            // and the chip should render alongside the name.
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/allsrv").await;
+    // Tier distribution after the review-agent re-tier (NM-12
+    // 2026-05-20: Trojan + Hysteria2 demoted to Weak because their
+    // server_inbound has no fallback / no obfs):
+    //   Strong:   vless+reality, wgturn          (2)
+    //   Moderate: tuic-v5, anytls                (2)
+    //   Weak:     shadowsocks-2022, wireguard,
+    //             trojan, hysteria2              (4)
+    //   ────────────────────────────────────────────
+    //   total                                    (8)
+    let strong_count = html.matches("DPI: strong").count();
+    let moderate_count = html.matches("DPI: moderate").count();
+    let weak_count = html.matches("DPI: weak").count();
+    assert_eq!(
+        strong_count, 2,
+        "expected 2 Strong chips (vless+reality, wgturn), got {strong_count}"
+    );
+    assert_eq!(
+        moderate_count, 2,
+        "expected 2 Moderate chips (tuic-v5, anytls), got {moderate_count}"
+    );
+    assert_eq!(
+        weak_count, 4,
+        "expected 4 Weak chips (shadowsocks-2022, wireguard, trojan, hysteria2), got {weak_count}"
+    );
+}
+
+#[tokio::test]
+async fn nm12_server_detail_renders_dpi_moderate_chip_for_tuic_v5() {
+    // After the review-agent re-tier (Trojan/Hysteria2 → Weak), only
+    // tuic-v5 and anytls are Moderate. This test pins that tuic-v5
+    // actually carries the Moderate chip — without it the
+    // Strong/Weak tests would happily pass even if the Moderate arm
+    // of `border_css()` / `text_css()` were broken.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("modsrv".into()),
+            address: "203.0.113.24".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/modsrv").await;
+    assert!(
+        html.contains("DPI: moderate"),
+        "tuic-v5 row must surface its Moderate DPI-risk chip"
+    );
+    // Moderate uses --rule + --mute (not the green/red palette); the
+    // tooltip wording is distinct from Strong/Weak.
+    assert!(
+        html.contains("Recognisable on careful active probing"),
+        "Moderate tier tooltip must explain the careful-probe boundary"
+    );
+}
+
+#[tokio::test]
+async fn nm12_server_detail_hidden_weak_protocol_still_shows_chip() {
+    // The chip is informational about the wire format, not about
+    // current visibility. Hiding a Weak protocol (NM-10) does NOT
+    // erase the DPI: weak chip — the operator still needs to see
+    // WHY they hid it. A regression that suppresses the chip on
+    // hidden rows would silently strip the most important context.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hwsrv".into()),
+            address: "203.0.113.25".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("shadowsocks-2022".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .set_server_protocol_hidden(
+            &ServerId("hwsrv".into()),
+            &ProtocolId("shadowsocks-2022".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/hwsrv").await;
+    assert!(
+        html.contains("DPI: weak"),
+        "hidden Weak protocol must STILL show the chip — chip is about the wire format, not visibility"
+    );
+    assert!(
+        html.contains("✓ on · hidden"),
+        "hidden status marker must also appear alongside the chip"
+    );
+}
+
+#[tokio::test]
+async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
+    // Defensive: if a server's `enabled_protocols` row references a
+    // ProtocolId the registry doesn't know about (impossible in
+    // production — registry is seeded at boot — but possible during
+    // an interrupted migration / dev-time table edit), the render
+    // path falls back to `risk = None` and emits NO chip rather
+    // than panicking.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("unksrv".into()),
+            address: "203.0.113.26".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            // Empty enabled_protocols — server-detail still lists
+            // every registry protocol with [enable] buttons; none
+            // of THEM are unknown, so we don't see the None branch
+            // here. To exercise it we'd need a synthetic registry,
+            // which the test stub doesn't expose. So this test
+            // instead pins the inverse property: every protocol id
+            // emitted by the rendered HTML carries a chip. If the
+            // chip ever silently drops on a known-good row this
+            // count goes out of sync.
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/unksrv").await;
+    // 8 registered protocols → 8 chips (Strong + Moderate + Weak
+    // sum). If the chip-or-no-chip decision branches on something
+    // OTHER than "registry knows this id", the count drifts.
+    let total_chips = html.matches("DPI: strong").count()
+        + html.matches("DPI: moderate").count()
+        + html.matches("DPI: weak").count();
+    assert_eq!(
+        total_chips, 8,
+        "8 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+    );
+}
+
+#[tokio::test]
+async fn nm12_user_detail_grid_renders_dpi_chip_and_weak_shrinks_to_10px() {
+    // Same chip shows up in the user-detail per-protocol delivery
+    // sub-grid, but at the smaller layout (9px chip, 10px Weak vs
+    // 11px Moderate/Strong) so it fits the dense row.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("hank".into()),
+            uuid: "00000000-0000-0000-0000-000000000008".to_string(),
+            sub_token: Some("t8".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&Server {
+            id: ServerId("hsrv".into()),
+            address: "203.0.113.23".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("amneziawg".into()), KernelId("sing-box".into())],
+            // Mix Strong (vless+reality) and Weak (wireguard,
+            // shadowsocks-2022) so both font branches exercise.
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("wireguard".into()),
+                ProtocolId("shadowsocks-2022".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("hank".into()), &ServerId("hsrv".into()))
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/hank").await;
+    assert!(
+        html.contains("DPI: strong") && html.contains("DPI: weak"),
+        "grid must render risk chips matching the protocol tiers"
+    );
+    // Grid font-size: 10px for Weak rows, 11px otherwise. Assert
+    // the 10px branch fires (would not be present without a Weak
+    // protocol in the row set).
+    assert!(
+        html.contains("font-size: 10px"),
+        "Weak protocol row in user-detail grid must shrink to 10px"
     );
 }

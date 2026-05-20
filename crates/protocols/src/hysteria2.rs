@@ -87,6 +87,23 @@ impl Protocol for Hysteria2 {
         &[("udp", 8444)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // Our Hysteria2 inbound has NO `obfs:` parameter (see
+        // `server_inbound` below — bare TLS 1.3 QUIC handshake on a
+        // fixed UDP/8444). Without Salamander obfs the QUIC version
+        // tag + handshake pattern fingerprints Hy2 reliably; TSPU
+        // (RU) has been actively dropping Hy2 traffic since early
+        // 2026 based on community reports + my own probe data
+        // (see CLAUDE.md NM-11 / NM-12 discussion). GFW (CN) the
+        // same.
+        //
+        // To upgrade to Moderate: configure `obfs.type = salamander`
+        // + `obfs.password = <secret>` in server_inbound + share-link
+        // so the demuxer scrambles the QUIC bytes before they hit
+        // the wire. Until that lands, Weak is the honest tier.
+        vpnctl_core::DpiRisk::Weak
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Reuse the TUIC cert paths so we provision ONE self-signed cert
         // per node (the existing deploy command already does that for TUIC).

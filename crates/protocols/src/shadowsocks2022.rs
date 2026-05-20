@@ -107,6 +107,20 @@ impl Protocol for Shadowsocks2022 {
         &[("tcp", SS_2022_PORT), ("udp", SS_2022_PORT)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // Shadowsocks-2022 emits AEAD-encrypted random bytes from
+        // byte 0 — there is NO TLS handshake, NO HTTP envelope, no
+        // observable protocol structure. DPI engines flag the stream
+        // by Shannon-entropy-from-first-byte heuristics (a real TCP
+        // app protocol opens with a header band; SS opens with
+        // uniform random). TSPU (RU) blocks SS-on-port-N on first
+        // 10kB of traffic since 2024; GFW (CN) drops it on ASN
+        // reputation alone. Active probing returns nothing
+        // (replay-protected AEAD), so the probe cannot CONFIRM SS
+        // — but the entropy fingerprint is already enough to drop.
+        vpnctl_core::DpiRisk::Weak
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
         // PSK is REQUIRED — without it the inbound can't decrypt.
         // We refuse rather than render a broken config; the caller

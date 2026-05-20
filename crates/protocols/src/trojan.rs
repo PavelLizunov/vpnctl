@@ -76,6 +76,23 @@ impl Protocol for Trojan {
         &[("tcp", TROJAN_PORT)]
     }
 
+    fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
+        // Our Trojan inbound serves a self-signed cert with NO
+        // `fallback:` upstream (see `server_inbound` below — only
+        // `tls.certificate_path` + `tls.key_path`, no fallback).
+        // Active TLS probe → self-signed cert without a real serving
+        // website behind it → textbook "Trojan-without-fallback"
+        // fingerprint blocked in RU/CN since 2022. Without a real
+        // upstream this protocol is no better than raw SS-2022 in a
+        // probing environment. Review-agent NM-12: «active TLS probes
+        // get a self-signed cert with no real HTML behind it».
+        //
+        // To upgrade to Moderate/Strong: wire a real nginx fallback
+        // on 443 + plumb its address into `tls.fallback.server` and
+        // document the operator burden.
+        vpnctl_core::DpiRisk::Weak
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let cert_path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
         let key_path = ctx.or_default("tuic.key_path", "/etc/sing-box/key.pem");

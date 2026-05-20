@@ -2496,6 +2496,7 @@ pub(crate) async fn user_detail(
                                 s,
                                 hidden_per_server.get(&s.id),
                                 &user_overrides,
+                                &state.registry,
                             ))
                         }
                     }
@@ -7350,9 +7351,45 @@ fn server_detail_protocols_section(
                 // pid (e.g. add_protocol invariant on enabled but
                 // schema-missing row).
                 @let is_hidden = hidden_map.get(pid).copied().unwrap_or(false);
+                // NM-12: DPI / active-probing resilience tier. Read
+                // straight from the protocol impl in the registry —
+                // none of the inventory mutations carry this; it's
+                // compile-time static. Missing protocol (impossible
+                // in production, registry seeds itself in main()) →
+                // None → no chip rendered.
+                @let risk = registry.protocol(pid).map(|p| p.dpi_risk());
+                @let pid_is_weak = matches!(risk, Some(vpnctl_core::DpiRisk::Weak));
                 li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                    span style=(if compatible { "flex: 1; color: var(--ink);" } else { "flex: 1; color: var(--mute);" }) {
+                    // Weak protocols get font-size 11px (vs 12px for
+                    // Moderate/Strong) — Pavel 2026-05-20: «можешь
+                    // даже шрифт меньше сделать у них». Visual
+                    // de-emphasis without removing the row, so the
+                    // operator can still see + toggle it.
+                    span style=(format!(
+                        "flex: 1; color: {}; font-size: {};",
+                        if compatible { "var(--ink)" } else { "var(--mute)" },
+                        if pid_is_weak { "11px" } else { "12px" },
+                    )) {
                         (pid.0)
+                        @if let Some(r) = risk {
+                            " "
+                            // DPI-risk chip: green/grey/red, sits
+                            // alongside the protocol id so the
+                            // operator's eye catches it. Colour
+                            // helpers on `DpiRisk` are the single
+                            // source of truth — adding a future tier
+                            // (or recolouring the palette) is one
+                            // edit in core/src/lib.rs. Tooltip carries
+                            // the per-tier explainer string.
+                            span title=(r.tooltip())
+                                 style=(format!(
+                                     "font-family: var(--mono); font-size: 10px; padding: 1px 6px; border: 1px solid {}; color: {}; letter-spacing: 0.04em;",
+                                     r.border_css(),
+                                     r.text_css(),
+                                 )) {
+                                (r.label())
+                            }
+                        }
                         @if !compatible {
                             " "
                             span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
@@ -7475,6 +7512,7 @@ fn user_detail_per_protocol_grid(
         (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
         bool,
     >,
+    registry: &vpnctl_core::Registry,
 ) -> Markup {
     let uid_enc = path_segment_encode(&uid.0);
     let sid_enc = path_segment_encode(&server.id.0);
@@ -7514,8 +7552,31 @@ fn user_detail_per_protocol_grid(
                             .copied()
                             .unwrap_or(false);
                         @let pid_enc = path_segment_encode(&pid.0);
+                        // NM-12: same registry-driven risk chip the
+                        // server-detail uses. Shrinks the protocol
+                        // name to 10px (vs 11px row-default) when
+                        // Weak — small visual sentence saying "you
+                        // shouldn't be delivering this here".
+                        @let risk = registry.protocol(pid).map(|p| p.dpi_risk());
+                        @let pid_is_weak = matches!(risk, Some(vpnctl_core::DpiRisk::Weak));
                         li style="display: flex; align-items: baseline; gap: 10px; padding: 2px 0;" {
-                            span style="flex: 1; color: var(--ink);" { (pid.0) }
+                            span style=(format!(
+                                "flex: 1; color: var(--ink); font-size: {};",
+                                if pid_is_weak { "10px" } else { "11px" },
+                            )) {
+                                (pid.0)
+                                @if let Some(r) = risk {
+                                    " "
+                                    span title=(r.tooltip())
+                                         style=(format!(
+                                             "font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {}; color: {}; letter-spacing: 0.04em; margin-left: 2px;",
+                                             r.border_css(),
+                                             r.text_css(),
+                                         )) {
+                                        (r.label())
+                                    }
+                                }
+                            }
                             @if is_hidden && is_user_blocked {
                                 // Both axes deny — show both, but the
                                 // server-hidden flag is the binding
