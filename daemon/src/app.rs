@@ -629,6 +629,27 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/deploy",
             post(admin::server_deploy),
         )
+        // Migration 0018: per-(server, protocol) hide flag + per-(user,
+        // server, protocol) deny override. 4 POST handlers — server-
+        // level chip is on /admin/servers/{id}; per-user grid is on
+        // /admin/users/{id} (rendered with checkboxes that POST these
+        // URLs). See handlers/admin.rs `server_protocol_hide` etc.
+        .route(
+            "/admin/servers/{sid}/protocols/{pid}/hide",
+            post(admin::server_protocol_hide),
+        )
+        .route(
+            "/admin/servers/{sid}/protocols/{pid}/unhide",
+            post(admin::server_protocol_unhide),
+        )
+        .route(
+            "/admin/users/{uid}/grants/{sid}/protocols/{pid}/disable",
+            post(admin::grant_protocol_disable),
+        )
+        .route(
+            "/admin/users/{uid}/grants/{sid}/protocols/{pid}/enable",
+            post(admin::grant_protocol_enable),
+        )
         // Server-side grant mutations (Pavel iter B). Identical mutation
         // to /admin/users/{id}/grants/{server_id} but the redirect goes
         // to the server detail page so the operator stays where they

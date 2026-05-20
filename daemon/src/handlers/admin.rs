@@ -7413,3 +7413,117 @@ fn server_detail_drift_section(
         }
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Migration 0018 — per-(server, protocol) hide + per-(user, server,
+// protocol) deny override. Four POST handlers below mirror the
+// inventory API (`set_server_protocol_hidden`, `set_grant_protocol_override`)
+// 1:1. Each returns 303 to the originating page (server-detail or
+// user-detail) so the operator sees post-mutation state without a
+// stale form re-submit risk. Audit row is written by the inventory
+// layer inside the same transaction — handler itself does NOT call
+// `state.inv.audit()` (avoids double-audit).
+//
+// Convention: action is implied by the path suffix (`/hide` /
+// `/unhide` / `/disable` / `/enable`) rather than a `value=` form
+// field — keeps the markup template-side simple (one form per
+// action button instead of a hidden input + JS).
+// ────────────────────────────────────────────────────────────────────────
+
+/// `POST /admin/servers/{sid}/protocols/{pid}/hide` — flip
+/// `server_protocols.hidden = 1` for (sid, pid). Render path
+/// (sub.rs + vpn_router.rs) immediately stops emitting this
+/// protocol for any user's next subscription pull. Existing
+/// cached client URIs keep working (the live sing-box inbound is
+/// untouched).
+pub(crate) async fn server_protocol_hide(
+    State(state): State<AppState>,
+    Path((server_id_str, protocol_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    match state.inv.set_server_protocol_hidden(&sid, &pid, true).await {
+        Ok(()) => Redirect::to(&format!(
+            "/admin/servers/{}",
+            path_segment_encode(&server_id_str)
+        ))
+        .into_response(),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
+        Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
+
+/// `POST /admin/servers/{sid}/protocols/{pid}/unhide` — flip
+/// `server_protocols.hidden = 0` for (sid, pid). Render path
+/// resumes emitting this protocol on next subscription pull.
+pub(crate) async fn server_protocol_unhide(
+    State(state): State<AppState>,
+    Path((server_id_str, protocol_id_str)): Path<(String, String)>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    match state
+        .inv
+        .set_server_protocol_hidden(&sid, &pid, false)
+        .await
+    {
+        Ok(()) => Redirect::to(&format!(
+            "/admin/servers/{}",
+            path_segment_encode(&server_id_str)
+        ))
+        .into_response(),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
+        Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
+
+/// `POST /admin/users/{uid}/grants/{sid}/protocols/{pid}/disable` —
+/// insert `grant_protocol_overrides` row with `state='disabled'`.
+/// Render path skips this protocol for THIS user's subscription
+/// while still emitting it for every other user.
+pub(crate) async fn grant_protocol_disable(
+    State(state): State<AppState>,
+    Path((user_id_str, server_id_str, protocol_id_str)): Path<(String, String, String)>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    match state
+        .inv
+        .set_grant_protocol_override(&uid, &sid, &pid, true)
+        .await
+    {
+        Ok(()) => Redirect::to(&format!(
+            "/admin/users/{}",
+            path_segment_encode(&user_id_str)
+        ))
+        .into_response(),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
+        Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
+
+/// `POST /admin/users/{uid}/grants/{sid}/protocols/{pid}/enable` —
+/// DELETE the per-user override row, returning the (user, server,
+/// protocol) tuple to inherit-from-server-visibility.
+pub(crate) async fn grant_protocol_enable(
+    State(state): State<AppState>,
+    Path((user_id_str, server_id_str, protocol_id_str)): Path<(String, String, String)>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    match state
+        .inv
+        .set_grant_protocol_override(&uid, &sid, &pid, false)
+        .await
+    {
+        Ok(()) => Redirect::to(&format!(
+            "/admin/users/{}",
+            path_segment_encode(&user_id_str)
+        ))
+        .into_response(),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
+        Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
