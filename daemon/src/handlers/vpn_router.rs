@@ -525,7 +525,13 @@ pub(crate) async fn get_config(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|axum::extract::ConnectInfo(addr)| addr.ip());
-    let ip_for_log = peer_ip
+    // Post-Phase-5: nginx peer collapses every external client to
+    // 192.168.0.207. `real_ip::resolve_real_ip` parses XFF when the
+    // peer is in the trusted-proxy allowlist; otherwise returns peer
+    // verbatim (spoof defense). Same call site as sub.rs.
+    let real_ip: Option<std::net::IpAddr> =
+        peer_ip.map(|p| crate::real_ip::resolve_real_ip(&headers, p));
+    let ip_for_log = real_ip
         .map(|a| a.to_string())
         .unwrap_or_else(|| "0.0.0.0".to_string());
     let ua_for_log: Option<String> = headers

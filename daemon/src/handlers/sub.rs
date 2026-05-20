@@ -54,7 +54,16 @@ pub(crate) async fn get(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
-    let ip = match peer_ip {
+    // Post-Phase-5 (2026-05-19): traffic now goes through nginx on
+    // 192.168.0.207 → vpnctld:18402. Without X-Forwarded-For
+    // resolution every client's IP collapses to nginx's peer
+    // address → rate-limit single-bucket + per-user distinct-IP
+    // counter = 1. `real_ip::resolve_real_ip` parses XFF ONLY when
+    // peer is in the trusted-proxy allowlist (LAN default
+    // 192.168.0.207, overridable via `VPNCTLD_TRUSTED_PROXIES`).
+    let real_peer_ip: Option<std::net::IpAddr> =
+        peer_ip.map(|p| crate::real_ip::resolve_real_ip(request.headers(), p));
+    let ip = match real_peer_ip {
         Some(addr) => addr.to_string(),
         None => {
             // Production rigs MUST install ConnectInfo via
@@ -80,7 +89,7 @@ pub(crate) async fn get(
     // bucket math — a banned IP is rejected without spending any
     // bucket tokens. The ban table is indexed on (kind, key,
     // until_ts) so the lookup is sub-millisecond.
-    if let Some(addr) = peer_ip {
+    if let Some(addr) = real_peer_ip {
         let ip_str = addr.to_string();
         match state.inv.is_banned("ip", &ip_str).await {
             Ok(Some(secs)) => return rate_limited(secs, "ip-ban"),
@@ -100,7 +109,7 @@ pub(crate) async fn get(
     // for free). Per-token gate runs AFTER the token resolves to
     // bound the by_token map size by the user count, not by attacker
     // creativity. Both gates issue HTTP 429 with `Retry-After`.
-    if let Some(addr) = peer_ip {
+    if let Some(addr) = real_peer_ip {
         if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr) {
             // Phase Track-2 chunk 2: escalate to a persistent ban EXACTLY
             // when the denial counter crosses K. Using `==` (not `>=`)

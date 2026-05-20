@@ -8,11 +8,16 @@
 
 pub mod access_log;
 pub mod app;
+// Real-client-IP resolution from X-Forwarded-For when the immediate
+// peer is a trusted reverse proxy (post-Phase-5 nginx cutover).
+// Without this every external client collapses to the nginx peer IP
+// → rate-limit single-bucket + per-user distinct-IP counter = 1.
 pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
 pub mod handlers;
 pub mod health_monitor;
+pub mod real_ip;
 // Generic HTTP helpers shared across handler surfaces and (in the
 // future) CLI consumers of form-encoded payloads. Started life as
 // `decode_form_value` inlined in `handlers/admin.rs`; extracted so
