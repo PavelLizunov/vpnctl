@@ -346,7 +346,27 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
             .await
             .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 
+        // Visibility filter (migration 0018): only emit protocols
+        // visible for THIS user on THIS server. Compound query joins
+        // server_protocols × grant_protocol_overrides:
+        //   * `server_protocols.hidden=1` → suppressed for everyone
+        //   * `grant_protocol_overrides.state='disabled'` →
+        //     suppressed for this specific user
+        //   * absent override + hidden=0 → visible (default)
+        // Inbound on the node still runs — only the rendered URL is
+        // filtered, so cached client URIs keep working.
+        let visible_protocols = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        let visible_set: std::collections::HashSet<&vpnctl_core::ProtocolId> =
+            visible_protocols.iter().collect();
+
         for pid in &server.enabled_protocols {
+            if !visible_set.contains(pid) {
+                continue;
+            }
             let Some(proto) = state.registry.protocol(pid) else {
                 tracing::warn!(
                     target = "vpnctld::sub",

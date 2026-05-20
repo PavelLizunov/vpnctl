@@ -251,6 +251,22 @@ async fn collect_vless_uris_for_user(
 
     let mut uris: Vec<String> = Vec::with_capacity(servers.len());
     for server in &servers {
+        // Visibility filter (migration 0018): ninitux endpoint emits
+        // VLESS+REALITY only, so skip this server if vless+reality is
+        // hidden globally OR per-this-user. Skipping = NO URI for this
+        // server in the rendered config; user still has access via
+        // /sub/<token> (which has its own filter) OR cached URIs (the
+        // sing-box inbound stays running on the node).
+        let visible = state
+            .inv
+            .visible_protocols_for_subscription(user_id, &server.id)
+            .await
+            .map_err(|e| format!("visible_protocols_for_subscription: {e}"))?;
+        let vless_id = vpnctl_core::ProtocolId("vless+reality".to_string());
+        if !visible.contains(&vless_id) {
+            continue;
+        }
+
         let secrets = state
             .inv
             .list_server_secrets(&server.id)

@@ -10,12 +10,10 @@ publish.workspace = true
 [dependencies]
 vpnctl-core = { path = "../core" }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 
 # Real SSH transport.
 russh = "0.60"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util"] }
-backon = { version = "1", features = ["tokio-sleep"] }
 tracing = "0.1"
 # Wrap secrets so they don't leak through Debug, accidental println, or
 # memory after drop.

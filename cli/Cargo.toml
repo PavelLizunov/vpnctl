@@ -15,7 +15,6 @@ path = "src/main.rs"
 vpnctl-core = { path = "../crates/core" }
 vpnctl-protocols = { path = "../crates/protocols" }
 vpnctl-kernels = { path = "../crates/kernels" }
-vpnctl-hosters = { path = "../crates/hosters" }
 vpnctl-inventory = { path = "../crates/inventory" }
 vpnctl-crypto = { path = "../crates/crypto" }
 vpnctl-ssh = { path = "../crates/ssh" }
