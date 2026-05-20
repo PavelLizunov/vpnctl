@@ -179,10 +179,24 @@ fn render_vless_uri(
         "type=tcp&security=reality&pbk={pbk_e}&fp=chrome&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
     );
 
-    let label = format!("{server_tag} VLESS");
+    // Fragment format (post-2026-05-20 + post-rename + operator-side
+    // identification re-added):
+    //   `{Country} VLESS ~{client_name}`
+    // separator `~` chosen because it's the ONLY ASCII char that:
+    //   1. is RFC-3986 unreserved (1 byte URL-encoded, no escape)
+    //   2. doesn't appear in any of the existing 33 production
+    //      user names (so the parser splitting on `~` is unambiguous)
+    //
+    // client_name is back in the label after Pavel's operational
+    // concern: when a user reports a problem, the operator needs to
+    // identify them from a screenshot of the outbound list (otherwise
+    // they have to ask for device_id which most users can't find).
+    // The sing-box log on the VPN node also carries `[user_name]` for
+    // every connection, so the chain is end-to-end greppable by
+    // username.
+    let label = format!("{server_tag} VLESS ~{client_name}");
     let fragment = utf8_percent_encode(&label, NINITUX_QUOTE);
 
-    let _ = client_name; // kept in signature for caller compat; intentionally not in label
     format!("vless://{client_uuid}@{server_ip}:{port}?{params}#{fragment}")
 }
 
@@ -559,7 +573,7 @@ mod tests {
             "tester-1", // ignored in label — kept for signature compat
         );
 
-        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS";
+        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
         assert_eq!(got, expected, "vless URI fragment drifted");
     }
 

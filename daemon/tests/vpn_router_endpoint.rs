@@ -182,8 +182,8 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
         assert!(line.contains("11111111-2222-3333-4444-555555555555"));
     }
     // Fragment has stripped server tag + port + client_name.
-    assert!(lines[0].contains("#Germany%20VLESS"));
-    assert!(lines[1].contains("#Iceland%20VLESS"));
+    assert!(lines[0].contains("#Germany%20VLESS%20~tester-1"));
+    assert!(lines[1].contains("#Iceland%20VLESS%20~tester-1"));
 }
 
 #[tokio::test]

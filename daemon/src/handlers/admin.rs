@@ -1343,8 +1343,18 @@ pub(crate) async fn users(
                 }
                 input type="text" name="id" required="required"
                       placeholder="alice"
-                      pattern="[A-Za-z0-9._-]+"
-                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes. Becomes a NEW user — not a search field."
+                      pattern="[a-z0-9._-]{2,32}"
+                      maxlength="32"
+                      // Live-edit: lowercase + strip disallowed + spaces→hyphen
+                      // + truncate to 32 chars AS THE OPERATOR TYPES.
+                      // Backend `valid_user_id` enforces the same shape —
+                      // operator gets WYSIWYG, and a direct curl POST that
+                      // bypasses JS still hits the 400 path. (Pavel
+                      // 2026-05-20: «корректнее будет если после ввода
+                      // имени оно и в интерфейсе будет сразу
+                      // редактироваться под нужный формат».)
+                      oninput="this.value=this.value.toLowerCase().replace(/\\s+/g,'-').replace(/[^a-z0-9._-]/g,'').slice(0,32);"
+                      title="2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type."
                       style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                 button type="submit"
                        title="Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible"
@@ -4144,11 +4154,19 @@ pub(crate) async fn server_disable_kernel(
 /// the additional constraint of bounded length.
 fn valid_user_id(id: &str) -> bool {
     let len = id.len();
-    if !(1..=64).contains(&len) {
+    if !(2..=32).contains(&len) {
         return false;
     }
+    // Post-2026-05-20 lowercase enforcement (Pavel: «Lowercase
+    // тоже скорее обезопасит»). Existing 33 production users have
+    // been batch-migrated to lowercase; the validator stops new
+    // mixed-case ids from re-introducing drift. Legacy `.` allowed
+    // to preserve `lana.fedyanina`-style dotted names; underscore
+    // for `abukarov_tk`-style. Frontend live-edit normalises input
+    // as the operator types, so this 400 should only fire on the
+    // direct curl path or a malicious POST.
     id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// `POST /admin/users` — create a new user from the form on
@@ -4177,7 +4195,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
 
     if !valid_user_id(&id_decoded) {
         return bad_request(&format!(
-            "invalid user id '{id_decoded}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+            "invalid user id '{id_decoded}' (allowed: 2-32 chars of a-z 0-9 . _ -; lowercase only)"
         ));
     }
 

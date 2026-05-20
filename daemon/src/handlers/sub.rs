@@ -386,7 +386,10 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
                     let server_display =
                         crate::handlers::vpn_router::country_display_name(&server.id.0);
                     let proto_display = protocol_display_name(&pid.0);
-                    let tag = format!("{server_display} {proto_display}");
+                    let tag = format!(
+                        "{server_display} {proto_display} ~{user_id}",
+                        user_id = user.id.0
+                    );
                     if let Some(obj) = value.as_object_mut() {
                         obj.insert("tag".into(), json!(tag));
                     }
