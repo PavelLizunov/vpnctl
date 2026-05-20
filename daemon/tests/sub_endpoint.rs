@@ -59,6 +59,7 @@ async fn seed(dir: &TempDir) -> (AppState, String) {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     };
     inv.add_user(&user).await.unwrap();
     inv.grant(&user.id, &server.id).await.unwrap();
@@ -211,6 +212,7 @@ async fn sub_skips_wgturn_protocol_in_sing_box_envelope() {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     };
     inv.add_user(&user).await.unwrap();
     inv.grant(&user.id, &server.id).await.unwrap();
@@ -275,6 +277,7 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     };
     inv.add_user(&user).await.unwrap();
     let token = inv
@@ -366,6 +369,7 @@ async fn sub_rate_limit_returns_429_after_burst() {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     };
     inv.add_user(&user).await.unwrap();
     inv.grant(&user.id, &server.id).await.unwrap();
@@ -492,6 +496,7 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     };
     inv.add_user(&user).await.unwrap();
     inv.grant(&user.id, &server.id).await.unwrap();

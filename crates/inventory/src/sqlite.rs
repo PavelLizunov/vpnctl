@@ -645,7 +645,7 @@ impl SqliteInventory {
     /// invariant by exposing the daemon publicly without Track-2.
     pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
              FROM users WHERE sub_token = ?1",
         )
         .bind(token)
@@ -709,7 +709,7 @@ impl SqliteInventory {
 
     pub async fn get_user(&self, id: &UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
              FROM users WHERE id = ?1",
         )
         .bind(&id.0)
@@ -720,7 +720,7 @@ impl SqliteInventory {
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
              FROM users ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -777,7 +777,7 @@ impl SqliteInventory {
     /// global is correct and avoids needless schema bloat.
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token
+            "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
@@ -953,7 +953,7 @@ impl SqliteInventory {
     /// uniform regardless of garbage input.
     pub async fn find_user_by_vpn_router_device_id(&self, device_id: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
              FROM users WHERE vpn_router_device_id = ?1",
         )
         .bind(device_id)
@@ -2393,6 +2393,17 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         wireguard_pubkey: r.try_get("wireguard_pubkey")?,
         wireguard_private: r.try_get("wireguard_private")?,
         sub_token: r.try_get("sub_token")?,
+        // Reads the column added by migration 0017. Bare `?` (no
+        // turbofish) — same pattern as the other Option<String>
+        // columns above. Rust infers `T = Option<String>` from the
+        // field type, which routes through sqlx's `Option<T>` Decode
+        // impl and handles NULL → `None` correctly. Initial fix
+        // used `.ok()` which inferred `T = String` and SQLite
+        // decoded NULL as `""` (caught 2026-05-19: `DEVICE_ID =
+        // Some("")` instead of `None` made every fresh-user
+        // detail page render the ninitux URL with an empty
+        // device_id).
+        vpn_router_device_id: r.try_get("vpn_router_device_id")?,
     })
 }
 
@@ -2553,6 +2564,7 @@ mod tests {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None, // inventory will generate one
+            vpn_router_device_id: None,
         }
     }
 

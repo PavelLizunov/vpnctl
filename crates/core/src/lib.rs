@@ -148,6 +148,32 @@ pub struct User {
     /// `skip` (token = bearer credential equivalent).
     #[serde(skip_serializing, default)]
     pub sub_token: Option<String>,
+    /// 32-lowercase-hex device identifier used by the ninitux-compat
+    /// endpoint `GET /api/v1/app/config/{device_id}` (Phase 3 merge,
+    /// migration `0017_users_vpn_router_device_id.sql`). Pinned per
+    /// user via `SqliteInventory::set_vpn_router_device_id`. When
+    /// `Some(...)`, the operator can hand the user the production
+    /// URL `https://ninitux.com/api/v1/app/config/<device_id>`
+    /// directly — no token rotation needed. When `None`, the user
+    /// has no ninitux-style endpoint (legacy `/sub/<token>` path
+    /// still works regardless).
+    ///
+    /// **BEARER CREDENTIAL — `Serialize` is `skip`.** Anyone who
+    /// knows the device_id can fetch the user's full VPN config
+    /// (VLESS URIs with UUIDs, TUIC passwords) via the public
+    /// `/api/v1/app/config/<device_id>` endpoint. Treat with the
+    /// same care as `sub_token`. The pre-Phase-3 doc-comment
+    /// called this a "device fingerprint, not a credential" —
+    /// review-agent 2026-05-19 correctly pointed out that's
+    /// wrong: knowing it == being able to fetch credentials.
+    /// Live transport is the admin UI (operator-facing only,
+    /// behind basic-auth) + the `/api/v1/app/config/` endpoint
+    /// (the bearer-credential surface) and the audit_log (admin-
+    /// gated). NEVER appears in `serde_json::to_string(&user)`
+    /// output (CLI `--output json`, future REST API, audit
+    /// payloads) — pinned by `user_debug_redacts_all_secret_fields`.
+    #[serde(skip_serializing, default)]
+    pub vpn_router_device_id: Option<String>,
 }
 
 impl User {
@@ -191,6 +217,10 @@ impl fmt::Debug for User {
                 &self.wireguard_private.as_ref().map(|_| "<redacted>"),
             )
             .field("sub_token", &self.sub_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "vpn_router_device_id",
+                &self.vpn_router_device_id.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -208,6 +238,13 @@ mod user_secret_redaction {
             wireguard_pubkey: Some("PUBKEY_OK_TO_PRINT_44CHARS_ENDING_EQ_VALUEAA=".into()),
             wireguard_private: Some("PRIV_WG_MUST_NOT_LEAK".into()),
             sub_token: Some("SUB_TOKEN_MUST_NOT_LEAK".into()),
+            // 32-hex bearer credential — knowing this string lets a
+            // probe fetch the user's full VPN config via
+            // /api/v1/app/config/<id>. Treated like sub_token: must
+            // not leak via Debug, JSON serialisation, or any
+            // logging path. Distinctive byte sequence so any future
+            // refactor that bypasses the redaction surfaces here.
+            vpn_router_device_id: Some("DEVICE_ID_MUST_NOT_LEAK_a92b915".into()),
         }
     }
 
@@ -218,6 +255,7 @@ mod user_secret_redaction {
             "PW_TUIC_MUST_NOT_LEAK",
             "PRIV_WG_MUST_NOT_LEAK",
             "SUB_TOKEN_MUST_NOT_LEAK",
+            "DEVICE_ID_MUST_NOT_LEAK",
         ] {
             assert!(!dbg.contains(forbidden), "Debug leaked {forbidden}: {dbg}");
         }
@@ -237,9 +275,11 @@ mod user_secret_redaction {
             "PW_TUIC_MUST_NOT_LEAK",
             "PRIV_WG_MUST_NOT_LEAK",
             "SUB_TOKEN_MUST_NOT_LEAK",
+            "DEVICE_ID_MUST_NOT_LEAK",
             "tuic_password",
             "wireguard_private",
             "sub_token",
+            "vpn_router_device_id",
         ] {
             assert!(
                 !json.contains(forbidden),

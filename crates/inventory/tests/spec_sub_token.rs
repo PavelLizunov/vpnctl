@@ -28,6 +28,7 @@ fn user(id: &str) -> User {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn user_with_token(id: &str, token: Option<&str>) -> User {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: token.map(str::to_string),
+        vpn_router_device_id: None,
     }
 }
 

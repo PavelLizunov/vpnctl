@@ -665,6 +665,7 @@ mod tests {
             wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: Some("st".into()),
+            vpn_router_device_id: None,
         }
     }
 

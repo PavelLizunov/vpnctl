@@ -340,6 +340,7 @@ mod tests {
             wireguard_pubkey: pubkey.map(str::to_string),
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         }
     }
 

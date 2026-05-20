@@ -1246,9 +1246,11 @@ pub(crate) async fn users(
             " on file"
         }
         p.ed-art-deck {
-            "Each user has one " span.ed-mono { "/sub/<token>" } " endpoint that hands their "
-            "sing-box client a fresh config covering every server they're granted on. "
-            "Open a row for the QR you'll point a phone at."
+            "Each user has a public subscription URL — "
+            span.ed-mono { "https://ninitux.com/api/v1/app/config/<device_id>" } " — "
+            "served by vpnctld since the Phase 5 cutover (2026-05-19). The QR on every user-detail "
+            "page encodes that URL; the legacy " span.ed-mono { "/sub/<token>" } " endpoint stays as "
+            "a LAN-only fallback. Open a row for the QR you'll point a phone at."
         }
 
         // Search FIRST, add-user SECOND. Pre-2026-05-19 the order
@@ -1397,6 +1399,39 @@ fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
     // Daemon is HTTP-only on LAN — when an operator stands up TLS in
     // front of vpnctld this becomes a config knob.
     format!("http://{host}/sub/{sub_token}")
+}
+
+/// Public production subscription URL — the one a client mobile app
+/// will actually fetch from. Renders the ninitux-compat endpoint
+/// served by `vpnctld` since the Phase 5 cutover (2026-05-19): nginx
+/// on 192.168.0.207 reverse-proxies `https://ninitux.com/api/v1/app/config/{device_id}`
+/// to `http://192.168.0.236:18402/api/v1/app/config/{device_id}`,
+/// byte-equivalent for every registered user.
+///
+/// Returns `None` when the device_id fails the shape gate
+/// (`vpnctl_crypto::is_valid_vpn_router_device_id`). Defensive —
+/// `SqliteInventory::set_vpn_router_device_id` enforces the same
+/// gate before writing, so a valid row should always pass; the
+/// `None` branch closes the gap where a malformed device_id lands
+/// in the DB via migration / external mutation / direct sqlite
+/// edit. Without this check, a value like `evil?h=x.com` would
+/// render as `https://ninitux.com/api/v1/app/config/evil?h=x.com`
+/// and the QR a user scans would point at an attacker-controlled
+/// path on a third-party host.
+///
+/// Hostname is hard-coded because the cutover IS the contract —
+/// every client in production polls this exact URL on a fixed
+/// schedule. Reading from a per-request `Host` header would
+/// silently drift the displayed URL if the operator opens the admin
+/// UI via IP vs hostname. (Review-agent flagged the hard-coding as
+/// a config-knob debt — TODO: promote to `VPNCTLD_PUBLIC_SUBSCRIPTION_BASE_URL`
+/// env var with this value as default, so staging deployments can
+/// override. Defer; current deployment is a single domain.)
+fn ninitux_url(device_id: &str) -> Option<String> {
+    if !vpnctl_crypto::is_valid_vpn_router_device_id(device_id) {
+        return None;
+    }
+    Some(format!("https://ninitux.com/api/v1/app/config/{device_id}"))
 }
 
 /// Render an inline SVG QR for the given URL. Returns
@@ -1763,6 +1798,16 @@ pub(crate) async fn user_detail(
         collect_amnezia_links(&user, &servers, &secrets_per_server, &peers_per_server);
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
+    // Phase 3+ ninitux-compat URL: the production endpoint that mobile
+    // apps actually fetch. Rendered as the PRIMARY subscription URL
+    // (with QR) when the user has a device_id pinned; the legacy
+    // `/sub/<token>` URL is demoted to a secondary "LAN fallback"
+    // block below it. When no device_id is pinned, falls back to the
+    // legacy URL as the primary — kept as an escape hatch for users
+    // that haven't been mapped to ninitux yet (operator can pin one
+    // via the import script or the future web action).
+    let ninitux_device_id = user.vpn_router_device_id.clone();
+    let ninitux_url_str = ninitux_device_id.as_deref().and_then(ninitux_url);
 
     // WireGuard "Flow B" diagnostics — without these the empty-state
     // copy can't tell the operator WHY no WG link rendered. Three
@@ -1845,22 +1890,79 @@ pub(crate) async fn user_detail(
         }
 
         // Subscription URL + QR — the headline for this page.
+        //
+        // Two URLs may exist per user post-Phase-5 (ninitux cutover,
+        // 2026-05-19):
+        //   * PRIMARY: the ninitux production URL
+        //     `https://ninitux.com/api/v1/app/config/<device_id>` —
+        //     the URL clients actually fetch. Only present when the
+        //     user has a `vpn_router_device_id` pinned (33/33
+        //     production users do; legacy bash-only or freshly-
+        //     created users may not).
+        //   * SECONDARY / LAN fallback: the legacy `/sub/<token>`
+        //     URL served by vpnctld directly on port 18402. Useful
+        //     for LAN debugging and as the fallback artefact for
+        //     users without a device_id.
+        //
+        // The QR encodes the PRIMARY URL when available — that's
+        // what a mobile-app user must scan. Showing the LAN URL in
+        // the QR (the pre-Phase-5 behaviour) silently broke any
+        // share-via-QR workflow because the client app can't reach
+        // 192.168.0.236 from outside the operator's LAN. Caught by
+        // visual review 2026-05-19; this block is the fix.
         div.ed-art-eyebrow style="margin-top: 28px;" { "Subscription" }
-        @match (&sub_token, &sub_url_str) {
-            (Some(token), Some(url)) => {
+        @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
+            (Some(device_id), Some(ninitux), _, _) => {
+                // Primary: ninitux production URL — QR scans this.
+                div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                    (qr_svg(ninitux))
+                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                        div { span style="color: var(--mute);" { "url        " } (ninitux) }
+                        div { span style="color: var(--mute);" { "device_id  " } (device_id) }
+                        div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
+                            "Production URL served via nginx on " span.ed-mono { "ninitux.com" } " → vpnctld. "
+                            "The user's mobile app polls this URL on a fixed schedule (3600s). "
+                            "Share the QR or the URL — both encode the same thing."
+                        }
+                    }
+                }
+                // Legacy LAN fallback — collapsed below the primary,
+                // muted styling, only useful for LAN debugging.
+                @if let (Some(token), Some(legacy_url)) = (sub_token.as_ref(), sub_url_str.as_ref()) {
+                    details style="margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                        summary style="cursor: pointer;" { "legacy /sub/<token> fallback (LAN-only)" }
+                        div style="padding: 8px 0 0 16px; line-height: 1.7;" {
+                            div { span style="color: var(--mute);" { "url   " } (legacy_url) }
+                            div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
+                            form method="post"
+                                 action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                                 style="margin-top: 10px;" {
+                                button type="submit"
+                                       title="Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable."
+                                       style="padding: 4px 10px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                    "rotate sub-token"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (None, _, Some(token), Some(url)) => {
+                // No device_id pinned — fall back to legacy /sub/<token>
+                // as the primary. Operator should pin a device_id to
+                // unlock the ninitux URL (import script or future web
+                // action).
                 div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
                     (qr_svg(url))
                     div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
                         div { span style="color: var(--mute);" { "url   " } (url) }
                         div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
                         div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
-                            "Point a Hiddify-style client at the URL once; it will re-pull the config on its own schedule."
+                            "Legacy " span.ed-mono { "/sub/<token>" } " URL — LAN-only. "
+                            "No " span.ed-mono { "vpn_router_device_id" } " pinned for this user, "
+                            "so the production " span.ed-mono { "ninitux.com" } " URL is not available yet. "
+                            "Pin one via " span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
                         }
-                        // Rotate sub-token. Idempotent-ish: clicking twice
-                        // gives two new tokens, the previous URL is dead
-                        // immediately. Operator's existing client must
-                        // re-fetch /sub/<new-token> to keep working — so
-                        // the inline copy spells out the consequence.
                         form method="post"
                              action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
                              style="margin-top: 14px;" {
@@ -4099,6 +4201,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         wireguard_pubkey: Some(wg_pub),
         wireguard_private: Some(wg_priv),
         sub_token: None,
+        vpn_router_device_id: None,
     };
 
     // Mutation. `AlreadyExists` (UNIQUE violation) gets a 400 with

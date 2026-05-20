@@ -30,6 +30,7 @@ fn user(name: &str, pw: Option<&str>) -> User {
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
+        vpn_router_device_id: None,
     }
 }
 

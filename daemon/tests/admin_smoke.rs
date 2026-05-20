@@ -557,6 +557,7 @@ async fn seed(
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -1020,6 +1021,7 @@ async fn admin_users_href_url_encodes_special_chars() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -1073,6 +1075,139 @@ async fn admin_user_detail_handles_missing_sub_token() {
     assert!(
         !html.contains("No sub-token assigned"),
         "user has a token — must not render the 'no token' fallback"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 3+ ninitux-compat URL rendering (post-Phase-5 cutover, 2026-05-19)
+//
+//  Pinned behaviour:
+//    1. User with `vpn_router_device_id` pinned → admin UI renders
+//       `https://ninitux.com/api/v1/app/config/<device_id>` as the
+//       PRIMARY subscription URL. The QR encodes that exact URL.
+//       The legacy `/sub/<token>` URL is demoted inside a <details>
+//       collapsible labelled "LAN-only fallback".
+//    2. User WITHOUT a device_id → admin UI falls back to the
+//       legacy `/sub/<token>` URL as primary (pre-Phase-3 behaviour
+//       preserved) AND the empty-state copy quotes the literal CLI
+//       command to pin a device_id (per CLAUDE.md "Every empty
+//       state must quote a literal CLI command").
+//    3. Users-list deck mentions the `ninitux.com` host so the
+//       operator sees the production URL shape at-a-glance.
+//
+//  Caught 2026-05-19 by visual review of /admin/users/tester-1: the
+//  QR encoded the LAN URL `http://192.168.0.236:18402/sub/<token>`
+//  which doesn't work for any client outside the LAN — operators
+//  showing the QR to a real user would silently fail.
+// ────────────────────────────────────────────────────────────────────────
+
+const TEST_NINITUX_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
+
+#[tokio::test]
+async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // Pin a ninitux device_id on the user.
+    s.inv
+        .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+
+    let expected_ninitux =
+        format!("https://ninitux.com/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}");
+    assert!(
+        html.contains(&expected_ninitux),
+        "ninitux production URL must be rendered as the primary subscription URL — \
+         expected substring: {expected_ninitux}"
+    );
+    // device_id is shown verbatim (it's not a secret — it's a device fingerprint).
+    assert!(
+        html.contains(TEST_NINITUX_DEVICE_ID),
+        "vpn_router_device_id must be displayed in the Subscription section"
+    );
+    // The LAN URL must still appear (operator might need it for debug),
+    // but inside a <details> collapsible — not as the primary block.
+    assert!(
+        html.contains("legacy /sub/&lt;token&gt; fallback")
+            || html.contains("legacy /sub/<token> fallback"),
+        "legacy /sub/<token> URL must be present BUT demoted inside a <details> labelled 'legacy'"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_qr_encodes_ninitux_url_not_lan_url_when_device_id_pinned() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+
+    // QR SVG embeds the URL via the qrcode crate. The textContent isn't
+    // in the SVG, but the URL appears in the <details> form action OR
+    // as an `aria-label` / `title` if rendered. The reliable invariant
+    // we can pin: the primary QR card appears BEFORE the <details>
+    // legacy fallback, AND the bytes of the ninitux URL appear BEFORE
+    // the bytes of the LAN URL in the HTML stream. That ordering proves
+    // the ninitux URL is the primary (QR-encoded) one, not the LAN URL.
+    let n_pos = html
+        .find("https://ninitux.com/api/v1/app/config/")
+        .expect("ninitux URL must appear");
+    let lan_pos = html
+        .find("/sub/")
+        .expect("legacy LAN URL must appear (in collapsed fallback)");
+    assert!(
+        n_pos < lan_pos,
+        "ninitux URL ({n_pos}) must appear BEFORE the LAN URL ({lan_pos}) so the \
+         QR card encodes ninitux. Otherwise QR encodes the LAN URL = mobile clients break."
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_falls_back_to_lan_url_when_no_device_id() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // u0 has NO vpn_router_device_id pinned — confirm fallback.
+    let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
+    assert!(u0.vpn_router_device_id.is_none());
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    // Ninitux URL MUST NOT appear at all — no device_id → no production URL.
+    assert!(
+        !html.contains("https://ninitux.com/api/v1/app/config/"),
+        "no device_id pinned → ninitux URL must NOT render"
+    );
+    // The empty-state copy must quote the CLI command operator runs to fix this,
+    // per CLAUDE.md "Every empty state must quote a literal CLI command".
+    assert!(
+        html.contains("scripts/import_from_subscription_server.py"),
+        "empty-state must point operator at the import script to pin a device_id"
+    );
+    // Subscription section heading present.
+    assert!(html.contains("Subscription"));
+}
+
+#[tokio::test]
+async fn admin_users_list_deck_mentions_ninitux_endpoint() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+
+    let html = fetch_html(router(s), "/admin/users").await;
+    // Deck text must mention the production URL shape so the operator
+    // sees what clients actually fetch at-a-glance. Pre-Phase-5 deck
+    // talked only about /sub/<token> which is now the LAN fallback.
+    assert!(
+        html.contains("ninitux.com/api/v1/app/config/&lt;device_id&gt;")
+            || html.contains("ninitux.com/api/v1/app/config/<device_id>"),
+        "users-list deck must mention the production ninitux URL shape"
     );
 }
 
@@ -1403,9 +1538,19 @@ async fn admin_frontend_section_headlines_match_voice() {
         detail.contains("Subscription"),
         "user-detail subscription section heading drifted"
     );
+    // Post-Phase-5 (2026-05-19): u0 in seed() has no `vpn_router_device_id`
+    // pinned → renders the legacy fallback subscription block. Pre-Phase-5
+    // this nudge was "Point a Hiddify-style client at the URL once" — that
+    // copy moved into the ninitux-primary branch (which u0 doesn't reach
+    // without a device_id) and was rewritten to mention nginx + ninitux.com.
+    // The fallback copy must keep pointing the operator at the import
+    // script — the action they need to upgrade this user from LAN-only
+    // to production.
     assert!(
-        detail.contains("Point a Hiddify-style client at the URL once"),
-        "user-detail Hiddify nudge copy drifted"
+        detail.contains("Legacy")
+            && detail.contains("LAN-only")
+            && detail.contains("scripts/import_from_subscription_server.py"),
+        "user-detail legacy-fallback copy drifted (no-device_id branch)"
     );
 }
 
@@ -3901,6 +4046,7 @@ async fn admin_users_renders_search_form_before_add_user_form() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: Some("seed-token".into()),
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -6586,6 +6732,7 @@ async fn admin_server_detail_lists_all_users_with_grant_buttons() {
                 wireguard_pubkey: None,
                 wireguard_private: None,
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .await
             .unwrap();
@@ -6640,6 +6787,7 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -6685,6 +6833,7 @@ async fn admin_users_search_filters_by_id_substring() {
                 wireguard_pubkey: None,
                 wireguard_private: None,
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .await
             .unwrap();
@@ -6730,6 +6879,7 @@ async fn admin_users_sort_servers_orders_by_grants_count_desc() {
                 wireguard_pubkey: None,
                 wireguard_private: None,
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .await
             .unwrap();
@@ -7016,6 +7166,7 @@ async fn admin_user_detail_shows_traffic_limit_section() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7051,6 +7202,7 @@ async fn admin_user_set_traffic_limit_persists_and_audits() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7105,6 +7257,7 @@ async fn admin_user_set_traffic_limit_zero_clears_cap() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7148,6 +7301,7 @@ async fn admin_dashboard_shows_limit_alerts_when_user_over_threshold() {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: None,
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7252,6 +7406,7 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
         wireguard_pubkey: Some("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=".into()),
         wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
         sub_token: Some("subtok-flowtest-abc123".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7345,6 +7500,7 @@ async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea(
         wireguard_pubkey: Some("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=".into()),
         wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
         sub_token: Some("subtok-flowtest2".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7421,6 +7577,7 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
         wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-amztest".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7492,6 +7649,7 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-dltest".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7576,6 +7734,7 @@ async fn admin_user_wireguard_conf_download_404_on_unknown_server_when_user_exis
             wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: Some("st".into()),
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7636,6 +7795,7 @@ async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server
         wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7715,6 +7875,7 @@ async fn admin_user_wg_conf_peer_octet_differs_per_user_index() {
             wireguard_pubkey: Some(pubk.into()),
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: Some(format!("st-{uid}")),
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -7789,6 +7950,7 @@ async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() 
         wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-u1".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();
@@ -7856,6 +8018,7 @@ async fn admin_user_detail_flow_b_links_to_conf_download() {
         wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-conf".into()),
+        vpn_router_device_id: None,
     })
     .await
     .unwrap();

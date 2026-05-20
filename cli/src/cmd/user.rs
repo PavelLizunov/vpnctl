@@ -109,6 +109,7 @@ pub(crate) async fn run(
                 // None → inventory generates one. Don't pre-gen here so the
                 // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
+                vpn_router_device_id: None,
             };
             inv.add_user(&user).await?;
             inv.audit(

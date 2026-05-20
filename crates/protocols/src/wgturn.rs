@@ -289,6 +289,7 @@ mod tests {
             wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
             wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
             sub_token: Some("st".into()),
+            vpn_router_device_id: None,
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
                 wireguard_pubkey: None,
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .collect();
 
@@ -609,6 +611,7 @@ mod tests {
             wireguard_pubkey: None,
             wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
             sub_token: None,
+            vpn_router_device_id: None,
         };
         let peers = vec![other];
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
@@ -648,6 +651,7 @@ mod tests {
                 wireguard_pubkey: None,
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .collect();
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
@@ -673,6 +677,7 @@ mod tests {
                 wireguard_pubkey: None,
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
+                vpn_router_device_id: None,
             })
             .collect();
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);

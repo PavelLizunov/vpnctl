@@ -459,6 +459,11 @@ pub fn build_migration_plan<F: FnMut(&str) -> String>(
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: Some(sub_token_for(name)),
+            // bash project pre-dates the ninitux merge; users
+            // arriving via `vpnctl migrate from-bash` carry no
+            // device_id (operator pins one later via the Phase 3
+            // import script or web UI).
+            vpn_router_device_id: None,
         };
         users_to_import.push(user);
         grants.push((UserId(name.clone()), server_id.clone()));
@@ -1169,6 +1174,7 @@ mod tests {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: Some("stale".into()),
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
@@ -1226,6 +1232,7 @@ mod tests {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: Some("stale".into()),
+            vpn_router_device_id: None,
         })
         .await
         .unwrap();
