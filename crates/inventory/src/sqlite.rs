@@ -225,6 +225,28 @@ pub struct ServerLiveActivity {
     pub distinct_users_attributed: u32,
 }
 
+/// One row in `vpn_user_sessions` (Phase 5c) — per-(user, server)
+/// activity window, closed by inactivity gap. Built by the
+/// session-tracker logic: tick observations advance an OPEN
+/// session's last_seen; a gap > SESSION_GAP_MINUTES makes the
+/// next observation OPEN a new row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VpnUserSessionRow {
+    pub id: i64,
+    pub user_id: UserId,
+    pub server_id: ServerId,
+    pub started_at: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub conn_count_peak: u32,
+    pub total_bytes: u64,
+}
+
+impl VpnUserSessionRow {
+    pub fn duration(&self) -> chrono::Duration {
+        self.last_seen - self.started_at
+    }
+}
+
 /// One row in `vpn_user_destinations` (Phase 5b) — per-(user,
 /// destination_label, date) hit counter. Used to render «куда
 /// ходит этот юзер» on /admin/users/<id>. NOT a byte counter —
@@ -2820,6 +2842,126 @@ impl SqliteInventory {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Phase 5c — per-user session windows.
+    //
+    // Session model: a tick observation of (user, server) either
+    // EXTENDS the most-recent OPEN session for that pair (if the
+    // gap since its `last_seen` is ≤ SESSION_GAP_MINUTES = 15),
+    // or OPENS a new session row. Sessions are never explicitly
+    // closed — they just stop being extended; old ones get
+    // displayed with `last_seen < now - 15min`.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Either extend the currently-open session for (user, server)
+    /// or open a new one, based on the time-since-last_seen vs
+    /// the `gap_minutes` budget. Returns the session id touched
+    /// for testability.
+    ///
+    /// `now` is passed in so tests can stub time; production code
+    /// passes `Utc::now()`. `bytes_delta` and `conn_count` are
+    /// added/maxed into the session's running totals.
+    pub async fn session_observe(
+        &self,
+        user_id: &UserId,
+        server_id: &ServerId,
+        now: DateTime<Utc>,
+        gap_minutes: i64,
+        bytes_delta: u64,
+        conn_count: u32,
+    ) -> Result<i64> {
+        // Look up the most-recent session for this (user, server).
+        let cutoff = now - chrono::Duration::minutes(gap_minutes);
+        let cutoff_s = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let now_s = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+        let maybe_existing: Option<(i64, i64, i64)> = sqlx::query(
+            "SELECT id, total_bytes, conn_count_peak
+             FROM vpn_user_sessions
+             WHERE user_id = ?1 AND server_id = ?2 AND last_seen >= ?3
+             ORDER BY last_seen DESC
+             LIMIT 1",
+        )
+        .bind(&user_id.0)
+        .bind(&server_id.0)
+        .bind(&cutoff_s)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| {
+            (
+                r.try_get::<i64, _>("id").unwrap_or(0),
+                r.try_get::<i64, _>("total_bytes").unwrap_or(0),
+                r.try_get::<i64, _>("conn_count_peak").unwrap_or(0),
+            )
+        });
+
+        if let Some((existing_id, prev_bytes, prev_peak)) = maybe_existing {
+            let new_bytes = (prev_bytes.max(0) as u64).saturating_add(bytes_delta);
+            let new_peak = (prev_peak.max(0) as u32).max(conn_count);
+            sqlx::query(
+                "UPDATE vpn_user_sessions
+                 SET last_seen = ?1, total_bytes = ?2, conn_count_peak = ?3
+                 WHERE id = ?4",
+            )
+            .bind(&now_s)
+            .bind(i64::try_from(new_bytes).unwrap_or(i64::MAX))
+            .bind(i64::from(new_peak))
+            .bind(existing_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(existing_id)
+        } else {
+            let res = sqlx::query(
+                "INSERT INTO vpn_user_sessions
+                    (user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
+                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+            )
+            .bind(&user_id.0)
+            .bind(&server_id.0)
+            .bind(&now_s)
+            .bind(i64::from(conn_count))
+            .bind(i64::try_from(bytes_delta).unwrap_or(i64::MAX))
+            .execute(&self.pool)
+            .await?;
+            Ok(res.last_insert_rowid())
+        }
+    }
+
+    /// Recent sessions for one user, newest-first. Used by the
+    /// user-detail «sessions timeline» on /admin/users/<id>.
+    pub async fn recent_sessions_for_user(
+        &self,
+        user_id: &UserId,
+        limit: i64,
+    ) -> Result<Vec<VpnUserSessionRow>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, server_id, started_at, last_seen,
+                    conn_count_peak, total_bytes
+             FROM vpn_user_sessions
+             WHERE user_id = ?1
+             ORDER BY started_at DESC
+             LIMIT ?2",
+        )
+        .bind(&user_id.0)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_user_session).collect()
+    }
+
+    /// Purge sessions older than `days`. Wired into the hourly
+    /// retention task at the standard 30-day default.
+    pub async fn purge_user_sessions_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM vpn_user_sessions
+             WHERE started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Phase 5b — per-user × destination tracking.
     // ──────────────────────────────────────────────────────────────────
 
@@ -3608,6 +3750,35 @@ fn row_to_admin_alert(r: sqlx::sqlite::SqliteRow) -> Result<AdminAlert> {
         summary: r.try_get("summary")?,
         payload_json: r.try_get("payload_json")?,
         acked_at,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_user_session(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserSessionRow> {
+    let id: i64 = r.try_get("id")?;
+    let user_id: String = r.try_get("user_id")?;
+    let server_id: String = r.try_get("server_id")?;
+    let started_at_s: String = r.try_get("started_at")?;
+    let last_seen_s: String = r.try_get("last_seen")?;
+    let conn_count_peak: i64 = r.try_get("conn_count_peak")?;
+    let total_bytes: i64 = r.try_get("total_bytes")?;
+    let parse_ts = |s: &str, label: &str| -> Result<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| {
+                SqliteInventoryError::Invalid(format!(
+                    "vpn_user_sessions.{label} malformed: {s}: {e}"
+                ))
+            })
+    };
+    Ok(VpnUserSessionRow {
+        id,
+        user_id: UserId(user_id),
+        server_id: ServerId(server_id),
+        started_at: parse_ts(&started_at_s, "started_at")?,
+        last_seen: parse_ts(&last_seen_s, "last_seen")?,
+        conn_count_peak: u32::try_from(conn_count_peak.max(0)).unwrap_or(u32::MAX),
+        total_bytes: total_bytes.max(0) as u64,
     })
 }
 

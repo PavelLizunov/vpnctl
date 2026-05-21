@@ -829,3 +829,190 @@ async fn phase5b_purge_user_destinations_removes_old_rows() {
     let removed = inv.purge_user_destinations_older_than(1).await.unwrap();
     assert_eq!(removed, 0, "fresh row must NOT be removed by 1-day purge");
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase 5c — vpn_user_sessions (activity windows).
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase5c_session_observe_within_gap_extends_existing_session() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let t0 = chrono::Utc::now();
+    let t1 = t0 + chrono::Duration::minutes(5);
+    let t2 = t0 + chrono::Duration::minutes(10);
+
+    // Tick 1: opens a new session.
+    let id1 = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t0,
+            15,
+            100,
+            1,
+        )
+        .await
+        .unwrap();
+    // Tick 2 (5 min later, within gap): EXTENDS same session.
+    let id2 = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t1,
+            15,
+            200,
+            3,
+        )
+        .await
+        .unwrap();
+    // Tick 3 (10 min later, still within gap): same session.
+    let id3 = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t2,
+            15,
+            50,
+            2,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(id1, id2, "second observation must extend the same session");
+    assert_eq!(id2, id3);
+
+    let sessions = inv
+        .recent_sessions_for_user(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1, "all 3 ticks landed in ONE session");
+    assert_eq!(sessions[0].total_bytes, 100 + 200 + 50);
+    assert_eq!(sessions[0].conn_count_peak, 3, "max(1,3,2) = 3");
+}
+
+#[tokio::test]
+async fn phase5c_session_observe_after_gap_opens_new_session() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let t0 = chrono::Utc::now();
+    let t1 = t0 + chrono::Duration::minutes(30); // > 15 min gap
+
+    let id1 = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t0,
+            15,
+            100,
+            1,
+        )
+        .await
+        .unwrap();
+    let id2 = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t1,
+            15,
+            200,
+            2,
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(id1, id2, "gap > 15 min must open a NEW session");
+    let sessions = inv
+        .recent_sessions_for_user(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 2);
+}
+
+#[tokio::test]
+async fn phase5c_sessions_dont_leak_across_users_or_servers() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_server(&server("s2")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    let t0 = chrono::Utc::now();
+    inv.session_observe(
+        &UserId("alice".into()),
+        &ServerId("s1".into()),
+        t0,
+        15,
+        100,
+        1,
+    )
+    .await
+    .unwrap();
+    inv.session_observe(
+        &UserId("alice".into()),
+        &ServerId("s2".into()),
+        t0,
+        15,
+        100,
+        1,
+    )
+    .await
+    .unwrap();
+    inv.session_observe(
+        &UserId("bob".into()),
+        &ServerId("s1".into()),
+        t0,
+        15,
+        100,
+        1,
+    )
+    .await
+    .unwrap();
+
+    let alice = inv
+        .recent_sessions_for_user(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        alice.len(),
+        2,
+        "alice has TWO sessions (s1, s2) — not bob's"
+    );
+    let bob = inv
+        .recent_sessions_for_user(&UserId("bob".into()), 10)
+        .await
+        .unwrap();
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].server_id.0, "s1");
+}
+
+#[tokio::test]
+async fn phase5c_purge_user_sessions_keeps_fresh_rows() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    let t0 = chrono::Utc::now();
+    inv.session_observe(
+        &UserId("alice".into()),
+        &ServerId("s1".into()),
+        t0,
+        15,
+        100,
+        1,
+    )
+    .await
+    .unwrap();
+    let removed = inv.purge_user_sessions_older_than(1).await.unwrap();
+    assert_eq!(
+        removed, 0,
+        "fresh session must NOT be removed by 1-day purge"
+    );
+}

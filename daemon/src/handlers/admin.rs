@@ -3369,6 +3369,7 @@ pub(crate) async fn user_detail(
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
         (live_vpn_stats_section(&state, &uid, lang).await)
         (user_top_destinations_section(&state, &uid, lang).await)
+        (user_sessions_section(&state, &uid, lang).await)
 
         // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
         // Show current month-to-date usage + the configured cap
@@ -3744,6 +3745,93 @@ async fn user_traffic_limit_section(
                    title="Set both fields. 0 GiB = clear the limit (no cap)."
                    style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer; margin-left: auto;" {
                 "save"
+            }
+        }
+    }
+}
+
+/// Phase 5c — «Когда была активна» session timeline. Builds an
+/// implicit «active from-to» window per (user, server) from the
+/// 5-min clash-poll observations: consecutive ticks extend the
+/// session; a gap > 15 minutes closes it. Empty until the
+/// poller has run at least one tick post-Phase-5c deploy.
+async fn user_sessions_section(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    const LIMIT: i64 = 20;
+    let rows = state
+        .inv
+        .recent_sessions_for_user(uid, LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sessions_for_user failed");
+            Vec::new()
+        });
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Sessions · recent 20", "Сессии · последние 20"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Implicit «active from-to» windows per (user, server). Derived from 5-min clash-poll observations: consecutive ticks extend the session; a gap >15 minutes closes it and the next tick opens a new row. Peak conns shows the busiest snapshot during the session.",
+                "Окна «активна с-по» на (юзер, сервер). Источник — 5-минутные тики clash-poll: последовательные тики расширяют сессию, пропуск >15 минут закрывает её, следующий тик открывает новую. Peak conns — самый загруженный snapshot в этой сессии.",
+            ))
+        }
+        @if rows.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                (tr(
+                    lang,
+                    "No sessions yet. The poller writes one row per (user, server, activity window) — wait for the next clash-api scrape.",
+                    "Сессий ещё нет. Поллер пишет одну запись на (юзер, сервер, окно активности) — подожди следующий скрейп clash-api.",
+                ))
+            }
+        } @else {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "server", "сервер"))
+                        }
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "started", "началось"))
+                        }
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "last seen", "последний"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "duration", "длительность"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;"
+                           title=(tr(lang, "Max active_connections observed across all 5-min ticks within the session.", "Max active_connections по всем 5-минутным тикам внутри сессии.")) {
+                            (tr(lang, "peak conns", "макс. соед."))
+                        }
+                    }
+                }
+                tbody {
+                    @for r in &rows {
+                        @let dur = r.duration();
+                        @let mins = dur.num_minutes().max(0);
+                        @let dur_str = if mins >= 60 {
+                            format!("{}h{:02}m", mins / 60, mins % 60)
+                        } else {
+                            format!("{mins}m")
+                        };
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 4px 8px;" {
+                                a href=(format!("/admin/servers/{}", crate::http_util::path_segment_encode(&r.server_id.0))) style="color: var(--ink); text-decoration: none;" { (r.server_id.0) }
+                            }
+                            td style="padding: 4px 8px;" { (r.started_at.format("%m-%d %H:%M").to_string()) }
+                            td style="padding: 4px 8px;" { (r.last_seen.format("%m-%d %H:%M").to_string()) }
+                            td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (dur_str) }
+                            td style="padding: 4px 8px; text-align: right;" { (r.conn_count_peak) }
+                        }
+                    }
+                }
             }
         }
     }

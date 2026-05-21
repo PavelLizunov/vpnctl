@@ -484,6 +484,52 @@ async fn poll_one_server(
         }
     }
 
+    // Phase 5c — session observation: per (resolved user, this
+    // server), advance or open a session window. SESSION_GAP_MINS
+    // matches the 15-min budget; a 5-min poll cadence means we
+    // tolerate ONE missed tick before considering the session
+    // ended. Active connection count = how many of THIS user's
+    // connections are alive in the snapshot.
+    const SESSION_GAP_MINS: i64 = 15;
+    use std::collections::HashMap as StdMap;
+    let mut per_user_conn_count: StdMap<String, u32> = StdMap::new();
+    for c in &snapshot.connections {
+        let user = c.metadata.user.as_deref().or_else(|| {
+            attribution_for_tick
+                .get(&(c.metadata.source_ip.clone(), c.metadata.source_port.clone()))
+                .map(|s| s.as_str())
+        });
+        if let Some(u) = user {
+            *per_user_conn_count.entry(u.to_string()).or_insert(0) += 1;
+        }
+    }
+    let now_utc = chrono::Utc::now();
+    for (user_str, conn_count) in &per_user_conn_count {
+        if let Err(e) = inv
+            .session_observe(
+                &vpnctl_core::UserId(user_str.clone()),
+                &server.id,
+                now_utc,
+                SESSION_GAP_MINS,
+                // bytes_delta = 0 here — the diff engine handles
+                // bytes; sessions track «была активна» windows,
+                // not byte budgets. If we want bytes per session
+                // later, pipe the per-user delta through.
+                0,
+                *conn_count,
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                user = %user_str,
+                error = %e,
+                "session_observe failed (session timeline may have a gap)"
+            );
+        }
+    }
+
     let deltas = engine.tick(&server.id, &snapshot, &attribution_for_tick);
     if deltas.is_empty() {
         tracing::debug!(
