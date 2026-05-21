@@ -431,30 +431,32 @@ async fn collect_dashboard_data(
 }
 
 /// Render an editorial 4-cell metric row from the dashboard stats.
-fn dashboard_metrics(stats: &DashboardStats) -> Markup {
+fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::tr;
     html! {
         div.ed-metrics {
             div.ed-metric {
-                span.ed-metric__lbl { "Servers" }
+                span.ed-metric__lbl { (tr(lang, "Servers", "Серверы")) }
                 span.ed-metric__v { (stats.servers) }
-                span.ed-metric__sub { "in inventory" }
+                span.ed-metric__sub { (tr(lang, "in inventory", "в инвентаре")) }
             }
             div.ed-metric {
-                span.ed-metric__lbl { "Users" }
+                span.ed-metric__lbl { (tr(lang, "Users", "Пользователи")) }
                 span.ed-metric__v { (stats.users) }
                 span.ed-metric__sub {
-                    "across " b { (stats.grants) }
-                    @if stats.grants == 1 { " grant" } @else { " grants" }
+                    (tr(lang, "across ", "всего ")) b { (stats.grants) }
+                    @if stats.grants == 1 { (tr(lang, " grant", " доступ")) }
+                    @else { (tr(lang, " grants", " доступов")) }
                 }
             }
             div.ed-metric {
-                span.ed-metric__lbl { "Protocols" }
+                span.ed-metric__lbl { (tr(lang, "Protocols", "Протоколы")) }
                 span.ed-metric__v { (stats.distinct_protocols) }
-                span.ed-metric__sub { "distinct, enabled" }
+                span.ed-metric__sub { (tr(lang, "distinct, enabled", "уникальных, включено")) }
             }
             div.ed-metric {
-                span.ed-metric__lbl { "Daemon" }
-                span.ed-metric__v { em { "live" } }
+                span.ed-metric__lbl { (tr(lang, "Daemon", "Демон")) }
+                span.ed-metric__v { em { (tr(lang, "live", "активен")) } }
                 span.ed-metric__sub { "vpnctld " b { (env!("CARGO_PKG_VERSION")) } }
             }
         }
@@ -464,12 +466,19 @@ fn dashboard_metrics(stats: &DashboardStats) -> Markup {
 /// Editorial timeline of the most recent audit entries. Empty inventory
 /// gets a deliberate "no activity yet" stub so the section never renders
 /// as a bare rule.
-fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry]) -> Markup {
+fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry], lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::tr;
     html! {
-        div.ed-art-eyebrow style="margin-top: 28px;" { "Recent activity" }
+        div.ed-art-eyebrow style="margin-top: 28px;" {
+            (tr(lang, "Recent activity", "Недавняя активность"))
+        }
         @if audit.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                "No actions logged yet — vpnctl bootstrap / deploy / add-user will start filling this stream."
+                (tr(
+                    lang,
+                    "No actions logged yet — vpnctl bootstrap / deploy / add-user will start filling this stream.",
+                    "Действий пока не записано — vpnctl bootstrap / deploy / add-user начнут наполнять этот поток.",
+                ))
             }
         } @else {
             div.ed-time {
@@ -487,7 +496,7 @@ fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry]) -> Markup {
                             }
                         }
                         span.ed-time-row__pl {
-                            "by " (e.actor)
+                            (tr(lang, "by ", "автор: ")) (e.actor)
                             // Show key payload fields so the row tells
                             // the operator WHAT was enabled, granted,
                             // etc. Without this they had to crack
@@ -642,19 +651,35 @@ pub(crate) async fn dashboard(
     });
 
     let body = html! {
-        div.ed-art-eyebrow { "Dashboard" }
-        h1.ed-art-h1 { "homelab " em { "at a glance" } }
-        p.ed-art-deck {
-            "Counts straight from the SQLite inventory backing this daemon "
-            "(" span.ed-mono { "/var/lib/vpnctl/inv.db" } "). "
-            b { "Servers, users, grants and the daemon version" }
-            " update on every reload."
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
+        h1.ed-art-h1 {
+            (crate::i18n::tr(lang, "homelab ", "homelab "))
+            em { (crate::i18n::tr(lang, "at a glance", "одним взглядом")) }
         }
-        (dashboard_metrics(&stats))
-        (dashboard_alerts_tile(unacked_alerts))
-        (dashboard_limit_alerts(&alerting))
-        (dashboard_heavy_users(&heavy_users))
-        (dashboard_audit(&audit))
+        p.ed-art-deck {
+            (crate::i18n::tr(
+                lang,
+                "Counts straight from the SQLite inventory backing this daemon (",
+                "Счётчики читаются напрямую из SQLite-инвентаря этого демона (",
+            ))
+            span.ed-mono { "/var/lib/vpnctl/inv.db" }
+            (crate::i18n::tr(lang, "). ", "). "))
+            b { (crate::i18n::tr(
+                lang,
+                "Servers, users, grants and the daemon version",
+                "Серверы, пользователи, выданные доступы и версия демона",
+            )) }
+            (crate::i18n::tr(
+                lang,
+                " update on every reload.",
+                " обновляются при каждой перезагрузке страницы.",
+            ))
+        }
+        (dashboard_metrics(&stats, lang))
+        (dashboard_alerts_tile(unacked_alerts, lang))
+        (dashboard_limit_alerts(&alerting, lang))
+        (dashboard_heavy_users(&heavy_users, lang))
+        (dashboard_audit(&audit, lang))
     };
     Ok(shell("dashboard", &theme, &accent, lang, body))
 }
@@ -662,17 +687,26 @@ pub(crate) async fn dashboard(
 /// Phase G — single-line alerts tile under the metric row. Renders
 /// only when there's at least one unacked alert; quiet dashboard stays
 /// quiet. Links to `/admin/alerts` for the full feed.
-fn dashboard_alerts_tile(unacked: u64) -> Markup {
+fn dashboard_alerts_tile(unacked: u64, lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::tr;
     html! {
         @if unacked > 0 {
             div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
-                div.ed-art-eyebrow { "Homelab health" }
+                div.ed-art-eyebrow { (tr(lang, "Homelab health", "Здоровье homelab")) }
                 p style="font-family: var(--serif); margin: 6px 0 0;" {
                     b { (unacked) }
-                    @if unacked == 1 { " unacked alert" } @else { " unacked alerts" }
+                    @if unacked == 1 {
+                        (tr(lang, " unacked alert", " непринятое уведомление"))
+                    } @else {
+                        (tr(lang, " unacked alerts", " непринятых уведомлений"))
+                    }
                     " · "
                     a href="/admin/alerts" style="color: var(--ink);" {
-                        em { "see what the daemon's complaining about →" }
+                        em { (tr(
+                            lang,
+                            "see what the daemon's complaining about →",
+                            "посмотреть на что жалуется демон →",
+                        )) }
                     }
                 }
             }
@@ -685,7 +719,11 @@ fn dashboard_alerts_tile(unacked: u64) -> Markup {
 /// section entirely when nobody is at risk — empty dashboard is
 /// clean dashboard). Each row click-throughs to user-detail where
 /// the operator can rotate keys / raise limit / dig in.
-fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Markup {
+fn dashboard_limit_alerts(
+    rows: &[(vpnctl_core::UserId, u64, u64, u8)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
     if rows.is_empty() {
         // Clean — no one near limit, no UI clutter. Operator sees
         // this section only when something demands attention.
@@ -694,14 +732,25 @@ fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Marku
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow style="color: var(--acc);" {
-            (rows.len()) " user"
-            @if rows.len() != 1 { "s" }
-            " near monthly limit"
+            (rows.len())
+            @if rows.len() == 1 {
+                (tr(lang, " user near monthly limit", " пользователь у лимита месяца"))
+            } @else {
+                (tr(lang, " users near monthly limit", " пользователей у лимита месяца"))
+            }
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "These users have crossed their configured alert threshold "
-            "(default " span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%" } "). "
-            "Click through to raise the cap or shape behaviour."
+            (tr(
+                lang,
+                "These users have crossed their configured alert threshold (default ",
+                "Эти пользователи перешли порог срабатывания уведомления (по умолчанию ",
+            ))
+            span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%" }
+            (tr(
+                lang,
+                "). Click through to raise the cap or shape behaviour.",
+                "). Кликни чтобы поднять лимит или повлиять на поведение.",
+            ))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for (uid, used, lim, threshold) in rows {
@@ -717,7 +766,7 @@ fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Marku
                     }
                     @if over_limit {
                         span style="font-family: var(--mono); font-size: 11px; color: var(--acc); font-weight: 600; margin-left: 8px;" {
-                            "OVER"
+                            (tr(lang, "OVER", "СВЕРХ"))
                         }
                     } @else {
                         span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-left: 8px;" {
@@ -733,28 +782,44 @@ fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Marku
 /// Render the "heavy users · last 24h" section on the dashboard.
 /// Sorted DESC by total bytes (upload + download). Empty list →
 /// explanatory empty-state explaining the polling prerequisite.
-fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)]) -> Markup {
+fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)], lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::{K, t, tr};
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow
-            title="Top-N by sum of (upload+download bytes) across all servers, last 24 hours. Data source: clash-api 5-minute polls. wgturn / WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here." {
-            "Heavy users · last 24h"
+            title=(tr(
+                lang,
+                "Top-N by sum of (upload+download bytes) across all servers, last 24 hours. Data source: clash-api 5-minute polls. wgturn / WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here.",
+                "Топ-N по сумме (upload+download байт) на всех серверах за 24 часа. Источник: 5-минутные опросы clash-api. Трафик wgturn / WireGuard НЕ учитывается (kernel-уровень, clash-api их не видит); только протоколы которые видит sing-box (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022).",
+            )) {
+            (t(lang, K::EyebrowHeavyUsers))
         }
         @if rows.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                "No per-user traffic recorded yet. The clash-api poller "
-                "ticks every 5 minutes — once the daemon's SSH deploy key "
-                "is in each node's "
+                (tr(
+                    lang,
+                    "No per-user traffic recorded yet. The clash-api poller ticks every 5 minutes — once the daemon's SSH deploy key is in each node's ",
+                    "Трафик по пользователям ещё не записан. Опрос clash-api идёт раз в 5 минут — как только SSH deploy-ключ демона окажется в ",
+                ))
                 span.ed-mono { "~/.ssh/authorized_keys" }
-                " (see "
-                a href="/admin/settings" style="color: var(--ink);" { "Settings" }
-                ") the section populates on the next tick."
+                (tr(lang, " (see ", " каждой ноды (см. "))
+                a href="/admin/settings" style="color: var(--ink);" {
+                    (t(lang, K::NavSettings))
+                }
+                (tr(
+                    lang,
+                    ") the section populates on the next tick.",
+                    ") — секция наполнится на следующем тике.",
+                ))
             }
         } @else {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                "Top " (rows.len())
-                " accounts by total (upload + download) over the last 24 hours. "
-                "Click through to investigate; the user page has the full breakdown + sparkline."
+                (tr(lang, "Top ", "Топ ")) (rows.len())
+                (tr(
+                    lang,
+                    " accounts by total (upload + download) over the last 24 hours. Click through to investigate; the user page has the full breakdown + sparkline.",
+                    " аккаунтов по суммарному (upload + download) за 24 часа. Кликни чтобы разобраться — страница пользователя содержит полную разбивку + sparkline.",
+                ))
             }
             ol style="list-style: decimal; padding-left: 24px; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
                 @for (uid, total) in rows {
@@ -843,52 +908,74 @@ pub(crate) async fn monitoring(
     let total_hits_7d: u64 = daily.iter().map(|b| b.hits).sum();
 
     let body = html! {
-        div.ed-art-eyebrow { "Monitoring" }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageMonitoring)) }
         h1.ed-art-h1 {
             (total_hits_24h) " "
-            @if total_hits_24h == 1 { em { "hit" } } @else { em { "hits" } }
-            " in the last 24h"
+            @if total_hits_24h == 1 { em { (crate::i18n::tr(lang, "hit", "обращение")) } }
+            @else { em { (crate::i18n::tr(lang, "hits", "обращений")) } }
+            (crate::i18n::tr(lang, " in the last 24h", " за последние 24 часа"))
         }
         p.ed-art-deck {
-            "Aggregate sub-access counters straight from "
+            (crate::i18n::tr(
+                lang,
+                "Aggregate sub-access counters straight from ",
+                "Агрегированные счётчики обращений напрямую из ",
+            ))
             span.ed-mono { "sub_access_log" }
-            ". Reads are server-side aggregated; no JavaScript on the "
-            "page — re-render on reload."
+            (crate::i18n::tr(
+                lang,
+                ". Reads are server-side aggregated; no JavaScript on the page — re-render on reload.",
+                ". Все агрегации на сервере; JavaScript на странице нет — перерасчёт по перезагрузке.",
+            ))
         }
 
         div style="display: flex; gap: 36px; padding: 12px 0 24px; font-family: var(--serif);" {
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (total_hits_24h) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "hits · 24h"
+                    (crate::i18n::tr(lang, "hits · 24h", "обращений · 24ч"))
                 }
             }
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (peak_ips_hour) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "peak distinct IPs / hour"
+                    (crate::i18n::tr(lang, "peak distinct IPs / hour", "пик уникальных IP / час"))
                 }
             }
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (total_hits_7d) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "hits · 7 days"
+                    (crate::i18n::tr(lang, "hits · 7 days", "обращений · 7 дней"))
                 }
             }
         }
 
         div.ed-rule {}
-        div.ed-art-eyebrow style="margin-top: 18px;" { "Hourly hits · last 24h" }
+        div.ed-art-eyebrow style="margin-top: 18px;" {
+            (crate::i18n::tr(lang, "Hourly hits · last 24h", "Обращения по часам · за 24ч"))
+        }
         (sparkline_svg(&hour_filled.iter().map(|b| b.hits as f64).collect::<Vec<_>>(), 720, 60))
-        div.ed-art-eyebrow style="margin-top: 18px;" { "Hourly distinct IPs · last 24h" }
+        div.ed-art-eyebrow style="margin-top: 18px;" {
+            (crate::i18n::tr(lang, "Hourly distinct IPs · last 24h", "Уникальные IP по часам · за 24ч"))
+        }
         (sparkline_svg(&hour_filled.iter().map(|b| b.distinct_ips as f64).collect::<Vec<_>>(), 720, 60))
-        div.ed-art-eyebrow style="margin-top: 18px;" { "Daily hits · last 7 days" }
+        div.ed-art-eyebrow style="margin-top: 18px;" {
+            (crate::i18n::tr(lang, "Daily hits · last 7 days", "Обращения по дням · за 7 дней"))
+        }
         (sparkline_svg(&day_filled.iter().map(|b| b.hits as f64).collect::<Vec<_>>(), 720, 60))
 
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 18px;" {
-            "Same data is curl-able as JSON at "
+            (crate::i18n::tr(
+                lang,
+                "Same data is curl-able as JSON at ",
+                "Те же данные доступны JSON-ом через ",
+            ))
             span.ed-mono { "/api/v1/stats/sub-access?bucket=hour&since_hours=24" }
-            " (no auth — only aggregate counts, no per-IP details)."
+            (crate::i18n::tr(
+                lang,
+                " (no auth — only aggregate counts, no per-IP details).",
+                " (без авторизации — только агрегаты, без детализации по IP).",
+            ))
         }
     };
     Ok(shell("monitoring", &theme, &accent, lang, body))
@@ -1018,7 +1105,9 @@ fn server_card(
         (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
         bool,
     >,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     // Split `enabled_protocols` into visible + hidden by consulting
     // the `server_protocols` table (via the pre-loaded bulk matrix).
     // Defaults to `not hidden` when the matrix doesn't know about a
@@ -1045,12 +1134,12 @@ fn server_card(
     };
     let jump = match &s.jump_via {
         Some(j) => j.0.clone(),
-        None => "direct".to_string(),
+        None => tr(lang, "direct", "напрямую").to_string(),
     };
     let fp = s
         .trusted_host_fingerprint
         .as_deref()
-        .unwrap_or("(unverified)");
+        .unwrap_or_else(|| tr(lang, "(unverified)", "(не подтверждён)"));
     let detail_href = format!("/admin/servers/{}", path_segment_encode(&s.id.0));
     html! {
         article.ed-server {
@@ -1073,36 +1162,38 @@ fn server_card(
                     }
                 }
                 p.ed-server__lede {
-                    "Hoster " b { (s.hoster) }
+                    (tr(lang, "Hoster ", "Хостер ")) b { (s.hoster) }
                     " · " b { (user_count) } " "
-                    @if user_count == 1 { "user" } @else { "users" }
-                    " granted access · jump " em { (jump) }
+                    @if user_count == 1 { (tr(lang, "user", "пользователь")) }
+                    @else { (tr(lang, "users", "пользователей")) }
+                    (tr(lang, " granted access · jump ", " имеют доступ · jump через "))
+                    em { (jump) }
                 }
             }
             dl.ed-server__meta {
-                dt { "protocols" }   dd { (visible_str) }
-                // NM-12 follow-up (Pavel 2026-05-20: «нужно сделаить
-                // на /admin/servers чтоб это отобразилось, сейчас
-                // показано что там все протоколы, хотя я сделал
-                // hide»). Pre-fix this row used `enabled_protocols`
-                // and didn't reflect hidden state at all. Now: only
-                // VISIBLE protocols make it into the main "protocols"
-                // dd; hidden ones get a separate dotted row in --acc
-                // colour so the operator's eye catches them — matches
-                // the "✓ on · hidden" treatment on server-detail.
+                dt { (tr(lang, "protocols", "протоколы")) }
+                dd { (visible_str) }
                 @if !hidden_protos.is_empty() {
-                    dt style="color: var(--acc);" { "hidden" }
+                    dt style="color: var(--acc);" { (tr(lang, "hidden", "скрыты")) }
                     dd style="color: var(--acc); font-style: italic;"
-                       title="These protocols are still enabled on the node (sing-box inbound keeps listening, cached client URIs continue to work) but the subscription render path stops emitting them. Adjust on the server detail page." {
+                       title=(tr(
+                           lang,
+                           "These protocols are still enabled on the node (sing-box inbound keeps listening, cached client URIs continue to work) but the subscription render path stops emitting them. Adjust on the server detail page.",
+                           "Эти протоколы по-прежнему включены на ноде (sing-box inbound продолжает слушать, кешированные клиентские URI работают), но в рендер подписок они не попадают. Управление — на странице сервера.",
+                       )) {
                         (hidden_protos.join(", "))
                         " · " span.ed-mono style="font-size: 10px;" {
-                            "(" (hidden_protos.len()) " hidden, "
-                            (visible_protos.len()) " visible)"
+                            "(" (hidden_protos.len())
+                            (tr(lang, " hidden, ", " скрытых, "))
+                            (visible_protos.len())
+                            (tr(lang, " visible)", " видимых)"))
                         }
                     }
                 }
-                dt { "fingerprint" } dd style="font-family: var(--mono); font-size: 11px;" { (fp) }
-                dt { "usage ×" }     dd { (format!("{:.2}", s.usage_coefficient)) }
+                dt { (tr(lang, "fingerprint", "отпечаток")) }
+                dd style="font-family: var(--mono); font-size: 11px;" { (fp) }
+                dt { (tr(lang, "usage ×", "коэф. использования")) }
+                dd { (format!("{:.2}", s.usage_coefficient)) }
             }
         }
     }
@@ -1130,53 +1221,78 @@ pub(crate) async fn servers(
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let body = html! {
-        div.ed-art-eyebrow { "Servers" }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
         h1.ed-art-h1 {
             (server_list.len()) " "
-            @if server_list.len() == 1 { em { "server" } } @else { em { "servers" } }
-            " in inventory"
+            @if server_list.len() == 1 { em { (crate::i18n::tr(lang, "server", "сервер")) } }
+            @else { em { (crate::i18n::tr(lang, "servers", "серверов")) } }
+            (crate::i18n::tr(lang, " in inventory", " в инвентаре"))
         }
         p.ed-art-deck {
-            "Read straight from the SQLite inventory. Add a server through the "
+            (crate::i18n::tr(
+                lang,
+                "Read straight from the SQLite inventory. Add a server through the ",
+                "Читаются напрямую из SQLite-инвентаря. Добавь сервер через ",
+            ))
             a href="/admin/servers/new" style="color: var(--ink); text-decoration: underline;" {
-                "wizard"
+                (crate::i18n::tr(lang, "wizard", "мастер"))
             }
-            " (paste IP + root password, the daemon does the rest), or use "
-            span.ed-mono { "vpnctl bootstrap" } " then " span.ed-mono { "vpnctl deploy" }
-            " from the CLI."
+            (crate::i18n::tr(
+                lang,
+                " (paste IP + root password, the daemon does the rest), or use ",
+                " (вставь IP + root пароль, остальное сделает демон), либо через ",
+            ))
+            span.ed-mono { "vpnctl bootstrap" }
+            (crate::i18n::tr(lang, " then ", " затем "))
+            span.ed-mono { "vpnctl deploy" }
+            (crate::i18n::tr(lang, " from the CLI.", " в CLI."))
         }
 
-        // Quick-add inline form — mirrors the users page one-input-
-        // one-button shape. Server gets default kernel=sing-box +
-        // ALL sing-box-supported protocols enabled; operator tweaks
-        // on detail-page right after. The big "wizard" CTA below is
-        // for the SSE-streamed bootstrap (Phase E in progress);
-        // this inline path is for "I already have a deployed VPS,
-        // just register it in inventory."
         div style="margin: 16px 0 16px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
             form method="post" action="/admin/servers/quick-add"
                  style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" {
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "add server"
+                    (crate::i18n::tr(lang, "add server", "добавить сервер"))
                 }
                 input type="text" name="id" required="required"
-                      placeholder="e.g. fra-01"
+                      placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
                       pattern="[A-Za-z0-9._-]+"
-                      title="Letters, digits, dot, underscore, hyphen — no spaces or slashes"
+                      title=(crate::i18n::tr(
+                          lang,
+                          "Letters, digits, dot, underscore, hyphen — no spaces or slashes",
+                          "Буквы, цифры, точка, подчёркивание, дефис — без пробелов и слешей",
+                      ))
                       style="max-width: 160px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                 input type="text" name="address" required="required"
-                      placeholder="ip or hostname"
+                      placeholder=(crate::i18n::tr(lang, "ip or hostname", "ip или хост"))
+                      title=(crate::i18n::tr(
+                          lang,
+                          "IPv4 / IPv6 / hostname of an already-bootstrapped node",
+                          "IPv4 / IPv6 / хост уже развёрнутой ноды",
+                      ))
                       style="max-width: 220px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                 input type="number" name="ssh_port" value="22" min="1" max="65535"
-                      title="SSH port — 22 (DO) or 2222 (Cloudzy)"
+                      title=(crate::i18n::tr(
+                          lang,
+                          "SSH port — 22 (DO) or 2222 (Cloudzy)",
+                          "SSH порт — 22 (DO) или 2222 (Cloudzy)",
+                      ))
                       style="max-width: 72px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                 button type="submit"
-                       title="Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after.",
+                           "Регистрирует сервер с ядром sing-box и всеми поддерживаемыми им протоколами. Настройки правь на странице сервера сразу после.",
+                       ))
                        style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "register"
+                    (crate::i18n::tr(lang, "register", "зарегистрировать"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); flex-basis: 100%;" {
-                    "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page."
+                    (crate::i18n::tr(
+                        lang,
+                        "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page.",
+                        "→ ядро sing-box по умолчанию, включены все поддерживаемые им протоколы. Тонкая настройка — на странице сервера.",
+                    ))
                 }
             }
         }
@@ -1187,17 +1303,25 @@ pub(crate) async fn servers(
         div style="margin: 0 0 24px;" {
             a href="/admin/servers/new"
               style="display: inline-block; padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                "wizard → bootstrap a fresh node from scratch"
+                (crate::i18n::tr(
+                    lang,
+                    "wizard → bootstrap a fresh node from scratch",
+                    "мастер → развернуть свежую ноду с нуля",
+                ))
             }
         }
 
         @if server_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
-                "No servers yet. Click "
-                span.ed-mono { "add server →" }
-                " above, or run "
+                (crate::i18n::tr(lang, "No servers yet. Click ", "Серверов ещё нет. Кликни "))
+                span.ed-mono { (crate::i18n::tr(lang, "add server →", "добавить сервер →")) }
+                (crate::i18n::tr(lang, " above, or run ", " выше, или запусти "))
                 span.ed-mono { "vpnctl bootstrap <id> <address> <ssh-user> <ssh-port>" }
-                " on a fresh node and refresh."
+                (crate::i18n::tr(
+                    lang,
+                    " on a fresh node and refresh.",
+                    " на свежей ноде и обнови страницу.",
+                ))
             }
         } @else {
             div {
@@ -1207,6 +1331,7 @@ pub(crate) async fn servers(
                         s,
                         user_counts.get(&s.id).copied().unwrap_or(0),
                         &hidden_matrix,
+                        lang,
                     ))
                 }
             }
@@ -1256,7 +1381,13 @@ fn mask_secret(s: &str) -> String {
 /// renders any `Display` integer so we don't need to pre-narrow into
 /// `i64` and risk an overflow fallback that would silently mislead the
 /// operator.
-fn user_row(idx: usize, u: &vpnctl_core::User, grants_count: usize) -> Markup {
+fn user_row(
+    idx: usize,
+    u: &vpnctl_core::User,
+    grants_count: usize,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
     let sub_token_preview = u.sub_token.as_deref().map(mask_secret);
     let uuid_preview: String = u.uuid.chars().take(8).collect();
     let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
@@ -1267,25 +1398,35 @@ fn user_row(idx: usize, u: &vpnctl_core::User, grants_count: usize) -> Markup {
                 h2.ed-server__h { (u.id.0) }
                 div.ed-server__addr {
                     "uuid " span.ed-mono { (uuid_preview) "…" }
-                    " · sub-token "
+                    (tr(lang, " · sub-token ", " · sub-токен "))
                     @match &sub_token_preview {
                         Some(s) => span.ed-mono { (s) },
-                        None => em { "(unset — open the user to regenerate)" },
+                        None => em { (tr(
+                            lang,
+                            "(unset — open the user to regenerate)",
+                            "(не задан — открой пользователя чтобы сгенерировать)",
+                        )) },
                     }
                 }
                 p.ed-server__lede {
                     b { (grants_count) } " "
-                    @if grants_count == 1 { "server" } @else { "servers" }
-                    " granted"
-                    @if u.tuic_password.is_some() { " · tuic password set" }
-                    @if u.wireguard_pubkey.is_some() { " · wireguard pubkey set" }
+                    @if grants_count == 1 { (tr(lang, "server", "сервер")) }
+                    @else { (tr(lang, "servers", "серверов")) }
+                    (tr(lang, " granted", " доступно"))
+                    @if u.tuic_password.is_some() {
+                        (tr(lang, " · tuic password set", " · tuic-пароль задан"))
+                    }
+                    @if u.wireguard_pubkey.is_some() {
+                        (tr(lang, " · wireguard pubkey set", " · wireguard-pubkey задан"))
+                    }
                 }
             }
             dl.ed-server__meta {
-                dt { "open" }
+                dt { (tr(lang, "open", "открыть")) }
                 dd {
-                    a href=(detail_href)
-                      class="ed-server__cta" { "detail · QR" }
+                    a href=(detail_href) class="ed-server__cta" {
+                        (tr(lang, "detail · QR", "детали · QR"))
+                    }
                 }
             }
         }
@@ -1373,18 +1514,31 @@ pub(crate) async fn users(
     let visible_users = pairs.len();
 
     let body = html! {
-        div.ed-art-eyebrow { "Users" }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageUsers)) }
         h1.ed-art-h1 {
             (users_list.len()) " "
-            @if users_list.len() == 1 { em { "user" } } @else { em { "users" } }
-            " on file"
+            @if users_list.len() == 1 { em { (crate::i18n::tr(lang, "user", "пользователь")) } }
+            @else { em { (crate::i18n::tr(lang, "users", "пользователей")) } }
+            (crate::i18n::tr(lang, " on file", " в базе"))
         }
         p.ed-art-deck {
-            "Each user has a public subscription URL — "
+            (crate::i18n::tr(
+                lang,
+                "Each user has a public subscription URL — ",
+                "У каждого пользователя есть публичный URL подписки — ",
+            ))
             span.ed-mono { "https://ninitux.com/api/v1/app/config/<device_id>" } " — "
-            "served by vpnctld since the Phase 5 cutover (2026-05-19). The QR on every user-detail "
-            "page encodes that URL; the legacy " span.ed-mono { "/sub/<token>" } " endpoint stays as "
-            "a LAN-only fallback. Open a row for the QR you'll point a phone at."
+            (crate::i18n::tr(
+                lang,
+                "served by vpnctld since the Phase 5 cutover (2026-05-19). The QR on every user-detail page encodes that URL; the legacy ",
+                "обслуживается vpnctld с момента Phase 5 cutover (2026-05-19). QR на странице каждого пользователя кодирует этот URL; легаси ",
+            ))
+            span.ed-mono { "/sub/<token>" }
+            (crate::i18n::tr(
+                lang,
+                " endpoint stays as a LAN-only fallback. Open a row for the QR you'll point a phone at.",
+                " остаётся как LAN-only fallback. Открой строку — там QR, который наводишь камерой телефона.",
+            ))
         }
 
         // Search FIRST, add-user SECOND. Pre-2026-05-19 the order
@@ -1406,28 +1560,33 @@ pub(crate) async fn users(
                 form method="get" action="/admin/users"
                      style="display: flex; gap: 6px; align-items: baseline;" {
                     label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                        "search"
+                        (crate::i18n::tr(lang, "search", "поиск"))
                     }
                     input type="text" name="q" value=(q_lower)
-                          placeholder="user id substring"
+                          placeholder=(crate::i18n::tr(lang, "user id substring", "подстрока user id"))
                           autofocus
                           style="max-width: 200px; padding: 3px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                     @if !sort_kind.is_empty() && sort_kind != "id" {
                         input type="hidden" name="sort" value=(sort_kind);
                     }
                     button type="submit"
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Search user ids by substring (case-insensitive)",
+                               "Поиск user id по подстроке (регистр игнорируется)",
+                           ))
                            style="padding: 3px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                        "go"
+                        (crate::i18n::tr(lang, "go", "ок"))
                     }
                     @if !q_lower.is_empty() {
                         a href=(make_sort_href(sort_kind))
                           style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-left: 4px;" {
-                            "× clear"
+                            (crate::i18n::tr(lang, "× clear", "× очистить"))
                         }
                     }
                 }
                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    "sort: "
+                    (crate::i18n::tr(lang, "sort: ", "сортировка: "))
                     @let sort_link = |kind: &str, label: &str| -> Markup {
                         let active = sort_kind == kind;
                         html! {
@@ -1437,14 +1596,17 @@ pub(crate) async fn users(
                             }
                         }
                     };
-                    (sort_link("id", "id ↑"))
-                    (sort_link("id-desc", "id ↓"))
-                    (sort_link("servers", "servers ↓"))
-                    (sort_link("servers-desc", "servers ↑"))
+                    (sort_link("id", crate::i18n::tr(lang, "id ↑", "id ↑")))
+                    (sort_link("id-desc", crate::i18n::tr(lang, "id ↓", "id ↓")))
+                    (sort_link("servers", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
+                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
                 }
                 @if visible_users != total_users {
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                        "showing " (visible_users) " of " (total_users)
+                        (crate::i18n::tr(lang, "showing ", "показано "))
+                        (visible_users)
+                        (crate::i18n::tr(lang, " of ", " из "))
+                        (total_users)
                     }
                 }
             }
@@ -1468,61 +1630,71 @@ pub(crate) async fn users(
         // to confuse at a glance.
         div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px dashed var(--accent); background: var(--paper);" {
             div style="font-family: var(--mono); font-size: 10px; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                "↓ create a NEW user (mints UUID + keys) ↓"
+                (crate::i18n::tr(
+                    lang,
+                    "↓ create a NEW user (mints UUID + keys) ↓",
+                    "↓ создать НОВОГО пользователя (сгенерирует UUID + ключи) ↓",
+                ))
             }
             form method="post" action="/admin/users"
                  style="display: flex; gap: 10px; align-items: baseline;" {
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "new id"
+                    (crate::i18n::tr(lang, "new id", "новый id"))
                 }
                 input type="text" name="id" required="required"
                       placeholder="alice"
                       pattern="[a-z0-9._-]{2,32}"
                       maxlength="32"
-                      // Live-edit: lowercase + strip disallowed + spaces→hyphen
-                      // + truncate to 32 chars AS THE OPERATOR TYPES.
-                      // Backend `valid_user_id` enforces the same shape —
-                      // operator gets WYSIWYG, and a direct curl POST that
-                      // bypasses JS still hits the 400 path. (Pavel
-                      // 2026-05-20: «корректнее будет если после ввода
-                      // имени оно и в интерфейсе будет сразу
-                      // редактироваться под нужный формат».)
                       oninput="this.value=this.value.toLowerCase().replace(/\\s+/g,'-').replace(/[^a-z0-9._-]/g,'').slice(0,32);"
-                      title="2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type."
+                      title=(crate::i18n::tr(
+                          lang,
+                          "2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type.",
+                          "2-32 символа: a-z 0-9 . _ - только. Пробелы превращаются в дефисы; верхний регистр в нижний; остальные символы отбрасываются по мере набора.",
+                      ))
                       style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
                 button type="submit"
-                       title="Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible"
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible",
+                           "Сгенерирует UUID + tuic_password + sub_token + WG-пару; редирект на /admin/users/<id> где ключи видны",
+                       ))
                        style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "create user"
+                    (crate::i18n::tr(lang, "create user", "создать пользователя"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    "→ all keys are auto-generated and shown on the user page"
+                    (crate::i18n::tr(
+                        lang,
+                        "→ all keys are auto-generated and shown on the user page",
+                        "→ все ключи генерируются автоматически и видны на странице пользователя",
+                    ))
                 }
             }
         }
 
         @if users_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
-                "No users yet. Type an id above and hit "
-                span.ed-mono { "create" }
-                ", or use "
+                (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
+                span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
+                (crate::i18n::tr(lang, ", or use ", ", либо запусти "))
                 span.ed-mono { "vpnctl user create <id>" }
-                " from the CLI. Then grant server access via "
+                (crate::i18n::tr(lang, " from the CLI. Then grant server access via ", " в CLI. Затем выдай доступ к серверу через "))
                 span.ed-mono { "vpnctl grant <user> <server>" }
-                " (web UI lands in C-3.3)."
+                (crate::i18n::tr(lang, " (web UI lands in C-3.3).", " (web UI приедет в C-3.3)."))
             }
         } @else if pairs.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                "No users match "
+                (crate::i18n::tr(lang, "No users match ", "Под фильтр не подошёл никто: "))
                 span.ed-mono { "q=" (q_lower) }
-                ". Loosen the search above or "
-                a href="/admin/users" style="color: var(--ink);" { "clear it" }
+                (crate::i18n::tr(lang, ". Loosen the search above or ", ". Расслабь поиск выше или "))
+                a href="/admin/users" style="color: var(--ink);" {
+                    (crate::i18n::tr(lang, "clear it", "очисти его"))
+                }
                 "."
             }
         } @else {
             div {
                 @for (display_idx, (_orig_idx, u, g)) in pairs.iter().enumerate() {
-                    (user_row(display_idx, u, *g))
+                    (user_row(display_idx, u, *g, lang))
                 }
             }
         }
@@ -2085,7 +2257,9 @@ pub(crate) async fn user_detail(
         // share-via-QR workflow because the client app can't reach
         // 192.168.0.236 from outside the operator's LAN. Caught by
         // visual review 2026-05-19; this block is the fix.
-        div.ed-art-eyebrow style="margin-top: 28px;" { "Subscription" }
+        div.ed-art-eyebrow style="margin-top: 28px;" {
+            (crate::i18n::tr(lang, "Subscription", "Подписка"))
+        }
         @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
             (Some(device_id), Some(ninitux), _, _) => {
                 // Primary: ninitux production URL — QR scans this.
@@ -2174,7 +2348,7 @@ pub(crate) async fn user_detail(
         // Per CLAUDE.md "users are low-tech" — the operator must see
         // every artefact needed to onboard the user in one place.
         div.ed-rule {}
-        div.ed-art-eyebrow { "WireGuard keypair" }
+        div.ed-art-eyebrow { (crate::i18n::tr(lang, "WireGuard keypair", "WireGuard-пара ключей")) }
         @match (&user.wireguard_pubkey, &user.wireguard_private) {
             (Some(pub_b64), Some(_priv_marker)) => {
                 div style="padding: 12px 0;" {
@@ -2556,12 +2730,18 @@ pub(crate) async fn user_detail(
         // the per-protocol grid below redirect with the
         // `#server-access` fragment so the operator stays anchored
         // here after a click instead of being scrolled to the top.
-        div.ed-art-eyebrow id="server-access" { "Server access" }
+        div.ed-art-eyebrow id="server-access" {
+            (crate::i18n::t(lang, crate::i18n::K::EyebrowServerAccess))
+        }
         @if all_servers.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                "No servers in the inventory yet. Run "
+                (crate::i18n::tr(
+                    lang,
+                    "No servers in the inventory yet. Run ",
+                    "Серверов в инвентаре ещё нет. Запусти ",
+                ))
                 span.ed-mono { "vpnctl bootstrap <id> <ip>" }
-                " to add one (web wizard lands in Phase E)."
+                (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
             }
         } @else {
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
@@ -2646,7 +2826,9 @@ pub(crate) async fn user_detail(
 
         // Per-protocol share-links — only meaningful for granted servers.
         @if !servers.is_empty() {
-            div.ed-art-eyebrow style="margin-top: 24px;" { "Per-protocol share links" }
+            div.ed-art-eyebrow style="margin-top: 24px;" {
+                (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
+            }
             @if share_links.is_empty() {
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
                     "No share-links could be rendered (missing secrets or unregistered protocols). "
@@ -2746,10 +2928,10 @@ pub(crate) async fn user_detail(
         }
 
         // ── UA fingerprint (Phase Track-4) ──────────────────────
-        (ua_clusters_section(&state, &uid).await)
+        (ua_clusters_section(&state, &uid, lang).await)
 
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
-        (live_vpn_stats_section(&state, &uid).await)
+        (live_vpn_stats_section(&state, &uid, lang).await)
 
         // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
         // Show current month-to-date usage + the configured cap
@@ -2789,14 +2971,18 @@ pub(crate) async fn user_detail(
 ///
 /// On inventory error returns a small "(unavailable)" nudge instead
 /// of failing the whole page.
-async fn ua_clusters_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+async fn ua_clusters_section(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    lang: crate::i18n::Locale,
+) -> Markup {
     let clusters = match state.inv.ua_clusters_for_user(uid, 24).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "ua_clusters_for_user failed");
             return html! {
                 div.ed-rule {}
-                div.ed-art-eyebrow { "UA fingerprint" }
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "UA fingerprint", "Отпечаток User-Agent")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
                     "(temporarily unavailable — see journalctl)"
                 }
@@ -3114,16 +3300,21 @@ async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId)
     }
 }
 
-async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+async fn live_vpn_stats_section(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
     let rows = match state.inv.recent_vpn_stats_for_user(uid, 24).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_vpn_stats_for_user failed");
             return html! {
                 div.ed-rule {}
-                div.ed-art-eyebrow { "Live VPN stats" }
+                div.ed-art-eyebrow { (tr(lang, "Live VPN stats", "Живая статистика VPN")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "(temporarily unavailable — see journalctl)"
+                    (tr(lang, "(temporarily unavailable — see journalctl)", "(временно недоступно — смотри journalctl)"))
                 }
             };
         }
@@ -3131,14 +3322,19 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
     if rows.is_empty() {
         return html! {
             div.ed-rule {}
-            div.ed-art-eyebrow { "Live VPN stats · last 24h" }
+            div.ed-art-eyebrow { (t(lang, K::EyebrowLiveStats)) }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                "No live stats yet. The clash-api poller is shipped (Track-3 chunks 1+2) "
-                "but the daemon-side scheduler that pulls snapshots from each VPN node "
-                "is queued for chunk 4 — it needs the SSH key on the vpnctld host's "
+                (tr(
+                    lang,
+                    "No live stats yet. The clash-api poller is shipped (Track-3 chunks 1+2) but the daemon-side scheduler that pulls snapshots from each VPN node is queued for chunk 4 — it needs the SSH key on the vpnctld host's ",
+                    "Живой статистики пока нет. Поллер clash-api уже работает (Track-3 chunks 1+2), но шедулер на стороне демона, который снимает снэпшоты с каждой VPN-ноды, в очереди на chunk 4 — нужен SSH-ключ на хосте vpnctld в ",
+                ))
                 span.ed-mono { "/var/lib/vpnctl/.ssh" }
-                " plus per-node authorisation. Once wired, this section will show real "
-                "per-user upload/download totals and active connection counts."
+                (tr(
+                    lang,
+                    " plus per-node authorisation. Once wired, this section will show real per-user upload/download totals and active connection counts.",
+                    " плюс авторизация на каждой ноде. Когда подключим — раздел покажет реальные upload/download по пользователю и активные подключения.",
+                ))
             }
         };
     }
@@ -4734,29 +4930,37 @@ pub(crate) async fn audit(
     let has_prev = page > 0;
 
     let body = html! {
-        div.ed-art-eyebrow { "Audit" }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageAudit)) }
         h1.ed-art-h1 {
-            "every "
-            em { "mutation" }
-            " on file"
+            (crate::i18n::tr(lang, "every ", "каждое "))
+            em { (crate::i18n::tr(lang, "mutation", "изменение")) }
+            (crate::i18n::tr(lang, " on file", " в базе"))
         }
         p.ed-art-deck {
-            "Append-only stream of every state change the daemon or CLI has made to "
+            (crate::i18n::tr(
+                lang,
+                "Append-only stream of every state change the daemon or CLI has made to ",
+                "Поток append-only — каждое изменение состояния которое демон или CLI сделали в ",
+            ))
             span.ed-mono { "/var/lib/vpnctl/inv.db" }
-            ". Use the filters to narrow by actor or action prefix; the CSV button "
-            "exports the same filtered slice."
+            (crate::i18n::tr(
+                lang,
+                ". Use the filters to narrow by actor or action prefix; the CSV button exports the same filtered slice.",
+                ". Используй фильтры чтобы сузить по автору / префиксу действия; кнопка CSV экспортирует ту же выборку.",
+            ))
         }
 
-        // Filter form. GET so the URL itself encodes the filter
-        // (operator can bookmark / share). All three inputs are
-        // empty-tolerant — empty string = no filter on that axis.
         form method="get" action="/admin/audit"
              style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 16px 0 24px; font-family: var(--mono); font-size: 11px;" {
-            label { "actor" }
+            label { (crate::i18n::tr(lang, "actor", "автор")) }
             select name="actor"
-                   title="admin = web UI, cli = vpnctl binary on the daemon host, daemon = scheduler / background job"
+                   title=(crate::i18n::tr(
+                       lang,
+                       "admin = web UI, cli = vpnctl binary on the daemon host, daemon = scheduler / background job",
+                       "admin = веб-UI, cli = бинарь vpnctl на хосте демона, daemon = шедулер / фоновая задача",
+                   ))
                    style="padding: 3px 6px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;" {
-                option value="" { "(any)" }
+                option value="" { (crate::i18n::tr(lang, "(any)", "(любой)")) }
                 @for opt in ["admin", "cli", "daemon"] {
                     @if Some(opt) == actor {
                         option value=(opt) selected="selected" { (opt) }
@@ -4765,38 +4969,53 @@ pub(crate) async fn audit(
                     }
                 }
             }
-            label { "action prefix" }
+            label { (crate::i18n::tr(lang, "action prefix", "префикс действия")) }
             input type="text" name="action"
                   value=(action.unwrap_or(""))
                   placeholder="server.protocol. / user. / grant. / settings."
-                  title="Substring/prefix match on action column. Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Underscores allowed INSIDE a verb."
+                  title=(crate::i18n::tr(
+                      lang,
+                      "Substring/prefix match on action column. Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Underscores allowed INSIDE a verb.",
+                      "Поиск по подстроке/префиксу в колонке action. Конвенция: точка-разделитель domain.subdomain.verb (напр. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Подчёркивания допустимы ВНУТРИ verb.",
+                  ))
                   style="padding: 3px 6px; max-width: 320px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
             button type="submit"
-                   title="Apply actor + action-prefix filters. URL stores them so the page is bookmarkable."
+                   title=(crate::i18n::tr(
+                       lang,
+                       "Apply actor + action-prefix filters. URL stores them so the page is bookmarkable.",
+                       "Применить фильтры по автору + префиксу действия. URL сохраняет их — страницу можно бookmark-нуть.",
+                   ))
                    style="padding: 3px 10px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                "filter"
+                (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
             }
-            // Reset button — empty params clear all filters.
             a href="/admin/audit"
-              title="Clear all filters and return to the unfiltered timeline."
+              title=(crate::i18n::tr(
+                  lang,
+                  "Clear all filters and return to the unfiltered timeline.",
+                  "Очистить все фильтры и вернуться к нефильтрованной ленте.",
+              ))
               style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                "reset"
+                (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
-            // CSV export uses the same query string.
             a href=(audit_url("/admin/audit.csv", actor, action, None))
-              title="Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters."
+              title=(crate::i18n::tr(
+                  lang,
+                  "Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters.",
+                  "Скачать текущую выборку как CSV (до 10000 строк). Учитывает оба фильтра.",
+              ))
               style="margin-left: auto; padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                "export csv"
+                (crate::i18n::t(lang, crate::i18n::K::BtnExportCsv))
             }
         }
 
-        // Date-grouped timeline. We walk visible rows once, emitting
-        // a sticky-date header whenever the day changes from the
-        // previous row. Entries are already newest-first by id.
         @if visible.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 @if actor.is_some() || action.is_some() {
-                    "No audit rows match the current filter."
+                    (crate::i18n::tr(
+                        lang,
+                        "No audit rows match the current filter.",
+                        "Под текущий фильтр не подошла ни одна строка аудита.",
+                    ))
                 } @else {
                     "No audit rows yet — this stream fills as the daemon does work."
                 }
@@ -5041,30 +5260,33 @@ pub(crate) async fn alerts(
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let body = html! {
-        div.ed-art-eyebrow { "Alerts" }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageAlerts)) }
         h1.ed-art-h1 {
-            "what the homelab is "
-            em { "shouting" }
-            " about"
+            (crate::i18n::tr(lang, "what the homelab is ", "на что homelab "))
+            em { (crate::i18n::tr(lang, "shouting", "ругается")) }
+            (crate::i18n::tr(lang, " about", ""))
         }
         p.ed-art-deck {
-            "Infrastructure alerts written by the Phase G health-monitor "
-            "on top of the Phase H node probe. Service flips, disk + "
-            "memory pressure, runaway sing-box logs, unreachable hosts, "
-            "and the «I locked myself out» class (fail2ban banned us). "
-            "Ack each one when you've looked — the dashboard tile "
-            em { "homelab health" } " counts unacked items."
+            (crate::i18n::tr(
+                lang,
+                "Infrastructure alerts written by the Phase G health-monitor on top of the Phase H node probe. Service flips, disk + memory pressure, runaway sing-box logs, unreachable hosts, and the «I locked myself out» class (fail2ban banned us). Ack each one when you've looked — the dashboard tile ",
+                "Алерты инфраструктуры, которые пишет health-monitor (Phase G) поверх node probe (Phase H). Сервис упал/поднялся, давление на диск/память, разрастающиеся логи sing-box, недоступные хосты, класс «сам себя забанил» (fail2ban забанил нас). Принимай каждое (ack) когда посмотрел — тайл дашборда ",
+            ))
+            em { (crate::i18n::tr(lang, "homelab health", "здоровье homelab")) }
+            (crate::i18n::tr(lang, " counts unacked items.", " считает непринятые."))
         }
         div.ed-rule {}
         div style="display: flex; gap: 16px; align-items: baseline; margin-bottom: 14px;" {
-            span.ed-mono { (unacked_total) " unacked" }
+            span.ed-mono {
+                (unacked_total) " " (crate::i18n::tr(lang, "unacked", "непринятых"))
+            }
             @if include_acked {
                 a href="/admin/alerts" style="color: var(--mute); text-decoration: none;" {
-                    "← only unacked"
+                    (crate::i18n::tr(lang, "← only unacked", "← только непринятые"))
                 }
             } @else {
                 a href="/admin/alerts?show=all" style="color: var(--mute); text-decoration: none;" {
-                    "show all (including acked) →"
+                    (crate::i18n::tr(lang, "show all (including acked) →", "показать всё (включая принятые) →"))
                 }
             }
         }
@@ -5072,23 +5294,39 @@ pub(crate) async fn alerts(
             div.ed-empty {
                 p {
                     @if include_acked {
-                        "no alerts on record. Either the homelab has been "
-                        em { "extraordinarily" }
-                        " quiet, or vpnctld hasn't been running long enough "
-                        "for the probe to fire one. Check "
+                        (crate::i18n::tr(
+                            lang,
+                            "no alerts on record. Either the homelab has been ",
+                            "ни одного алерта в записях. Либо homelab был ",
+                        ))
+                        em { (crate::i18n::tr(lang, "extraordinarily", "удивительно")) }
+                        (crate::i18n::tr(
+                            lang,
+                            " quiet, or vpnctld hasn't been running long enough for the probe to fire one. Check ",
+                            " тихим, либо vpnctld запущен недостаточно долго чтобы probe что-то поймал. Проверь ",
+                        ))
                         span.ed-mono { "journalctl -u vpnctld -t vpnctld::health_monitor" }
-                        " for the scan trail."
+                        (crate::i18n::tr(lang, " for the scan trail.", " на предмет следов сканера."))
                     } @else {
-                        "no unacked alerts. Everything the homelab is currently "
-                        em { "complaining" }
-                        " about lives here; nothing means nothing's wrong "
-                        "(or every condition has been acknowledged). To "
-                        "browse history: " a href="/admin/alerts?show=all" { "show all →" }
+                        (crate::i18n::tr(
+                            lang,
+                            "no unacked alerts. Everything the homelab is currently ",
+                            "нет непринятых алертов. Всё на что сейчас homelab ",
+                        ))
+                        em { (crate::i18n::tr(lang, "complaining", "жалуется")) }
+                        (crate::i18n::tr(
+                            lang,
+                            " about lives here; nothing means nothing's wrong (or every condition has been acknowledged). To browse history: ",
+                            " — здесь. Пусто значит всё хорошо (либо все условия приняты). Посмотреть историю: ",
+                        ))
+                        a href="/admin/alerts?show=all" {
+                            (crate::i18n::tr(lang, "show all →", "показать всё →"))
+                        }
                     }
                 }
             }
         } @else {
-            (alerts_table(&alerts_rows))
+            (alerts_table(&alerts_rows, lang))
         }
     };
     Ok(shell("alerts", &theme, &accent, lang, body))
@@ -5152,7 +5390,8 @@ pub(crate) struct AlertsQuery {
 /// Render the feed table — newest-first, severity badge, server link,
 /// per-row ack button (hidden when already acked). Inline styles keep
 /// this self-contained so admin.css doesn't need a Phase G section.
-fn alerts_table(rows: &[vpnctl_inventory::AdminAlert]) -> Markup {
+fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::{K, t, tr};
     html! {
         div.ed-time {
             @for a in rows {
@@ -5178,7 +5417,8 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert]) -> Markup {
                         @match &a.acked_at {
                             Some(when) => {
                                 " · " span style="color: var(--mute);" {
-                                    "acked " (clip_ts(&when.to_rfc3339()))
+                                    (tr(lang, "acked ", "принято "))
+                                    (clip_ts(&when.to_rfc3339()))
                                 }
                             }
                             None => {
@@ -5186,9 +5426,13 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert]) -> Markup {
                                 form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
                                      style="display: inline;" {
                                     button type="submit"
-                                           title="Mark this alert acknowledged. Doesn't clear or fix the underlying condition — just records 'I've seen it'. The alert row stays in the feed (with an acked-timestamp) until the condition resolves."
+                                           title=(tr(
+                                               lang,
+                                               "Mark this alert acknowledged. Doesn't clear or fix the underlying condition — just records 'I've seen it'. The alert row stays in the feed (with an acked-timestamp) until the condition resolves.",
+                                               "Отметить алерт принятым. Не очищает и не чинит условие — просто фиксирует «я это видел». Строка остаётся в ленте (с меткой времени принятия) пока условие не уйдёт.",
+                                           ))
                                            style="background: transparent; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 2px 8px; cursor: pointer;" {
-                                        "ack"
+                                        (t(lang, K::BtnAck))
                                     }
                                 }
                             }
@@ -5246,45 +5490,73 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
     let servers_for_proxy_dropdown = state.inv.list_servers().await.unwrap_or_default();
 
     let body = html! {
-        div.ed-art-eyebrow { "Settings" }
-        h1.ed-art-h1 { "homelab " em { "controls" } }
+        div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageSettings)) }
+        h1.ed-art-h1 {
+            (crate::i18n::tr(lang, "homelab ", "homelab "))
+            em { (crate::i18n::tr(lang, "controls", "управление")) }
+        }
         p.ed-art-deck {
-            "Daemon-wide knobs live here. Server / user mutations live on their respective pages."
+            (crate::i18n::tr(
+                lang,
+                "Daemon-wide knobs live here. Server / user mutations live on their respective pages.",
+                "Здесь лежат настройки уровня всего демона. Изменения серверов / пользователей — на их собственных страницах.",
+            ))
         }
 
         div.ed-rule {}
-        div.ed-art-eyebrow { "Appearance — theme + accent" }
+        div.ed-art-eyebrow { (crate::i18n::tr(lang, "Appearance — theme + accent", "Внешний вид — тема + акцент")) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
-            "Pick a paper theme (background palette) and an accent colour. Choices are stored as cookies; one-time configuration."
+            (crate::i18n::tr(
+                lang,
+                "Pick a paper theme (background palette) and an accent colour. Choices are stored as cookies; one-time configuration.",
+                "Выбери бумажную тему (фон) и акцентный цвет. Сохраняется в cookies; настраивается один раз.",
+            ))
         }
         (tweaks_inline(&theme, &accent))
 
         div.ed-rule {}
-        // `id` so `backup_snapshot_now`'s POST-redirect-GET can
-        // anchor back to this section.
-        div #backups-section.ed-art-eyebrow { "Backups — inventory snapshots" }
+        div #backups-section.ed-art-eyebrow {
+            (crate::i18n::tr(lang, "Backups — inventory snapshots", "Бэкапы — снэпшоты инвентаря"))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "vpnctld snapshots " span.ed-mono { (crate::app::DEFAULT_DEPLOY_KEY_PATH.replace("/.ssh/id_ed25519", "/inv.db")) }
-            " hourly into "
+            (crate::i18n::tr(lang, "vpnctld snapshots ", "vpnctld делает снэпшоты "))
+            span.ed-mono { (crate::app::DEFAULT_DEPLOY_KEY_PATH.replace("/.ssh/id_ed25519", "/inv.db")) }
+            (crate::i18n::tr(lang, " hourly into ", " ежечасно в "))
             span.ed-mono { (crate::app::DEFAULT_BACKUP_DIR) }
-            " (24 hourly + 30 daily + 12 monthly retained). "
-            b { "Off-site is operator-driven" }
-            " — click "
-            em { "download" }
-            " next to a snapshot and copy it to USB / Forgejo / cloud / wherever you trust. The daemon never pushes anywhere by itself."
+            (crate::i18n::tr(
+                lang,
+                " (24 hourly + 30 daily + 12 monthly retained). ",
+                " (хранятся 24 часовых + 30 дневных + 12 месячных). ",
+            ))
+            b { (crate::i18n::tr(lang, "Off-site is operator-driven", "Off-site копии делает оператор")) }
+            (crate::i18n::tr(lang, " — click ", " — кликни "))
+            em { (crate::i18n::tr(lang, "download", "скачать")) }
+            (crate::i18n::tr(
+                lang,
+                " next to a snapshot and copy it to USB / Forgejo / cloud / wherever you trust. The daemon never pushes anywhere by itself.",
+                " рядом со снэпшотом и скопируй на USB / Forgejo / облако / куда доверяешь. Демон сам никуда не пушит.",
+            ))
         }
         div style="display: flex; gap: 12px; align-items: center; margin-bottom: 14px;" {
             form method="post" action="/admin/backup/snapshot" style="display: inline;" {
                 button type="submit"
-                       title="Take a snapshot now (in addition to the hourly schedule). Safe to click any time."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Take a snapshot now (in addition to the hourly schedule). Safe to click any time.",
+                           "Сделать снэпшот сейчас (вдобавок к часовому расписанию). Безопасно нажимать в любой момент.",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "snapshot now"
+                    (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас"))
                 }
             }
             span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                "Restore is a "
+                (crate::i18n::tr(lang, "Restore is a ", "Восстановление — это команда "))
                 span.ed-mono { "vpnctl restore <snapshot>" }
-                " CLI command — the daemon can't replace its own open DB while it's holding it. See doc-comment in "
+                (crate::i18n::tr(
+                    lang,
+                    " CLI command — the daemon can't replace its own open DB while it's holding it. See doc-comment in ",
+                    " в CLI — демон не может заменить свою же открытую БД пока её держит. См. doc-comment в ",
+                ))
                 span.ed-mono { "crates/inventory/src/backup.rs" }
                 "."
             }
@@ -5292,9 +5564,13 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         @match snapshots {
             Ok(list) if list.is_empty() => {
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px;" {
-                    "No snapshots yet. The scheduler fires its first snapshot ~60 seconds after daemon start; click "
-                    b { "snapshot now" }
-                    " above to skip the wait."
+                    (crate::i18n::tr(
+                        lang,
+                        "No snapshots yet. The scheduler fires its first snapshot ~60 seconds after daemon start; click ",
+                        "Снэпшотов пока нет. Шедулер делает первый ~60 секунд после старта демона; кликни ",
+                    ))
+                    b { (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас")) }
+                    (crate::i18n::tr(lang, " above to skip the wait.", " выше чтобы не ждать."))
                 }
             }
             Ok(list) => {
@@ -6820,7 +7096,7 @@ pub(crate) async fn server_detail(
         }
 
         // Hero: current state (live or empty-state)
-        (server_detail_hero(&latest, &server))
+        (server_detail_hero(&latest, &server, lang))
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some()))
@@ -6942,27 +7218,48 @@ pub(crate) async fn server_detail(
 fn server_detail_hero(
     latest: &Option<vpnctl_inventory::NodeHealthRow>,
     server: &vpnctl_core::Server,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     let Some(h) = latest else {
         return html! {
             div.ed-rule {}
-            div.ed-art-eyebrow { "Live status" }
+            div.ed-art-eyebrow { (tr(lang, "Live status", "Живой статус")) }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                "No probes yet. The node-telemetry poller is scheduled for "
-                em { "Phase H chunk 4" }
-                " — it'll SSH " span.ed-mono { (server.address) }
-                " every 5 min and persist disk/mem/load + listening-port observations. "
-                "Until then this section reads as blank."
+                (tr(
+                    lang,
+                    "No probes yet. The node-telemetry poller is scheduled for ",
+                    "Probe-ов пока нет. Поллер телеметрии нод запланирован в ",
+                ))
+                em { (tr(lang, "Phase H chunk 4", "Phase H chunk 4")) }
+                (tr(lang, " — it'll SSH ", " — он будет SSH-ить ")) span.ed-mono { (server.address) }
+                (tr(
+                    lang,
+                    " every 5 min and persist disk/mem/load + listening-port observations. Until then this section reads as blank.",
+                    " каждые 5 минут и сохранять наблюдения disk/mem/load + слушающие порты. До тех пор раздел остаётся пустым.",
+                ))
             }
         };
     };
     let sb = h
         .sing_box_active
-        .map(|b| if b { "active" } else { "down" })
+        .map(|b| {
+            if b {
+                tr(lang, "active", "активен")
+            } else {
+                tr(lang, "down", "не работает")
+            }
+        })
         .unwrap_or("?");
     let f2b = h
         .fail2ban_active
-        .map(|b| if b { "active" } else { "down" })
+        .map(|b| {
+            if b {
+                tr(lang, "active", "активен")
+            } else {
+                tr(lang, "down", "не работает")
+            }
+        })
         .unwrap_or("?");
     let disk_pct = h
         .disk_used_mib
@@ -7002,16 +7299,19 @@ fn server_detail_hero(
 
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Live status · last probe " span style="color: var(--mute);" {
-            (h.ts.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        } }
+        div.ed-art-eyebrow {
+            (tr(lang, "Live status · last probe ", "Живой статус · последний probe "))
+            span style="color: var(--mute);" {
+                (h.ts.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            }
+        }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
             (status_tile("sing-box", sb, sb_color))
             (status_tile("fail2ban", f2b, f2b_color))
-            (status_tile("disk used", &disk_pct, "var(--ink)"))
-            (status_tile("memory used", &mem_pct, "var(--ink)"))
-            (status_tile("1-min load", &load, "var(--ink)"))
-            (status_tile("sing-box log", &log_size, log_alert_color))
+            (status_tile(tr(lang, "disk used", "диск занят"), &disk_pct, "var(--ink)"))
+            (status_tile(tr(lang, "memory used", "память занята"), &mem_pct, "var(--ink)"))
+            (status_tile(tr(lang, "1-min load", "load 1мин"), &load, "var(--ink)"))
+            (status_tile(tr(lang, "sing-box log", "лог sing-box"), &log_size, log_alert_color))
         }
     }
 }

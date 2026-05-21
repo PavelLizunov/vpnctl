@@ -9704,6 +9704,129 @@ async fn i18n_ru_cookie_renders_russian_nav_and_subtitle() {
 }
 
 #[tokio::test]
+async fn i18n_ru_renders_translated_body_copy_on_each_page() {
+    // Pavel 2026-05-21: «делай полный перевод». First wave covered
+    // chrome only; this commit pushed translations into the body
+    // copy on every top-level page. Pin a representative Russian
+    // phrase from each page so a future "let's revert translations"
+    // PR has to update all 6 simultaneously.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+
+    let fetch = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", "vpnctl_lang=ru")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path} must return 200");
+            String::from_utf8(
+                axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+        }
+    };
+
+    // Dashboard
+    let h = fetch("/admin/").await;
+    assert!(
+        h.contains("одним взглядом"),
+        "dashboard H1 must read 'homelab одним взглядом' under ru"
+    );
+    assert!(
+        h.contains("Счётчики читаются напрямую из SQLite-инвентаря"),
+        "dashboard deck must be translated"
+    );
+
+    // Monitoring
+    let h = fetch("/admin/monitoring").await;
+    assert!(
+        h.contains("за последние 24 часа"),
+        "monitoring H1 must contain 'за последние 24 часа'"
+    );
+    assert!(
+        h.contains("Агрегированные счётчики"),
+        "monitoring deck must be translated"
+    );
+
+    // Servers list (empty in fresh inventory — empty-state copy)
+    let h = fetch("/admin/servers").await;
+    assert!(
+        h.contains("в инвентаре"),
+        "servers H1 must read 'N серверов в инвентаре'"
+    );
+    assert!(
+        h.contains("Читаются напрямую из SQLite-инвентаря"),
+        "servers deck must be translated"
+    );
+
+    // Users list
+    let h = fetch("/admin/users").await;
+    assert!(
+        h.contains("в базе"),
+        "users H1 must read 'N пользователей в базе'"
+    );
+    assert!(
+        h.contains("публичный URL подписки"),
+        "users deck must be translated"
+    );
+
+    // Audit page
+    let h = fetch("/admin/audit").await;
+    assert!(
+        h.contains("каждое") && h.contains("изменение"),
+        "audit H1 must read 'каждое изменение в базе'"
+    );
+
+    // Alerts page
+    let h = fetch("/admin/alerts").await;
+    assert!(
+        h.contains("ругается"),
+        "alerts H1 must read 'на что homelab ругается'"
+    );
+
+    // Settings page
+    let h = fetch("/admin/settings").await;
+    assert!(
+        h.contains("homelab") && h.contains("управление"),
+        "settings H1 must read 'homelab управление'"
+    );
+    assert!(
+        h.contains("Здесь лежат настройки уровня всего демона"),
+        "settings deck must be translated"
+    );
+}
+
+#[tokio::test]
+async fn i18n_en_default_renders_english_body_copy() {
+    // Symmetric: default (no cookie, no Accept-Language: ru) keeps
+    // the English copy. A bug that swaps the locale arms in tr()
+    // would surface here AND in the ru test above.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("at a glance"),
+        "default EN dashboard H1 must read 'homelab at a glance'"
+    );
+    assert!(
+        !html.contains("одним взглядом"),
+        "default EN must NOT leak Russian copy"
+    );
+}
+
+#[tokio::test]
 async fn i18n_accept_language_ru_picks_russian_when_no_cookie() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

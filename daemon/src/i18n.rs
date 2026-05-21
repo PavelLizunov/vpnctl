@@ -154,6 +154,25 @@ pub enum K {
     EyebrowTrustedFingerprint,
 }
 
+/// Inline-translation helper for the long tail of body copy that
+/// doesn't deserve its own `K` enum entry. Trade-off vs `t()`:
+///
+/// - `t(loc, K::Foo)` — central registry, compile-time exhaustive,
+///   ideal for re-used strings (nav items, action buttons).
+/// - `tr(loc, "Foo", "Фу")` — inline pair, no registry overhead,
+///   ideal for one-off paragraph copy + form labels that appear
+///   exactly once in the templates.
+///
+/// Both args are `&'static str` to guarantee zero allocation.
+/// Adding a new site uses `tr()`; promoting one to `K` makes sense
+/// once it appears in 2+ places.
+pub fn tr(loc: Locale, en: &'static str, ru: &'static str) -> &'static str {
+    match loc {
+        Locale::En => en,
+        Locale::Ru => ru,
+    }
+}
+
 /// Translation lookup. Exhaustive — adding a `K` variant without
 /// translating it for both locales is a compile error.
 pub fn t(loc: Locale, k: K) -> &'static str {
@@ -321,6 +340,15 @@ mod tests {
             Locale::from_request(&hm(&[("cookie", "foo=bar; vpnctl_lang=ru; baz=qux")])),
             Locale::Ru
         );
+    }
+
+    #[test]
+    fn tr_inline_helper_selects_by_locale() {
+        // tr() is the workhorse for body-copy translation — pin both
+        // arms so a future locale addition (or accidental swap) shows
+        // up here.
+        assert_eq!(tr(Locale::En, "Hello", "Привет"), "Hello");
+        assert_eq!(tr(Locale::Ru, "Hello", "Привет"), "Привет");
     }
 
     #[test]
