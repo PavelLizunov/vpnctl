@@ -7377,17 +7377,22 @@ pub(crate) async fn server_detail(
         // to manage access on a node. Same shape as the per-user
         // Server-access section, just transposed.
         div.ed-rule {}
-        div.ed-art-eyebrow { "Grants" }
+        div.ed-art-eyebrow { (crate::i18n::tr(lang, "Grants", "Выданные доступы")) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (user_count) " of " (all_users.len()) " "
-            @if all_users.len() == 1 { "user" } @else { "users" }
-            " have access on this server. Toggle below — POST returns 303 here."
+            (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len()) " "
+            @if all_users.len() == 1 { (crate::i18n::tr(lang, "user", "пользователь")) }
+            @else { (crate::i18n::tr(lang, "users", "пользователей")) }
+            (crate::i18n::tr(
+                lang,
+                " have access on this server. Toggle below — POST returns 303 here.",
+                " имеют доступ к этому серверу. Тогли ниже — POST возвращает 303 сюда же.",
+            ))
         }
         @if all_users.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-                "No users in the inventory yet. Create one on "
+                (crate::i18n::tr(lang, "No users in the inventory yet. Create one on ", "В инвентаре ещё нет пользователей. Создай на "))
                 a href="/admin/users" style="color: var(--ink);" { "/admin/users" }
-                " — then come back to grant access."
+                (crate::i18n::tr(lang, " — then come back to grant access.", " — затем вернись сюда чтобы выдать доступ."))
             }
         } @else {
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
@@ -7629,20 +7634,24 @@ fn server_detail_kernels_section(
                         (kid.0)
                         " "
                         span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
-                            "(runs: " (supported) ")"
+                            (tr(lang, "(runs: ", "(крутит: ")) (supported) ")"
                         }
                     }
                     @if is_on {
                         span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                            "✓ on"
+                            (tr(lang, "✓ on", "✓ вкл"))
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/kernels/{}/disable", sid_enc, path_segment_encode(&kid.0)))
                              style="margin: 0; padding: 0;" {
+                            @let dis_title = match lang {
+                                crate::i18n::Locale::En => format!("Remove {} from {}.kernels. Takes effect on next deploy.", kid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.kernels. Применится при следующем деплое.", kid.0, server.id.0),
+                            };
                             button type="submit"
-                                   title=(format!("Remove {} from {}.kernels. Takes effect on next deploy.", kid.0, server.id.0))
+                                   title=(dis_title)
                                    style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                "disable"
+                                (crate::i18n::t(lang, crate::i18n::K::BtnDisable))
                             }
                         }
                     } @else {
@@ -7652,10 +7661,14 @@ fn server_detail_kernels_section(
                         form method="post"
                              action=(format!("/admin/servers/{}/kernels/{}/enable", sid_enc, path_segment_encode(&kid.0)))
                              style="margin: 0; padding: 0;" {
+                            @let en_title = match lang {
+                                crate::i18n::Locale::En => format!("Add {} to {}.kernels. Takes effect on next deploy.", kid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.kernels. Применится при следующем деплое.", kid.0, server.id.0),
+                            };
                             button type="submit"
-                                   title=(format!("Add {} to {}.kernels. Takes effect on next deploy.", kid.0, server.id.0))
+                                   title=(en_title)
                                    style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                                "enable"
+                                (crate::i18n::t(lang, crate::i18n::K::BtnEnable))
                             }
                         }
                     }
@@ -8134,18 +8147,26 @@ fn server_detail_protocols_section(
         // doesn't miss it.
         div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
-                "⚠ toggle here = inventory only"
+                (tr(lang, "⚠ toggle here = inventory only", "⚠ тогл здесь = только инвентарь"))
             }
-            " — clicking "
-            span.ed-mono { "enable" }
+            (tr(lang, " — clicking ", " — клик по "))
+            span.ed-mono { (t(lang, K::BtnEnable)) }
             " / "
-            span.ed-mono { "disable" }
-            " only writes to vpnctl's database. The actual sing-box config on the node is rewritten when you click "
+            span.ed-mono { (t(lang, K::BtnDisable)) }
+            (tr(
+                lang,
+                " only writes to vpnctl's database. The actual sing-box config on the node is rewritten when you click ",
+                " только пишет в БД vpnctl. Реальный конфиг sing-box на ноде переписывается когда ты кликаешь ",
+            ))
             a href="#deploy-button"
               style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { "deploy →" }
+                span.ed-mono { (t(lang, K::BtnDeploy)) }
             }
-            " at the top. So: toggle → click deploy → wait for SSE log to finish → live."
+            (tr(
+                lang,
+                " at the top. So: toggle → click deploy → wait for SSE log to finish → live.",
+                " вверху. То есть: тогл → клик деплой → дождаться окончания SSE-лога → live.",
+            ))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for pid in &all_protocols {
@@ -8201,10 +8222,11 @@ fn server_detail_protocols_section(
                         @if !compatible {
                             " "
                             span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
-                                "(not supported by "
-                                @if server.kernels.len() == 1 { "kernel " (server.kernels[0].0) }
-                                @else {
-                                    "any kernel on this server: "
+                                (tr(lang, "(not supported by ", "(не поддерживается "))
+                                @if server.kernels.len() == 1 {
+                                    (tr(lang, "kernel ", "ядром ")) (server.kernels[0].0)
+                                } @else {
+                                    (tr(lang, "any kernel on this server: ", "ни одним ядром на этом сервере: "))
                                     (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join(", "))
                                 }
                                 ")"
@@ -8213,62 +8235,57 @@ fn server_detail_protocols_section(
                     }
                     @if is_on {
                         @if is_hidden {
-                            // Distinct chip when the protocol is hidden
-                            // from public render. Using --acc (accent
-                            // colour, usually orange) so the operator's
-                            // eye catches the row without it being
-                            // mistaken for an error state. Wrapped in
-                            // brackets to read as a status label.
                             span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                "✓ on · hidden"
+                                (tr(lang, "✓ on · hidden", "✓ вкл · скрыт"))
                             }
                         } @else {
                             span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                "✓ on"
+                                (tr(lang, "✓ on", "✓ вкл"))
                             }
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/protocols/{}/disable", sid_enc, path_segment_encode(&pid.0)))
                              style="margin: 0; padding: 0;" {
+                            @let dis_proto_title = match lang {
+                                crate::i18n::Locale::En => format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.enabled_protocols. Применится при следующем деплое.", pid.0, server.id.0),
+                            };
                             button type="submit"
-                                   title=(format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0))
+                                   title=(dis_proto_title)
                                    style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                "disable"
+                                (t(lang, K::BtnDisable))
                             }
                         }
-                        // Hide / unhide chip (migration 0018 / NM-10).
-                        // Separate POST endpoints + 303-redirect-back-
-                        // here. Renders ONLY for enabled + compatible
-                        // protocols — hiding an incompatible-but-on
-                        // row (kernel doesn't support the wire format)
-                        // would surface a button with no observable
-                        // effect, and the operator's actual remedy is
-                        // [disable] which removes the orphan row.
                         @if !compatible {
-                            // No-op label so the row width matches the
-                            // compatible rows. Caught by review-agent
-                            // 2026-05-20.
                             span style="font-family: var(--mono); font-size: 10px; color: var(--mute); font-style: italic;" {
-                                "(disable to clear)"
+                                (tr(lang, "(disable to clear)", "(выключи чтобы убрать)"))
                             }
                         } @else if is_hidden {
                             form method="post"
                                  action=(format!("/admin/servers/{}/protocols/{}/unhide", sid_enc, path_segment_encode(&pid.0)))
                                  style="margin: 0; padding: 0;" {
+                                @let unhide_title = match lang {
+                                    crate::i18n::Locale::En => format!("Resume emitting {} in this server's subscription URLs. Live sing-box inbound was never stopped; this just unmutes the render.", pid.0),
+                                    crate::i18n::Locale::Ru => format!("Снова отдавать {} в URL подписок этого сервера. Живой sing-box inbound никто не останавливал; это только снимает mute с рендера.", pid.0),
+                                };
                                 button type="submit"
-                                       title=(format!("Resume emitting {} in this server's subscription URLs. Live sing-box inbound was never stopped; this just unmutes the render.", pid.0))
+                                       title=(unhide_title)
                                        style="padding: 2px 8px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                                    "unhide"
+                                    (t(lang, K::BtnUnhide))
                                 }
                             }
                         } @else {
                             form method="post"
                                  action=(format!("/admin/servers/{}/protocols/{}/hide", sid_enc, path_segment_encode(&pid.0)))
                                  style="margin: 0; padding: 0;" {
+                                @let hide_title = match lang {
+                                    crate::i18n::Locale::En => format!("Stop emitting {} in this server's subscription URLs WITHOUT removing the live inbound. Existing client URIs keep working until they re-pull.", pid.0),
+                                    crate::i18n::Locale::Ru => format!("Перестать отдавать {} в URL подписок этого сервера БЕЗ удаления живого inbound. Закешированные клиентские URI продолжают работать до следующего pull.", pid.0),
+                                };
                                 button type="submit"
-                                       title=(format!("Stop emitting {} in this server's subscription URLs WITHOUT removing the live inbound. Existing client URIs keep working until they re-pull.", pid.0))
+                                       title=(hide_title)
                                        style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                    "hide"
+                                    (t(lang, K::BtnHide))
                                 }
                             }
                         }
@@ -8279,17 +8296,19 @@ fn server_detail_protocols_section(
                         form method="post"
                              action=(format!("/admin/servers/{}/protocols/{}/enable", sid_enc, path_segment_encode(&pid.0)))
                              style="margin: 0; padding: 0;" {
+                            @let en_proto_title = match lang {
+                                crate::i18n::Locale::En => format!("Add {} to {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.enabled_protocols. Применится при следующем деплое.", pid.0, server.id.0),
+                            };
                             button type="submit"
-                                   title=(format!("Add {} to {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0))
+                                   title=(en_proto_title)
                                    style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                                "enable"
+                                (t(lang, K::BtnEnable))
                             }
                         }
                     } @else {
-                        // Incompatible — no button, just an explainer
-                        // span so the row width is consistent.
                         span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                            "incompatible"
+                            (tr(lang, "incompatible", "несовместимо"))
                         }
                     }
                 }
