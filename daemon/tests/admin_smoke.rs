@@ -2397,6 +2397,11 @@ async fn access_log_back_pressure_drops_records_when_full() {
         ua: None,
         status: 200,
         bytes: 100,
+        accept_language: None,
+        http_version: None,
+        device_class: None,
+        geo_country: None,
+        geo_asn: None,
     };
 
     // First two enqueues fill the buffer → both return true.

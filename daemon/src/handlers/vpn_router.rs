@@ -539,6 +539,14 @@ pub(crate) async fn get_config(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let bytes_for_log = u64::try_from(config.len()).unwrap_or(u64::MAX);
+    // Track-1.2: richer per-request metadata (migration 0019). Same
+    // shape as sub.rs handler.
+    let accept_language: Option<String> = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(120).collect::<String>());
+    let http_version = Some(format!("{:?}", request.version()));
+    let device_class = crate::ua::parse_ua_short(ua_for_log.as_deref()).map(str::to_owned);
     let _ = crate::access_log::try_enqueue(
         &state.access_log_tx,
         crate::access_log::AccessLogRecord {
@@ -547,6 +555,12 @@ pub(crate) async fn get_config(
             ua: ua_for_log,
             status: 200,
             bytes: bytes_for_log,
+            accept_language,
+            http_version,
+            device_class,
+            // GeoIP fields populated by writer task.
+            geo_country: None,
+            geo_asn: None,
         },
     );
 

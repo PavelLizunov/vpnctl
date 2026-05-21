@@ -122,6 +122,13 @@ pub struct SubAccessEntry {
     pub ua: Option<String>,
     pub status: u16,
     pub bytes: u64,
+    // Track-1.2 (migration 0019) — richer per-request metadata.
+    // All Optional; old rows stay None (pre-migration NULL).
+    pub accept_language: Option<String>,
+    pub http_version: Option<String>,
+    pub device_class: Option<String>,
+    pub geo_country: Option<String>,
+    pub geo_asn: Option<String>,
 }
 
 /// One row of `sub_rate_bans` (Phase Track-2 chunk 2). Persistent
@@ -1579,9 +1586,39 @@ impl SqliteInventory {
         status: u16,
         bytes: u64,
     ) -> Result<()> {
+        // Convenience wrapper for tests + old call sites — passes None
+        // for the 5 Track-1.2 metadata columns (migration 0019). The
+        // production writer task on the access-log channel calls
+        // `log_sub_access_rich` directly so it can pass parsed UA /
+        // Accept-Language / HTTP version / GeoIP results.
+        self.log_sub_access_rich(user_id, ip, ua, status, bytes, None, None, None, None, None)
+            .await
+    }
+
+    /// Full sub-access logging — accepts the 5 new metadata columns
+    /// (Track-1.2 migration 0019). Called from the access-log writer
+    /// task; handlers populate the captured-from-request fields and
+    /// the writer enriches with GeoIP before passing through here.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn log_sub_access_rich(
+        &self,
+        user_id: &UserId,
+        ip: &str,
+        ua: Option<&str>,
+        status: u16,
+        bytes: u64,
+        accept_language: Option<&str>,
+        http_version: Option<&str>,
+        device_class: Option<&str>,
+        geo_country: Option<&str>,
+        geo_asn: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO sub_access_log (user_id, ip, ua, status, bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO sub_access_log
+             (user_id, ip, ua, status, bytes,
+              accept_language, http_version, device_class,
+              geo_country, geo_asn)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&user_id.0)
         .bind(ip)
@@ -1589,6 +1626,11 @@ impl SqliteInventory {
         // SQLite has no u16 affinity; cast through i64.
         .bind(i64::from(status))
         .bind(i64::try_from(bytes).unwrap_or(i64::MAX))
+        .bind(accept_language)
+        .bind(http_version)
+        .bind(device_class)
+        .bind(geo_country)
+        .bind(geo_asn)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1633,7 +1675,9 @@ impl SqliteInventory {
         limit: i64,
     ) -> Result<Vec<SubAccessEntry>> {
         let rows = sqlx::query(
-            "SELECT id, ts, user_id, ip, ua, status, bytes
+            "SELECT id, ts, user_id, ip, ua, status, bytes,
+                    accept_language, http_version, device_class,
+                    geo_country, geo_asn
              FROM sub_access_log
              WHERE user_id = ?1
              ORDER BY id DESC
@@ -2695,6 +2739,14 @@ fn row_to_sub_access(r: sqlx::sqlite::SqliteRow) -> Result<SubAccessEntry> {
         // SQLite stores INTEGER, narrow defensively rather than panic.
         status: u16::try_from(status_i).unwrap_or(0),
         bytes: u64::try_from(bytes_i).unwrap_or(0),
+        // Track-1.2 (migration 0019) — old rows have NULL, try_get
+        // maps that to Option::None for Option<String> targets. No
+        // defensive code needed.
+        accept_language: r.try_get("accept_language")?,
+        http_version: r.try_get("http_version")?,
+        device_class: r.try_get("device_class")?,
+        geo_country: r.try_get("geo_country")?,
+        geo_asn: r.try_get("geo_asn")?,
     })
 }
 

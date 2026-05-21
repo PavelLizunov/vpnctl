@@ -84,6 +84,21 @@ tokio-stream = "0.1"
 # accepts. Already pulled transitively by axum; declaring it directly
 # keeps `daemon/src/wizard_bootstrap.rs` honest about its imports.
 futures-core = "0.3"
+# Track-1.2 (migration 0019) — MaxMind GeoLite2 reader for
+# enriching sub_access_log rows with country + ASN. Pure-Rust, no
+# openssl-sys / native-tls (matches workspace invariants). Gated
+# behind the `geoip` feature so builds without the .mmdb files
+# stay light; runtime gracefully degrades to disabled-lookup when
+# VPNCTLD_GEOIP_DIR is unset OR the DB files are missing.
+maxminddb = { version = "0.24", optional = true }
+
+[features]
+# Default: GeoIP enabled (pure-Rust dep, no native code). Operators
+# who want a strictly minimal binary can disable it with
+# `--no-default-features` — `GeoLookup::open` then returns a stub
+# that always answers None.
+default = ["geoip"]
+geoip = ["dep:maxminddb"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

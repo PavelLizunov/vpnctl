@@ -60,6 +60,18 @@ pub struct AccessLogRecord {
     pub ua: Option<String>,
     pub status: u16,
     pub bytes: u64,
+    // Track-1.2 (migration 0019) — richer per-request metadata.
+    // All Optional; handler captures what it can off the incoming
+    // request, writer leaves NULL in SQL when None.
+    pub accept_language: Option<String>,
+    pub http_version: Option<String>,
+    pub device_class: Option<String>,
+    // GeoIP fields are FILLED INSIDE THE WRITER TASK, not the
+    // handler — keeps handler latency stable + lets us batch /
+    // cache / mock lookups in one place. Handler always passes
+    // None for these.
+    pub geo_country: Option<String>,
+    pub geo_asn: Option<String>,
 }
 
 /// Spin up the writer task. Returns the channel sender (handed to
@@ -83,14 +95,56 @@ pub fn spawn_writer(inv: SqliteInventory) -> (mpsc::Sender<AccessLogRecord>, Joi
 /// the loop — losing one row is preferable to losing the whole
 /// abuse-detection feature because of a transient SQLite hiccup.
 async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord>) {
-    while let Some(rec) = rx.recv().await {
+    // GeoIP lookup is best-effort: if the daemon was built without
+    // the DB, or the DB file isn't present, every lookup returns
+    // None and the columns stay NULL. We construct ONCE here so the
+    // mmap (when available) is shared across all writes for this
+    // task's lifetime.
+    let geoip = crate::geoip::GeoLookup::from_env();
+    if geoip.is_loaded() {
+        tracing::info!(
+            target = "vpnctld::access_log_writer",
+            "GeoIP DB loaded — sub_access_log rows will be enriched with country + ASN"
+        );
+    } else {
+        tracing::debug!(
+            target = "vpnctld::access_log_writer",
+            "GeoIP DB not loaded — geo_country / geo_asn columns will be NULL (set VPNCTLD_GEOIP_DIR + drop GeoLite2-{{City,ASN}}.mmdb to enable)"
+        );
+    }
+
+    while let Some(mut rec) = rx.recv().await {
+        // Enrich with GeoIP before persisting (handler always sends
+        // None for these two; we fill them here so handler latency
+        // is unaffected by DB lookups).
+        if geoip.is_loaded() {
+            if let Ok(parsed_ip) = rec.ip.parse() {
+                if let Some(info) = geoip.lookup(parsed_ip) {
+                    // Compute asn_label BEFORE consuming
+                    // info.country_iso below — asn_label() borrows
+                    // &self so we capture the owned String first.
+                    let asn_label = info.asn_label();
+                    if rec.geo_country.is_none() {
+                        rec.geo_country = info.country_iso;
+                    }
+                    if rec.geo_asn.is_none() {
+                        rec.geo_asn = asn_label;
+                    }
+                }
+            }
+        }
         if let Err(e) = inv
-            .log_sub_access(
+            .log_sub_access_rich(
                 &rec.user_id,
                 &rec.ip,
                 rec.ua.as_deref(),
                 rec.status,
                 rec.bytes,
+                rec.accept_language.as_deref(),
+                rec.http_version.as_deref(),
+                rec.device_class.as_deref(),
+                rec.geo_country.as_deref(),
+                rec.geo_asn.as_deref(),
             )
             .await
         {

@@ -11,6 +11,15 @@ pub mod app;
 // Locale detection (cookie + Accept-Language) + the bilingual EN/RU
 // translation table for admin UI chrome. Pavel 2026-05-21.
 pub mod i18n;
+// GeoIP / ASN lookup for the access-log writer (Track-1.2). Stub
+// when the daemon is built without the `geoip` feature or when
+// VPNCTLD_GEOIP_DIR isn't set — handlers see no behaviour change,
+// the new columns just stay NULL in the DB.
+pub mod geoip;
+// Shared User-Agent parser for the access-log writer + admin UI
+// rendering. Lives outside `handlers::admin` so both surfaces share
+// one truth (Track-1.2 / migration 0019).
+pub mod ua;
 // Real-client-IP resolution from X-Forwarded-For when the immediate
 // peer is a trusted reverse proxy (post-Phase-5 nginx cutover).
 // Without this every external client collapses to the nginx peer IP

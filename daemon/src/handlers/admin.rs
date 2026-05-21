@@ -691,70 +691,17 @@ fn classify_ip(ip: &str) -> IpKind {
     IpKind::Public
 }
 
-/// Minimal User-Agent → human-readable summary. Handles the
-/// half-dozen UAs that actually appear in `sub_access_log` on the
-/// homelab — full UA-parsing-library overkill for a 33-user
-/// operator surface. Operator hovers the row to see the full raw
-/// string via title attr; this just gives an at-a-glance label so
-/// the table doesn't drown in 200-char Mozilla/5.0 (…) blobs.
-fn parse_ua_short(ua: Option<&str>) -> Option<&'static str> {
-    let s = ua?;
-    // Order matters — match the most-specific tags first.
-    if s.contains("v2rayN") {
-        return Some("v2rayN / Windows");
-    }
-    if s.contains("Hiddify") {
-        return Some("Hiddify");
-    }
-    if s.contains("sing-box") {
-        return Some("sing-box client");
-    }
-    if s.contains("clash") || s.contains("Clash") {
-        return Some("Clash");
-    }
-    if s.contains("Shadowrocket") {
-        return Some("Shadowrocket / iOS");
-    }
-    if s.contains("Streisand") {
-        return Some("Streisand / iOS");
-    }
-    if s.contains("Quantumult") {
-        return Some("Quantumult / iOS");
-    }
-    if s.contains("Stash") {
-        return Some("Stash / iOS");
-    }
-    if s.contains("curl/") {
-        return Some("curl");
-    }
-    if s.contains("Wget/") {
-        return Some("wget");
-    }
-    if s.contains("Mozilla/5.0") {
-        // Browser bucket — distinguish OS only.
-        if s.contains("iPhone") || s.contains("iPad") {
-            return Some("браузер iOS");
-        }
-        if s.contains("Android") {
-            return Some("браузер Android");
-        }
-        if s.contains("Macintosh") || s.contains("Mac OS X") {
-            return Some("браузер macOS");
-        }
-        if s.contains("Windows") {
-            return Some("браузер Windows");
-        }
-        if s.contains("Linux") {
-            return Some("браузер Linux");
-        }
-        return Some("браузер");
-    }
-    None
-}
+// `parse_ua_short` moved to `crate::ua` (Track-1.2 / migration 0019)
+// so the access-log writer can persist its result in
+// `sub_access_log.device_class` from the same source of truth. Render
+// sites call `crate::ua::parse_ua_short(...)` directly. The previous
+// /// doc-block lived above this comment; deleted to satisfy
+// `clippy::empty-line-after-doc-comments` since there's no `fn` it
+// could document anymore.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod ip_ua_tests {
+mod ip_classify_tests {
     use super::*;
 
     #[test]
@@ -771,28 +718,6 @@ mod ip_ua_tests {
         assert!(matches!(classify_ip("169.254.0.1"), IpKind::LinkLocal));
         assert!(matches!(classify_ip("104.194.156.93"), IpKind::Public));
         assert!(matches!(classify_ip("8.8.8.8"), IpKind::Public));
-    }
-
-    #[test]
-    fn parse_ua_short_buckets() {
-        assert_eq!(
-            parse_ua_short(Some("v2rayN/6.99")),
-            Some("v2rayN / Windows")
-        );
-        assert_eq!(parse_ua_short(Some("Hiddify/2.5.7")), Some("Hiddify"));
-        assert_eq!(parse_ua_short(Some("curl/8.5.0")), Some("curl"));
-        assert_eq!(
-            parse_ua_short(Some(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605"
-            )),
-            Some("браузер iOS")
-        );
-        assert_eq!(
-            parse_ua_short(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120")),
-            Some("браузер Windows")
-        );
-        assert_eq!(parse_ua_short(Some("unknown-thing/1.0")), None);
-        assert_eq!(parse_ua_short(None), None);
     }
 }
 
@@ -3138,7 +3063,15 @@ pub(crate) async fn user_detail(
                 tbody {
                     @for row in &recent_access {
                         @let ip_kind = classify_ip(&row.ip);
-                        @let ua_summary = parse_ua_short(row.ua.as_deref());
+                        // Prefer persisted device_class from
+                        // sub_access_log (migration 0019) — that
+                        // way future parser changes don't rewrite
+                        // history. Fallback to live parse for
+                        // pre-migration NULL rows.
+                        @let ua_summary = row
+                            .device_class
+                            .as_deref()
+                            .or_else(|| crate::ua::parse_ua_short(row.ua.as_deref()));
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
                                 (clip_ts(&row.ts.to_rfc3339()))
@@ -3149,6 +3082,32 @@ pub(crate) async fn user_detail(
                                     " "
                                     span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind.color())) {
                                         (tag)
+                                    }
+                                }
+                                // Track-1.2 (migration 0019) — country
+                                // ISO + ASN chips from GeoIP enrichment.
+                                // Both columns are NULL for old rows or
+                                // when VPNCTLD_GEOIP_DIR isn't set;
+                                // render only what we have.
+                                @if let Some(cc) = row.geo_country.as_deref() {
+                                    " "
+                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid var(--acc-good, #2c5f2d); color: var(--acc-good, #2c5f2d); margin-left: 2px;"
+                                         title=(crate::i18n::tr(lang, "Country (ISO 3166-1 alpha-2) from MaxMind GeoLite2 City", "Страна (ISO 3166-1 alpha-2) из MaxMind GeoLite2 City")) {
+                                        (cc)
+                                    }
+                                }
+                                @if let Some(asn) = row.geo_asn.as_deref() {
+                                    " "
+                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; color: var(--mute); margin-left: 2px;"
+                                         title=(crate::i18n::tr(lang, "Autonomous System / ISP from MaxMind GeoLite2 ASN", "Автономная система / ISP из MaxMind GeoLite2 ASN")) {
+                                        (asn)
+                                    }
+                                }
+                                @if let Some(http_v) = row.http_version.as_deref() {
+                                    " "
+                                    span style="font-family: var(--mono); font-size: 9px; color: var(--mute); margin-left: 2px;"
+                                         title=(crate::i18n::tr(lang, "HTTP version negotiated", "Согласованная версия HTTP")) {
+                                        (http_v)
                                     }
                                 }
                             }

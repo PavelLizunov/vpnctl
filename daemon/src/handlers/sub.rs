@@ -46,6 +46,17 @@ pub(crate) async fn get(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    // Track-1.2 — capture richer request metadata at handler time.
+    // accept_language is truncated to 120 chars (the column is
+    // declared TEXT with no length limit but we don't want
+    // misbehaved clients to fill the DB with megabyte UA strings).
+    let accept_language = request
+        .headers()
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(120).collect::<String>());
+    let http_version = Some(format!("{:?}", request.version()));
+    let device_class = crate::ua::parse_ua_short(ua.as_deref()).map(str::to_owned);
     // IP only, port stripped — the port rotates per connection and would
     // explode the cardinality of "distinct IPs". Both v4 and v6 land as
     // `IpAddr::to_string()` (192.0.2.1 / fe80::1) — same shape SQLite
@@ -277,6 +288,13 @@ pub(crate) async fn get(
                     ua,
                     status: 200,
                     bytes,
+                    accept_language,
+                    http_version,
+                    device_class,
+                    // GeoIP fields populated by writer task — handler
+                    // always sends None.
+                    geo_country: None,
+                    geo_asn: None,
                 },
             );
 
