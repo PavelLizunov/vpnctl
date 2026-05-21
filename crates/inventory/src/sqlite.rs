@@ -225,6 +225,27 @@ pub struct ServerLiveActivity {
     pub distinct_users_attributed: u32,
 }
 
+/// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
+/// date) aggregated traffic + peak conns. Long-term retention
+/// counterpart to the rolling 30-day `vpn_connection_stats`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VpnUserDailyRow {
+    /// UTC date as `YYYY-MM-DD`.
+    pub date: String,
+    pub user_id: UserId,
+    pub server_id: ServerId,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub active_connections_peak: u32,
+    pub distinct_source_ips: u32,
+}
+
+impl VpnUserDailyRow {
+    pub fn total_bytes(&self) -> u64 {
+        self.upload_bytes.saturating_add(self.download_bytes)
+    }
+}
+
 /// One row in `vpn_connection_stats` (Track-3 chunk 2). The poller
 /// writes deltas (not totals) per (server, user) on every tick where
 /// the delta is non-zero.
@@ -2618,6 +2639,173 @@ impl SqliteInventory {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Phase 5a-1 — daily per-user rollups for long-term retention.
+    //
+    // `vpn_connection_stats` is rolling 30-day raw 5-min ticks.
+    // `vpn_user_daily` is the daily aggregate that lives indefinitely
+    // (one row per (user, server, date), ~36k rows/year at 33 users
+    // × 3 servers = trivial SQLite scale).
+    //
+    // Rollup pattern: each call to `rollup_vpn_user_daily` re-computes
+    // the totals for ONE date from `vpn_connection_stats` rows in that
+    // date's window and UPSERT-overwrites the matching `vpn_user_daily`
+    // rows. Idempotent — running it twice on the same date yields the
+    // same data. The hourly rollup scheduler (in `daemon/src/app.rs`)
+    // re-rolls TODAY + YESTERDAY each tick so we capture late-arriving
+    // ticks across midnight UTC.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Re-compute and UPSERT all `(user, server)` daily rollup rows
+    /// for `date_utc` (format `YYYY-MM-DD`). Reads from
+    /// `vpn_connection_stats` where `user_id IS NOT NULL` AND the
+    /// ts falls within the date's 00:00–24:00 UTC window. Returns
+    /// the number of UPSERTed rows.
+    ///
+    /// Safe to call concurrently for different dates; same-date
+    /// concurrent calls race on the UPSERT but the last writer wins
+    /// idempotently (deterministic sum).
+    pub async fn rollup_vpn_user_daily(&self, date_utc: &str) -> Result<u64> {
+        // Derive the 24h window from the date string. SQLite's
+        // strftime returns `YYYY-MM-DDTHH:MM:SS.fffZ` form — match
+        // that to `ts` shape used by `vpn_connection_stats` rows.
+        let lower = format!("{date_utc}T00:00:00.000Z");
+        let upper = format!("{date_utc}T23:59:59.999Z");
+
+        // Aggregate raw ticks into per-(user, server) sums. Server-
+        // wide rows (user_id IS NULL) are excluded — they belong
+        // to a future server-wide rollup if/when we add one.
+        let rows = sqlx::query(
+            "SELECT
+                user_id,
+                server_id,
+                COALESCE(SUM(upload_bytes), 0)        AS up_total,
+                COALESCE(SUM(download_bytes), 0)      AS dn_total,
+                COALESCE(MAX(active_connections), 0)  AS peak_conns
+             FROM vpn_connection_stats
+             WHERE user_id IS NOT NULL
+               AND ts >= ?1
+               AND ts <= ?2
+             GROUP BY user_id, server_id",
+        )
+        .bind(&lower)
+        .bind(&upper)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut tx = self.pool.begin().await?;
+        let mut upserted: u64 = 0;
+        for r in rows {
+            let user_id: String = r.try_get("user_id")?;
+            let server_id: String = r.try_get("server_id")?;
+            let up_total: i64 = r.try_get("up_total")?;
+            let dn_total: i64 = r.try_get("dn_total")?;
+            let peak_conns: i64 = r.try_get("peak_conns")?;
+            // distinct_source_ips currently not derivable from
+            // vpn_connection_stats (which doesn't carry source IP)
+            // — left at 0 for now. Phase 5b's destinations table
+            // is where source-IP-diversity lives.
+            let res = sqlx::query(
+                "INSERT INTO vpn_user_daily
+                    (date, user_id, server_id, upload_bytes,
+                     download_bytes, active_connections_peak,
+                     distinct_source_ips, last_rolled_up_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0,
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 ON CONFLICT(user_id, server_id, date) DO UPDATE SET
+                     upload_bytes              = excluded.upload_bytes,
+                     download_bytes            = excluded.download_bytes,
+                     active_connections_peak   = excluded.active_connections_peak,
+                     last_rolled_up_at         = excluded.last_rolled_up_at",
+            )
+            .bind(date_utc)
+            .bind(&user_id)
+            .bind(&server_id)
+            .bind(up_total.max(0))
+            .bind(dn_total.max(0))
+            .bind(peak_conns.max(0))
+            .execute(&mut *tx)
+            .await?;
+            upserted = upserted.saturating_add(res.rows_affected());
+        }
+        tx.commit().await?;
+        Ok(upserted)
+    }
+
+    /// Daily rollup rows for ONE user across the last N days.
+    /// Newest-first. Used by the user-detail analytics section.
+    pub async fn vpn_user_daily_for_user(
+        &self,
+        user_id: &UserId,
+        days: u32,
+    ) -> Result<Vec<VpnUserDailyRow>> {
+        let cutoff = format!("-{days} days");
+        let rows = sqlx::query(
+            "SELECT date, user_id, server_id, upload_bytes,
+                    download_bytes, active_connections_peak,
+                    distinct_source_ips
+             FROM vpn_user_daily
+             WHERE user_id = ?1
+               AND date >= strftime('%Y-%m-%d', 'now', ?2)
+             ORDER BY date DESC, server_id",
+        )
+        .bind(&user_id.0)
+        .bind(&cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_vpn_user_daily).collect()
+    }
+
+    /// Top-N users by daily-total traffic across `days`. Used by
+    /// the dashboard «Heavy users» tile (now actually populated
+    /// post-Phase-4e+5a-1, where the old `top_users_by_traffic`
+    /// returned empty because of NM-11). Sums upload+download
+    /// across all servers per user.
+    pub async fn top_users_by_daily_traffic(
+        &self,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<(UserId, u64)>> {
+        let cutoff = format!("-{days} days");
+        let rows = sqlx::query(
+            "SELECT user_id, COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
+             FROM vpn_user_daily
+             WHERE date >= strftime('%Y-%m-%d', 'now', ?1)
+             GROUP BY user_id
+             ORDER BY total DESC
+             LIMIT ?2",
+        )
+        .bind(&cutoff)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let total: i64 = r.try_get("total")?;
+            out.push((UserId(uid), total.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// Month-to-date total for one user across all servers. Used
+    /// for traffic-limit alerts (`users.monthly_bandwidth_limit_bytes`).
+    /// Post-Phase-5a-1 this replaces the old NULL-returning
+    /// `user_traffic_this_month` for production use.
+    pub async fn user_traffic_this_month_from_daily(&self, id: &UserId) -> Result<u64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
+             FROM vpn_user_daily
+             WHERE user_id = ?1
+               AND date >= strftime('%Y-%m-01', 'now')",
+        )
+        .bind(&id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let total: i64 = row.try_get("total")?;
+        Ok(total.max(0) as u64)
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Phase H chunk 2 — node telemetry storage (node_probe sink)
     //
     // Same shape + lifecycle as `vpn_connection_stats`:
@@ -3242,6 +3430,28 @@ fn row_to_admin_alert(r: sqlx::sqlite::SqliteRow) -> Result<AdminAlert> {
         summary: r.try_get("summary")?,
         payload_json: r.try_get("payload_json")?,
         acked_at,
+    })
+}
+
+// Owned row argument is what `.into_iter().map(...)` over `Vec<SqliteRow>`
+// gives us; taking by reference would force a `.collect()` round-trip.
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_vpn_user_daily(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDailyRow> {
+    let date: String = r.try_get("date")?;
+    let user_id: String = r.try_get("user_id")?;
+    let server_id: String = r.try_get("server_id")?;
+    let upload_i: i64 = r.try_get("upload_bytes")?;
+    let download_i: i64 = r.try_get("download_bytes")?;
+    let peak_i: i64 = r.try_get("active_connections_peak")?;
+    let distinct_i: i64 = r.try_get("distinct_source_ips")?;
+    Ok(VpnUserDailyRow {
+        date,
+        user_id: UserId(user_id),
+        server_id: ServerId(server_id),
+        upload_bytes: upload_i.max(0) as u64,
+        download_bytes: download_i.max(0) as u64,
+        active_connections_peak: u32::try_from(peak_i.max(0)).unwrap_or(u32::MAX),
+        distinct_source_ips: u32::try_from(distinct_i.max(0)).unwrap_or(u32::MAX),
     })
 }
 

@@ -557,3 +557,143 @@ async fn phase4b_server_live_activity_window_excludes_older_than_since_hours() {
         "row inserted just now must be inside a 1-hour window"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase 5a-1 — vpn_user_daily rollups (indefinite retention layer).
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase5a1_rollup_aggregates_ticks_into_per_user_per_server_daily_totals() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    for u in ["alice", "bob"] {
+        inv.add_user(&user(u)).await.unwrap();
+    }
+
+    // Tick 1: alice 100/200, bob 50/100, server-wide 200/400.
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[
+            ud(Some("alice"), 100, 200, 2),
+            ud(Some("bob"), 50, 100, 1),
+            ud(None, 200, 400, 3),
+        ],
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    // Tick 2: alice 150/300, bob 0/0, server-wide 150/300.
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(Some("alice"), 150, 300, 3), ud(None, 150, 300, 3)],
+    )
+    .await
+    .unwrap();
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let upserted = inv.rollup_vpn_user_daily(&today).await.unwrap();
+    assert_eq!(upserted, 2, "alice + bob → 2 rows");
+
+    let alice = inv
+        .vpn_user_daily_for_user(&UserId("alice".into()), 7)
+        .await
+        .unwrap();
+    assert_eq!(alice.len(), 1);
+    assert_eq!(alice[0].upload_bytes, 250, "100+150 across 2 ticks");
+    assert_eq!(alice[0].download_bytes, 500, "200+300");
+    assert_eq!(alice[0].active_connections_peak, 3, "max(2,3)");
+    assert_eq!(alice[0].server_id.0, "s1");
+}
+
+#[tokio::test]
+async fn phase5a1_rollup_is_idempotent_second_call_yields_same_data() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.record_vpn_stats(&ServerId("s1".into()), &[ud(Some("alice"), 1000, 2000, 5)])
+        .await
+        .unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let alice = inv
+        .vpn_user_daily_for_user(&UserId("alice".into()), 7)
+        .await
+        .unwrap();
+    assert_eq!(alice.len(), 1, "no duplicate rows from idempotent re-roll");
+    assert_eq!(alice[0].upload_bytes, 1000);
+    assert_eq!(alice[0].download_bytes, 2000);
+}
+
+#[tokio::test]
+async fn phase5a1_rollup_excludes_server_wide_null_user_rows() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    // No users added; one server-wide row only.
+    inv.record_vpn_stats(&ServerId("s1".into()), &[ud(None, 9999, 9999, 10)])
+        .await
+        .unwrap();
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let upserted = inv.rollup_vpn_user_daily(&today).await.unwrap();
+    assert_eq!(
+        upserted, 0,
+        "server-wide NULL-user row must NOT create a vpn_user_daily entry"
+    );
+}
+
+#[tokio::test]
+async fn phase5a1_top_users_by_daily_traffic_orders_desc_and_respects_limit() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    for u in ["alice", "bob", "charlie"] {
+        inv.add_user(&user(u)).await.unwrap();
+    }
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[
+            ud(Some("alice"), 100, 100, 1),   // 200 total
+            ud(Some("bob"), 1000, 1000, 1),   // 2000 total
+            ud(Some("charlie"), 500, 500, 1), // 1000 total
+        ],
+    )
+    .await
+    .unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let top = inv.top_users_by_daily_traffic(1, 2).await.unwrap();
+    assert_eq!(top.len(), 2, "limit=2 must cap");
+    assert_eq!(top[0].0.0, "bob", "bob (2000) is top");
+    assert_eq!(top[0].1, 2000);
+    assert_eq!(top[1].0.0, "charlie", "charlie (1000) is second");
+}
+
+#[tokio::test]
+async fn phase5a1_user_traffic_this_month_sums_from_daily_rollup() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(Some("alice"), 12_000_000, 8_000_000, 2)],
+    )
+    .await
+    .unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let total = inv
+        .user_traffic_this_month_from_daily(&UserId("alice".into()))
+        .await
+        .unwrap();
+    assert_eq!(total, 20_000_000, "12M up + 8M down");
+}

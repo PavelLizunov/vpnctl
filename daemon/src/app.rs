@@ -397,6 +397,38 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     "admin_alerts purge failed; will retry next tick"
                 ),
             }
+
+            // Phase 5a-1 — daily rollup of vpn_connection_stats →
+            // vpn_user_daily. Re-roll TODAY + YESTERDAY so we
+            // capture late-arriving ticks straddling the midnight
+            // UTC boundary. Rollup is idempotent (UPSERT). The
+            // daily table is the long-term retention layer; the
+            // raw 30-day vpn_connection_stats gets purged above,
+            // but the aggregated daily totals survive indefinitely.
+            for date_offset in &["now", "-1 day"] {
+                let date_utc = chrono::Utc::now();
+                let target_date = if *date_offset == "-1 day" {
+                    (date_utc - chrono::Duration::days(1))
+                        .format("%Y-%m-%d")
+                        .to_string()
+                } else {
+                    date_utc.format("%Y-%m-%d").to_string()
+                };
+                match inv.rollup_vpn_user_daily(&target_date).await {
+                    Ok(n) => tracing::debug!(
+                        target = "vpnctld::retention",
+                        date = %target_date,
+                        rolled_rows = n,
+                        "vpn_user_daily rollup tick"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target = "vpnctld::retention",
+                        date = %target_date,
+                        error = %e,
+                        "vpn_user_daily rollup failed; will retry next tick"
+                    ),
+                }
+            }
         }
     })
 }
