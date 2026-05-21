@@ -1410,6 +1410,8 @@ async fn admin_tweak_tweaks_kind_is_gone_returns_404() {
         "error body must call out the retired kind by name, got {text:?}"
     );
     // And the new known-kinds list must NOT include "tweaks" anymore.
+    // (Should include theme + accent + lang post-NM-12; doesn't care
+    // about ordering — the lang addition is forward-compat.)
     assert!(
         text.contains("known: theme, accent") && !text.contains("tweaks)"),
         "known-kinds list must drop 'tweaks', got {text:?}"
@@ -1504,7 +1506,7 @@ async fn admin_backend_error_responses_use_unified_prefix() {
     )
     .await;
     assert_eq!(
-        body, "vpnctl admin: unknown tweak kind 'whatever' (known: theme, accent)\n",
+        body, "vpnctl admin: unknown tweak kind 'whatever' (known: theme, accent, lang)\n",
         "unknown-tweak 404 body drifted"
     );
 }
@@ -9630,6 +9632,167 @@ async fn nm12_followup_servers_list_no_hidden_row_when_all_visible() {
         !html.contains(r#"<dt style="color: var(--acc);">hidden</dt>"#),
         "no protocols are hidden — the hidden dt row must NOT render"
     );
+}
+
+// ─── i18n: bilingual admin shell (Pavel 2026-05-21) ─────────────────
+//
+// Pavel: «добавил русскую версию». Cookie-driven locale toggle in the
+// masthead, with `vpnctl_lang=ru` flipping nav + footer + masthead
+// subtitle to Russian. These tests pin the toggle round-trip and a
+// representative key for each locale.
+
+#[tokio::test]
+async fn i18n_default_locale_is_english_with_english_nav() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains(">Dashboard<"),
+        "nav must render Dashboard label in English by default"
+    );
+    assert!(
+        html.contains("— a daily report from your homelab"),
+        "masthead subtitle must be in English by default"
+    );
+    // The lang switch button shows the OTHER locale (`RU` when active
+    // is `EN`); the active locale renders as bold text next to it.
+    assert!(
+        html.contains(">RU<"),
+        "masthead toggle button must offer the alternate locale (RU when EN active)"
+    );
+}
+
+#[tokio::test]
+async fn i18n_ru_cookie_renders_russian_nav_and_subtitle() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .header("cookie", "vpnctl_lang=ru")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains(">Дашборд<"),
+        "ru cookie must render the nav Dashboard label as Дашборд"
+    );
+    assert!(
+        html.contains(">Серверы<"),
+        "ru cookie must render Servers as Серверы"
+    );
+    assert!(
+        html.contains("ежедневный отчёт по твоей домашней лаборатории"),
+        "ru cookie must render the masthead subtitle in Russian"
+    );
+    assert!(
+        html.contains(r#"<html lang="ru""#) || html.contains(r#"<html lang=\"ru\""#),
+        "ru cookie must set `<html lang=\"ru\">` for hyphenation + screen readers"
+    );
+}
+
+#[tokio::test]
+async fn i18n_accept_language_ru_picks_russian_when_no_cookie() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .header("accept-language", "ru-RU,ru;q=0.9,en;q=0.8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains(">Дашборд<"),
+        "no cookie + Accept-Language: ru* → render Russian"
+    );
+}
+
+#[tokio::test]
+async fn i18n_lang_toggle_post_sets_cookie_and_redirects_back() {
+    // POST /admin/tweak/lang with `value=ru` → 303 + Set-Cookie:
+    // vpnctl_lang=ru. Matches the existing theme/accent tweak shape.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/lang")
+                    .header("referer", "http://192.168.0.236:18402/admin/users")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("value=ru"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let set_cookie = resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        set_cookie.contains("vpnctl_lang=ru"),
+        "POST /admin/tweak/lang value=ru must set vpnctl_lang=ru cookie, got {set_cookie}"
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/admin/users",
+        "303 must redirect back via Referer (sanitised to /admin path)"
+    );
+}
+
+#[tokio::test]
+async fn i18n_lang_toggle_rejects_invalid_value() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tweak/lang")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("value=de"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Bad-value path returns 400 via bad_request() in set_tweak_cookie.
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 // ─── Tooltip coverage spec (bug-audit-agent 2026-05-21) ──────────────

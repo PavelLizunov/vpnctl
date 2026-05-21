@@ -1,0 +1,347 @@
+//! Lightweight bilingual (en / ru) i18n for the vpnctld admin UI.
+//!
+//! Pavel 2026-05-21: «добавил русскую версию … сделал подсказки по
+//! каждому пункту чтоб всем было понятно как пользоваться». Pavel is
+//! the only operator, but he prefers a Russian admin shell + every
+//! actionable element wears an explainer. This module is the
+//! mechanism; the actual translation table lives in `t()` below.
+//!
+//! ── Design ───────────────────────────────────────────────────────────
+//!
+//! 1. **Locale enum** — `En` (default) and `Ru`. No runtime allocation:
+//!    everything is `&'static str` indexed by `(Locale, K)` enum tuple.
+//!
+//! 2. **`K` (key) enum** — every user-visible string that gets
+//!    translated has a key here. Adding `K::Foo` without populating
+//!    both arms of `t()` is a compile error (exhaustive match), which
+//!    means future operators can't silently ship a half-translated
+//!    page.
+//!
+//! 3. **Locale detection** — `from_request(&HeaderMap)` looks at, in
+//!    order:
+//!    a. `Cookie: vpnctl_lang=ru` (operator's explicit choice)
+//!    b. `Accept-Language: ru*` (browser hint)
+//!    c. fallback `En`
+//!
+//! 4. **Operator toggle** — `[EN | RU]` chip in the masthead. Clicking
+//!    `POST /admin/tweak/lang/<en|ru>` sets the cookie + 303 redirects
+//!    back via the Referer (same pattern as the theme tweaks).
+//!
+//! ── Coverage ─────────────────────────────────────────────────────────
+//!
+//! First wave (this commit): nav items, footer, masthead subtitle, top-
+//! level page H1s + eyebrows on Dashboard / Servers / Users / Audit /
+//! Alerts / Settings, common action buttons (deploy, save, hide,
+//! unhide, block, unblock, regen, ack).
+//!
+//! Strings still in English-only after this commit: body copy, error
+//! messages, dense table contents, wizard SSE log lines. Those follow
+//! in incremental passes — each can extend `K` and `t()` without
+//! touching the shell or cookie plumbing.
+//!
+//! Mixed locale on hover: where a tooltip already exists in English
+//! (typical case: 12 buttons + form fields added in `cd644b2`), the
+//! tooltip stays English for now — translating those is part of the
+//! body-copy wave.
+
+use axum::http::HeaderMap;
+
+/// User-visible language. Add a variant here ONLY if you can populate
+/// every arm of `t()` for it; the exhaustive match in `t()` will fail
+/// to compile otherwise (intentional safety net).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Locale {
+    #[default]
+    En,
+    Ru,
+}
+
+impl Locale {
+    /// Parse the operator's language preference from the request.
+    /// Cookie wins over `Accept-Language` (explicit > inferred).
+    pub fn from_request(headers: &HeaderMap) -> Self {
+        // 1. Cookie. We hand-parse instead of pulling tower-cookies —
+        //    one cookie, one shape, no need for a crate.
+        if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+            for kv in cookie_hdr.split(';') {
+                let kv = kv.trim();
+                if let Some(val) = kv.strip_prefix("vpnctl_lang=") {
+                    return match val {
+                        "ru" => Locale::Ru,
+                        _ => Locale::En,
+                    };
+                }
+            }
+        }
+        // 2. Accept-Language. Cheap: just check the first 2 chars of
+        //    the first language tag. Real RFC-7231 parsing is
+        //    overkill — browsers send q-values + region codes, but
+        //    `ru-RU,en;q=0.9` still starts with `ru` and we want Ru.
+        if let Some(al) = headers.get("accept-language").and_then(|v| v.to_str().ok()) {
+            let first = al.split(',').next().unwrap_or("").trim();
+            if first.starts_with("ru") {
+                return Locale::Ru;
+            }
+        }
+        // 3. Default.
+        Locale::En
+    }
+
+    /// The cookie value to set when the operator picks this locale.
+    /// Used by the `/admin/tweak/lang/<x>` handler.
+    pub fn cookie_value(self) -> &'static str {
+        match self {
+            Locale::En => "en",
+            Locale::Ru => "ru",
+        }
+    }
+
+    /// Two-char tag for `<html lang="...">`. Browsers + screen readers
+    /// honour this for hyphenation + voice selection.
+    pub fn html_lang(self) -> &'static str {
+        match self {
+            Locale::En => "en",
+            Locale::Ru => "ru",
+        }
+    }
+}
+
+/// Translation keys. Adding a variant here forces a compile-time
+/// failure in `t()` until every locale has an arm — that's the whole
+/// point. Grouped by surface (Nav, Mast, Foot, Dash, …) for ergonomic
+/// `match` patterns.
+#[derive(Clone, Copy, Debug)]
+pub enum K {
+    // Masthead + nav + footer (rendered on every page)
+    MastSubtitle,
+    NavDashboard,
+    NavMonitoring,
+    NavServers,
+    NavUsers,
+    NavAudit,
+    NavAlerts,
+    NavSettings,
+    NavOperator, // "operator pavel" tagline
+    FootStack,   // "axum + maud"
+
+    // Common action buttons used on multiple pages.
+    BtnDeploy,
+    BtnSave,
+    BtnHide,
+    BtnUnhide,
+    BtnBlock,
+    BtnUnblock,
+    BtnDisable,
+    BtnEnable,
+    BtnAck,
+    BtnFilter,
+    BtnReset,
+    BtnExportCsv,
+
+    // Page-level H1s and section eyebrows.
+    PageDashboard,
+    PageMonitoring,
+    PageServers,
+    PageUsers,
+    PageAudit,
+    PageAlerts,
+    PageSettings,
+    EyebrowServerAccess,
+    EyebrowEnabledProtocols,
+    EyebrowHeavyUsers,
+    EyebrowAlertsLimit,
+    EyebrowLiveStats,
+    EyebrowTrustedFingerprint,
+}
+
+/// Translation lookup. Exhaustive — adding a `K` variant without
+/// translating it for both locales is a compile error.
+pub fn t(loc: Locale, k: K) -> &'static str {
+    use K::*;
+    use Locale::*;
+    match (loc, k) {
+        // ── Masthead / nav / footer ─────────────────────────────────
+        (En, MastSubtitle) => "— a daily report from your homelab",
+        (Ru, MastSubtitle) => "— ежедневный отчёт по твоей домашней лаборатории",
+        (En, NavDashboard) => "Dashboard",
+        (Ru, NavDashboard) => "Дашборд",
+        (En, NavMonitoring) => "Monitoring",
+        (Ru, NavMonitoring) => "Мониторинг",
+        (En, NavServers) => "Servers",
+        (Ru, NavServers) => "Серверы",
+        (En, NavUsers) => "Users",
+        (Ru, NavUsers) => "Пользователи",
+        (En, NavAudit) => "Audit",
+        (Ru, NavAudit) => "Аудит",
+        (En, NavAlerts) => "Alerts",
+        (Ru, NavAlerts) => "Алерты",
+        (En, NavSettings) => "Settings",
+        (Ru, NavSettings) => "Настройки",
+        (En, NavOperator) => "homelab · operator pavel",
+        (Ru, NavOperator) => "homelab · оператор pavel",
+        (En, FootStack) => "· axum + maud",
+        (Ru, FootStack) => "· axum + maud",
+
+        // ── Common buttons ──────────────────────────────────────────
+        (En, BtnDeploy) => "deploy →",
+        (Ru, BtnDeploy) => "деплой →",
+        (En, BtnSave) => "save",
+        (Ru, BtnSave) => "сохранить",
+        (En, BtnHide) => "hide",
+        (Ru, BtnHide) => "скрыть",
+        (En, BtnUnhide) => "unhide",
+        (Ru, BtnUnhide) => "показать",
+        (En, BtnBlock) => "block",
+        (Ru, BtnBlock) => "заблокировать",
+        (En, BtnUnblock) => "unblock",
+        (Ru, BtnUnblock) => "разблокировать",
+        (En, BtnDisable) => "disable",
+        (Ru, BtnDisable) => "выключить",
+        (En, BtnEnable) => "enable",
+        (Ru, BtnEnable) => "включить",
+        (En, BtnAck) => "ack",
+        (Ru, BtnAck) => "принять",
+        (En, BtnFilter) => "filter",
+        (Ru, BtnFilter) => "фильтр",
+        (En, BtnReset) => "reset",
+        (Ru, BtnReset) => "сброс",
+        (En, BtnExportCsv) => "export csv",
+        (Ru, BtnExportCsv) => "экспорт csv",
+
+        // ── Page titles + eyebrows ──────────────────────────────────
+        (En, PageDashboard) => "Dashboard",
+        (Ru, PageDashboard) => "Дашборд",
+        (En, PageMonitoring) => "Monitoring",
+        (Ru, PageMonitoring) => "Мониторинг",
+        (En, PageServers) => "Servers",
+        (Ru, PageServers) => "Серверы",
+        (En, PageUsers) => "Users",
+        (Ru, PageUsers) => "Пользователи",
+        (En, PageAudit) => "Audit log",
+        (Ru, PageAudit) => "Журнал аудита",
+        (En, PageAlerts) => "Alerts",
+        (Ru, PageAlerts) => "Алерты",
+        (En, PageSettings) => "Settings",
+        (Ru, PageSettings) => "Настройки",
+        (En, EyebrowServerAccess) => "Server access",
+        (Ru, EyebrowServerAccess) => "Доступ к серверам",
+        (En, EyebrowEnabledProtocols) => "Enabled protocols",
+        (Ru, EyebrowEnabledProtocols) => "Включённые протоколы",
+        (En, EyebrowHeavyUsers) => "Heavy users · last 24h",
+        (Ru, EyebrowHeavyUsers) => "Тяжёлые пользователи · за 24ч",
+        (En, EyebrowAlertsLimit) => "Limit alerts",
+        (Ru, EyebrowAlertsLimit) => "Лимит-алерты",
+        (En, EyebrowLiveStats) => "Live VPN stats · last 24h",
+        (Ru, EyebrowLiveStats) => "Живая статистика VPN · за 24ч",
+        (En, EyebrowTrustedFingerprint) => "Trusted host fingerprint",
+        (Ru, EyebrowTrustedFingerprint) => "Доверенный отпечаток хоста",
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn hm(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            let name = axum::http::header::HeaderName::from_bytes(k.as_bytes())
+                .expect("test header name must be ASCII");
+            let val = axum::http::HeaderValue::from_str(v)
+                .expect("test header value must be valid bytes");
+            h.insert(name, val);
+        }
+        h
+    }
+
+    #[test]
+    fn default_locale_is_en() {
+        assert_eq!(Locale::from_request(&hm(&[])), Locale::En);
+    }
+
+    #[test]
+    fn cookie_wins_over_accept_language() {
+        // Cookie says ru, A-L says en → cookie wins.
+        assert_eq!(
+            Locale::from_request(&hm(&[
+                ("cookie", "vpnctl_lang=ru; other=foo"),
+                ("accept-language", "en-US,en;q=0.9"),
+            ])),
+            Locale::Ru
+        );
+        // Cookie says en, A-L says ru → cookie wins.
+        assert_eq!(
+            Locale::from_request(&hm(&[
+                ("cookie", "vpnctl_lang=en"),
+                ("accept-language", "ru-RU,ru;q=0.9"),
+            ])),
+            Locale::En
+        );
+    }
+
+    #[test]
+    fn accept_language_ru_picks_ru() {
+        assert_eq!(
+            Locale::from_request(&hm(&[("accept-language", "ru-RU,ru;q=0.9,en;q=0.8")])),
+            Locale::Ru
+        );
+        assert_eq!(
+            Locale::from_request(&hm(&[("accept-language", "ru")])),
+            Locale::Ru
+        );
+    }
+
+    #[test]
+    fn accept_language_en_picks_en() {
+        assert_eq!(
+            Locale::from_request(&hm(&[("accept-language", "en-US,en;q=0.9")])),
+            Locale::En
+        );
+    }
+
+    #[test]
+    fn unknown_cookie_value_falls_back_to_en() {
+        assert_eq!(
+            Locale::from_request(&hm(&[("cookie", "vpnctl_lang=de")])),
+            Locale::En
+        );
+    }
+
+    #[test]
+    fn malformed_cookie_doesnt_panic() {
+        // No `=` → not a valid cookie pair, skipped.
+        assert_eq!(
+            Locale::from_request(&hm(&[("cookie", "vpnctl_lang")])),
+            Locale::En
+        );
+        // Multiple cookies, one valid: still picks up the right one.
+        assert_eq!(
+            Locale::from_request(&hm(&[("cookie", "foo=bar; vpnctl_lang=ru; baz=qux")])),
+            Locale::Ru
+        );
+    }
+
+    #[test]
+    fn translation_table_covers_every_key_for_both_locales() {
+        // If the exhaustive match in `t()` is missing an arm this
+        // file wouldn't compile — this test exists to surface a
+        // spot-check of representative keys + their non-empty,
+        // distinct values per locale.
+        let pairs = [
+            (K::NavDashboard, "Dashboard", "Дашборд"),
+            (K::NavServers, "Servers", "Серверы"),
+            (K::NavSettings, "Settings", "Настройки"),
+            (K::BtnDeploy, "deploy →", "деплой →"),
+            (K::BtnHide, "hide", "скрыть"),
+            (K::BtnSave, "save", "сохранить"),
+            (K::EyebrowServerAccess, "Server access", "Доступ к серверам"),
+        ];
+        for (k, en, ru) in pairs {
+            assert_eq!(t(Locale::En, k), en, "EN mismatch for {k:?}");
+            assert_eq!(t(Locale::Ru, k), ru, "RU mismatch for {k:?}");
+            assert_ne!(en, ru, "expected EN != RU for {k:?}");
+        }
+    }
+}

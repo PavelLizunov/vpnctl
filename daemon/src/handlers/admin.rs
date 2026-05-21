@@ -21,6 +21,14 @@ use vpnctl_core::humanize::format_size_bytes;
 
 const COOKIE_THEME: &str = "vpnctl_theme";
 const COOKIE_ACCENT: &str = "vpnctl_accent";
+/// Operator's locale preference. Set by the masthead `[EN | RU]`
+/// toggle (POST /admin/tweak/lang). Read in `Locale::from_request`,
+/// which falls back to Accept-Language then defaults to En.
+const COOKIE_LANG: &str = "vpnctl_lang";
+/// Valid values for the lang cookie. Mirrors the `Locale` enum
+/// variants in `crate::i18n` — adding a locale means extending this
+/// list AND the enum.
+const VALID_LANGS: &[&str] = &["en", "ru"];
 
 const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
@@ -41,45 +49,49 @@ fn glyph(size: u32) -> Markup {
 
 #[derive(Clone, Copy)]
 struct NavItem {
+    /// The URL path segment AND the `active_nav` matcher token. Stays
+    /// English in both locales (URLs aren't localised).
     key: &'static str,
-    label: &'static str,
+    /// The i18n key used to look up the localised label. nav() calls
+    /// `t(lang, label_key)` to get the actual rendered text.
+    label_key: crate::i18n::K,
     count: Option<usize>,
 }
 
 const NAV: &[NavItem] = &[
     NavItem {
         key: "dashboard",
-        label: "Dashboard",
+        label_key: crate::i18n::K::NavDashboard,
         count: None,
     },
     NavItem {
         key: "monitoring",
-        label: "Monitoring",
+        label_key: crate::i18n::K::NavMonitoring,
         count: None,
     },
     NavItem {
         key: "servers",
-        label: "Servers",
+        label_key: crate::i18n::K::NavServers,
         count: None,
     },
     NavItem {
         key: "users",
-        label: "Users",
+        label_key: crate::i18n::K::NavUsers,
         count: None,
     },
     NavItem {
         key: "audit",
-        label: "Audit",
+        label_key: crate::i18n::K::NavAudit,
         count: None,
     },
     NavItem {
         key: "alerts",
-        label: "Alerts",
+        label_key: crate::i18n::K::NavAlerts,
         count: None,
     },
     NavItem {
         key: "settings",
-        label: "Settings",
+        label_key: crate::i18n::K::NavSettings,
         count: None,
     },
 ];
@@ -94,7 +106,8 @@ fn nav_href(key: &str) -> String {
     }
 }
 
-fn nav(active: &str) -> Markup {
+fn nav(active: &str, lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::{K, t};
     html! {
         nav.ed-mast__nav-inline style="padding: 12px 56px 0; border-bottom: 1px solid var(--rule);" {
             @for it in NAV {
@@ -108,14 +121,14 @@ fn nav(active: &str) -> Markup {
                 // selector-based assertions.
                 @if it.key == active {
                     a.on href=(nav_href(it.key)) {
-                        (it.label)
+                        (t(lang, it.label_key))
                         @if let Some(c) = it.count {
                             span.ct { (c) }
                         }
                     }
                 } @else {
                     a href=(nav_href(it.key)) {
-                        (it.label)
+                        (t(lang, it.label_key))
                         @if let Some(c) = it.count {
                             span.ct { (c) }
                         }
@@ -123,7 +136,7 @@ fn nav(active: &str) -> Markup {
                 }
             }
             span style="margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); letter-spacing: 0; text-transform: none;" {
-                "homelab · operator pavel"
+                (t(lang, K::NavOperator))
             }
         }
     }
@@ -137,14 +150,40 @@ fn masthead_date() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
-fn masthead(date: &str, vol: &str) -> Markup {
+fn masthead(date: &str, vol: &str, lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::{K, Locale, t};
+    // The [EN | RU] toggle clicks POST /admin/tweak/lang/<other>;
+    // the handler sets the vpnctl_lang cookie + 303-redirects back
+    // via Referer. The "active" side is unlinked + bold; the
+    // "other" side is a clickable form button. Two buttons (not one
+    // link with `?lang=...`) so the cookie is server-set, not
+    // URL-leaky.
+    let other = match lang {
+        Locale::En => Locale::Ru,
+        Locale::Ru => Locale::En,
+    };
+    let toggle_form = html! {
+        form method="post"
+             action="/admin/tweak/lang"
+             style="display: inline; margin: 0; padding: 0;" {
+            input type="hidden" name="value" value=(other.cookie_value()) {}
+            button type="submit"
+                   title=(match other {
+                       Locale::En => "Switch admin UI to English",
+                       Locale::Ru => "Переключить админку на русский",
+                   })
+                   style="background: transparent; border: none; cursor: pointer; padding: 0 4px; font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: underline;" {
+                (other.cookie_value().to_uppercase())
+            }
+        }
+    };
     html! {
         div.ed-mast {
             div.ed-mast__logo {
                 (glyph(20))
                 "vpnctl"
             }
-            span.ed-mast__sub { "— a daily report from your homelab" }
+            span.ed-mast__sub { (t(lang, K::MastSubtitle)) }
             span.ed-mast__date {
                 // The volume number is always tinted with the active
                 // accent. Used to be the (now-removed) floating Tweaks
@@ -155,12 +194,22 @@ fn masthead(date: &str, vol: &str) -> Markup {
                 b style="color: var(--acc);" { (vol) }
                 " · "
                 (date)
+                " · "
+                // Active locale — bold, unlinked. Then the toggle
+                // button for the other locale. Visually:
+                //   `vol. 0.1.0 · 2026-05-21 · EN | [RU]`
+                b style="font-family: var(--mono); font-size: 11px; color: var(--ink);" {
+                    (lang.cookie_value().to_uppercase())
+                }
+                " | "
+                (toggle_form)
             }
         }
     }
 }
 
-fn foot() -> Markup {
+fn foot(lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::{K, t};
     html! {
         div.ed-foot {
             div.ed-foot__l {
@@ -170,7 +219,7 @@ fn foot() -> Markup {
                 // mutation today is a plain POST + 303 redirect, no
                 // partial swaps). Bug-audit-agent 2026-05-21 caught
                 // the footer claiming htmx — corrected.
-                span { "· axum + maud" }
+                span { (t(lang, K::FootStack)) }
             }
             span { "github.com/PavelLizunov/vpnctl" }
         }
@@ -265,11 +314,17 @@ fn root_class(theme: &str, accent: &str) -> String {
 /// Tweaks panel state. Panel moved into /admin/settings; the arg is gone
 /// along with the cookie + the `/admin/tweak/tweaks` route.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -> Markup {
+pub(crate) fn shell(
+    active_nav: &str,
+    theme: &str,
+    accent: &str,
+    lang: crate::i18n::Locale,
+    body: Markup,
+) -> Markup {
     let cls = root_class(theme, accent);
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang=(lang.html_lang()) {
             head {
                 meta charset="utf-8" {}
                 meta name="viewport" content="width=device-width, initial-scale=1" {}
@@ -287,12 +342,12 @@ pub(crate) fn shell(active_nav: &str, theme: &str, accent: &str, body: Markup) -
             }
             body {
                 div class=(cls) {
-                    (masthead(&masthead_date(), &format!("vol. {}", env!("CARGO_PKG_VERSION"))))
-                    (nav(active_nav))
+                    (masthead(&masthead_date(), &format!("vol. {}", env!("CARGO_PKG_VERSION")), lang))
+                    (nav(active_nav, lang))
                     main.ed-main {
                         (body)
                     }
-                    (foot())
+                    (foot(lang))
                 }
             }
         }
@@ -326,6 +381,18 @@ fn theme_accent(headers: &HeaderMap) -> (String, String) {
         .unwrap_or("default")
         .to_string();
     (theme, accent)
+}
+
+/// Same accessor pattern as `theme_accent`, but for the bilingual
+/// admin shell — returns theme + accent + the operator's preferred
+/// locale. Handlers call this instead of `theme_accent` so the
+/// `shell()` invocation gets the locale plumbed through to
+/// `masthead` + `nav` + `foot` (and onwards to any body-level
+/// `t(lang, K::...)` lookups). Pavel 2026-05-21.
+fn theme_accent_lang(headers: &HeaderMap) -> (String, String, crate::i18n::Locale) {
+    let (theme, accent) = theme_accent(headers);
+    let lang = crate::i18n::Locale::from_request(headers);
+    (theme, accent, lang)
 }
 
 /// Aggregated counters used in the dashboard top-row metric tiles.
@@ -529,7 +596,7 @@ pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     let (stats, audit) = collect_dashboard_data(&state)
         .await
@@ -589,7 +656,7 @@ pub(crate) async fn dashboard(
         (dashboard_heavy_users(&heavy_users))
         (dashboard_audit(&audit))
     };
-    Ok(shell("dashboard", &theme, &accent, body))
+    Ok(shell("dashboard", &theme, &accent, lang, body))
 }
 
 /// Phase G — single-line alerts tile under the metric row. Renders
@@ -752,7 +819,7 @@ pub(crate) async fn monitoring(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     let hourly = state
         .inv
@@ -824,7 +891,7 @@ pub(crate) async fn monitoring(
             " (no auth — only aggregate counts, no per-IP details)."
         }
     };
-    Ok(shell("monitoring", &theme, &accent, body))
+    Ok(shell("monitoring", &theme, &accent, lang, body))
 }
 
 /// Fill the last `n_hours` hourly buckets with zero where the input
@@ -1045,7 +1112,7 @@ pub(crate) async fn servers(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     // Fan out three reads concurrently — server list, the grants
     // count per server, AND the bulk (server, protocol) → hidden
@@ -1145,7 +1212,7 @@ pub(crate) async fn servers(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, body))
+    Ok(shell("servers", &theme, &accent, lang, body))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1242,7 +1309,7 @@ pub(crate) async fn users(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<UsersQuery>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     // list_users + servers_for_user-per-user would be N+1; instead use
     // the inventory's grants-count map (one query) and look up by user.
@@ -1460,7 +1527,7 @@ pub(crate) async fn users(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, body))
+    Ok(shell("users", &theme, &accent, lang, body))
 }
 
 /// Build the canonical sub URL the QR encodes. Uses the request's `Host`
@@ -1808,7 +1875,7 @@ pub(crate) async fn user_detail(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
 
     let user = state
@@ -2707,7 +2774,7 @@ pub(crate) async fn user_detail(
             "delete user…"
         }
     };
-    Ok(shell("users", &theme, &accent, body))
+    Ok(shell("users", &theme, &accent, lang, body))
 }
 
 /// Phase Track-4 — UA fingerprint heuristic. Renders one row per
@@ -4527,7 +4594,7 @@ pub(crate) async fn user_delete_confirm(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
     match state.inv.get_user(&uid).await {
         Ok(Some(_)) => {}
@@ -4580,7 +4647,7 @@ pub(crate) async fn user_delete_confirm(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, body))
+    Ok(shell("users", &theme, &accent, lang, body))
 }
 
 /// `POST /admin/users/{id}/delete` — actually delete. Body must be
@@ -4635,7 +4702,7 @@ pub(crate) async fn audit(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<AuditQuery>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
@@ -4768,7 +4835,7 @@ pub(crate) async fn audit(
             }
         }
     };
-    Ok(shell("audit", &theme, &accent, body))
+    Ok(shell("audit", &theme, &accent, lang, body))
 }
 
 /// Query-string args for the audit timeline. All optional; empty
@@ -4955,7 +5022,7 @@ pub(crate) async fn alerts(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<AlertsQuery>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
 
     /// Generous cap — the feed wants enough history to spot patterns
     /// without paginating. Older rows are retention-pruned (acked
@@ -5024,7 +5091,7 @@ pub(crate) async fn alerts(
             (alerts_table(&alerts_rows))
         }
     };
-    Ok(shell("alerts", &theme, &accent, body))
+    Ok(shell("alerts", &theme, &accent, lang, body))
 }
 
 /// `POST /admin/alerts/{id}/ack` — operator dismisses one alert.
@@ -5146,7 +5213,7 @@ fn severity_class(s: &str) -> &'static str {
 }
 
 pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) -> Markup {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     // Auto-generated by vpnctld on startup (see
     // `crate::app::DEFAULT_DEPLOY_KEY_PATH` + `ensure_deploy_key`).
     // Surfaces the public half for diagnostic / out-of-inventory
@@ -5508,7 +5575,7 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
             }
         }
     };
-    shell("settings", &theme, &accent, body)
+    shell("settings", &theme, &accent, lang, body)
 }
 
 /// `POST /admin/servers/{id}/push-deploy-key` — append the daemon's
@@ -6104,8 +6171,14 @@ pub(crate) async fn set_tweak(
     match kind.as_str() {
         "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
         "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
+        // NM-12 follow-up (Pavel 2026-05-21): bilingual admin shell.
+        // Operator clicks `[EN | RU]` in the masthead → POST here
+        // with `value=<en|ru>` → set the cookie + 303 redirect back
+        // via Referer. Same shape as theme/accent so the
+        // sanitize_referer + 1-year-cookie semantic is reused.
+        "lang" => set_tweak_cookie(&headers, COOKIE_LANG, VALID_LANGS, &body),
         unknown => not_found(&format!(
-            "unknown tweak kind '{unknown}' (known: theme, accent)"
+            "unknown tweak kind '{unknown}' (known: theme, accent, lang)"
         )),
     }
 }
@@ -6165,7 +6238,7 @@ fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// Submit POSTs to the same URL; success goes to `/admin/servers/new/step-2`.
 /// Cancel link leads back to `/admin/servers`.
 pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     let body = html! {
         div.ed-art-eyebrow { "Add server · step 1 of 3" }
         h1.ed-art-h1 {
@@ -6235,7 +6308,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
             }
         }
     };
-    shell("servers", &theme, &accent, body)
+    shell("servers", &theme, &accent, lang, body)
 }
 
 /// `POST /admin/servers/new` — validate the step-1 input, stash it in
@@ -6309,7 +6382,7 @@ pub(crate) async fn wizard_step2_stub(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     let session =
         read_cookie(&headers, crate::wizard::COOKIE_NAME).and_then(|id| state.wizard.get(id));
 
@@ -6435,7 +6508,7 @@ pub(crate) async fn wizard_step2_stub(
 "#))
         }
     };
-    shell("servers", &theme, &accent, body).into_response()
+    shell("servers", &theme, &accent, lang, body).into_response()
 }
 
 /// `GET /admin/servers/new/step-2/sse` — the EventSource endpoint
@@ -6596,7 +6669,7 @@ pub(crate) async fn server_detail(
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
 ) -> Result<Markup, Response> {
-    let (theme, accent) = theme_accent(&headers);
+    let (theme, accent, lang) = theme_accent_lang(&headers);
     let sid = vpnctl_core::ServerId(server_id_str.clone());
 
     let server = match state.inv.get_server(&sid).await {
@@ -6860,7 +6933,7 @@ pub(crate) async fn server_detail(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, body))
+    Ok(shell("servers", &theme, &accent, lang, body))
 }
 
 /// Hero block — most-recent probe at-a-glance KPIs, OR an empty state

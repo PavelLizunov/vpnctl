@@ -8,6 +8,9 @@
 
 pub mod access_log;
 pub mod app;
+// Locale detection (cookie + Accept-Language) + the bilingual EN/RU
+// translation table for admin UI chrome. Pavel 2026-05-21.
+pub mod i18n;
 // Real-client-IP resolution from X-Forwarded-For when the immediate
 // peer is a trusted reverse proxy (post-Phase-5 nginx cutover).
 // Without this every external client collapses to the nginx peer IP
