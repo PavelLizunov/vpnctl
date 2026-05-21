@@ -2806,6 +2806,83 @@ impl SqliteInventory {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Phase 5a-2 — reverse-DNS (PTR) cache for destination IPs.
+    //
+    // Pattern: the DNS resolver task in daemon/src/dns_resolver.rs
+    // calls `lookup_dns_ptr_bulk(ips)` to fetch what's cached, then
+    // shells out to `getent hosts <ip>` for each missing IP (in
+    // parallel via spawn_blocking), then writes back via
+    // `upsert_dns_ptr`. The admin UI's render path only ever calls
+    // `lookup_dns_ptr_bulk` — never the resolver itself.
+    //
+    // TTL: 7 days, pruned by the existing hourly retention scheduler.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Bulk-fetch cached PTR results for a list of IPs. Returns a
+    /// map from IP to (hostname_opt, resolved_at). hostname None =
+    /// we tried and got no answer; that's a CACHED negative answer
+    /// — distinct from the IP not being in the map at all (= never
+    /// looked up). The render path uses this distinction to know
+    /// whether to fall back to `IP:port` (negative cached) or show
+    /// the resolved hostname.
+    pub async fn lookup_dns_ptr_bulk(
+        &self,
+        ips: &[String],
+    ) -> Result<std::collections::HashMap<String, Option<String>>> {
+        use std::collections::HashMap;
+        if ips.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ips.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT ip, hostname FROM dns_ptr_cache WHERE ip IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for ip in ips {
+            q = q.bind(ip);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut out: HashMap<String, Option<String>> = HashMap::new();
+        for r in rows {
+            let ip: String = r.try_get("ip")?;
+            let hostname: Option<String> = r.try_get("hostname")?;
+            out.insert(ip, hostname);
+        }
+        Ok(out)
+    }
+
+    /// Insert-or-update a PTR cache entry. NULL hostname is a
+    /// VALID value — caches "we asked, got no PTR" so the
+    /// resolver doesn't re-query for the TTL window.
+    pub async fn upsert_dns_ptr(&self, ip: &str, hostname: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO dns_ptr_cache (ip, hostname, resolved_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(ip) DO UPDATE SET
+                 hostname    = excluded.hostname,
+                 resolved_at = excluded.resolved_at",
+        )
+        .bind(ip)
+        .bind(hostname)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Purge cache entries older than `days`. Aligned with the
+    /// hourly retention scheduler. Default TTL: 7 days.
+    pub async fn purge_dns_ptr_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM dns_ptr_cache
+             WHERE resolved_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Phase H chunk 2 — node telemetry storage (node_probe sink)
     //
     // Same shape + lifecycle as `vpn_connection_stats`:

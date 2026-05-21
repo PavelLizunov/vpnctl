@@ -7912,6 +7912,32 @@ pub(crate) async fn server_detail(
     // when the poller has never reached this server (fresh
     // daemon start / no key / etc).
     let last_server_snap = state.snapshot_cache.get(&sid);
+    // Phase 5a-2 — bulk-fetch cached PTR hostnames for unique
+    // destination IPs in the snapshot. Used to enrich the «top
+    // destinations» table — `35.217.1.178:50005` becomes
+    // `r3.googlevideo.com:50005` when cached. Misses fall back
+    // to bare IP. Resolver task fills the cache asynchronously
+    // every 5 minutes.
+    let dns_ptr_map = if let Some(s) = last_server_snap.as_ref() {
+        let mut dst_ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in &s.snapshot.connections {
+            if c.metadata.host.is_empty() && !c.metadata.destination_ip.is_empty() {
+                dst_ips.insert(c.metadata.destination_ip.clone());
+            }
+        }
+        let ips_vec: Vec<String> = dst_ips.into_iter().collect();
+        state
+            .inv
+            .lookup_dns_ptr_bulk(&ips_vec)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "lookup_dns_ptr_bulk failed");
+                std::collections::HashMap::new()
+            })
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Phase 4c — sub_access correlation as the FALLBACK. We
     // extract unique sourceIPs from the snapshot, then ask
     // inventory which users have hit subscription URL from those
@@ -8079,12 +8105,10 @@ pub(crate) async fn server_detail(
         // intentionally to make the limit explicit).
         (server_detail_live_activity_section(&live_activity, lang))
 
-        // Phase 4c + 4d — per-connection drill-down (top
-        // destinations + top source IPs with user correlation +
-        // TCP/UDP split). 4d's sing-box log scrape gives exact
-        // (IP:port) → user_id mapping; 4c's sub_access correlation
-        // is the fallback for connections older than the log tail.
-        (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, lang))
+        // Phase 4c + 4d + 5a-2 — per-connection drill-down (top
+        // destinations enriched with reverse-DNS hostnames + top
+        // source IPs with user correlation + TCP/UDP split).
+        (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
@@ -8401,6 +8425,7 @@ fn server_detail_live_activity_section(
 fn server_detail_live_connections_section(
     server_snap: Option<&crate::snapshot_cache::ServerSnapshot>,
     source_user_map: &std::collections::HashMap<String, Vec<(vpnctl_core::UserId, u64)>>,
+    dns_ptr_map: &std::collections::HashMap<String, Option<String>>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -8424,7 +8449,7 @@ fn server_detail_live_connections_section(
     let snap = &server_snap.snapshot;
     let log_attribution = &server_snap.attribution;
     let nb = network_breakdown(snap);
-    let top_dests = aggregate_by_destination(snap, TOP_N);
+    let top_dests = aggregate_by_destination(snap, TOP_N, dns_ptr_map);
     let top_sources = aggregate_by_source(snap, TOP_N);
     let total_conns = snap.connections.len();
 

@@ -61,6 +61,11 @@ pub mod snapshot_cache;
 // `[user_id]` even though clash-api wire format drops the `user`
 // field). Pure parser + an SSH-driven scrape entry point.
 pub mod sing_box_log_scraper;
+// Phase 5a-2 — periodic reverse-DNS (PTR) resolver. Walks the
+// SnapshotCache, picks unique destination IPs lacking a host
+// field, shells out to `getent hosts <ip>` via spawn_blocking,
+// caches results in `dns_ptr_cache` (7-day TTL).
+pub mod dns_resolver;
 // Phase 3c — SSE backend for the Settings GeoIP «update now» button.
 // Wraps `/usr/local/bin/vpnctl geoip-update` via `std::process::Command`
 // + `tokio::task::spawn_blocking`. NOT `tokio::process` (glibc 2.39+

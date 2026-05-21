@@ -131,6 +131,16 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         snapshot_cache.clone(),
     ));
 
+    // Phase 5a-2 — periodic reverse-DNS resolver. Walks
+    // `snapshot_cache` for unique destination IPs lacking a host
+    // field, calls `getent hosts <ip>`, caches result in
+    // `dns_ptr_cache`. Admin UI's «top destinations» table
+    // enriches IP-only labels with the cached hostname.
+    drop(crate::dns_resolver::spawn_dns_resolver(
+        inv.clone(),
+        snapshot_cache.clone(),
+    ));
+
     // Phase H chunk 4 — periodic node_health probe (systemctl /
     // disk / mem / load / listening ports / sing-box log size).
     // Same SubprocessSshTransport, same skip-when-no-key behaviour,
@@ -395,6 +405,30 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     target = "vpnctld::retention",
                     error = %e,
                     "admin_alerts purge failed; will retry next tick"
+                ),
+            }
+
+            // Phase 5a-2 — sweep dns_ptr_cache on the same cadence.
+            // 7-day TTL — PTR records change rarely (ISP renames,
+            // CDN failovers) but not never; weekly refresh keeps
+            // the cache accurate without thrashing.
+            const DNS_TTL_DAYS: u32 = 7;
+            match inv.purge_dns_ptr_older_than(DNS_TTL_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = DNS_TTL_DAYS,
+                    "dns_ptr_cache purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = DNS_TTL_DAYS,
+                    removed = n,
+                    "purged old dns_ptr_cache rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "dns_ptr_cache purge failed; will retry next tick"
                 ),
             }
 

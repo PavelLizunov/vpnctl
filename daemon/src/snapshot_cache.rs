@@ -118,12 +118,23 @@ impl ConnAggregate {
     }
 }
 
-/// Group `snap.connections` by **destination** (prefer
-/// `metadata.host` when sing-box resolved one — that's the real
-/// DNS name like `youtube.com` — otherwise fall back to
-/// `destinationIP:port`). Returns aggregates sorted by total bytes
-/// DESC. Limit to `top_n` to keep the render budget tight.
-pub fn aggregate_by_destination(snap: &Snapshot, top_n: usize) -> Vec<ConnAggregate> {
+/// Group `snap.connections` by **destination**. Label resolution
+/// priority (Phase 5a-2):
+///   1. `metadata.host` if non-empty (sing-box already resolved
+///      DNS — typically from HTTPS SNI / HTTP Host).
+///   2. `dns_ptr_map[destination_ip]` if cache hit (positive).
+///      → label becomes `<hostname>:<port> (<ip>)` so the operator
+///      still sees the raw IP for debugging.
+///   3. `destination_ip:port` if everything else fails.
+///
+/// Returns aggregates sorted by total bytes DESC, truncated to
+/// `top_n`. Pass an empty `dns_ptr_map` to skip enrichment (tests
+/// and pre-5a-2 call sites).
+pub fn aggregate_by_destination(
+    snap: &Snapshot,
+    top_n: usize,
+    dns_ptr_map: &HashMap<String, Option<String>>,
+) -> Vec<ConnAggregate> {
     let mut by_dest: HashMap<String, ConnAggregate> = HashMap::new();
     for c in &snap.connections {
         let label = if !c.metadata.host.is_empty() {
@@ -135,13 +146,24 @@ pub fn aggregate_by_destination(snap: &Snapshot, top_n: usize) -> Vec<ConnAggreg
                 format!("{}:{}", c.metadata.host, c.metadata.destination_port)
             }
         } else if !c.metadata.destination_ip.is_empty() {
-            if c.metadata.destination_port.is_empty() {
-                c.metadata.destination_ip.clone()
-            } else {
-                format!(
+            // Phase 5a-2: consult reverse-DNS cache. Some(Some)
+            // = resolved hostname (enrich label). Some(None) =
+            // cached "no PTR" (use bare IP). None = not yet
+            // looked up (use bare IP).
+            let cached_hostname = dns_ptr_map
+                .get(&c.metadata.destination_ip)
+                .and_then(|v| v.as_deref());
+            match (cached_hostname, c.metadata.destination_port.is_empty()) {
+                (Some(host), true) => format!("{} ({})", host, c.metadata.destination_ip),
+                (Some(host), false) => format!(
+                    "{}:{} ({})",
+                    host, c.metadata.destination_port, c.metadata.destination_ip
+                ),
+                (None, true) => c.metadata.destination_ip.clone(),
+                (None, false) => format!(
                     "{}:{}",
                     c.metadata.destination_ip, c.metadata.destination_port
-                )
+                ),
             }
         } else {
             "(unknown)".to_string()
@@ -315,7 +337,7 @@ mod tests {
             conn("1.1.1.1", "8.8.8.8", "443", "youtube.com", "tcp", 50, 500),
             conn("1.1.1.1", "1.1.1.1", "53", "", "udp", 10, 20),
         ]);
-        let top = aggregate_by_destination(&s, 10);
+        let top = aggregate_by_destination(&s, 10, &HashMap::new());
         assert_eq!(top.len(), 2, "youtube.com:443 + 1.1.1.1:53");
         assert_eq!(top[0].label, "youtube.com:443");
         assert_eq!(top[0].conns, 2);
@@ -335,14 +357,68 @@ mod tests {
             10,
             20,
         )]);
-        let top = aggregate_by_destination(&s, 10);
+        let top = aggregate_by_destination(&s, 10, &HashMap::new());
         assert_eq!(top[0].label, "172.217.16.142:443");
+    }
+
+    #[test]
+    fn aggregate_by_destination_uses_dns_ptr_cache_when_host_empty_and_cache_hit() {
+        // Phase 5a-2: when sing-box gives only an IP (no SNI/Host),
+        // the reverse-DNS cache fills the gap. Cached hostname becomes
+        // `hostname:port (ip)` so the operator sees BOTH.
+        let s = snap(vec![conn(
+            "1.1.1.1",
+            "35.217.1.178",
+            "50005",
+            "",
+            "udp",
+            100,
+            200,
+        )]);
+        let mut cache: HashMap<String, Option<String>> = HashMap::new();
+        cache.insert(
+            "35.217.1.178".to_string(),
+            Some("r3.googlevideo.com".to_string()),
+        );
+        let top = aggregate_by_destination(&s, 10, &cache);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].label, "r3.googlevideo.com:50005 (35.217.1.178)");
+    }
+
+    #[test]
+    fn aggregate_by_destination_skips_cache_when_negative_entry() {
+        // Cached "no PTR" → bare IP, not enriched.
+        let s = snap(vec![conn("1.1.1.1", "5.5.5.5", "443", "", "tcp", 10, 20)]);
+        let mut cache: HashMap<String, Option<String>> = HashMap::new();
+        cache.insert("5.5.5.5".to_string(), None);
+        let top = aggregate_by_destination(&s, 10, &cache);
+        assert_eq!(top[0].label, "5.5.5.5:443");
+    }
+
+    #[test]
+    fn aggregate_by_destination_uses_metadata_host_over_dns_cache() {
+        // sing-box already resolved (via SNI) → metadata.host wins,
+        // cache ignored to preserve the protocol's own DNS answer.
+        let s = snap(vec![conn(
+            "1.1.1.1",
+            "8.8.8.8",
+            "443",
+            "actually-sni.example.com",
+            "tcp",
+            10,
+            20,
+        )]);
+        let mut cache: HashMap<String, Option<String>> = HashMap::new();
+        cache.insert("8.8.8.8".to_string(), Some("dns.google".to_string()));
+        let top = aggregate_by_destination(&s, 10, &cache);
+        // metadata.host wins; cache.dns.google ignored.
+        assert_eq!(top[0].label, "actually-sni.example.com:443");
     }
 
     #[test]
     fn aggregate_by_destination_unknown_when_both_host_and_ip_empty() {
         let s = snap(vec![conn("1.1.1.1", "", "", "", "tcp", 10, 20)]);
-        let top = aggregate_by_destination(&s, 10);
+        let top = aggregate_by_destination(&s, 10, &HashMap::new());
         assert_eq!(top[0].label, "(unknown)");
     }
 
