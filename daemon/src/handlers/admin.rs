@@ -850,7 +850,7 @@ fn dashboard_vpn_activity(
                                 td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(act.bytes_dn_window)) }
                                 td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
                                     @match act.last_sample_ts {
-                                        Some(ts) => (ts.format("%m-%d %H:%M").to_string()),
+                                        Some(ts) => (format_msk(ts)),
                                         None => (tr(lang, "—", "—")),
                                     }
                                 }
@@ -3146,7 +3146,7 @@ pub(crate) async fn user_detail(
                 @match access_aggregates.last_seen {
                     Some(ts) => {
                         div style="font-size: 18px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                            (ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                            (format_msk_iso(ts))
                         }
                     }
                     None => {
@@ -3825,8 +3825,8 @@ async fn user_sessions_section(
                             td style="padding: 4px 8px;" {
                                 a href=(format!("/admin/servers/{}", crate::http_util::path_segment_encode(&r.server_id.0))) style="color: var(--ink); text-decoration: none;" { (r.server_id.0) }
                             }
-                            td style="padding: 4px 8px;" { (r.started_at.format("%m-%d %H:%M").to_string()) }
-                            td style="padding: 4px 8px;" { (r.last_seen.format("%m-%d %H:%M").to_string()) }
+                            td style="padding: 4px 8px;" { (format_msk(r.started_at)) }
+                            td style="padding: 4px 8px;" { (format_msk(r.last_seen)) }
                             td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (dur_str) }
                             td style="padding: 4px 8px; text-align: right;" { (r.conn_count_peak) }
                         }
@@ -3857,6 +3857,34 @@ async fn user_top_destinations_section(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "top_destinations_for_user failed");
             Vec::new()
         });
+
+    // Phase 5d: enrich bare-IP labels via `dns_ptr_cache`. The
+    // poller writes `IP:port` when sing-box's metadata.host was
+    // empty (most TCP-to-IP traffic); the resolver background
+    // job populates `dns_ptr_cache` separately. At render time we
+    // bulk-lookup so each row that's still a bare IP can be shown
+    // as `hostname:port (ip)` — matching the format
+    // `snapshot_cache::aggregate_by_destination` uses on the
+    // server-detail page (one canonical render shape for both).
+    let mut ip_candidates: Vec<String> = rows
+        .iter()
+        .filter_map(|r| extract_ip_from_label(&r.destination_label).map(str::to_owned))
+        .collect();
+    ip_candidates.sort();
+    ip_candidates.dedup();
+    let dns_map = if ip_candidates.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        state
+            .inv
+            .lookup_dns_ptr_bulk(&ip_candidates)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "lookup_dns_ptr_bulk failed");
+                std::collections::HashMap::new()
+            })
+    };
+
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow {
@@ -3896,10 +3924,12 @@ async fn user_top_destinations_section(
                 tbody {
                     @for r in &rows {
                         tr style="border-bottom: 1px dotted var(--rule);" {
-                            td style="padding: 4px 8px; overflow-wrap: anywhere;" { (r.destination_label) }
+                            td style="padding: 4px 8px; overflow-wrap: anywhere;" {
+                                (enrich_destination_label(&r.destination_label, &dns_map))
+                            }
                             td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (r.hit_count) }
                             td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
-                                (r.last_seen.format("%m-%d %H:%M").to_string())
+                                (format_msk(r.last_seen))
                             }
                         }
                     }
@@ -4055,6 +4085,118 @@ fn humanize_bytes(n: u64) -> String {
         unit += 1;
     }
     format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Format a UTC timestamp in Moscow time (MSK, UTC+3, no DST since
+/// 2014). Used on user-detail dense tables (Top destinations,
+/// Sessions) where the operator scans for «когда последний раз ходил»
+/// — UTC made the time column unreadable for the sole operator in
+/// MSK. The trailing `MSK` literal makes the timezone explicit so
+/// nobody mistakes the column for UTC after Phase 5d.
+///
+/// Fallback to `%m-%d %H:%M UTC` if `FixedOffset::east_opt` rejects
+/// the offset — defensive, in practice `3 * 3600` always fits in
+/// the documented `-86_399..=86_399` range.
+fn format_msk(dt: chrono::DateTime<chrono::Utc>) -> String {
+    match chrono::FixedOffset::east_opt(3 * 3600) {
+        Some(tz) => dt.with_timezone(&tz).format("%m-%d %H:%M MSK").to_string(),
+        None => dt.format("%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+/// Same as [`format_msk`] but emits the year too (`%Y-%m-%d %H:%M MSK`).
+/// Used for «last fetch / last sample» tile timestamps where the
+/// operator needs the absolute date — those values can be days/weeks
+/// old, so dropping the year would be ambiguous.
+fn format_msk_iso(dt: chrono::DateTime<chrono::Utc>) -> String {
+    match chrono::FixedOffset::east_opt(3 * 3600) {
+        Some(tz) => dt
+            .with_timezone(&tz)
+            .format("%Y-%m-%d %H:%M MSK")
+            .to_string(),
+        None => dt.format("%Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+/// Phase 5d — pull a bare IPv4 candidate out of a `vpn_user_destinations`
+/// row label so the render path can bulk-look-up reverse-DNS.
+///
+/// The poller (`daemon::clash_poller::poll_one_server`) writes the
+/// label as one of:
+///   * `host:port` — sing-box already had a DNS name (e.g. SNI), no
+///     enrichment needed; we return `None` so the IP-lookup batch
+///     skips this row.
+///   * `IP:port` — bare IPv4 + port; return `Some(ip_slice)` so the
+///     render path can probe the `dns_ptr_cache` for a hostname.
+///   * `IP` — bare IPv4 alone (poller path when `destination_port` is
+///     empty, see `clash_poller::poll_one_server`'s portless branch);
+///     return `Some(ip_slice)` so this row gets enriched too.
+///   * Anything else (hostname-form, already-enriched, IPv6 with
+///     internal colons, malformed) → `None`.
+///
+/// Intentionally narrow: the only goal is «is this a bare IP we
+/// could enrich», not «is this a valid IPv4». A malformed
+/// `999.999.999.999:80` returns `Some` and the cache lookup will
+/// simply miss — strictly correct because the cache key matches
+/// what the writer stored.
+fn extract_ip_from_label(label: &str) -> Option<&str> {
+    // Portless form first: whole label is `[0-9.]+` and non-empty.
+    // Has to be checked BEFORE rsplit_once(':') because that returns
+    // None for the no-colon case, and we want to accept it.
+    if !label.is_empty()
+        && !label.contains(':')
+        && label.chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return Some(label);
+    }
+    // With-port form: `IP:port`.
+    let (left, right) = label.rsplit_once(':')?;
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    if !right.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !left.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    Some(left)
+}
+
+/// Phase 5d — assemble the visible destination label by enriching
+/// bare-IP rows with their cached hostname. Single source of truth
+/// for the per-row render in `user_top_destinations_section`; lives
+/// here (not inline in maud) so the contract has direct unit tests.
+///
+/// Shape parity: the output format `hostname:port (ip)` matches
+/// `snapshot_cache::aggregate_by_destination` on the server-detail
+/// page — operator scanning both screens sees one canonical layout.
+///
+/// Passthrough rules:
+///   * `label` not a bare-IP form (hostname, already-enriched, IPv6,
+///     malformed) → returned unchanged.
+///   * `dns_map[ip] = Some(Some(host))` → enriched as `host:port (ip)`,
+///     or `host (ip)` when the original label was a portless IP.
+///   * `dns_map[ip] = Some(None)` (cached negative) → returned
+///     unchanged; resolver tried and got no PTR.
+///   * `dns_map[ip] = None` (cache miss) → returned unchanged;
+///     resolver hasn't visited this IP yet.
+fn enrich_destination_label(
+    label: &str,
+    dns_map: &std::collections::HashMap<String, Option<String>>,
+) -> String {
+    let Some(ip) = extract_ip_from_label(label) else {
+        return label.to_string();
+    };
+    let Some(Some(host)) = dns_map.get(ip) else {
+        return label.to_string();
+    };
+    // Preserve any port suffix (`:443`, etc.) that came after the IP
+    // — strip_prefix on the IP and reuse the remainder verbatim, so
+    // a portless label `1.2.3.4` becomes `host (1.2.3.4)` and a
+    // with-port `1.2.3.4:443` becomes `host:443 (1.2.3.4)`.
+    let port_suffix = label.strip_prefix(ip).unwrap_or("");
+    format!("{host}{port_suffix} ({ip})")
 }
 
 /// 404 response for `/admin/users/<id>` when no such user exists. Keeps
@@ -9942,5 +10084,168 @@ pub(crate) async fn grant_protocol_enable(
         .into_response(),
         Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
         Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 5d unit tests — `format_msk` + `extract_ip_from_label`.
+//
+//  Live in the impl crate (not `tests/admin_smoke.rs`) because the
+//  helpers themselves are file-private and the contracts are tiny;
+//  adding axum/maud scaffolding for them would dwarf the asserts.
+// ────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod helper_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn format_msk_shifts_utc_by_plus_three_hours_and_marks_timezone() {
+        // Noon UTC = 15:00 MSK. The MSK literal is part of the
+        // contract — see the user-detail Sessions table where the
+        // operator needs the timezone to be unambiguous.
+        let utc = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap();
+        assert_eq!(format_msk(utc), "05-21 15:00 MSK");
+    }
+
+    #[test]
+    fn format_msk_wraps_across_midnight_when_adding_offset() {
+        // 22:30 UTC on 2026-05-21 = 01:30 MSK on 2026-05-22.
+        // Date column has to advance too — otherwise the late-night
+        // ticks would all look like they happened "yesterday" in MSK.
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 21, 22, 30, 0)
+            .unwrap();
+        assert_eq!(format_msk(utc), "05-22 01:30 MSK");
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_ip_for_bare_ipv4_port_form() {
+        assert_eq!(extract_ip_from_label("1.2.3.4:443"), Some("1.2.3.4"));
+        assert_eq!(extract_ip_from_label("10.0.0.1:80"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_none_for_hostname_form() {
+        // Hostname segment contains non-digit, non-dot chars (letters,
+        // hyphens) — we leave these as-is because the poller already
+        // had a DNS name from sing-box metadata; enriching would just
+        // duplicate the host.
+        assert!(extract_ip_from_label("www.microsoft.com:443").is_none());
+        assert!(extract_ip_from_label("api-v2.example.io:8443").is_none());
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_none_for_already_enriched_label() {
+        // `hostname:port (ip)` shape produced by Phase 5d enrichment
+        // and the server-detail aggregator. The `(ip)` suffix breaks
+        // the all-digits port check — the helper should refuse,
+        // preventing a second enrichment round (which would render
+        // garbage like `hostname:port (ip) (ip)`).
+        assert!(extract_ip_from_label("example.com:443 (1.2.3.4)").is_none());
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_none_for_ipv6_form() {
+        // IPv6 has internal colons. The rsplit_once peels off only
+        // the last `:`-segment, and the remainder contains colons
+        // which fail the `digit-or-dot` check. Skipping IPv6 is
+        // acceptable for Phase 5d — VPN destinations are overwhelmingly
+        // v4; v6 support can be added when the cache learns it.
+        assert!(extract_ip_from_label("2001:db8::1:8080").is_none());
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_none_for_malformed_input() {
+        assert!(extract_ip_from_label("no-colon-at-all").is_none());
+        assert!(extract_ip_from_label(":443").is_none()); // empty IP
+        assert!(extract_ip_from_label("1.2.3.4:").is_none()); // empty port
+        assert!(extract_ip_from_label("1.2.3.4:notaport").is_none());
+    }
+
+    #[test]
+    fn extract_ip_from_label_returns_ip_for_portless_bare_ipv4() {
+        // The clash-poller writes the destination_label as just the IP
+        // (no colon, no port) when `destination_port` is empty — see
+        // `daemon::clash_poller::poll_one_server` portless branch.
+        // Those rows must enrich too, otherwise the most opaque ones
+        // (UDP / ICMP-style flows with no port metadata) stay as raw IPs.
+        assert_eq!(extract_ip_from_label("1.2.3.4"), Some("1.2.3.4"));
+        assert_eq!(extract_ip_from_label("10.0.0.1"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn format_msk_iso_emits_full_date_with_msk_marker() {
+        // Used on the user-detail «last fetch» tile where the value
+        // can be many days old; dropping the year would be ambiguous.
+        let utc = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap();
+        assert_eq!(format_msk_iso(utc), "2026-05-21 15:00 MSK");
+    }
+
+    #[test]
+    fn enrich_destination_label_inserts_hostname_for_cache_hit_with_port() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("1.2.3.4".to_string(), Some("example.com".to_string()));
+        // Shape parity with `snapshot_cache::aggregate_by_destination`:
+        // `host:port (ip)`. Pins the assembly order — would catch any
+        // future swap to `ip:port (host)` or dropped port suffix.
+        assert_eq!(
+            enrich_destination_label("1.2.3.4:443", &cache),
+            "example.com:443 (1.2.3.4)"
+        );
+    }
+
+    #[test]
+    fn enrich_destination_label_inserts_hostname_for_cache_hit_portless() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("1.2.3.4".to_string(), Some("example.com".to_string()));
+        // Portless variant — when the original label had no `:port`,
+        // the enriched form must not invent one.
+        assert_eq!(
+            enrich_destination_label("1.2.3.4", &cache),
+            "example.com (1.2.3.4)"
+        );
+    }
+
+    #[test]
+    fn enrich_destination_label_passes_through_when_cache_misses() {
+        let cache = std::collections::HashMap::new();
+        // Untouched bare-IP label when the resolver hasn't visited
+        // this IP yet — operator still sees the raw IP, not a panic
+        // or a "(unknown)" sentinel.
+        assert_eq!(
+            enrich_destination_label("1.2.3.4:443", &cache),
+            "1.2.3.4:443"
+        );
+    }
+
+    #[test]
+    fn enrich_destination_label_passes_through_for_negative_cache_entry() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("1.2.3.4".to_string(), None);
+        // Some(None) = resolver tried, got no PTR. The label stays
+        // bare-IP rather than emitting `None:port (ip)`.
+        assert_eq!(
+            enrich_destination_label("1.2.3.4:443", &cache),
+            "1.2.3.4:443"
+        );
+    }
+
+    #[test]
+    fn enrich_destination_label_passes_through_for_hostname_label() {
+        let mut cache = std::collections::HashMap::new();
+        // Even if a hostname accidentally exists in the cache (it
+        // shouldn't — keys are IPs), the label is not bare-IP form
+        // so extract_ip_from_label refuses and enrichment skips.
+        cache.insert(
+            "www.microsoft.com".to_string(),
+            Some("ms.example".to_string()),
+        );
+        assert_eq!(
+            enrich_destination_label("www.microsoft.com:443", &cache),
+            "www.microsoft.com:443"
+        );
     }
 }
