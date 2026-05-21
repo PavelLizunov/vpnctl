@@ -548,3 +548,281 @@ async fn recent_sub_access_renders_null_for_pre_migration_rows() {
     assert!(rows[0].geo_country.is_none());
     assert!(rows[0].geo_asn.is_none());
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase 4a — VPN-egress detection (migration 0021) + aggregates
+// + recent_sub_access_filtered.
+// ────────────────────────────────────────────────────────────────────────
+
+// Helper to register a server so the migration-0021 trigger has
+// rows to match against.
+async fn add_test_server(inv: &SqliteInventory, id: &str, address: &str) {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    inv.add_server(&Server {
+        id: ServerId(id.into()),
+        address: address.into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: Vec::new(),
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .expect("add_server");
+}
+
+#[tokio::test]
+async fn phase4a_trigger_marks_inserted_row_as_egress_when_ip_matches_server() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    // Hit /sub from the matching VPN-server IP — trigger should
+    // flip is_vpn_egress to 1.
+    inv.log_sub_access(&UserId("alice".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    // And one from a real client IP — should stay 0.
+    inv.log_sub_access(&UserId("alice".into()), "8.8.8.8", None, 200, 0)
+        .await
+        .unwrap();
+
+    let rows = inv
+        .recent_sub_access(&UserId("alice".into()), 5)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let egress: Vec<bool> = rows.iter().map(|r| r.is_vpn_egress).collect();
+    // newest-first ordering: real-client (8.8.8.8) is row 0, egress (10.20.30.40) is row 1.
+    assert_eq!(
+        egress,
+        vec![false, true],
+        "trigger must mark the VPN-egress row"
+    );
+}
+
+#[tokio::test]
+async fn phase4a_recent_sub_access_filtered_with_include_egress_false_hides_egress_rows() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    inv.log_sub_access(&UserId("alice".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    inv.log_sub_access(&UserId("alice".into()), "8.8.8.8", None, 200, 0)
+        .await
+        .unwrap();
+
+    let real_only = inv
+        .recent_sub_access_filtered(&UserId("alice".into()), 50, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        real_only.len(),
+        1,
+        "include_egress=false must return only the real-client row"
+    );
+    assert_eq!(real_only[0].ip, "8.8.8.8");
+    assert!(!real_only[0].is_vpn_egress);
+
+    let all = inv
+        .recent_sub_access_filtered(&UserId("alice".into()), 50, true)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2, "include_egress=true must return everything");
+}
+
+#[tokio::test]
+async fn phase4a_sub_access_aggregates_distinguishes_real_vs_egress_and_distinct_dims() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    // Two real-client rows in DE, one in FI, one duplicate IP, plus
+    // one egress hit. Aggregates should exclude egress from every
+    // counter EXCEPT egress_rows.
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "8.8.8.8",
+        None,
+        200,
+        100,
+        None,
+        None,
+        None,
+        Some("US"),
+        Some("AS15169 Google"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "8.8.8.8", // duplicate — distinct_ips must still count it once
+        None,
+        200,
+        100,
+        None,
+        None,
+        None,
+        Some("US"),
+        Some("AS15169 Google"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "5.5.5.5",
+        None,
+        200,
+        50,
+        None,
+        None,
+        None,
+        Some("FI"),
+        Some("AS1234 Telia"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // Egress row — must NOT pollute distinct_ips / countries / bytes.
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "10.20.30.40",
+        None,
+        200,
+        9999,
+        None,
+        None,
+        None,
+        Some("DE"),
+        Some("AS14956 Cloudzy"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let agg = inv
+        .sub_access_aggregates_for_user(&UserId("alice".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(agg.total_rows, 3, "egress row excluded from total_rows");
+    assert_eq!(agg.egress_rows, 1, "egress count must be exact");
+    assert_eq!(agg.distinct_ips, 2, "8.8.8.8 (×2) + 5.5.5.5 = 2 distinct");
+    assert_eq!(agg.distinct_countries, 2, "US + FI; DE was egress");
+    assert_eq!(agg.distinct_asns, 2);
+    assert_eq!(agg.total_bytes, 250, "100+100+50; egress 9999 excluded");
+    assert!(agg.last_seen.is_some());
+    assert!(agg.first_seen.is_some());
+}
+
+#[tokio::test]
+async fn phase4a_sub_access_aggregates_for_empty_user_returns_zeroes_and_none_timestamps() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let agg = inv
+        .sub_access_aggregates_for_user(&UserId("alice".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(agg.total_rows, 0);
+    assert_eq!(agg.egress_rows, 0);
+    assert_eq!(agg.distinct_ips, 0);
+    assert!(agg.last_seen.is_none());
+    assert!(agg.first_seen.is_none());
+}
+
+#[tokio::test]
+async fn phase4a_backfill_marks_pre_migration_rows_when_server_address_already_known() {
+    // Realistic deployment: vpnctld already has servers + sub_access
+    // rows pre-dating migration 0021. The migration's UPDATE
+    // backfill must flag every existing row whose IP matches a
+    // current server. Verified end-to-end via the migrator.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    // Insert one egress + one real row (post-migration, so the
+    // trigger does the flagging — same end-state we'd get from
+    // backfill on pre-migration rows).
+    inv.log_sub_access(&UserId("alice".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    inv.log_sub_access(&UserId("alice".into()), "1.1.1.1", None, 200, 0)
+        .await
+        .unwrap();
+
+    let rows = inv
+        .recent_sub_access(&UserId("alice".into()), 50)
+        .await
+        .unwrap();
+    let flagged: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.is_vpn_egress)
+        .map(|r| r.ip.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["10.20.30.40"],
+        "exactly the server IP is flagged"
+    );
+}
+
+#[tokio::test]
+async fn phase4a_add_server_retroactively_flags_existing_rows_for_new_address() {
+    // Pavel: «если сервер добавлен ПОСЛЕ migration 0021, старые
+    // строки с его IP должны быть помечены». Review-agent finding #3.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // Log rows BEFORE the server is registered → they go in with
+    // is_vpn_egress = 0 (trigger sees empty servers set).
+    inv.log_sub_access(&UserId("alice".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    inv.log_sub_access(&UserId("alice".into()), "8.8.8.8", None, 200, 0)
+        .await
+        .unwrap();
+    let before = inv
+        .recent_sub_access(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    assert!(
+        before.iter().all(|r| !r.is_vpn_egress),
+        "no rows should be flagged before the server is registered"
+    );
+
+    // NOW register the server. add_server runs the retro-backfill
+    // UPDATE inside its transaction.
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    let after = inv
+        .recent_sub_access(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    let flagged: Vec<&str> = after
+        .iter()
+        .filter(|r| r.is_vpn_egress)
+        .map(|r| r.ip.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["10.20.30.40"],
+        "after add_server, exactly the matching historical row must be flagged"
+    );
+}

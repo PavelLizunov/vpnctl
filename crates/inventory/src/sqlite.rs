@@ -136,6 +136,50 @@ pub struct SubAccessEntry {
     // schema is ready, capture is gated on host config.
     pub tls_ja3: Option<String>,
     pub tls_ja4: Option<String>,
+    // Phase 4a (migration 0021) — true when this row's src IP is
+    // one of our own VPN-server addresses. Means: the user was in
+    // full-tunnel mode and their request reached us through the
+    // VPN exit, so `ip` is OUR server IP, NOT the user's device IP.
+    // Set automatically by a SQLite trigger on INSERT (no Rust-
+    // side state to invalidate when servers come and go).
+    pub is_vpn_egress: bool,
+}
+
+/// Aggregates over a user's `sub_access_log` rows for the
+/// per-user-detail summary cards. Phase 4a — Pavel needs «I've
+/// reset the iPhone, what was its last seen IP?» / «how many
+/// countries did this user hit us from?» at a glance instead of
+/// scanning the timeline. All counters EXCLUDE VPN-egress rows
+/// (they're our own servers, no operator-actionable signal).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubAccessAggregates {
+    /// Total rows in the window (real client IPs only — egress
+    /// rows excluded).
+    pub total_rows: u64,
+    /// How many rows were filtered out as VPN-egress in this
+    /// window — surface as a small badge so the operator knows
+    /// the «N hidden» count without scrolling.
+    pub egress_rows: u64,
+    /// Distinct real client IPs. A high number with low
+    /// distinct_countries (e.g. 50 IPs, 1 country) usually means
+    /// a single roaming device on a busy ISP; high+high means
+    /// shared subscription.
+    pub distinct_ips: u64,
+    /// Distinct ISO country codes from GeoIP enrichment. NULL
+    /// geo_country (pre-2026-05-21 rows / private IPs) is not
+    /// counted.
+    pub distinct_countries: u64,
+    /// Distinct ASN labels (full string `AS1234 Operator Ltd`).
+    pub distinct_asns: u64,
+    /// Sum of `bytes` across the window — total subscription
+    /// payload bytes served to this user.
+    pub total_bytes: u64,
+    /// Timestamp of the most recent row (real or egress). None if
+    /// the user has zero history. Useful for the «last seen
+    /// recently / inactive» chip on the user-detail page.
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Earliest row in the window. None if zero history.
+    pub first_seen: Option<DateTime<Utc>>,
 }
 
 /// One row of `sub_rate_bans` (Phase Track-2 chunk 2). Persistent
@@ -354,6 +398,23 @@ impl SqliteInventory {
                 .bind(&proto.0)
                 .execute(&mut *tx)
                 .await?;
+        }
+
+        // Phase 4a (migration 0021) — when a server is added AFTER
+        // the migration has run, any pre-existing sub_access_log
+        // rows that happened to come from this server's IP (e.g.
+        // logged before vpnctld knew this was an egress) need to
+        // be flagged retroactively. Skipped if the server has no
+        // address at all (defensive — Server.address is required
+        // by the schema so this never happens in practice).
+        if !s.address.is_empty() {
+            sqlx::query(
+                "UPDATE sub_access_log SET is_vpn_egress = 1
+                 WHERE ip = ?1 AND is_vpn_egress = 0",
+            )
+            .bind(&s.address)
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
@@ -1690,10 +1751,15 @@ impl SqliteInventory {
         user_id: &UserId,
         limit: i64,
     ) -> Result<Vec<SubAccessEntry>> {
+        // Default behaviour preserved (returns ALL rows including
+        // VPN-egress) so existing callers + spec tests keep their
+        // contract. Callers that want the «real IPs only» variant
+        // call `recent_sub_access_filtered` (Phase 4a) instead.
         let rows = sqlx::query(
             "SELECT id, ts, user_id, ip, ua, status, bytes,
                     accept_language, http_version, device_class,
-                    geo_country, geo_asn, tls_ja3, tls_ja4
+                    geo_country, geo_asn, tls_ja3, tls_ja4,
+                    is_vpn_egress
              FROM sub_access_log
              WHERE user_id = ?1
              ORDER BY id DESC
@@ -1704,6 +1770,120 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_sub_access).collect()
+    }
+
+    /// Phase 4a — `recent_sub_access` with VPN-egress filter. When
+    /// `include_egress = false` (the user-detail page's default),
+    /// returns ONLY rows where the src IP is a real client device,
+    /// not one of our own VPN server addresses. The `is_vpn_egress`
+    /// flag is set by the SQLite trigger added in migration 0021,
+    /// so this filter is just a `WHERE is_vpn_egress = 0` predicate
+    /// using the partial index `idx_sub_access_log_user_ts_real`.
+    pub async fn recent_sub_access_filtered(
+        &self,
+        user_id: &UserId,
+        limit: i64,
+        include_egress: bool,
+    ) -> Result<Vec<SubAccessEntry>> {
+        let sql = if include_egress {
+            "SELECT id, ts, user_id, ip, ua, status, bytes,
+                    accept_language, http_version, device_class,
+                    geo_country, geo_asn, tls_ja3, tls_ja4,
+                    is_vpn_egress
+             FROM sub_access_log
+             WHERE user_id = ?1
+             ORDER BY id DESC
+             LIMIT ?2"
+        } else {
+            "SELECT id, ts, user_id, ip, ua, status, bytes,
+                    accept_language, http_version, device_class,
+                    geo_country, geo_asn, tls_ja3, tls_ja4,
+                    is_vpn_egress
+             FROM sub_access_log
+             WHERE user_id = ?1 AND is_vpn_egress = 0
+             ORDER BY id DESC
+             LIMIT ?2"
+        };
+        let rows = sqlx::query(sql)
+            .bind(&user_id.0)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_sub_access).collect()
+    }
+
+    /// Phase 4a — aggregates over a user's recent `sub_access_log`
+    /// rows for the user-detail summary cards (distinct IPs /
+    /// countries / ASNs, total bytes, first/last seen, hidden-
+    /// egress badge count). `days` bounds the window — Pavel's
+    /// chosen UX is 30d for the cards, matching the retention
+    /// purger's max window.
+    ///
+    /// One SQL round-trip; SQLite computes the aggregates over the
+    /// already-filtered window so we don't ship raw rows through
+    /// Rust just to count distinct values. The `egress_rows`
+    /// counter is the only field that includes egress (so the
+    /// «N hidden» badge has the right denominator).
+    pub async fn sub_access_aggregates_for_user(
+        &self,
+        user_id: &UserId,
+        days: u32,
+    ) -> Result<SubAccessAggregates> {
+        let cutoff = format!("-{days} days");
+        // One query returns 8 scalars. Wraps NULL aggregates in
+        // sensible defaults (zero / None) via the conversion below.
+        let row = sqlx::query(
+            "SELECT
+                COUNT(*) FILTER (WHERE is_vpn_egress = 0)                    AS total_rows,
+                COUNT(*) FILTER (WHERE is_vpn_egress = 1)                    AS egress_rows,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 THEN ip END)      AS distinct_ips,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND geo_country IS NOT NULL THEN geo_country END) AS distinct_countries,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND geo_asn IS NOT NULL THEN geo_asn END)         AS distinct_asns,
+                COALESCE(SUM(CASE WHEN is_vpn_egress = 0 THEN bytes END), 0) AS total_bytes,
+                MAX(ts)                                                      AS last_seen,
+                MIN(ts)                                                      AS first_seen
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+        )
+        .bind(&user_id.0)
+        .bind(&cutoff)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_rows: i64 = row.try_get("total_rows")?;
+        let egress_rows: i64 = row.try_get("egress_rows")?;
+        let distinct_ips: i64 = row.try_get("distinct_ips")?;
+        let distinct_countries: i64 = row.try_get("distinct_countries")?;
+        let distinct_asns: i64 = row.try_get("distinct_asns")?;
+        let total_bytes: i64 = row.try_get("total_bytes")?;
+        let last_seen_str: Option<String> = row.try_get("last_seen")?;
+        let first_seen_str: Option<String> = row.try_get("first_seen")?;
+
+        let parse_ts = |s: Option<String>| -> Option<DateTime<Utc>> {
+            s.and_then(|t| {
+                DateTime::parse_from_rfc3339(&t)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            })
+        };
+
+        // `i64 → u64` via `.max(0) as u64` is a saturating cast —
+        // honest about discarding negatives (impossible for
+        // COALESCE(SUM, 0) and COUNT(*), but defensive against any
+        // future schema bug that lets a sentinel `-1` slip through;
+        // the previous `.unwrap_or(0)` form silently swallowed
+        // those without telemetry). Review-agent Phase 4a #4.
+        Ok(SubAccessAggregates {
+            total_rows: total_rows.max(0) as u64,
+            egress_rows: egress_rows.max(0) as u64,
+            distinct_ips: distinct_ips.max(0) as u64,
+            distinct_countries: distinct_countries.max(0) as u64,
+            distinct_asns: distinct_asns.max(0) as u64,
+            total_bytes: total_bytes.max(0) as u64,
+            last_seen: parse_ts(last_seen_str),
+            first_seen: parse_ts(first_seen_str),
+        })
     }
 
     /// UA-cluster aggregate for the Phase Track-4 fingerprint
@@ -2766,6 +2946,10 @@ fn row_to_sub_access(r: sqlx::sqlite::SqliteRow) -> Result<SubAccessEntry> {
         // Track-1.4 (migration 0020) — same NULL-tolerant pattern.
         tls_ja3: r.try_get("tls_ja3")?,
         tls_ja4: r.try_get("tls_ja4")?,
+        // Phase 4a (migration 0021) — INTEGER NOT NULL DEFAULT 0
+        // in SQL → bool in Rust. SQLite stores 0/1; `try_get::<i64>`
+        // and compare. Always present (NOT NULL with DEFAULT).
+        is_vpn_egress: r.try_get::<i64, _>("is_vpn_egress").unwrap_or(0) != 0,
     })
 }
 

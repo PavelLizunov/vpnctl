@@ -23,5 +23,6 @@ pub use migrate::{
 };
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, NodeHealthRow, SqliteInventory,
-    SqliteInventoryError, SubAccessEntry, TelegramConfig, UaCluster, VpnStatsDelta, VpnStatsRow,
+    SqliteInventoryError, SubAccessAggregates, SubAccessEntry, TelegramConfig, UaCluster,
+    VpnStatsDelta, VpnStatsRow,
 };

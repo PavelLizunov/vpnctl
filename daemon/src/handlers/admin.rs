@@ -2119,13 +2119,34 @@ fn collect_share_links(
     out
 }
 
+/// Phase 4a — query parameters for the user-detail page. Today only
+/// the VPN-egress toggle; more flags can land here as they show up.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct UserDetailQuery {
+    /// When `?show_egress=1`, the sub-access table includes rows
+    /// where src IP is one of our own VPN-server addresses (the
+    /// «in full-tunnel mode the user's egress is the VPN exit»
+    /// case). Default = off, so the operator sees only real client
+    /// IPs (the genuine abuse-signal).
+    #[serde(default)]
+    show_egress: Option<String>,
+}
+
+impl UserDetailQuery {
+    fn show_egress(&self) -> bool {
+        matches!(self.show_egress.as_deref(), Some("1") | Some("true"))
+    }
+}
+
 pub(crate) async fn user_detail(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
+    let show_egress = query.show_egress();
 
     let user = state
         .inv
@@ -2289,13 +2310,30 @@ pub(crate) async fn user_detail(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "distinct_ips_for_user(168) failed");
             0
         });
+    // Phase 4a — default hides VPN-egress rows (where src IP =
+    // one of our own VPN-server addresses, i.e. user is in
+    // full-tunnel + we're seeing OUR exit IP, not theirs). The
+    // `?show_egress=1` query flag flips it on for the case Pavel
+    // explicitly wants to inspect the full-tunnel traffic.
     let recent_access = state
         .inv
-        .recent_sub_access(&uid, 25)
+        .recent_sub_access_filtered(&uid, 25, show_egress)
         .await
         .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sub_access failed");
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sub_access_filtered failed");
             Vec::new()
+        });
+    // Phase 4a — aggregates over the 30-day window for the summary
+    // cards above the timeline table. Failure → zeros; cards still
+    // render so the page doesn't break (operator sees the
+    // diagnostic in journalctl).
+    let access_aggregates = state
+        .inv
+        .sub_access_aggregates_for_user(&uid, 30)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_aggregates_for_user failed");
+            vpnctl_inventory::SubAccessAggregates::default()
         });
     // Heat threshold — first cut. 5 distinct IPs in 24h is a soft
     // signal that the URL has been shared. Configurable later via the
@@ -2968,23 +3006,116 @@ pub(crate) async fn user_detail(
                 }
             }
         }
-        div style="display: flex; gap: 36px; padding: 12px 0 18px; font-family: var(--serif);" {
+        // Phase 4a hero row 1 — 30-day aggregates from
+        // sub_access_aggregates_for_user. Cards excluded VPN-egress
+        // rows; the `last_seen` chip uses the 30d max ts.
+        div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 12px 0 6px; font-family: var(--serif);" {
+            div title=(crate::i18n::tr(lang, "Distinct real-client IPs over the last 30 days. VPN-egress rows (where src IP = one of our VPN servers, full-tunnel mode) excluded.", "Уникальные клиентские IP за 30 дней. Строки VPN-egress (когда src IP — один из наших VPN-серверов в full-tunnel) исключены.")) {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_ips) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (crate::i18n::tr(lang, "distinct IPs · 30 days", "уникальных IP · 30 дней"))
+                }
+            }
+            div title=(crate::i18n::tr(lang, "Distinct ISO country codes from GeoIP enrichment (DB-IP Lite City). Rows where GeoIP didn't resolve a country stay uncounted.", "Уникальные ISO-коды стран из GeoIP-обогащения (DB-IP Lite City). Строки где GeoIP не определил страну — не учтены.")) {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_countries) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (crate::i18n::tr(lang, "countries · 30 days", "стран · 30 дней"))
+                }
+            }
+            div title=(crate::i18n::tr(lang, "Distinct ASN labels (full AS-number + operator name) from GeoIP-ASN. High distinct_ASNs with low distinct_countries = single user roaming ISPs. High both = shared subscription URL.", "Уникальные ASN (номер AS + название оператора) из GeoIP-ASN. Много ASN при малом числе стран = один юзер мигрирует между провайдерами. Много и того и другого = расшаренная подписка.")) {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_asns) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (crate::i18n::tr(lang, "ASNs · 30 days", "ASN · 30 дней"))
+                }
+            }
+            div title=(crate::i18n::tr(lang, "Sum of subscription payload bytes served over the last 30 days. Subscription JSON itself, NOT actual VPN traffic.", "Сумма байт payload подписки за 30 дней. Это сам JSON-конфиг подписки, НЕ реальный VPN-трафик.")) {
+                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (humanize_bytes(access_aggregates.total_bytes)) }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (crate::i18n::tr(lang, "served · 30 days", "отдано · 30 дней"))
+                }
+            }
+            div title=(crate::i18n::tr(lang, "Most recent subscription fetch (any IP, including VPN-egress). If older than a few days, the user's client probably isn't auto-updating — they may have imported the URL once and forgotten about it.", "Последнее обращение к подписке (любой IP, включая VPN-egress). Если старше нескольких дней — клиент не auto-update'ит подписку; возможно, юзер импортировал URL один раз и забыл.")) {
+                @match access_aggregates.last_seen {
+                    Some(ts) => {
+                        div style="font-size: 18px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                            (ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                        }
+                    }
+                    None => {
+                        div style="font-size: 18px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
+                            (crate::i18n::tr(lang, "never", "никогда"))
+                        }
+                    }
+                }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (crate::i18n::tr(lang, "last fetch", "последнее обращение"))
+                }
+            }
+        }
+        // Phase 4a — VPN-egress filter toggle. Default state hides
+        // rows where src IP is one of our own VPN-server addresses
+        // (full-tunnel egress noise). Clicking the link adds /
+        // removes `?show_egress=1`. Counter shows how many rows are
+        // currently hidden so the operator knows what the filter is
+        // catching.
+        div style="display: flex; gap: 36px; padding: 4px 0 14px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+            @if show_egress {
+                span {
+                    (crate::i18n::tr(lang, "Showing VPN-egress rows. ", "Показаны строки VPN-egress. "))
+                    a href=(format!("/admin/users/{}", user.id.0))
+                      style="color: var(--ink); text-decoration: underline;" {
+                        (crate::i18n::tr(lang, "Hide them", "Скрыть"))
+                    }
+                }
+            } @else {
+                @if access_aggregates.egress_rows > 0 {
+                    // English needs singular/plural agreement
+                    // («1 row hidden» vs «12 rows hidden»); Russian
+                    // sidesteps with the genitive-plural «строк» that
+                    // works for 1, 2, 5, … (technically «строка» for 1
+                    // is more natural but the gen-plural reads fine in
+                    // context and keeps the i18n surface flat).
+                    @let en_suffix = if access_aggregates.egress_rows == 1 {
+                        " VPN-egress row hidden (src IP = our own VPN server, full-tunnel mode). "
+                    } else {
+                        " VPN-egress rows hidden (src IP = our own VPN server, full-tunnel mode). "
+                    };
+                    span {
+                        (access_aggregates.egress_rows)
+                        (crate::i18n::tr(lang, en_suffix, " строк VPN-egress скрыто (src IP — наш VPN-сервер, full-tunnel). "))
+                        a href=(format!("/admin/users/{}?show_egress=1", user.id.0))
+                          style="color: var(--ink); text-decoration: underline;" {
+                            (crate::i18n::tr(lang, "Show them", "Показать"))
+                        }
+                    }
+                } @else {
+                    span {
+                        (crate::i18n::tr(lang, "No VPN-egress rows for this user (no full-tunnel traffic observed).", "Строк VPN-egress нет (full-tunnel-трафик не наблюдался)."))
+                    }
+                }
+            }
+        }
+        // Hero row 2 — the legacy 24h/7d/recent counters live here
+        // because they're shorter-window vs the 30-day aggregates
+        // above. Kept for continuity with the old abuse-detection
+        // workflow.
+        div style="display: flex; gap: 36px; padding: 4px 0 18px; font-family: var(--serif);" {
             div {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
+                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                     (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
                 }
             }
             div {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
+                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                     (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
                 }
             }
             div {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
+                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "recent fetches", "недавних обращений"))
+                    (crate::i18n::tr(lang, "rows in table", "строк в таблице"))
                 }
             }
         }

@@ -10604,3 +10604,232 @@ async fn phase3c_inline_script_does_not_contain_unescaped_script_terminator() {
         &script_body[script_body.len().saturating_sub(120)..]
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 4a — user-detail 30d aggregates + VPN-egress hide toggle.
+// ────────────────────────────────────────────────────────────────────────
+
+async fn phase4a_register_test_server(s: &AppState, id: &str, address: &str) {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    s.inv
+        .add_server(&Server {
+            id: ServerId(id.into()),
+            address: address.into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn phase4a_user_detail_renders_30d_aggregates_above_table() {
+    // Pin Phase 4a hero row 1 — distinct IPs / countries / ASNs /
+    // bytes-served / last-fetch cards land above the existing
+    // 24h/7d/recent counters. Each card has a `title=` tooltip
+    // explaining its meaning.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&User {
+        id: UserId("agg-user".into()),
+        uuid: "agg0".into(),
+        sub_token: Some("aggtok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    // Three real-client rows across US + DE; the aggregate query
+    // should count distinct_ips=3, distinct_countries=2, etc.
+    for (ip, cc, asn, bytes) in [
+        ("8.8.8.8", "US", "AS15169 Google", 100u64),
+        ("8.8.4.4", "US", "AS15169 Google", 100),
+        ("5.5.5.5", "DE", "AS3320 DTAG", 50),
+    ] {
+        inv.log_sub_access_rich(
+            &UserId("agg-user".into()),
+            ip,
+            None,
+            200,
+            bytes,
+            None,
+            None,
+            None,
+            Some(cc),
+            Some(asn),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/users/agg-user").await;
+    // Card labels (en defaults — i18n test covers ru elsewhere).
+    assert!(
+        html.contains("distinct IPs · 30 days"),
+        "missing 30d-IPs card"
+    );
+    assert!(
+        html.contains("countries · 30 days"),
+        "missing 30d-countries card"
+    );
+    assert!(html.contains("ASNs · 30 days"), "missing 30d-ASNs card");
+    assert!(html.contains("served · 30 days"), "missing 30d-bytes card");
+    assert!(html.contains("last fetch"), "missing last-fetch card");
+}
+
+#[tokio::test]
+async fn phase4a_user_detail_default_hides_vpn_egress_rows_and_shows_counter_toggle() {
+    // The CSRF gate: src IP = our own VPN server (`10.20.30.40`).
+    // The migration-0021 trigger should flag it. Default render
+    // (no `?show_egress=1`) excludes the row from the table AND
+    // shows the «N VPN-egress rows hidden» pointer.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
+    inv.add_user(&User {
+        id: UserId("egress-user".into()),
+        uuid: "eg0".into(),
+        sub_token: Some("egtok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    inv.log_sub_access(&UserId("egress-user".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    inv.log_sub_access(&UserId("egress-user".into()), "8.8.8.8", None, 200, 0)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s.clone()), "/admin/users/egress-user").await;
+    // The «N VPN-egress rows hidden» counter proves the trigger
+    // flagged the row AND that the user-detail handler is calling
+    // recent_sub_access_filtered with include_egress=false. NOTE:
+    // we can't just `!html.contains("10.20.30.40")` because the
+    // same address renders in the «Server access» section (every
+    // server is listed there as ungranted with a [grant] button).
+    assert!(html.contains("8.8.8.8"), "real client IP must render");
+    // English uses singular «row» when N=1; the counter
+    // therefore reads «1 VPN-egress row hidden ...».
+    // (Review-agent Phase 4a #5 — pluralization bug fix.)
+    assert!(
+        html.contains("1 VPN-egress row hidden"),
+        "counter must use singular «row» when exactly 1 row is hidden, got HTML around «VPN-egress»: …{}…",
+        html.split("VPN-egress")
+            .nth(1)
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>()
+    );
+    // The «Show them» link with the show_egress=1 query (handler
+    // builds it relative to /admin/users/<id>).
+    assert!(
+        html.contains("/admin/users/egress-user?show_egress=1"),
+        "missing «Show them» link with ?show_egress=1"
+    );
+}
+
+#[tokio::test]
+async fn phase4a_user_detail_show_egress_param_includes_vpn_egress_rows_and_flips_toggle() {
+    // ?show_egress=1 must (1) include the egress row in the table,
+    // (2) show the «Hide them» link pointing back at the
+    // egress-free URL.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
+    inv.add_user(&User {
+        id: UserId("egress-on".into()),
+        uuid: "eo0".into(),
+        sub_token: Some("eotok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    inv.log_sub_access(&UserId("egress-on".into()), "10.20.30.40", None, 200, 0)
+        .await
+        .unwrap();
+    inv.log_sub_access(&UserId("egress-on".into()), "8.8.8.8", None, 200, 0)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/egress-on?show_egress=1").await;
+    assert!(
+        html.contains("10.20.30.40"),
+        "show_egress=1 must include the VPN-egress IP in the table"
+    );
+    assert!(html.contains("8.8.8.8"), "real client IP still renders");
+    assert!(
+        html.contains("Showing VPN-egress rows"),
+        "expected «Showing VPN-egress rows» banner"
+    );
+    // «Hide them» link points back at the bare URL (no query).
+    assert!(
+        html.contains("href=\"/admin/users/egress-on\""),
+        "missing «Hide them» link back to egress-free URL"
+    );
+}
+
+#[tokio::test]
+async fn phase4a_user_detail_counter_uses_plural_rows_when_more_than_one_hidden() {
+    // Pin the plural branch — review-agent flagged the original
+    // `1 rows hidden` as ungrammatical; the fix uses singular when
+    // N=1. This test pins that the >1 branch correctly uses «rows».
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
+    phase4a_register_test_server(&s, "fi", "5.5.5.5").await;
+    inv.add_user(&User {
+        id: UserId("plur".into()),
+        uuid: "p0".into(),
+        sub_token: Some("ptok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    // 3 egress hits (2 from de IP, 1 from fi IP) + 1 real-client.
+    for ip in ["10.20.30.40", "10.20.30.40", "5.5.5.5", "1.1.1.1"] {
+        inv.log_sub_access(&UserId("plur".into()), ip, None, 200, 0)
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/users/plur").await;
+    assert!(
+        html.contains("3 VPN-egress rows hidden"),
+        "counter must use plural «rows» when N=3, got HTML around «VPN-egress»: …{}…",
+        html.split("VPN-egress")
+            .nth(1)
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>()
+    );
+}
