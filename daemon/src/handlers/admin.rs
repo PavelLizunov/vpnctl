@@ -2228,8 +2228,10 @@ pub(crate) async fn user_detail(
 
     let body = html! {
         div.ed-art-eyebrow {
-            a href="/admin/users" style="color: var(--mute); text-decoration: none;" { "← all users" }
-            "  ·  user"
+            a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
+                (crate::i18n::tr(lang, "← all users", "← все пользователи"))
+            }
+            (crate::i18n::tr(lang, "  ·  user", "  ·  пользователь"))
         }
         h1.ed-art-h1 { (user.id.0) }
         p.ed-art-deck {
