@@ -55,7 +55,7 @@ pub(crate) async fn get(
         .get(header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(120).collect::<String>());
-    let http_version = Some(format!("{:?}", request.version()));
+    let http_version = Some(crate::ua::http_version_label(request.version()).to_owned());
     let device_class = crate::ua::parse_ua_short(ua.as_deref()).map(str::to_owned);
     // IP only, port stripped — the port rotates per connection and would
     // explode the cardinality of "distinct IPs". Both v4 and v6 land as

@@ -10037,3 +10037,100 @@ async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
         .unwrap_or("");
     assert_eq!(loc, "/admin/servers/esrv2#enabled-protocols");
 }
+
+#[tokio::test]
+async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
+    // Pin that the migration-0019 chips render on the
+    // /admin/users/{id} Subscription-access table when columns
+    // are present. Without this assertion, a maud template
+    // refactor that drops the chip rendering would silently
+    // ship without breaking a test.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&User {
+        id: UserId("zoidberg".into()),
+        uuid: "z0".into(),
+        sub_token: Some("ztok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+
+    // Use log_sub_access_rich directly so we can populate the new
+    // metadata columns without a real HTTP roundtrip (the writer
+    // task path is exercised live, not in this smoke).
+    inv.log_sub_access_rich(
+        &UserId("zoidberg".into()),
+        "8.8.8.8",
+        Some("Hiddify/Android/2.5.0"),
+        200,
+        4096,
+        Some("ru-RU,ru;q=0.9"),
+        Some("HTTP/2.0"),
+        Some("Hiddify"),
+        Some("US"),
+        Some("AS15169 GOOGLE"),
+    )
+    .await
+    .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/zoidberg").await;
+    assert!(html.contains("8.8.8.8"), "raw IP must render");
+    assert!(
+        html.contains(">US<"),
+        "geo_country chip 'US' must render alongside the IP"
+    );
+    assert!(
+        html.contains("AS15169 GOOGLE"),
+        "geo_asn chip 'AS15169 GOOGLE' must render"
+    );
+    assert!(
+        html.contains(">HTTP/2.0<"),
+        "http_version chip 'HTTP/2.0' must render"
+    );
+    // Persisted device_class wins over live parse — Hiddify text
+    // shows up as the parsed label.
+    assert!(
+        html.contains(">Hiddify<"),
+        "persisted device_class 'Hiddify' must render as the UA label"
+    );
+}
+
+#[tokio::test]
+async fn track_1_2_subscription_access_legacy_row_renders_bare_ip() {
+    // Symmetric: a row from BEFORE migration 0019 (no new metadata)
+    // renders the IP without exploding and without spurious empty
+    // chips.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&User {
+        id: UserId("nibbler".into()),
+        uuid: "n0".into(),
+        sub_token: Some("ntok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    inv.log_sub_access(&UserId("nibbler".into()), "1.2.3.4", None, 200, 0)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/nibbler").await;
+    assert!(html.contains("1.2.3.4"), "raw IP must render");
+    // No geo_country / geo_asn chips since both are NULL — render
+    // must NOT emit empty `>` `<` placeholders.
+    assert!(
+        !html.contains(r#"border: 1px solid var(--acc-good, #2c5f2d); color: var(--acc-good, #2c5f2d); margin-left: 2px;" title="Country"#),
+        "no country chip when geo_country is None — currently no such substring"
+    );
+}

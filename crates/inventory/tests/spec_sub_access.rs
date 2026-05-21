@@ -429,3 +429,74 @@ async fn deleting_user_keeps_their_access_rows_with_null_user_id() {
     );
     raw.close().await;
 }
+
+#[tokio::test]
+async fn log_sub_access_rich_round_trips_all_track_1_2_columns() {
+    // Track-1.2 / migration 0019: persist accept_language +
+    // http_version + device_class + geo_country + geo_asn. Pin
+    // round-trip so a schema column-name drift or a SELECT that
+    // forgot to extend the projection fails loudly.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "8.8.8.8",
+        Some("Hiddify/Android/2.5.0"),
+        200,
+        4096,
+        Some("ru-RU,ru;q=0.9,en;q=0.8"),
+        Some("HTTP/2.0"),
+        Some("Hiddify"),
+        Some("US"),
+        Some("AS15169 GOOGLE"),
+    )
+    .await
+    .unwrap();
+
+    let rows = inv
+        .recent_sub_access(&UserId("alice".into()), 5)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one row");
+    let r = &rows[0];
+    assert_eq!(
+        r.accept_language.as_deref(),
+        Some("ru-RU,ru;q=0.9,en;q=0.8")
+    );
+    assert_eq!(r.http_version.as_deref(), Some("HTTP/2.0"));
+    assert_eq!(r.device_class.as_deref(), Some("Hiddify"));
+    assert_eq!(r.geo_country.as_deref(), Some("US"));
+    assert_eq!(r.geo_asn.as_deref(), Some("AS15169 GOOGLE"));
+}
+
+#[tokio::test]
+async fn recent_sub_access_renders_null_for_pre_migration_rows() {
+    // Backward-compat: a row inserted via the old 5-arg
+    // `log_sub_access` (or via raw SQL emulating pre-0019 schema)
+    // must NOT panic on `try_get` for the new columns —
+    // `Option<String>` maps NULL to `None` cleanly. Pin the
+    // legacy-data path so a future SubAccessEntry refactor that
+    // tightens the type to non-Option would fail here instead of
+    // breaking 30,000 production rows.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // Use the wrapper that passes None for all 5 new columns.
+    inv.log_sub_access(&UserId("alice".into()), "1.2.3.4", None, 200, 0)
+        .await
+        .unwrap();
+
+    let rows = inv
+        .recent_sub_access(&UserId("alice".into()), 5)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].accept_language.is_none());
+    assert!(rows[0].http_version.is_none());
+    assert!(rows[0].device_class.is_none());
+    assert!(rows[0].geo_country.is_none());
+    assert!(rows[0].geo_asn.is_none());
+}

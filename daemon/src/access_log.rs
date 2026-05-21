@@ -120,9 +120,10 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
         if geoip.is_loaded() {
             if let Ok(parsed_ip) = rec.ip.parse() {
                 if let Some(info) = geoip.lookup(parsed_ip) {
-                    // Compute asn_label BEFORE consuming
-                    // info.country_iso below — asn_label() borrows
-                    // &self so we capture the owned String first.
+                    // Compute asn_label first so the partial-move of
+                    // `info.country_iso` below doesn't surprise the
+                    // reader. (Borrow ends at the `;`, so order isn't
+                    // strictly necessary — just easier to follow.)
                     let asn_label = info.asn_label();
                     if rec.geo_country.is_none() {
                         rec.geo_country = info.country_iso;

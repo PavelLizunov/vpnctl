@@ -110,7 +110,14 @@ impl GeoLookup {
             return Self::disabled();
         };
         let dir = PathBuf::from(dir);
-        Self::open(
+        // `open()` catches per-file failures inside its `read` closure
+        // and never returns Err today, but keep the `?`-style flow for
+        // future-proofing (a downstream maxminddb upgrade might bubble
+        // a real error). Then, if the env var was set but no DB loaded,
+        // surface that as a warn — operator notices in journalctl when
+        // they THOUGHT they configured GeoIP but the files weren't
+        // where they expected. Review-agent Track-1.2.
+        let g = Self::open(
             &dir.join("GeoLite2-City.mmdb"),
             &dir.join("GeoLite2-ASN.mmdb"),
         )
@@ -122,7 +129,19 @@ impl GeoLookup {
                 "VPNCTLD_GEOIP_DIR set but DB load failed — falling back to disabled lookup"
             );
             Self::disabled()
-        })
+        });
+        if !g.is_loaded() {
+            tracing::warn!(
+                target = "vpnctld::geoip",
+                dir = ?dir,
+                "VPNCTLD_GEOIP_DIR set but neither GeoLite2-City.mmdb \
+                 nor GeoLite2-ASN.mmdb is present — sub_access_log rows \
+                 will leave geo_country / geo_asn NULL. Drop the .mmdb \
+                 files into the dir + restart the daemon to enable \
+                 enrichment."
+            );
+        }
+        g
     }
 
     /// Try to open both DBs. The `geoip` Cargo feature gates the
@@ -266,7 +285,10 @@ mod tests {
         // var set (the normal CI case).
         if std::env::var_os("VPNCTLD_GEOIP_DIR").is_none() {
             let g = GeoLookup::from_env();
-            assert!(!g.is_loaded(), "no env var → from_env must yield disabled stub");
+            assert!(
+                !g.is_loaded(),
+                "no env var → from_env must yield disabled stub"
+            );
         }
     }
 }

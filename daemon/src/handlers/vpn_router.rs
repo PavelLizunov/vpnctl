@@ -545,7 +545,7 @@ pub(crate) async fn get_config(
         .get(header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(120).collect::<String>());
-    let http_version = Some(format!("{:?}", request.version()));
+    let http_version = Some(crate::ua::http_version_label(request.version()).to_owned());
     let device_class = crate::ua::parse_ua_short(ua_for_log.as_deref()).map(str::to_owned);
     let _ = crate::access_log::try_enqueue(
         &state.access_log_tx,

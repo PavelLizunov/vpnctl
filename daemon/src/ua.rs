@@ -13,6 +13,25 @@
 //! call remains for fresh requests so UI rendering doesn't need a
 //! migration step.
 
+/// Stable `axum::http::Version` → wire-format string. Used to
+/// populate `sub_access_log.http_version` (migration 0019) with a
+/// value that won't drift on hyper/http upgrades — Debug formatting
+/// of `Version` is NOT API-stable (could become "Http11" tomorrow).
+/// Review-agent Track-1.2.
+pub fn http_version_label(v: axum::http::Version) -> &'static str {
+    match v {
+        axum::http::Version::HTTP_09 => "HTTP/0.9",
+        axum::http::Version::HTTP_10 => "HTTP/1.0",
+        axum::http::Version::HTTP_11 => "HTTP/1.1",
+        axum::http::Version::HTTP_2 => "HTTP/2.0",
+        axum::http::Version::HTTP_3 => "HTTP/3.0",
+        // Catch-all for any future variant `http` crate adds — emit
+        // a stable placeholder so the column doesn't end up with
+        // `Http??` on a hypothetical http-1.0 release.
+        _ => "HTTP/?",
+    }
+}
+
 /// User-Agent → human label. Returns `None` for unrecognised strings
 /// (caller renders the raw UA). All labels are `&'static str` — zero
 /// allocation, ergonomic in maud templates AND in the writer's
