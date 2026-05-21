@@ -9632,6 +9632,79 @@ async fn nm12_followup_servers_list_no_hidden_row_when_all_visible() {
     );
 }
 
+// ─── Tooltip coverage spec (bug-audit-agent 2026-05-21) ──────────────
+//
+// Pavel: «сделал подсказки по каждому пункту, чтоб всем было понятно
+// как пользоваться». The bug-audit agent walked the live UI and found
+// ~30 actionable elements / dense tables without explainer tooltips.
+// These tests pin the most-trafficked ones so a future maud refactor
+// can't silently strip them.
+
+#[tokio::test]
+async fn tooltips_audit_filter_form_carries_explainers() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/audit").await;
+    assert!(
+        html.contains("server.protocol. / user. / grant. / settings."),
+        "audit filter placeholder must list concrete dot-prefixes"
+    );
+    assert!(
+        html.contains("admin = web UI"),
+        "actor select must explain the 3 actor values"
+    );
+    assert!(
+        html.contains("dot-separated domain.subdomain.verb"),
+        "action input must surface the audit naming convention"
+    );
+    assert!(
+        html.contains("Apply actor + action-prefix filters"),
+        "filter button must carry its purpose tooltip"
+    );
+}
+
+#[tokio::test]
+async fn tooltips_user_detail_traffic_limit_fields_explain_units() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("tip".into()),
+            uuid: "00000000-0000-0000-0000-000000000020".to_string(),
+            sub_token: Some("ttip".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/tip").await;
+    assert!(
+        html.contains("Monthly cap in GiB"),
+        "limit_gib input must explain unit + 0=no cap semantic"
+    );
+    assert!(
+        html.contains("Fire a dashboard alert"),
+        "threshold_pct input must explain alert semantic"
+    );
+}
+
+#[tokio::test]
+async fn tooltips_footer_drops_htmx_lie() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("axum + maud"),
+        "footer should claim the stack we actually ship"
+    );
+    assert!(
+        !html.contains("axum + maud + htmx"),
+        "footer must NOT claim htmx — we don't ship it"
+    );
+}
+
 #[tokio::test]
 async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
     // Symmetric to the [disable] test above.

@@ -669,7 +669,10 @@ fn dashboard_limit_alerts(rows: &[(vpnctl_core::UserId, u64, u64, u8)]) -> Marku
 fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)]) -> Markup {
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Heavy users · last 24h" }
+        div.ed-art-eyebrow
+            title="Top-N by sum of (upload+download bytes) across all servers, last 24 hours. Data source: clash-api 5-minute polls. wgturn / WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here." {
+            "Heavy users · last 24h"
+        }
         @if rows.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 "No per-user traffic recorded yet. The clash-api poller "
@@ -2087,6 +2090,7 @@ pub(crate) async fn user_detail(
                          action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
                          style="display: inline; margin-left: 8px;" {
                         button type="submit"
+                               title="Generate this user's FIRST sub-token + the public /sub/<token> URL. Safe — no existing config to invalidate; the user's QR + clients will start working after this."
                                style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                                 "mint sub-token"
                             }
@@ -2466,6 +2470,7 @@ pub(crate) async fn user_detail(
                          action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
                          style="margin-top: 8px;" {
                         button type="submit"
+                               title="Mint a fresh Curve25519 keypair for this user (legacy self-heal — only shown when the user has no key on file). No existing WireGuard client config to break."
                                style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                             "generate WG keypair"
                         }
@@ -2746,11 +2751,16 @@ async fn ua_clusters_section(state: &AppState, uid: &vpnctl_core::UserId) -> Mar
         table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
             thead {
                 tr style="border-bottom: 1px solid var(--ink);" {
-                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "user-agent" }
-                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "hits" }
-                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "ips" }
-                    th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "/16 nets" }
-                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "verdict" }
+                    th title="Distinct User-Agent strings the subscription URL was pulled with in the last 24h. Each cluster is one row."
+                       style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "user-agent" }
+                    th title="Total subscription pulls from this UA (one row per /sub/<token> or /api/v1/app/config/<device> GET that produced 200)."
+                       style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "hits" }
+                    th title="Distinct source IPs that pulled with this UA. Normal mobile client = 1-3 IPs (home wifi + LTE + travel). Many IPs = either roaming heavily or shared URL."
+                       style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "ips" }
+                    th title="Distinct /16 IPv4 prefixes (≈ISP-scale buckets). One user roaming between LTE + wifi tends to stay in 1-2 /16s. >=3 /16s strongly suggests the subscription URL was shared past one human."
+                       style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "/16 nets" }
+                    th title="Heuristic classification from (hits, ips, /16 nets): single = one human, roaming = one human on the move, shared = the URL escaped past one human."
+                       style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "verdict" }
                 }
             }
             tbody {
@@ -3017,6 +3027,7 @@ async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId)
                 .unwrap_or(0.0);
             input type="number" name="limit_gib" step="0.1" min="0" max="100000"
                   value=(format!("{limit_gib_default:.1}"))
+                  title="Monthly cap in GiB (upload + download summed). 0 / empty = no cap. Resets on the first of each month."
                   style="max-width: 80px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "GiB / month" }
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-left: 8px;" {
@@ -3024,6 +3035,7 @@ async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId)
             }
             input type="number" name="threshold_pct" step="1" min="1" max="100"
                   value=(threshold_eff)
+                  title="Fire a dashboard alert (and Telegram if configured) when used / cap >= this percent. Default 80%."
                   style="max-width: 56px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "%" }
             button type="submit"
@@ -3103,9 +3115,12 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "server" }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "uploaded" }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "downloaded" }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "peak conns" }
+                        th title="Sum of upload-bytes deltas from clash-api 5-min ticks over the last 24h. Counts everything sing-box saw on this user's auth — VLESS, TUIC, Trojan; wgturn / WireGuard NOT included (kernel-level, no clash-api visibility)."
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "uploaded" }
+                        th title="Same window + same caveats as uploaded — download direction."
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "downloaded" }
+                        th title="Maximum simultaneous active connections seen for this user during any 5-min poll window in the last 24h. >50 from a phone client = unusual (chat apps + browser keep ~5-15 sustained); >200 typically means torrent / web-crawler."
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "peak conns" }
                     }
                 }
                 tbody {
@@ -5104,6 +5119,7 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert]) -> Markup {
                                 form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
                                      style="display: inline;" {
                                     button type="submit"
+                                           title="Mark this alert acknowledged. Doesn't clear or fix the underlying condition — just records 'I've seen it'. The alert row stays in the feed (with an acked-timestamp) until the condition resolves."
                                            style="background: transparent; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 2px 8px; cursor: pointer;" {
                                         "ack"
                                     }
@@ -5347,6 +5363,7 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                       name="telegram_bot_token"
                       placeholder="leave blank to keep existing; paste new value to replace; clear BOTH fields to disable"
                       autocomplete="off"
+                      title="Token from @BotFather, shape `123456:ABC-XYZ...`. Stored in inv.db, masked after save. Empty + empty chat-id disables the Telegram sink entirely."
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
                 label for="telegram_chat_id" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     "chat-id"
@@ -5359,6 +5376,7 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                           _ => "",
                       })
                       placeholder="numeric, e.g. 123456789 (or @your_channel)"
+                      title="Numeric user/group id from @userinfobot OR a public @channel handle. Test-send button below checks this end-to-end."
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
 
                 // ─── Phase G chunk 3.5 — proxy-via-server dropdown ──
@@ -6714,7 +6732,15 @@ pub(crate) async fn server_detail(
             }
             span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                 "Mints missing secrets, SSH-pushes "
-                span.ed-mono { "ensure_installed" } " + " span.ed-mono { "apply_config" }
+                span.ed-mono
+                    title="ensure_installed: run the kernel's package install on the node (e.g. apt-get install sing-box). Skipped if the binary is already present at the expected version." {
+                    "ensure_installed"
+                }
+                " + "
+                span.ed-mono
+                    title="apply_config: re-render the kernel's config file (e.g. /etc/sing-box/config.json) from the current inventory state + push it to the node + systemctl restart. Brief connection drop (~1-2 sec) for live clients; they reconnect transparently." {
+                    "apply_config"
+                }
                 " for every kernel, restarts the service. Subscription URLs reflect the new config immediately."
             }
             " · hoster " b { (server.hoster) }
@@ -7122,12 +7148,18 @@ fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
     let current = server.trusted_host_fingerprint.clone();
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Trusted host fingerprint" }
+        div.ed-art-eyebrow
+            title="The SHA-256 of the node's SSH host public key, pinned in the inventory. Every SSH-using subsystem (deploy, probe, clash-poller) verifies the live key matches before sending any secrets — protects against MITM if someone hijacks the IP." {
+            "Trusted host fingerprint"
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             "Pinned SHA-256 of the node's SSH ed25519 host key. vpnctld + "
             "the deploy / probe / clash-poller pipelines all refuse to "
             "talk to a host whose live key doesn't match this value — "
-            "TOFU pin, set once. Update only if the node was legitimately "
+            span title="Trust-On-First-Use: accept whatever host key the node presents the first time, refuse changes afterwards. Standard SSH posture; same model `~/.ssh/known_hosts` uses." {
+                "TOFU pin"
+            }
+            ", set once. Update only if the node was legitimately "
             "rebuilt (and re-confirm via console)."
         }
         div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
@@ -7167,6 +7199,7 @@ fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
                       pattern="SHA256:[A-Za-z0-9+/=_-]{1,44}"
                       title="SHA256:<43-char-base64>";
                 button type="submit"
+                       title="Save the SHA256 fingerprint you pasted above as the trusted host key for this server (TOFU pin). Future SSH connections refuse if the node presents a different key — protects against MITM after the initial trust."
                        style="padding: 4px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     "pin manually"
                 }
