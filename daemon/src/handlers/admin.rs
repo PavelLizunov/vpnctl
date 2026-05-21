@@ -2306,21 +2306,32 @@ pub(crate) async fn user_detail(
                 div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
                     (qr_svg(url))
                     div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                        div { span style="color: var(--mute);" { "url   " } (url) }
-                        div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
+                        div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "url   ", "url   ")) } (url) }
+                        div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "token ", "token ")) } (mask_secret(token)) }
                         div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
-                            "Legacy " span.ed-mono { "/sub/<token>" } " URL — LAN-only. "
-                            "No " span.ed-mono { "vpn_router_device_id" } " pinned for this user, "
-                            "so the production " span.ed-mono { "ninitux.com" } " URL is not available yet. "
-                            "Pin one via " span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
+                            (crate::i18n::tr(lang, "Legacy ", "Легаси ")) span.ed-mono { "/sub/<token>" }
+                            (crate::i18n::tr(lang, " URL — LAN-only. No ", " URL — только LAN. У этого пользователя нет "))
+                            span.ed-mono { "vpn_router_device_id" }
+                            (crate::i18n::tr(
+                                lang,
+                                " pinned for this user, so the production ",
+                                ", поэтому production-URL ",
+                            ))
+                            span.ed-mono { "ninitux.com" }
+                            (crate::i18n::tr(lang, " URL is not available yet. Pin one via ", " пока недоступен. Привяжи через "))
+                            span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
                         }
                         form method="post"
                              action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
                              style="margin-top: 14px;" {
                             button type="submit"
-                                   title="Mint a new sub_token; the previous URL stops working immediately"
+                                   title=(crate::i18n::tr(
+                                       lang,
+                                       "Mint a new sub_token; the previous URL stops working immediately",
+                                       "Сгенерировать новый sub_token; предыдущий URL перестанет работать немедленно",
+                                   ))
                                    style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                "rotate sub-token"
+                                (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                             }
                         }
                     }
@@ -2955,22 +2966,28 @@ pub(crate) async fn user_detail(
         // (if any) + an inline form to change both. Re-runs the
         // usage query so the page-after-redirect immediately
         // reflects new limits.
-        (user_traffic_limit_section(&state, &uid).await)
+        (user_traffic_limit_section(&state, &uid, lang).await)
 
-        // Destructive zone (Phase C-3.4) — deliberately at the very
-        // bottom so the operator scrolls past everything else first.
-        // The link goes to a confirm page (GET) NOT a direct POST,
-        // so a misclick doesn't immediately delete.
         div.ed-rule {}
-        div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" { "Danger zone" }
+        div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" {
+            (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
+        }
         p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-            "Deleting drops the user, cascades to grants, and clears the FK on "
+            (crate::i18n::tr(
+                lang,
+                "Deleting drops the user, cascades to grants, and clears the FK on ",
+                "Удаление сносит пользователя, каскадно убирает grants и очищает FK в ",
+            ))
             span.ed-mono { "sub_access_log" }
-            " rows (forensics survive with NULL user_id)."
+            (crate::i18n::tr(
+                lang,
+                " rows (forensics survive with NULL user_id).",
+                " (forensics остаётся с NULL user_id).",
+            ))
         }
         a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
           style="display: inline-block; padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-            "delete user…"
+            (crate::i18n::tr(lang, "delete user…", "удалить пользователя…"))
         }
     };
     Ok(shell("users", &theme, &accent, lang, body))
@@ -3226,7 +3243,12 @@ fn fmt_traffic_progress(used: u64, limit: u64) -> String {
 /// inline form to change both. Operator can set a cap even when
 /// no traffic has accrued yet — alerts fire only after the limit
 /// is crossed.
-async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId) -> Markup {
+async fn user_traffic_limit_section(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
     let used = state
         .inv
         .user_traffic_this_month(uid)
@@ -3243,47 +3265,44 @@ async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId)
     let threshold_eff = threshold_opt.unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Traffic limit · month-to-date" }
+        div.ed-art-eyebrow { (tr(lang, "Traffic limit · month-to-date", "Лимит трафика · с начала месяца")) }
         @match limit_opt {
             Some(lim) if lim > 0 => {
                 @let pct = ((used as u128 * 100) / lim as u128).min(999) as u32;
                 @let over_threshold = pct >= u32::from(threshold_eff);
                 @let over_limit = pct >= 100;
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                    "Total upload + download this calendar month vs. the "
-                    "configured monthly cap. Alert fires at "
+                    (tr(
+                        lang,
+                        "Total upload + download this calendar month vs. the configured monthly cap. Alert fires at ",
+                        "Суммарно upload + download за календарный месяц vs. настроенный месячный лимит. Алерт срабатывает при ",
+                    ))
                     span.ed-mono { (threshold_eff) "%" } "."
                 }
                 div style="font-family: var(--mono); font-size: 13px; margin: 0 0 8px;" {
                     (fmt_traffic_progress(used, lim))
                     @if over_limit {
                         " · "
-                        span style="color: var(--acc); font-weight: 600;" { "OVER LIMIT" }
+                        span style="color: var(--acc); font-weight: 600;" { (tr(lang, "OVER LIMIT", "СВЕРХ ЛИМИТА")) }
                     } @else if over_threshold {
                         " · "
-                        span style="color: var(--acc);" { "near limit" }
+                        span style="color: var(--acc);" { (tr(lang, "near limit", "у лимита")) }
                     }
                 }
-                // Progress bar — pure CSS, no JS. Width capped at
-                // 100% so a runaway user (200% of cap) still renders
-                // a sane bar; the numeric copy above tells the truth.
                 @let bar_pct = pct.min(100);
-                // Both "over limit" and "over threshold" use accent
-                // colour — the operator-facing difference is the
-                // copy ("OVER LIMIT" vs "near limit"), not the bar
-                // hue. Single ternary keeps clippy happy.
                 @let bar_fill = if over_threshold { "var(--acc)" } else { "var(--ink)" };
-                @let _ = over_limit;  // bound above; threshold check covers fill
+                @let _ = over_limit;
                 div style="height: 8px; background: var(--rule); margin-bottom: 16px; overflow: hidden;" {
                     div style=(format!("height: 100%; width: {bar_pct}%; background: {bar_fill};")) {}
                 }
             }
             _ => {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                    "Used this month: " span.ed-mono { (humanize_bytes(used)) }
-                    " — no monthly cap configured. Set one below if you want a "
-                    span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%-of-limit alert" }
-                    " to fire on the dashboard."
+                    (tr(lang, "Used this month: ", "Использовано в этом месяце: "))
+                    span.ed-mono { (humanize_bytes(used)) }
+                    (tr(lang, " — no monthly cap configured. Set one below if you want a ", " — месячный лимит не задан. Задай ниже если хочешь "))
+                    span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%-" (tr(lang, "of-limit alert", "от-лимита алерт")) }
+                    (tr(lang, " to fire on the dashboard.", " на дашборде."))
                 }
             }
         }
@@ -3292,7 +3311,7 @@ async fn user_traffic_limit_section(state: &AppState, uid: &vpnctl_core::UserId)
              action=(format!("/admin/users/{}/traffic-limit", path_segment_encode(&uid.0)))
              style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                "limit"
+                (tr(lang, "limit", "лимит"))
             }
             // Operator-friendly input: GiB. Backend converts to
             // bytes. 0 / empty = clear the limit.
@@ -7255,25 +7274,41 @@ pub(crate) async fn server_detail(
                  action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                  style="display: inline;" {
                 button type="submit"
-                       title="Full deploy: mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Re-clicking is safe — already-present secrets and kernels are skipped."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Full deploy: mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Re-clicking is safe — already-present secrets and kernels are skipped.",
+                           "Полный деплой: дораздать недостающие per-protocol секреты, затем SSH в ноду и запустить apt-get install + render-config + systemctl restart для каждого включённого ядра. Повторный клик безопасен — уже существующие секреты и ядра пропускаются.",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "deploy →"
+                    (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
                 }
             }
             span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                "Mints missing secrets, SSH-pushes "
+                (crate::i18n::tr(lang, "Mints missing secrets, SSH-pushes ", "Создаёт недостающие секреты, SSH-пушит "))
                 span.ed-mono
-                    title="ensure_installed: run the kernel's package install on the node (e.g. apt-get install sing-box). Skipped if the binary is already present at the expected version." {
+                    title=(crate::i18n::tr(
+                        lang,
+                        "ensure_installed: run the kernel's package install on the node (e.g. apt-get install sing-box). Skipped if the binary is already present at the expected version.",
+                        "ensure_installed: запустить установку пакета ядра на ноде (напр. apt-get install sing-box). Пропускается если бинарь уже стоит нужной версии.",
+                    )) {
                     "ensure_installed"
                 }
                 " + "
                 span.ed-mono
-                    title="apply_config: re-render the kernel's config file (e.g. /etc/sing-box/config.json) from the current inventory state + push it to the node + systemctl restart. Brief connection drop (~1-2 sec) for live clients; they reconnect transparently." {
+                    title=(crate::i18n::tr(
+                        lang,
+                        "apply_config: re-render the kernel's config file (e.g. /etc/sing-box/config.json) from the current inventory state + push it to the node + systemctl restart. Brief connection drop (~1-2 sec) for live clients; they reconnect transparently.",
+                        "apply_config: перерендерить конфиг ядра (напр. /etc/sing-box/config.json) из текущего инвентаря + запушить на ноду + systemctl restart. Кратковременный разрыв (~1-2 сек) для живых клиентов; переподключение прозрачное.",
+                    )) {
                     "apply_config"
                 }
-                " for every kernel, restarts the service. Subscription URLs reflect the new config immediately."
+                (crate::i18n::tr(
+                    lang,
+                    " for every kernel, restarts the service. Subscription URLs reflect the new config immediately.",
+                    " для каждого ядра, рестартует сервис. URL подписок отражают новый конфиг сразу.",
+                ))
             }
-            " · hoster " b { (server.hoster) }
+            (crate::i18n::tr(lang, " · hoster ", " · хостер ")) b { (server.hoster) }
         }
 
         // Hero: current state (live or empty-state)
@@ -7299,7 +7334,7 @@ pub(crate) async fn server_detail(
         // hide / unhide chip: hidden=1 keeps the sing-box inbound
         // running but stops emitting the protocol from `/sub/<token>`
         // and `/api/v1/app/config/<device_id>`.
-        (server_detail_protocols_section(&server, &state.registry, &hidden_map))
+        (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
 
         // Trusted host fingerprint — TOFU pin for the daemon's SSH
         // probe + clash-api poller + deploy. The CLAUDE.md note from
@@ -7307,7 +7342,7 @@ pub(crate) async fn server_detail(
         // — TODO for vpnctl: `vpnctl server set-fingerprint <id>`».
         // Web equivalent lives here so the operator never has to drop
         // to a shell + raw SQL just to pin a host key.
-        (server_detail_fingerprint_section(&server))
+        (server_detail_fingerprint_section(&server, lang))
 
         // wgturn-specific settings — only renders when the server has
         // the wgturn kernel enabled. The VK Calls invite URL is
@@ -7321,7 +7356,7 @@ pub(crate) async fn server_detail(
         // pubkey push never ran. Phase G chunk 3.5 follow-up; the
         // user's «почему это не делается автоматически» surfaced
         // the gap.
-        (server_detail_push_deploy_key_section(&server))
+        (server_detail_push_deploy_key_section(&server, lang))
 
         // Grants — centralised per-server view (Pavel iter B).
         // Lists EVERY user with a per-row grant/revoke form, so the
@@ -7649,42 +7684,61 @@ fn server_detail_kernels_section(
 /// Reuses `wizard_bootstrap::ssh_password_run` so the actual remote
 /// command is byte-identical to what the wizard runs (idempotent
 /// `grep -qxF || echo >>` — re-clicking after success is safe).
-fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup {
+fn server_detail_push_deploy_key_section(
+    server: &vpnctl_core::Server,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
     let sid_enc = path_segment_encode(&server.id.0);
-    // Detect whether the daemon has a reference SSH key configured —
-    // if yes, the password field is OPTIONAL (clicking with empty
-    // password attempts ref-key first). If no, password is required.
     let reference_key = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
     let reference_ok = reference_key
         .as_ref()
         .is_some_and(|p| std::path::Path::new(p).exists());
     html! {
         div.ed-rule {}
-        div #push-deploy-key.ed-art-eyebrow { "Deploy SSH key — push to this server" }
+        div #push-deploy-key.ed-art-eyebrow {
+            (tr(lang, "Deploy SSH key — push to this server", "Deploy SSH-ключ — запушить на этот сервер"))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px; max-width: 760px;" {
-            "Daemon needs its pubkey on this server's "
+            (tr(lang, "Daemon needs its pubkey on this server's ", "Демону нужен его pubkey в "))
             span.ed-mono { "~/.ssh/authorized_keys" }
-            " before probes, deploys, or the Telegram via-server proxy can work. "
-            "The Phase E wizard at "
+            (tr(
+                lang,
+                " before probes, deploys, or the Telegram via-server proxy can work. The Phase E wizard at ",
+                " этого сервера, иначе не работают probe-ы, деплои и Telegram via-server прокси. Мастер Phase E на ",
+            ))
             span.ed-mono { "/admin/servers/new" }
-            " does this automatically. For servers added via "
+            (tr(lang, " does this automatically. For servers added via ", " делает это автоматически. Для серверов добавленных через "))
             span.ed-mono { "quick-add" } " / " span.ed-mono { "migrate-from-bash" }
-            " (or when the wizard's push step failed), use this form. "
-            "Idempotent — re-clicking after success is a no-op."
+            (tr(
+                lang,
+                " (or when the wizard's push step failed), use this form. Idempotent — re-clicking after success is a no-op.",
+                " (или если шаг push мастера упал), используй эту форму. Идемпотентно — повторный клик после успеха ничего не делает.",
+            ))
         }
 
         @if reference_ok {
             p style="font-family: var(--mono); font-size: 11px; color: var(--ink); margin: 0 0 12px; padding: 8px 12px; background: var(--paper); border-left: 3px solid var(--acc); max-width: 760px;" {
-                "✓ " b { "reference SSH key configured" } " (" span.ed-mono { (reference_key.as_deref().unwrap_or("")) } "). "
-                "Click " b { "push deploy key" } " with password EMPTY — daemon will use the reference key for a silent push. "
-                "If that key isn't authorised on this specific server, fill in the password to fall back to sshpass."
+                "✓ " b { (tr(lang, "reference SSH key configured", "reference SSH-ключ настроен")) }
+                " (" span.ed-mono { (reference_key.as_deref().unwrap_or("")) } "). "
+                (tr(lang, "Click ", "Клик "))
+                b { (tr(lang, "push deploy key", "запушить deploy-ключ")) }
+                (tr(
+                    lang,
+                    " with password EMPTY — daemon will use the reference key for a silent push. If that key isn't authorised on this specific server, fill in the password to fall back to sshpass.",
+                    " с ПУСТЫМ паролем — демон использует reference-key для тихого push. Если этот ключ не авторизован на конкретно этом сервере — заполни пароль для fallback через sshpass.",
+                ))
             }
         } @else {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px; max-width: 760px;" {
-                "Tip: set " span.ed-mono { "VPNCTLD_REFERENCE_SSH_KEY=/path/to/operator_key" }
-                " in the daemon's "
+                (tr(lang, "Tip: set ", "Подсказка: задай ")) span.ed-mono { "VPNCTLD_REFERENCE_SSH_KEY=/path/to/operator_key" }
+                (tr(lang, " in the daemon's ", " в "))
                 span.ed-mono { "/etc/vpnctl/vpnctld.env" }
-                " (then restart vpnctld) to skip the password input on future pushes — useful when an operator key (claude-dev, etc) is already authorised on every server."
+                (tr(
+                    lang,
+                    " (then restart vpnctld) to skip the password input on future pushes — useful when an operator key (claude-dev, etc) is already authorised on every server.",
+                    " демона (затем перезапусти vpnctld) — это позволит обходить ввод пароля на будущих push'ах, удобно когда operator-ключ (claude-dev и т.п.) уже авторизован на каждом сервере.",
+                ))
             }
         }
 
@@ -7693,73 +7747,105 @@ fn server_detail_push_deploy_key_section(server: &vpnctl_core::Server) -> Markup
              style="margin: 0 0 14px;" {
             div style="display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; max-width: 560px;" {
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    "root password"
+                    (tr(lang, "root password", "root-пароль"))
                 }
                 input type="password"
                       name="root_password"
                       autocomplete="off"
-                      placeholder=(if reference_ok { "leave blank to use reference key; fill to force sshpass fallback" } else { "never stored — used once for the SSH connect, then discarded" })
+                      placeholder=(if reference_ok {
+                          tr(lang, "leave blank to use reference key; fill to force sshpass fallback", "пусто = reference-key; заполни = форсировать sshpass fallback")
+                      } else {
+                          tr(lang, "never stored — used once for the SSH connect, then discarded", "не сохраняется — используется один раз для SSH-коннекта, затем отбрасывается")
+                      })
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
             }
             div style="margin-top: 12px;" {
                 button type="submit"
-                       title="Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. Tries reference key first (if configured) then falls back to sshpass + the password above."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. Tries reference key first (if configured) then falls back to sshpass + the password above.",
+                           "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. Сначала пробует reference-key (если настроен), затем fallback на sshpass + пароль выше.",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "push deploy key"
+                    (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
-                    "Connects to " span.ed-mono { (server.ssh_user) "@" (server.address) ":" (server.ssh_port) }
+                    (crate::i18n::tr(lang, "Connects to ", "Подключение к "))
+                    span.ed-mono { (server.ssh_user) "@" (server.address) ":" (server.ssh_port) }
                 }
             }
         }
     }
 }
 
-fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
+fn server_detail_fingerprint_section(
+    server: &vpnctl_core::Server,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
     let sid_enc = path_segment_encode(&server.id.0);
     let current = server.trusted_host_fingerprint.clone();
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow
-            title="The SHA-256 of the node's SSH host public key, pinned in the inventory. Every SSH-using subsystem (deploy, probe, clash-poller) verifies the live key matches before sending any secrets — protects against MITM if someone hijacks the IP." {
-            "Trusted host fingerprint"
+            title=(tr(
+                lang,
+                "The SHA-256 of the node's SSH host public key, pinned in the inventory. Every SSH-using subsystem (deploy, probe, clash-poller) verifies the live key matches before sending any secrets — protects against MITM if someone hijacks the IP.",
+                "SHA-256 публичного SSH-ключа ноды, закреплённый в инвентаре. Все подсистемы которые используют SSH (деплой, probe, clash-poller) проверяют что live-ключ совпадает прежде чем посылать секреты — защита от MITM если кто-то перехватит IP.",
+            )) {
+            (t(lang, K::EyebrowTrustedFingerprint))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "Pinned SHA-256 of the node's SSH ed25519 host key. vpnctld + "
-            "the deploy / probe / clash-poller pipelines all refuse to "
-            "talk to a host whose live key doesn't match this value — "
-            span title="Trust-On-First-Use: accept whatever host key the node presents the first time, refuse changes afterwards. Standard SSH posture; same model `~/.ssh/known_hosts` uses." {
-                "TOFU pin"
+            (tr(
+                lang,
+                "Pinned SHA-256 of the node's SSH ed25519 host key. vpnctld + the deploy / probe / clash-poller pipelines all refuse to talk to a host whose live key doesn't match this value — ",
+                "Закреплённый SHA-256 хост-ключа ed25519 ноды. vpnctld + пайплайны деплоя / probe / clash-poller отказываются разговаривать с хостом чей live-ключ не совпадает с этим значением — ",
+            ))
+            span title=(tr(
+                lang,
+                "Trust-On-First-Use: accept whatever host key the node presents the first time, refuse changes afterwards. Standard SSH posture; same model `~/.ssh/known_hosts` uses.",
+                "Trust-On-First-Use: принять любой host-ключ который нода предъявляет в первый раз, затем отказываться от смены. Стандартная SSH-модель; так же как `~/.ssh/known_hosts`.",
+            )) {
+                (tr(lang, "TOFU pin", "TOFU-pin"))
             }
-            ", set once. Update only if the node was legitimately "
-            "rebuilt (and re-confirm via console)."
+            (tr(
+                lang,
+                ", set once. Update only if the node was legitimately rebuilt (and re-confirm via console).",
+                ", задаётся один раз. Обновляй только если нода была легитимно пересоздана (и сверь через console).",
+            ))
         }
         div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
             @match &current {
-                Some(fp) => { "current: " (fp) }
+                Some(fp) => { (tr(lang, "current: ", "текущий: ")) (fp) }
                 None => {
                     em style="color: var(--mute);" {
-                        "(no fingerprint pinned — first SSH connection will TOFU-accept whatever the host presents)"
+                        (tr(
+                            lang,
+                            "(no fingerprint pinned — first SSH connection will TOFU-accept whatever the host presents)",
+                            "(отпечаток не закреплён — первый SSH-коннект TOFU-примет то, что хост предъявит)",
+                        ))
                     }
                 }
             }
         }
-        // Two-mode form. Auto-detect is the primary recommended path —
-        // operator clicks one button + daemon does the keyscan. Manual
-        // paste is the escape hatch if the operator has the fingerprint
-        // from an out-of-band channel (hoster's console screenshot, etc).
         div style="display: flex; flex-direction: column; gap: 10px;" {
             form method="post"
                  action=(format!("/admin/servers/{sid_enc}/set-fingerprint"))
                  style="display: flex; gap: 8px; align-items: center;" {
                 input type="hidden" name="mode" value="keyscan";
                 button type="submit"
-                       title="Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint."
+                       title=(tr(
+                           lang,
+                           "Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint.",
+                           "Запустить ssh-keyscan + ssh-keygen -lf - на хосте демона и закрепить полученный отпечаток.",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "auto-detect via ssh-keyscan →"
+                    (tr(lang, "auto-detect via ssh-keyscan →", "автоопределить через ssh-keyscan →"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    "(daemon will SSH-keyscan " span.ed-mono { (server.address) ":" (server.ssh_port) } " and pin the SHA-256)"
+                    (tr(lang, "(daemon will SSH-keyscan ", "(демон сделает ssh-keyscan "))
+                    span.ed-mono { (server.address) ":" (server.ssh_port) }
+                    (tr(lang, " and pin the SHA-256)", " и закрепит SHA-256)"))
                 }
             }
             form method="post"
@@ -7771,9 +7857,13 @@ fn server_detail_fingerprint_section(server: &vpnctl_core::Server) -> Markup {
                       pattern="SHA256:[A-Za-z0-9+/=_-]{1,44}"
                       title="SHA256:<43-char-base64>";
                 button type="submit"
-                       title="Save the SHA256 fingerprint you pasted above as the trusted host key for this server (TOFU pin). Future SSH connections refuse if the node presents a different key — protects against MITM after the initial trust."
+                       title=(tr(
+                           lang,
+                           "Save the SHA256 fingerprint you pasted above as the trusted host key for this server (TOFU pin). Future SSH connections refuse if the node presents a different key — protects against MITM after the initial trust.",
+                           "Сохранить вставленный выше SHA256-отпечаток как доверенный host-ключ для этого сервера (TOFU pin). Будущие SSH-коннекты откажутся если нода предъявит другой ключ — защита от MITM после первичного доверия.",
+                       ))
                        style="padding: 4px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "pin manually"
+                    (tr(lang, "pin manually", "закрепить вручную"))
                 }
             }
         }
@@ -7973,7 +8063,9 @@ fn server_detail_protocols_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
     hidden_map: &std::collections::HashMap<vpnctl_core::ProtocolId, bool>,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::{K, t, tr};
     let enabled: std::collections::HashSet<&vpnctl_core::ProtocolId> =
         server.enabled_protocols.iter().collect();
     let all_protocols = registry.protocol_ids();
@@ -8007,9 +8099,13 @@ fn server_detail_protocols_section(
         // `/admin/servers/{id}#enabled-protocols`. The browser
         // honours the fragment and scrolls the operator back to
         // THIS section instead of resetting to the page top.
-        div.ed-art-eyebrow id="enabled-protocols" { "Enabled protocols" }
+        div.ed-art-eyebrow id="enabled-protocols" { (t(lang, K::EyebrowEnabledProtocols)) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
-            "Check what runs on this node. Protocols are wire formats; their kernels (one or more) are picked from the section above."
+            (tr(
+                lang,
+                "Check what runs on this node. Protocols are wire formats; their kernels (one or more) are picked from the section above.",
+                "Что крутится на этой ноде. Протоколы — это wire-форматы; их ядра (одно или больше) выбираются выше в секции Ядра.",
+            ))
         }
         // Same deploy-required notice as the Kernels section above —
         // duplicated deliberately so an operator who scrolls straight
