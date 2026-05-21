@@ -2950,8 +2950,13 @@ pub(crate) async fn user_detail(
                 }
             }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
-                "Showing the " (recent_access.len()) " most recent fetches. "
-                "Rows are auto-purged after 30 days (default retention)."
+                (crate::i18n::tr(lang, "Showing the ", "Показано "))
+                (recent_access.len())
+                (crate::i18n::tr(
+                    lang,
+                    " most recent fetches. Rows are auto-purged after 30 days (default retention).",
+                    " последних обращений. Строки автоудаляются через 30 дней (retention по умолчанию).",
+                ))
             }
         }
 
@@ -3446,9 +3451,17 @@ async fn live_vpn_stats_section(
         // upload — both legible on every theme.
         (vpn_sparkline_24h(&rows))
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
-            "Aggregated from " (rows.len())
-            @if rows.len() == 1 { " snapshot" } @else { " snapshots" }
-            " over the last 24 hours. Rows are auto-purged after 30 days."
+            (crate::i18n::tr(lang, "Aggregated from ", "Агрегировано из ")) (rows.len())
+            @if rows.len() == 1 {
+                (crate::i18n::tr(lang, " snapshot", " снэпшота"))
+            } @else {
+                (crate::i18n::tr(lang, " snapshots", " снэпшотов"))
+            }
+            (crate::i18n::tr(
+                lang,
+                " over the last 24 hours. Rows are auto-purged after 30 days.",
+                " за последние 24 часа. Строки автоудаляются через 30 дней.",
+            ))
         }
     }
 }
@@ -7349,7 +7362,7 @@ pub(crate) async fn server_detail(
         // captcha-gated (can't be auto-minted server-side), so the
         // operator pastes it once here; subsequent deploys read it
         // from `server_secrets["wgturn:vk_link"]`.
-        (server_detail_wgturn_section(&server, &server_secrets))
+        (server_detail_wgturn_section(&server, &server_secrets, lang))
 
         // Push deploy key — recovery action for servers added via
         // quick-add / migrate-from-bash where the wizard's step-3
@@ -8023,34 +8036,42 @@ pub(crate) async fn server_set_fingerprint(
 fn server_detail_wgturn_section(
     server: &vpnctl_core::Server,
     _secrets: &std::collections::HashMap<String, String>,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     let has_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
     if !has_wgturn {
         return html! {};
     }
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "wgturn — emergency channel" }
+        div.ed-art-eyebrow { (tr(lang, "wgturn — emergency channel", "wgturn — аварийный канал")) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "VK-TURN-relayed WireGuard. The server-side daemon "
+            (tr(lang, "VK-TURN-relayed WireGuard. The server-side daemon ", "WireGuard через VK-TURN relay. Серверный демон "))
             span.ed-mono { "wgturn-cli serve" }
-            " is configured automatically when you click "
-            span.ed-mono { "deploy →" }
-            " — no operator input is needed here."
+            (tr(lang, " is configured automatically when you click ", " настраивается автоматически когда ты кликаешь "))
+            span.ed-mono { (tr(lang, "deploy →", "деплой →")) }
+            (tr(lang, " — no operator input is needed here.", " — ввод оператора здесь не нужен."))
         }
         div style="font-family: var(--serif); font-size: 13px; line-height: 1.6; padding: 10px 14px; background: var(--paper-tint); border-left: 3px solid var(--accent);" {
-            b { "VK link is supplied by the END USER, not the operator." }
-            " Each VK call has limited concurrent streams, so a shared per-server link would saturate. "
-            "Each user creates their own VK call invite on vk.com, then runs (or pastes the URL into "
-            "their wgturn-cli)"
+            b { (tr(lang, "VK link is supplied by the END USER, not the operator.", "VK-ссылку даёт КОНЕЧНЫЙ ПОЛЬЗОВАТЕЛЬ, не оператор.")) }
+            (tr(
+                lang,
+                " Each VK call has limited concurrent streams, so a shared per-server link would saturate. Each user creates their own VK call invite on vk.com, then runs (or pastes the URL into their wgturn-cli)",
+                " У каждого VK-звонка ограниченное число одновременных потоков, поэтому общая server-ссылка быстро бы переполнилась. Каждый пользователь сам создаёт инвайт на VK-звонок на vk.com, затем запускает (или вставляет URL в свой wgturn-cli)",
+            ))
             br {}
             span.ed-mono style="display: inline-block; margin: 6px 0; padding: 4px 8px; background: var(--paper); font-size: 11px;" {
                 "wgturn-cli connect-url '<wgturn://...>' --vk-link '<https://vk.com/call/join/...>'"
             }
             br {}
-            "The "
+            (tr(lang, "The ", "Сама "))
             span.ed-mono { "wgturn://" }
-            " share-link itself lives on the user-detail page under «Per-protocol share links»."
+            (tr(
+                lang,
+                " share-link itself lives on the user-detail page under «Per-protocol share links».",
+                " share-ссылка лежит на странице пользователя в секции «Ссылки на отдельные протоколы».",
+            ))
         }
     }
 }
