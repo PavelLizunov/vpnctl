@@ -7907,19 +7907,20 @@ pub(crate) async fn server_detail(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
-    // Phase 4c — last clash-api snapshot for the «Live connections»
-    // drill-down. None when the poller has never reached this
-    // server (fresh daemon start / no key / etc); the renderer
-    // handles that with an empty-state.
-    let last_snapshot = state.snapshot_cache.get(&sid);
-    // Phase 4c — source-IP → user_id correlation. We extract the
-    // unique sourceIPs from the snapshot, then ask inventory which
-    // users have hit subscription URL from those IPs in the last
-    // 7 days. NM-11 work-around: sing-box drops `user` but
-    // preserves `sourceIP`, so we attribute via the side-channel.
-    let source_user_map = if let Some(snap) = last_snapshot.as_ref() {
+    // Phase 4c+4d — last clash-api snapshot + log-derived
+    // attribution for the «Live connections» drill-down. None
+    // when the poller has never reached this server (fresh
+    // daemon start / no key / etc).
+    let last_server_snap = state.snapshot_cache.get(&sid);
+    // Phase 4c — sub_access correlation as the FALLBACK. We
+    // extract unique sourceIPs from the snapshot, then ask
+    // inventory which users have hit subscription URL from those
+    // IPs in the last 7 days. Used when the Phase 4d log scrape
+    // has no entry for a given (IP, port) pair (e.g. connection
+    // older than the log tail window).
+    let source_user_map = if let Some(s) = last_server_snap.as_ref() {
         let mut ips: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for c in &snap.connections {
+        for c in &s.snapshot.connections {
             if !c.metadata.source_ip.is_empty() {
                 ips.insert(c.metadata.source_ip.clone());
             }
@@ -8078,10 +8079,12 @@ pub(crate) async fn server_detail(
         // intentionally to make the limit explicit).
         (server_detail_live_activity_section(&live_activity, lang))
 
-        // Phase 4c — per-connection drill-down (top destinations
-        // + top source IPs with user correlation + TCP/UDP split)
-        // from the last clash-api snapshot.
-        (server_detail_live_connections_section(last_snapshot.as_deref(), &source_user_map, lang))
+        // Phase 4c + 4d — per-connection drill-down (top
+        // destinations + top source IPs with user correlation +
+        // TCP/UDP split). 4d's sing-box log scrape gives exact
+        // (IP:port) → user_id mapping; 4c's sub_access correlation
+        // is the fallback for connections older than the log tail.
+        (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, lang))
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
@@ -8396,7 +8399,7 @@ fn server_detail_live_activity_section(
 /// every 5 minutes and tells the operator to come back. No
 /// «restart vpnctld» / SSH instructions per operator-action policy.
 fn server_detail_live_connections_section(
-    snapshot: Option<&crate::clash_api::Snapshot>,
+    server_snap: Option<&crate::snapshot_cache::ServerSnapshot>,
     source_user_map: &std::collections::HashMap<String, Vec<(vpnctl_core::UserId, u64)>>,
     lang: crate::i18n::Locale,
 ) -> Markup {
@@ -8404,7 +8407,7 @@ fn server_detail_live_connections_section(
     use crate::snapshot_cache::{aggregate_by_destination, aggregate_by_source, network_breakdown};
     const TOP_N: usize = 10;
 
-    let Some(snap) = snapshot else {
+    let Some(server_snap) = server_snap else {
         return html! {
             div.ed-rule {}
             div.ed-art-eyebrow { (tr(lang, "Live connections", "Активные соединения")) }
@@ -8418,10 +8421,40 @@ fn server_detail_live_connections_section(
         };
     };
 
+    let snap = &server_snap.snapshot;
+    let log_attribution = &server_snap.attribution;
     let nb = network_breakdown(snap);
     let top_dests = aggregate_by_destination(snap, TOP_N);
     let top_sources = aggregate_by_source(snap, TOP_N);
     let total_conns = snap.connections.len();
+
+    // Phase 4d — for each top-source aggregate, look up the
+    // FRESHEST user_id we have for ANY (source_ip, port) pair
+    // matching this IP in the log map. We don't dedupe across
+    // ports: the log map can carry the same user_id under
+    // different ports (one device, many connections), and we
+    // want to surface that user_id. If multiple users share an
+    // IP (NAT collision), pick the one with the most port
+    // entries — that's the most-active device behind the NAT.
+    use std::collections::HashMap as StdHashMap;
+    let mut ip_to_log_user: StdHashMap<&str, StdHashMap<&str, u32>> = StdHashMap::new();
+    for ((ip, _port), user) in log_attribution.iter() {
+        *ip_to_log_user
+            .entry(ip.as_str())
+            .or_default()
+            .entry(user.as_str())
+            .or_insert(0) += 1;
+    }
+    // Resolve each IP → top user_id (highest port count).
+    let log_ip_winner: StdHashMap<&str, &str> = ip_to_log_user
+        .iter()
+        .filter_map(|(ip, users)| {
+            users
+                .iter()
+                .max_by_key(|(_, cnt)| **cnt)
+                .map(|(user, _)| (*ip, *user))
+        })
+        .collect();
 
     html! {
         div.ed-rule {}
@@ -8539,17 +8572,45 @@ fn server_detail_live_connections_section(
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="padding: 4px 8px;" { (s.label) }
                             td style="padding: 4px 8px;" {
-                                @match source_user_map.get(&s.label) {
-                                    Some(users) if !users.is_empty() => {
+                                // Phase 4d — log-derived attribution
+                                // wins (exact match from sing-box
+                                // accept logs). Phase 4c sub_access
+                                // correlation is the fallback for
+                                // connections older than the log tail.
+                                @if let Some(log_user) = log_ip_winner.get(s.label.as_str()) {
+                                    a href=(format!("/admin/users/{}", crate::http_util::path_segment_encode(log_user)))
+                                      style="color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--ink);"
+                                      title=(tr(
+                                          lang,
+                                          "Matched from VPN server log — this user authenticated from that IP.",
+                                          "Совпадение из лога VPN-сервера — этот юзер аутентифицировался с этого IP.",
+                                      )) {
+                                        (*log_user)
+                                    }
+                                    span style="color: var(--mute); margin-left: 6px; font-size: 10px;"
+                                         title=(tr(lang, "Source: VPN server log. Direct, high-confidence match.", "Источник: лог VPN-сервера. Прямое сопоставление с высокой точностью.")) {
+                                        (tr(lang, "log", "лог"))
+                                    }
+                                } @else if let Some(users) = source_user_map.get(&s.label) {
+                                    @if !users.is_empty() {
                                         @let (top_uid, top_hits) = &users[0];
                                         a href=(format!("/admin/users/{}", crate::http_util::path_segment_encode(&top_uid.0)))
                                           style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--rule);"
-                                          title=(format!(
-                                              "{} hit{} from this IP in the last 7 days. Click to open user-detail.",
-                                              top_hits,
-                                              if *top_hits == 1 { "" } else { "s" }
+                                          title=(tr(
+                                              lang,
+                                              "Best-guess match — this user fetched their subscription URL from this IP in the last 7 days.",
+                                              "Предположительное совпадение — этот юзер запрашивал свою подписку с этого IP за последние 7 дней.",
                                           )) {
                                             (top_uid.0)
+                                        }
+                                        span style="color: var(--mute); margin-left: 6px; font-size: 10px;"
+                                             title=(format!(
+                                                "{} ({} {})",
+                                                tr(lang, "Source: subscription fetches over the last 7 days. Best-guess (NAT can collide).", "Источник: запросы подписки за 7 дней. Эвристика (NAT может коллидировать)."),
+                                                top_hits,
+                                                tr(lang, "fetches from this IP", "запросов с этого IP"),
+                                             )) {
+                                            (tr(lang, "sub", "подп"))
                                         }
                                         @if users.len() > 1 {
                                             span style="color: var(--mute); margin-left: 6px;" {
@@ -8557,9 +8618,16 @@ fn server_detail_live_connections_section(
                                                 (tr(lang, "more", "ещё"))
                                             }
                                         }
+                                    } @else {
+                                        span style="color: var(--mute);"
+                                             title=(tr(lang, "No match in VPN server log and no recent subscription fetch from this IP.", "Нет совпадения в логе VPN-сервера и нет недавних запросов подписки с этого IP.")) {
+                                            "—"
+                                        }
                                     }
-                                    _ => {
-                                        span style="color: var(--mute);" { "—" }
+                                } @else {
+                                    span style="color: var(--mute);"
+                                         title=(tr(lang, "No match in VPN server log and no recent subscription fetch from this IP.", "Нет совпадения в логе VPN-сервера и нет недавних запросов подписки с этого IP.")) {
+                                        "—"
                                     }
                                 }
                             }

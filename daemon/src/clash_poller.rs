@@ -348,12 +348,40 @@ async fn poll_one_server(
         }
     };
 
+    // Phase 4d — scrape sing-box log to build the (source_ip,
+    // port) → user_id attribution map. Best-effort: an SSH or
+    // parse failure means we store an empty map (snapshot still
+    // lands, UI falls back to sub_access correlation). NM-11
+    // work-around — sing-box's wire-format omits the user field,
+    // but the on-disk log has it. See sing_box_log_scraper docs.
+    let log_path = crate::sing_box_log_scraper::resolve_log_path();
+    let tail_n = crate::sing_box_log_scraper::resolve_tail_lines();
+    let attribution = match crate::sing_box_log_scraper::scrape(&ssh, &log_path, tail_n).await {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %e,
+                "sing-box log scrape failed (per-conn attribution will be empty this tick; sub_access fallback still applies)"
+            );
+            std::collections::HashMap::new()
+        }
+    };
+    let attribution_hits = attribution.len();
     // Phase 4c — store the full snapshot (per-connection detail)
-    // in the shared cache BEFORE we agregate. The cache feeds the
-    // server-detail page's «Live connections» drill-down. We clone
-    // the snapshot because `engine.tick` borrows it; cheap (clone
-    // is one Vec allocation for the connections array).
-    snapshot_cache.store(server.id.clone(), snapshot.clone());
+    // + the Phase 4d attribution map in the shared cache BEFORE
+    // we agregate. The cache feeds the server-detail page's
+    // «Live connections» drill-down.
+    snapshot_cache.store(server.id.clone(), snapshot.clone(), attribution);
+    if attribution_hits > 0 {
+        tracing::debug!(
+            target = "vpnctld::poller",
+            server = %server.id.0,
+            attribution_entries = attribution_hits,
+            "sing-box log scrape attributed connections"
+        );
+    }
 
     let deltas = engine.tick(&server.id, &snapshot);
     if deltas.is_empty() {

@@ -36,14 +36,31 @@ use std::sync::{Arc, RwLock};
 use vpnctl_core::ServerId;
 
 use crate::clash_api::Snapshot;
+use crate::sing_box_log_scraper::AttributionMap;
 
-/// Process-shared cache of last-tick clash-api snapshots, keyed by
-/// `ServerId`. Cloneable handle (the inner `Arc` makes `.clone()`
-/// cheap — both AppState and the poller hold their own clones, but
-/// write through the same `RwLock`).
+/// Phase 4d — one snapshot + its source-IP/port → user_id
+/// attribution map, bundled for atomic store / load. The
+/// attribution map may be empty (sing-box log scrape failed,
+/// daemon just started, etc); the snapshot half is always
+/// populated when the entry exists.
+#[derive(Debug, Default)]
+pub struct ServerSnapshot {
+    pub snapshot: Snapshot,
+    /// (source_ip, source_port) → user_id from `sing-box` log.
+    /// Empty map means «scrape happened but matched nothing»
+    /// (e.g. the tail window was past the connection's accept
+    /// time) — DISTINCT from None which we don't model here.
+    pub attribution: AttributionMap,
+}
+
+/// Process-shared cache of last-tick clash-api snapshots + log-
+/// derived attribution maps, keyed by `ServerId`. Cloneable
+/// handle (the inner `Arc` makes `.clone()` cheap — both AppState
+/// and the poller hold their own clones, but write through the
+/// same `RwLock`).
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotCache {
-    inner: Arc<RwLock<HashMap<ServerId, Arc<Snapshot>>>>,
+    inner: Arc<RwLock<HashMap<ServerId, Arc<ServerSnapshot>>>>,
 }
 
 impl SnapshotCache {
@@ -51,16 +68,20 @@ impl SnapshotCache {
         Self::default()
     }
 
-    /// Store the freshest snapshot for `server`. Replaces any
-    /// previous entry. Poisoned lock (from another thread panicking
-    /// mid-write — `RwLock` becomes unusable) is logged-and-ignored:
-    /// next successful write recovers, the alternative is to crash
-    /// the daemon on a lock-poisoning event that doesn't actually
-    /// affect SQL correctness.
-    pub fn store(&self, server: ServerId, snap: Snapshot) {
+    /// Store the freshest snapshot + its attribution for `server`.
+    /// Replaces any previous entry. Poisoned lock (from another
+    /// thread panicking mid-write — `RwLock` becomes unusable)
+    /// is logged-and-ignored: next successful write recovers,
+    /// the alternative is to crash the daemon on a lock-poisoning
+    /// event that doesn't actually affect SQL correctness.
+    pub fn store(&self, server: ServerId, snap: Snapshot, attribution: AttributionMap) {
+        let entry = Arc::new(ServerSnapshot {
+            snapshot: snap,
+            attribution,
+        });
         match self.inner.write() {
             Ok(mut g) => {
-                g.insert(server, Arc::new(snap));
+                g.insert(server, entry);
             }
             Err(e) => {
                 tracing::warn!(
@@ -72,10 +93,9 @@ impl SnapshotCache {
         }
     }
 
-    /// Borrow the freshest snapshot for `server`. None when the
-    /// poller has never reached this server (fresh daemon start,
-    /// server out-of-order, deploy key missing, etc).
-    pub fn get(&self, server: &ServerId) -> Option<Arc<Snapshot>> {
+    /// Borrow the freshest server-snapshot bundle for `server`.
+    /// None when the poller has never reached this server.
+    pub fn get(&self, server: &ServerId) -> Option<Arc<ServerSnapshot>> {
         self.inner.read().ok()?.get(server).cloned()
     }
 }
@@ -259,9 +279,27 @@ mod tests {
             snap(vec![conn(
                 "1.1.1.1", "2.2.2.2", "443", "x", "tcp", 100, 200,
             )]),
+            HashMap::new(),
         );
         let got = c.get(&sid).expect("snapshot must be present");
-        assert_eq!(got.connections.len(), 1);
+        assert_eq!(got.snapshot.connections.len(), 1);
+        assert!(got.attribution.is_empty());
+    }
+
+    #[test]
+    fn cache_round_trips_attribution_map() {
+        let c = SnapshotCache::new();
+        let sid = ServerId("de".into());
+        let mut attr = HashMap::new();
+        attr.insert(("83.97.108.34".into(), "55512".into()), "main-brat".into());
+        c.store(sid.clone(), snap(vec![]), attr);
+        let got = c.get(&sid).expect("must be present");
+        assert_eq!(
+            got.attribution
+                .get(&("83.97.108.34".into(), "55512".into()))
+                .map(|s| s.as_str()),
+            Some("main-brat")
+        );
     }
 
     #[test]

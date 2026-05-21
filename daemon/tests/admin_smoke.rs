@@ -11092,7 +11092,11 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
             },
         ],
     };
-    s.snapshot_cache.store(ServerId("active".into()), snap);
+    s.snapshot_cache.store(
+        ServerId("active".into()),
+        snap,
+        std::collections::HashMap::new(),
+    );
 
     let html = fetch_html(router(s), "/admin/servers/active").await;
     assert!(html.contains("Live connections"));
@@ -11118,5 +11122,251 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
     assert!(
         html.contains("NM-11"),
         "section must surface NM-11 explainer"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 4d — sing-box log scrape exact attribution wins over sub_access
+//  correlation in the «top sources» column.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation() {
+    // Setup: clash snapshot has source IP 31.135.234.102 with no
+    // sub_access row (so Phase 4c correlation returns nothing).
+    // Phase 4d attribution map says 31.135.234.102 → main-brat.
+    // The «top sources» row must surface main-brat (exact match,
+    // tagged «log») not «—».
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("phase4d-srv".into()),
+            address: "203.0.113.50".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("main-brat".into()),
+            uuid: "mb0".into(),
+            sub_token: None,
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    // NO sub_access_log row — so Phase 4c fallback would NOT
+    // find a match. Only Phase 4d log attribution can.
+
+    let snap = Snapshot {
+        upload_total: 1000,
+        download_total: 5000,
+        connections: vec![Connection {
+            id: "c1".into(),
+            upload: 1000,
+            download: 5000,
+            start: "2026-05-21T19:00:00Z".into(),
+            metadata: ConnectionMeta {
+                network: "tcp".into(),
+                destination_ip: "1.2.3.4".into(),
+                destination_port: "443".into(),
+                source_ip: "31.135.234.102".into(),
+                source_port: "2810".into(),
+                host: String::new(),
+                user: None,
+            },
+        }],
+    };
+    let mut attribution = std::collections::HashMap::new();
+    attribution.insert(
+        ("31.135.234.102".to_string(), "2810".to_string()),
+        "main-brat".to_string(),
+    );
+    s.snapshot_cache
+        .store(ServerId("phase4d-srv".into()), snap, attribution);
+
+    let html = fetch_html(router(s), "/admin/servers/phase4d-srv").await;
+    // Exact match link to main-brat.
+    assert!(
+        html.contains("href=\"/admin/users/main-brat\""),
+        "log-derived attribution must link the source IP to main-brat"
+    );
+    // Tagged «log» (not «sub» fallback).
+    assert!(
+        html.contains(">log<"),
+        "tag «log» must indicate this came from sing-box log attribution"
+    );
+}
+
+#[tokio::test]
+async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution() {
+    // Symmetric case — log attribution empty, sub_access has a
+    // match → falls back, tagged «sub».
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("phase4d-fb".into()),
+            address: "203.0.113.51".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("falluser".into()),
+            uuid: "fb0".into(),
+            sub_token: Some("fbtok".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    // sub_access_log entry — Phase 4c sub_access correlation
+    // hit for 5.5.5.5.
+    s.inv
+        .log_sub_access(&UserId("falluser".into()), "5.5.5.5", None, 200, 100)
+        .await
+        .unwrap();
+
+    let snap = Snapshot {
+        upload_total: 100,
+        download_total: 200,
+        connections: vec![Connection {
+            id: "c1".into(),
+            upload: 100,
+            download: 200,
+            start: "2026-05-21T19:00:00Z".into(),
+            metadata: ConnectionMeta {
+                network: "tcp".into(),
+                destination_ip: "1.2.3.4".into(),
+                destination_port: "443".into(),
+                source_ip: "5.5.5.5".into(),
+                source_port: "55555".into(),
+                host: String::new(),
+                user: None,
+            },
+        }],
+    };
+    // EMPTY attribution map — Phase 4d had nothing for this IP.
+    s.snapshot_cache.store(
+        ServerId("phase4d-fb".into()),
+        snap,
+        std::collections::HashMap::new(),
+    );
+
+    let html = fetch_html(router(s), "/admin/servers/phase4d-fb").await;
+    // Must link to falluser via sub_access fallback.
+    assert!(
+        html.contains("href=\"/admin/users/falluser\""),
+        "sub_access fallback must link the source IP to falluser when log attribution is empty"
+    );
+    // Tagged «sub» (not «log»).
+    assert!(
+        html.contains(">sub<"),
+        "tag «sub» must indicate fallback-via-sub_access"
+    );
+    assert!(
+        !html.contains(">log<"),
+        "no «log» tag when log attribution map is empty"
+    );
+}
+
+#[tokio::test]
+async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribution() {
+    // Pin the «both layers empty» path: no log attribution, no
+    // sub_access correlation hits → the «likely user» cell must
+    // render «—» with NO `<a href="/admin/users/...">` link.
+    use vpnctl_core::{KernelId, Server, ServerId};
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("phase4d-none".into()),
+            address: "203.0.113.52".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // NO users added → users_for_source_ips returns no matches
+    // for any IP, and we pass an empty attribution map.
+
+    let snap = Snapshot {
+        upload_total: 100,
+        download_total: 100,
+        connections: vec![Connection {
+            id: "c1".into(),
+            upload: 100,
+            download: 100,
+            start: "2026-05-21T19:00:00Z".into(),
+            metadata: ConnectionMeta {
+                network: "tcp".into(),
+                destination_ip: "1.2.3.4".into(),
+                destination_port: "443".into(),
+                source_ip: "203.0.113.99".into(),
+                source_port: "55555".into(),
+                host: String::new(),
+                user: None,
+            },
+        }],
+    };
+    s.snapshot_cache.store(
+        ServerId("phase4d-none".into()),
+        snap,
+        std::collections::HashMap::new(),
+    );
+
+    let html = fetch_html(router(s), "/admin/servers/phase4d-none").await;
+    // Source IP must render in the top-sources row.
+    assert!(
+        html.contains("203.0.113.99"),
+        "the unattributed source IP must still render in the table"
+    );
+    // NO link to any user-detail for this orphan IP. We use a
+    // targeted check: extract the slice around the source IP cell
+    // and assert it doesn't carry a user-detail link.
+    let pos = html.find("203.0.113.99").expect("source IP must render");
+    // The cell + the next ~400 chars cover the «likely user» cell.
+    let window = &html[pos..pos.saturating_add(800)];
+    assert!(
+        !window.contains("href=\"/admin/users/"),
+        "orphan source IP must NOT link to any user-detail; window: …{window}…"
+    );
+    // The «—» glyph appears as the cell content.
+    assert!(
+        window.contains("—"),
+        "«likely user» cell must render «—» for orphan IP, got window: …{window}…"
     );
 }

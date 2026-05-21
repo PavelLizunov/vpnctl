@@ -56,6 +56,11 @@ pub mod ssh_subprocess;
 // Cache is shared between the poller (writer) and admin handlers
 // (readers) through a SnapshotCache handle that lives in AppState.
 pub mod snapshot_cache;
+// Phase 4d — sing-box log scraper for exact per-connection
+// `user_id` attribution (NM-11 work-around: sing-box logs include
+// `[user_id]` even though clash-api wire format drops the `user`
+// field). Pure parser + an SSH-driven scrape entry point.
+pub mod sing_box_log_scraper;
 // Phase 3c — SSE backend for the Settings GeoIP «update now» button.
 // Wraps `/usr/local/bin/vpnctl geoip-update` via `std::process::Command`
 // + `tokio::task::spawn_blocking`. NOT `tokio::process` (glibc 2.39+
