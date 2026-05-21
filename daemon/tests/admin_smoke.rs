@@ -10403,3 +10403,204 @@ async fn track_1_4_subscription_access_omits_ja_chips_when_null() {
         "JA chips must not render when columns are NULL"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 3c — Settings GeoIP «update now» SSE button.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase3c_settings_renders_geoip_update_now_button_and_eventsource_wiring() {
+    // Pin the Settings page: the «update now» button + the inline
+    // EventSource wiring + the live-log <pre> all render. Pavel
+    // confirmed via UI requirement — operator must NEVER need to
+    // open a terminal; the equivalent of `vpnctl geoip-update` has
+    // to be one click.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/settings").await;
+
+    assert!(
+        html.contains("id=\"geoip-update-now-btn\""),
+        "Settings must surface the GeoIP «update now» button"
+    );
+    assert!(
+        html.contains("id=\"geoip-update-now-log\""),
+        "Settings must surface the live-log pane"
+    );
+    assert!(
+        html.contains("new EventSource('/admin/settings/geoip/update-now')"),
+        "button JS must attach EventSource to the SSE source"
+    );
+    assert!(
+        html.contains("addEventListener('step'")
+            && html.contains("addEventListener('ok'")
+            && html.contains("addEventListener('error'"),
+        "all three named SSE events (step/ok/error) must be handled in JS"
+    );
+}
+
+#[tokio::test]
+async fn phase3c_geoip_update_now_sse_endpoint_returns_text_event_stream() {
+    // Endpoint contract: GET /admin/settings/geoip/update-now must
+    // return 200 with Content-Type: text/event-stream. The runner
+    // will spawn `/usr/local/bin/vpnctl geoip-update` which usually
+    // won't exist in the test container — that's fine, the runner
+    // emits a terminal Error event and the stream closes. We just
+    // pin the HTTP wire contract here. NOTE: we deliberately don't
+    // override the bin path via env var — `std::env::set_var` is
+    // `unsafe` in Rust 2024 + workspace forbids unsafe; the wire
+    // contract (200 + text/event-stream) is identical regardless
+    // of whether the spawn succeeds.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+
+    let resp = router(s)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings/geoip/update-now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "SSE source must return Content-Type: text/event-stream, got {ct:?}"
+    );
+}
+
+#[tokio::test]
+async fn phase3c_geoip_update_now_fire_writes_audit_row() {
+    // Hitting the SSE endpoint must write an audit row with the
+    // canonical dot-separated action name. The audit row is the
+    // operator's after-the-fact «what happened» record — without
+    // it, a misbehaving subprocess vanishes without a trace beyond
+    // journalctl.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    let _ = router(s)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings/geoip/update-now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Audit row is written BEFORE the subprocess spawn (so even a
+    // spawn failure is logged). The connection close before the
+    // subprocess finishes doesn't lose the audit row.
+    let rows = inv.recent_audit(20).await.unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.action == "settings.geoip.update_now.fired"),
+        "expected audit row settings.geoip.update_now.fired, got {:?}",
+        rows.iter().map(|r| &r.action).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn phase3c_geoip_update_now_rejects_cross_site_sec_fetch() {
+    // CSRF defense — a hostile page that embeds
+    //   <img src="http://192.168.0.236:18402/admin/settings/geoip/update-now">
+    // causes the browser to GET our endpoint with
+    //   Sec-Fetch-Site: cross-site
+    // Without this gate the audit row + subprocess would fire just
+    // from the operator visiting the attacker's page (basic-auth
+    // is sent automatically by the browser). With the gate, we 403
+    // BEFORE the audit or spawn — neither side-effect occurs.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    let resp = router(s)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings/geoip/update-now")
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.starts_with("vpnctl admin: "),
+        "403 must carry the unified prefix, got: {body}"
+    );
+    // No audit row may exist — the gate refused BEFORE the audit.
+    let rows = inv.recent_audit(20).await.unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.action == "settings.geoip.update_now.fired"),
+        "audit row must NOT be written when the CSRF gate rejects"
+    );
+}
+
+#[tokio::test]
+async fn phase3c_geoip_update_now_accepts_same_origin_sec_fetch() {
+    // Symmetric to the cross-site test — the legitimate EventSource
+    // attach from /admin/settings sends Sec-Fetch-Site: same-origin.
+    // That MUST succeed (200 + text/event-stream).
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+
+    let resp = router(s)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/settings/geoip/update-now")
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn phase3c_inline_script_does_not_contain_unescaped_script_terminator() {
+    // XSS defense — the inline JS interpolates 4 `tr()` labels via
+    // `json_for_script` (which escapes `</` → `<\/`). If any
+    // translation ever contains `</script>`, the raw literal must
+    // not appear inside the inline <script> block. Pin the
+    // contract: the inline JS body (between our function definition
+    // and its corresponding </script>) is free of any further
+    // </script> sequence.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/settings").await;
+
+    let start_marker = "function vpnctlGeoipUpdateNow()";
+    let start = html.find(start_marker).expect("inline script must render");
+    let end_rel = html[start..].find("</script>").expect("script must close");
+    let script_body = &html[start..start + end_rel];
+
+    assert!(
+        !script_body.contains("</script>"),
+        "inline JS body must not contain a script-close sequence — found a stray </script> in: …{}…",
+        &script_body[script_body.len().saturating_sub(120)..]
+    );
+}

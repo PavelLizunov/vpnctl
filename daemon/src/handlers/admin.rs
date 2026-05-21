@@ -3676,6 +3676,24 @@ fn error_resp(status: StatusCode, detail: &str) -> Response {
     (status, error_text(detail)).into_response()
 }
 
+/// JSON-encode `s` for safe interpolation inside an inline `<script>`
+/// block. Standard `serde_json::to_string` escapes `"`, `\` and
+/// control chars — but **not `/`**. A string containing `</script>`
+/// would close the script tag prematurely and yield XSS. The
+/// post-process `replace("</", "<\\/")` produces a JSON-equivalent
+/// string (JSON-spec allows escaped `\/`) that browsers tokenise
+/// safely inside `<script>`. The escaped form is JS-identical
+/// (`"<\/script>"` == `"</script>"` at runtime — only the parser
+/// sees the difference).
+///
+/// Fallback to `""` JSON string on serialise failure (only happens
+/// on non-UTF-8 input, which `&str` can't hold — defensive).
+fn json_for_script(s: &str) -> String {
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| String::from("\"\""))
+        .replace("</", "<\\/")
+}
+
 /// 400 Bad Request with the editorial-prefixed body. Single source of
 /// truth — was inlined as `(StatusCode::BAD_REQUEST, error_text(...))
 /// .into_response()` at ~25 sites before consolidation. Delegates to
@@ -5692,10 +5710,11 @@ fn severity_class(s: &str) -> &'static str {
 /// Reads `VPNCTLD_GEOIP_DIR` (defaults to `/var/lib/vpnctl/geoip`)
 /// and reports per-file: present? last-modified? size?
 ///
-/// No mutation actions here — Pavel's update flow is `vpnctl
-/// geoip-update` (CLI, runs alongside the daemon on the same host).
-/// A future iteration can add an `/admin/settings/geoip/update` POST
-/// that shells out to the same command + streams the log via SSE.
+/// Phase 3c — the «update now» button hits
+/// `/admin/settings/geoip/update-now` (SSE source). The button
+/// flips into a live log pane that streams stdout/stderr from the
+/// `vpnctl geoip-update` subprocess until the terminal Ok/Error
+/// event closes the connection.
 fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
     use crate::i18n::tr;
     let dir = std::env::var_os("VPNCTLD_GEOIP_DIR")
@@ -5791,6 +5810,83 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                 " on the daemon host. The command downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir. Restart vpnctld for the new DB to load.",
                 " на хосте демона. Команда скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Перезапусти vpnctld чтобы новая БД загрузилась.",
             ))
+        }
+        // ── «update now» button (Phase 3c) ─────────────────────────
+        // Operator clicks → button replaces itself with a live log
+        // pane streaming from /admin/settings/geoip/update-now.
+        // Inline vanilla JS — no framework dep. Idempotent (clicking
+        // twice spawns two subprocesses; the later atomic-rename
+        // wins, harmless). Subprocess is the same `vpnctl
+        // geoip-update` that the monthly systemd timer fires.
+        div style="margin: 14px 0;" {
+            button id="geoip-update-now-btn"
+                   type="button"
+                   onclick="vpnctlGeoipUpdateNow()"
+                   style="font-family: var(--mono); font-size: 12px; padding: 6px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); cursor: pointer;"
+                   title=(tr(
+                       lang,
+                       "Spawn the `vpnctl geoip-update` subprocess on the daemon host and stream its progress here. Same action the monthly systemd timer fires.",
+                       "Запустить `vpnctl geoip-update` на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный systemd timer.",
+                   )) {
+                (tr(lang, "update now", "обновить сейчас"))
+            }
+            (maud::PreEscaped(format!(r#"
+<pre id="geoip-update-now-log"
+     style="display:none; margin: 10px 0 0; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; max-height: 320px; overflow-y: auto; white-space: pre-wrap;"></pre>
+<script>
+function vpnctlGeoipUpdateNow() {{
+  var btn = document.getElementById('geoip-update-now-btn');
+  var log = document.getElementById('geoip-update-now-log');
+  btn.disabled = true;
+  btn.textContent = {running_label};
+  log.style.display = 'block';
+  log.textContent = '';
+  var es = new EventSource('/admin/settings/geoip/update-now');
+  function append(line, color) {{
+    var span = document.createElement('span');
+    if (color) {{ span.style.color = color; }}
+    span.textContent = line + '\n';
+    log.appendChild(span);
+    log.scrollTop = log.scrollHeight;
+  }}
+  es.addEventListener('step', function(e) {{
+    try {{
+      var d = JSON.parse(e.data);
+      var color = (d.stream === 'stderr') ? 'var(--acc, #c14)' : null;
+      append(d.message, color);
+    }} catch (err) {{ append('[parse error] ' + e.data, 'var(--acc, #c14)'); }}
+  }});
+  es.addEventListener('ok', function(e) {{
+    try {{ var d = JSON.parse(e.data); append('✓ ' + d.message, 'var(--acc-good, #2c5f2d)'); }}
+    catch (err) {{ append('✓ done', 'var(--acc-good, #2c5f2d)'); }}
+    es.close();
+    btn.disabled = false;
+    btn.textContent = {done_label};
+  }});
+  es.addEventListener('error', function(e) {{
+    try {{ var d = JSON.parse(e.data); append('✗ ' + d.message, 'var(--acc, #c14)'); }}
+    catch (err) {{ append('✗ stream error', 'var(--acc, #c14)'); }}
+    es.close();
+    btn.disabled = false;
+    btn.textContent = {retry_label};
+  }});
+  es.onerror = function() {{
+    // Transport-level error (network, server crash). The named-event
+    // 'error' handler above also fires on terminal errors emitted by
+    // the runner — onerror catches the connection-level cases.
+    es.close();
+    if (!btn.disabled) {{ return; }}
+    append('✗ ' + {transport_err_label}, 'var(--acc, #c14)');
+    btn.disabled = false;
+    btn.textContent = {retry_label};
+  }};
+}}
+</script>"#,
+                running_label = json_for_script(tr(lang, "running…", "запущено…")),
+                done_label = json_for_script(tr(lang, "update now", "обновить сейчас")),
+                retry_label = json_for_script(tr(lang, "retry", "повторить")),
+                transport_err_label = json_for_script(tr(lang, "connection lost", "соединение потеряно")),
+            )))
         }
     }
 }
@@ -7386,6 +7482,97 @@ pub(crate) async fn wizard_step2_sse(
     // KeepAlive sends `: keep-alive\n\n` comments every 15s so
     // intermediate proxies (or a tab in the background) don't drop
     // the connection during a long apt-get install.
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 3c — Settings GeoIP «update now» SSE button.
+//
+//  Streams the live output of `vpnctl geoip-update` as named SSE
+//  events. Auth-gated by the basic-auth middleware (same as every
+//  other /admin route). One audit row per fire — provenance only,
+//  no payload (the subprocess output is in journalctl).
+//
+//  See `crate::geoip_update_runner` for the subprocess pattern.
+// ────────────────────────────────────────────────────────────────────────
+
+/// SSE source for the Settings GeoIP «update now» button. Streams
+/// `/usr/local/bin/vpnctl geoip-update` stdout/stderr line-by-line
+/// to the browser. Each Step event carries a `stream:"stdout"` or
+/// `"stderr"` field so the front-end can colour stderr lines for
+/// the operator. Final Ok/Error event closes the stream.
+///
+/// CSRF defense: the endpoint is GET (EventSource only does GET),
+/// state-changing (spawns a subprocess + writes an audit row).
+/// We gate on `Sec-Fetch-Site` — modern browsers stamp it on every
+/// fetch; an attacker's `<img src=…>` from a cross-site page would
+/// set it to `cross-site` and get rejected here BEFORE the audit
+/// or spawn. Absence (CLI / curl / very old browser) is allowed —
+/// those aren't the realistic attack surface for a LAN-only
+/// homelab admin.
+pub(crate) async fn settings_geoip_update_now_sse(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        // "same-origin" = EventSource from /admin/settings page,
+        // "none" = direct address-bar navigation. Anything else is
+        // a cross-context attach — refuse without spawning or
+        // logging. (Returns the unified prefix via error_resp.)
+        if sfs != "same-origin" && sfs != "none" {
+            return error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-origin request rejected — open the admin UI directly",
+            );
+        }
+    }
+
+    // One audit row per fire — provenance only. The actual download
+    // log goes to journalctl (subprocess stderr). If the audit
+    // write fails the fire still proceeds (we don't want the button
+    // to mysteriously do nothing because of an unrelated audit
+    // problem).
+    if let Err(e) = state
+        .inv
+        .audit("admin", "settings.geoip.update_now.fired", None, None)
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            error = %e,
+            "audit write failed for settings.geoip.update_now.fired — subprocess will still run"
+        );
+    }
+
+    let vpnctl_bin = crate::geoip_update_runner::resolve_vpnctl_bin();
+    let raw = crate::geoip_update_runner::run_update(vpnctl_bin);
+    let mapped = raw.map(|ev| {
+        let name = ev.event_name();
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::admin",
+                event_name = name,
+                error = %e,
+                "geoip-update SSE event serialisation failed — emitting placeholder"
+            );
+            format!(
+                "{{\"kind\":\"step\",\"stream\":\"stderr\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+            )
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response()

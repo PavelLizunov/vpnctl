@@ -50,6 +50,12 @@ pub mod rate_limit;
 // of linking russh. Lets vpnctld talk to nodes without pulling
 // glibc 2.38; see ssh_subprocess.rs for the rationale.
 pub mod ssh_subprocess;
+// Phase 3c — SSE backend for the Settings GeoIP «update now» button.
+// Wraps `/usr/local/bin/vpnctl geoip-update` via `std::process::Command`
+// + `tokio::task::spawn_blocking`. NOT `tokio::process` (glibc 2.39+
+// pidfd_spawnp = prod crash on bookworm). Same workaround pattern as
+// `ssh_subprocess`.
+pub mod geoip_update_runner;
 pub mod wizard;
 // Phase E sub-iter 4b — wizard SSE bootstrap engine. Pulled out of
 // the admin handler so the bootstrap pipeline can be unit-tested

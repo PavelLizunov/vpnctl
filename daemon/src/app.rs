@@ -791,6 +791,18 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts/{id}/ack", post(admin::alert_ack))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
+        // Phase 3c — Settings GeoIP «update now» SSE source. Streams
+        // the live stdout/stderr of `vpnctl geoip-update` as named
+        // SSE events (step / ok / error). GET because EventSource
+        // only does GET; the action is idempotent (no state mutation
+        // beyond the disk file the subprocess writes itself + an
+        // audit row). See `geoip_update_runner` for the subprocess
+        // pattern (std::process::Command, NOT tokio::process —
+        // glibc-2.39 hazard explained in the module doc).
+        .route(
+            "/admin/settings/geoip/update-now",
+            get(admin::settings_geoip_update_now_sse),
+        )
         // Phase G chunk 3 — Telegram bot config POST. Singleton row;
         // empty inputs = clear/disable. CSRF middleware (Origin check)
         // runs ahead of this, so a cross-origin form-post can't write.
