@@ -601,6 +601,201 @@ fn clip_ts(ts: &str) -> String {
     head.replacen('T', " ", 1)
 }
 
+/// Classify an IP address from `sub_access_log.ip` into one of four
+/// buckets so the admin UI can flag rows that aren't real external
+/// clients. Pavel 2026-05-21: «вот такой ip это норм?» about a
+/// `127.0.0.1` row — answer is «it's localhost, you (or a script
+/// on the daemon host) ran a curl on the box itself». This makes
+/// that visible at a glance instead of looking like a mystery
+/// external client.
+///
+/// Rules (RFC 1918 + loopback + link-local; IPv6 left untouched
+/// for now — a homelab almost never sees IPv6 sub fetches):
+/// - `127.0.0.0/8`         → `Loopback`
+/// - `10.0.0.0/8`,
+///   `172.16.0.0/12`,
+///   `192.168.0.0/16`      → `LanRfc1918`
+/// - `169.254.0.0/16`      → `LinkLocal` (DHCP-failure fallback)
+/// - otherwise             → `Public` (no tag, no tooltip override)
+#[derive(Clone, Copy)]
+enum IpKind {
+    Loopback,
+    LanRfc1918,
+    LinkLocal,
+    Public,
+}
+
+impl IpKind {
+    fn tag(self, lang: crate::i18n::Locale) -> Option<&'static str> {
+        match self {
+            IpKind::Loopback => Some(crate::i18n::tr(lang, "localhost", "localhost")),
+            IpKind::LanRfc1918 => Some(crate::i18n::tr(lang, "LAN", "LAN")),
+            IpKind::LinkLocal => Some(crate::i18n::tr(lang, "link-local", "link-local")),
+            IpKind::Public => None,
+        }
+    }
+    fn tooltip(self, lang: crate::i18n::Locale) -> &'static str {
+        match self {
+            IpKind::Loopback => crate::i18n::tr(
+                lang,
+                "Loopback (127.0.0.0/8). Hit came from a script running ON the daemon host itself (curl localhost, SSH tunnel, internal poller). Not an external client.",
+                "Loopback (127.0.0.0/8). Запрос пришёл от скрипта, запущенного НА самом хосте демона (curl localhost, SSH-туннель, внутренний поллер). НЕ внешний клиент.",
+            ),
+            IpKind::LanRfc1918 => crate::i18n::tr(
+                lang,
+                "RFC 1918 private address (10/8, 172.16/12, 192.168/16). Same LAN as the daemon — likely your nginx proxy or another homelab host. Real client IP should arrive via X-Forwarded-For if the peer is in VPNCTLD_TRUSTED_PROXIES.",
+                "Приватный адрес по RFC 1918 (10/8, 172.16/12, 192.168/16). Та же LAN что и демон — скорее всего твой nginx-прокси или другой homelab-хост. Реальный IP клиента должен приходить через X-Forwarded-For если пир в VPNCTLD_TRUSTED_PROXIES.",
+            ),
+            IpKind::LinkLocal => crate::i18n::tr(
+                lang,
+                "Link-local (169.254.0.0/16). DHCP-failure fallback address; should never appear in a sub-access log on a healthy network.",
+                "Link-local (169.254.0.0/16). Fallback-адрес при сбое DHCP; в access-log здоровой сети появляться не должен.",
+            ),
+            IpKind::Public => "",
+        }
+    }
+    fn color(self) -> &'static str {
+        match self {
+            IpKind::Loopback => "var(--mute)",
+            IpKind::LanRfc1918 => "var(--mute)",
+            IpKind::LinkLocal => "var(--acc)",
+            IpKind::Public => "var(--rule)",
+        }
+    }
+}
+
+fn classify_ip(ip: &str) -> IpKind {
+    // Cheap textual classifier — avoids pulling in a full IPv4 parser
+    // for the hot path. Handles the 4 RFC 1918 + loopback + link-local
+    // cases; everything else is Public. IPv6 not classified (homelab
+    // almost never sees IPv6 sub pulls).
+    if ip == "127.0.0.1" || ip.starts_with("127.") {
+        return IpKind::Loopback;
+    }
+    if ip.starts_with("10.") || ip.starts_with("192.168.") || ip.starts_with("169.254.") {
+        return if ip.starts_with("169.254.") {
+            IpKind::LinkLocal
+        } else {
+            IpKind::LanRfc1918
+        };
+    }
+    if let Some(rest) = ip.strip_prefix("172.") {
+        if let Some((octet, _)) = rest.split_once('.') {
+            if let Ok(n) = octet.parse::<u8>() {
+                if (16..=31).contains(&n) {
+                    return IpKind::LanRfc1918;
+                }
+            }
+        }
+    }
+    IpKind::Public
+}
+
+/// Minimal User-Agent → human-readable summary. Handles the
+/// half-dozen UAs that actually appear in `sub_access_log` on the
+/// homelab — full UA-parsing-library overkill for a 33-user
+/// operator surface. Operator hovers the row to see the full raw
+/// string via title attr; this just gives an at-a-glance label so
+/// the table doesn't drown in 200-char Mozilla/5.0 (…) blobs.
+fn parse_ua_short(ua: Option<&str>) -> Option<&'static str> {
+    let s = ua?;
+    // Order matters — match the most-specific tags first.
+    if s.contains("v2rayN") {
+        return Some("v2rayN / Windows");
+    }
+    if s.contains("Hiddify") {
+        return Some("Hiddify");
+    }
+    if s.contains("sing-box") {
+        return Some("sing-box client");
+    }
+    if s.contains("clash") || s.contains("Clash") {
+        return Some("Clash");
+    }
+    if s.contains("Shadowrocket") {
+        return Some("Shadowrocket / iOS");
+    }
+    if s.contains("Streisand") {
+        return Some("Streisand / iOS");
+    }
+    if s.contains("Quantumult") {
+        return Some("Quantumult / iOS");
+    }
+    if s.contains("Stash") {
+        return Some("Stash / iOS");
+    }
+    if s.contains("curl/") {
+        return Some("curl");
+    }
+    if s.contains("Wget/") {
+        return Some("wget");
+    }
+    if s.contains("Mozilla/5.0") {
+        // Browser bucket — distinguish OS only.
+        if s.contains("iPhone") || s.contains("iPad") {
+            return Some("браузер iOS");
+        }
+        if s.contains("Android") {
+            return Some("браузер Android");
+        }
+        if s.contains("Macintosh") || s.contains("Mac OS X") {
+            return Some("браузер macOS");
+        }
+        if s.contains("Windows") {
+            return Some("браузер Windows");
+        }
+        if s.contains("Linux") {
+            return Some("браузер Linux");
+        }
+        return Some("браузер");
+    }
+    None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod ip_ua_tests {
+    use super::*;
+
+    #[test]
+    fn classify_ip_buckets() {
+        assert!(matches!(classify_ip("127.0.0.1"), IpKind::Loopback));
+        assert!(matches!(classify_ip("127.1.2.3"), IpKind::Loopback));
+        assert!(matches!(classify_ip("10.0.0.1"), IpKind::LanRfc1918));
+        assert!(matches!(classify_ip("192.168.0.236"), IpKind::LanRfc1918));
+        assert!(matches!(classify_ip("172.16.5.1"), IpKind::LanRfc1918));
+        assert!(matches!(classify_ip("172.31.255.254"), IpKind::LanRfc1918));
+        // Outside 16-31 → not RFC 1918, classified Public.
+        assert!(matches!(classify_ip("172.15.0.1"), IpKind::Public));
+        assert!(matches!(classify_ip("172.32.0.1"), IpKind::Public));
+        assert!(matches!(classify_ip("169.254.0.1"), IpKind::LinkLocal));
+        assert!(matches!(classify_ip("104.194.156.93"), IpKind::Public));
+        assert!(matches!(classify_ip("8.8.8.8"), IpKind::Public));
+    }
+
+    #[test]
+    fn parse_ua_short_buckets() {
+        assert_eq!(
+            parse_ua_short(Some("v2rayN/6.99")),
+            Some("v2rayN / Windows")
+        );
+        assert_eq!(parse_ua_short(Some("Hiddify/2.5.7")), Some("Hiddify"));
+        assert_eq!(parse_ua_short(Some("curl/8.5.0")), Some("curl"));
+        assert_eq!(
+            parse_ua_short(Some(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605"
+            )),
+            Some("браузер iOS")
+        );
+        assert_eq!(
+            parse_ua_short(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120")),
+            Some("браузер Windows")
+        );
+        assert_eq!(parse_ua_short(Some("unknown-thing/1.0")), None);
+        assert_eq!(parse_ua_short(None), None);
+    }
+}
+
 pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -2874,73 +3069,102 @@ pub(crate) async fn user_detail(
             }
         }
 
-        // ── Subscription access (Phase Track-1 abuse-detection signal) ──
         div.ed-rule {}
         div.ed-art-eyebrow {
-            "Subscription access"
+            (crate::i18n::tr(lang, "Subscription access", "Обращения к подписке"))
             @if heat_24h {
-                // Inline heat flag with accent colour. The eyebrow is
-                // small so the operator notices it on scroll without
-                // it screaming. ABUSE_HEAT_THRESHOLD documents the cut.
                 span style="color: var(--acc); margin-left: 12px; letter-spacing: 0;" {
-                    "· abuse signal: " (ips_24h) " distinct IPs in 24h (≥" (ABUSE_HEAT_THRESHOLD) " threshold)"
+                    (crate::i18n::tr(lang, "· abuse signal: ", "· abuse-сигнал: "))
+                    (ips_24h)
+                    (crate::i18n::tr(
+                        lang,
+                        " distinct IPs in 24h (≥",
+                        " уникальных IP за 24ч (≥",
+                    ))
+                    (ABUSE_HEAT_THRESHOLD)
+                    (crate::i18n::tr(lang, " threshold)", " порог)"))
                 }
             }
         }
-        // Headline counters — distinct IPs in two windows. Side-by-side
-        // so the operator sees both at a glance without clicking.
         div style="display: flex; gap: 36px; padding: 12px 0 18px; font-family: var(--serif);" {
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "distinct IPs · 24h"
+                    (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
                 }
             }
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "distinct IPs · 7 days"
+                    (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
                 }
             }
             div {
                 div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
                 div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    "recent fetches"
+                    (crate::i18n::tr(lang, "recent fetches", "недавних обращений"))
                 }
             }
         }
-        // Recent rows table — last N hits, newest first. Mono-font for
-        // IPs / UAs so shared-prefix cases (192.168.0.1 vs 192.168.0.2)
-        // are easy to scan visually. The operator can spot patterns
-        // (one IP, several UAs over time = roaming device; one UA,
-        // many ASNs at once = shared URL).
         @if recent_access.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                "No subscription fetches recorded yet. "
-                "Hits will appear here as soon as a client pulls the URL above."
+                (crate::i18n::tr(
+                    lang,
+                    "No subscription fetches recorded yet. Hits will appear here as soon as a client pulls the URL above.",
+                    "Обращений к подписке пока не записано. Строки появятся сразу как только клиент дёрнет URL выше.",
+                ))
             }
         } @else {
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "when" }
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "ip" }
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "user-agent" }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "status" }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "bytes" }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (crate::i18n::tr(lang, "when", "когда"))
+                        }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (crate::i18n::tr(lang, "ip", "ip"))
+                        }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (crate::i18n::tr(lang, "user-agent", "user-agent"))
+                        }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (crate::i18n::tr(lang, "status", "статус"))
+                        }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (crate::i18n::tr(lang, "bytes", "байт"))
+                        }
                     }
                 }
                 tbody {
                     @for row in &recent_access {
+                        @let ip_kind = classify_ip(&row.ip);
+                        @let ua_summary = parse_ua_short(row.ua.as_deref());
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
                                 (clip_ts(&row.ts.to_rfc3339()))
                             }
-                            td style="padding: 5px 8px; color: var(--ink);" { (row.ip) }
+                            td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind.tooltip(lang)) {
+                                (row.ip)
+                                @if let Some(tag) = ip_kind.tag(lang) {
+                                    " "
+                                    span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind.color())) {
+                                        (tag)
+                                    }
+                                }
+                            }
                             td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere; word-break: break-all;" {
                                 @match &row.ua {
-                                    Some(s) => (s),
-                                    None => em style="color: var(--mute);" { "(none)" },
+                                    Some(s) => {
+                                        // Parsed summary if recognised, else raw string.
+                                        @if let Some(label) = ua_summary {
+                                            span title=(s) style="border-bottom: 1px dotted var(--rule-s); cursor: help;" {
+                                                (label)
+                                            }
+                                        } @else {
+                                            (s)
+                                        }
+                                    }
+                                    None => em style="color: var(--mute);" { (crate::i18n::tr(lang, "(none)", "(нет)")) },
                                 }
                             }
                             td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (row.status) }
