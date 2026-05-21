@@ -718,6 +718,15 @@ pub(crate) async fn dashboard(
         0
     });
 
+    // Phase 4b — per-server live activity rollup for the dashboard
+    // «VPN activity» tile. ONE call returns one entry per known
+    // server (defaults to zeros for unpolled servers); we sum +
+    // pass the per-server breakdown to the renderer.
+    let live_activity = state.inv.all_servers_live_activity(24).await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "all_servers_live_activity failed");
+        Vec::new()
+    });
+
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         h1.ed-art-h1 {
@@ -744,6 +753,7 @@ pub(crate) async fn dashboard(
             ))
         }
         (dashboard_metrics(&stats, lang))
+        (dashboard_vpn_activity(&live_activity, lang))
         (dashboard_alerts_tile(unacked_alerts, lang))
         (dashboard_limit_alerts(&alerting, lang))
         (dashboard_heavy_users(&heavy_users, lang))
@@ -755,6 +765,104 @@ pub(crate) async fn dashboard(
 /// Phase G — single-line alerts tile under the metric row. Renders
 /// only when there's at least one unacked alert; quiet dashboard stays
 /// quiet. Links to `/admin/alerts` for the full feed.
+/// Phase 4b — dashboard «VPN activity» tile. Sums per-server
+/// server-wide totals from `all_servers_live_activity(24)` and
+/// shows: total bytes, active conns now, per-server breakdown.
+/// Renders even when the poller has zero data so the operator
+/// sees the structure (instead of guessing whether the section
+/// would EVER appear). Empty-state copy points at the NM-11
+/// upstream limit so the operator knows why per-user attribution
+/// is zero today.
+fn dashboard_vpn_activity(
+    rows: &[(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let total_up: u64 = rows
+        .iter()
+        .map(|(_, a)| a.bytes_up_window)
+        .fold(0u64, u64::saturating_add);
+    let total_dn: u64 = rows
+        .iter()
+        .map(|(_, a)| a.bytes_dn_window)
+        .fold(0u64, u64::saturating_add);
+    let total_active: u32 = rows
+        .iter()
+        .map(|(_, a)| a.active_now)
+        .fold(0u32, u32::saturating_add);
+    let any_polled = rows.iter().any(|(_, a)| a.last_sample_ts.is_some());
+
+    html! {
+        div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
+            div.ed-art-eyebrow { (tr(lang, "VPN activity · last 24h", "VPN-активность · 24 часа")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user attribution is currently blocked upstream (NM-11: sing-box's clash-api wire format omits the User field); server-wide aggregates are unaffected.",
+                    "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user attribution заблокирован upstream (NM-11: sing-box's clash-api не передаёт поле User в wire-формате); сервер-агрегатные сводки работают.",
+                ))
+            }
+            @if !any_polled {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0;" {
+                    (tr(
+                        lang,
+                        "No clash-api samples yet — the poller hasn't reached any node. Check ",
+                        "Снимков clash-api ещё нет — поллер не дошёл ни до одной ноды. Проверить ",
+                    ))
+                    a href="/admin/servers" style="color: var(--ink);" { (tr(lang, "Servers", "Серверы")) }
+                    (tr(
+                        lang,
+                        " for deploy state.",
+                        " на статус деплоя.",
+                    ))
+                }
+            } @else {
+                div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 8px 0 12px;" {
+                    div title=(tr(lang, "Sum of active_connections across all servers' freshest server-wide tick.", "Сумма active_connections по всем серверам (свежий сервер-агрегатный тик).")) {
+                        (status_tile(tr(lang, "active now", "активных сейчас"), &total_active.to_string(), "var(--ink)"))
+                    }
+                    div title=(tr(lang, "Total upload bytes (client → server) across every node over the last 24 hours.", "Total upload-байт (клиент → сервер) по всем нодам за последние 24 часа.")) {
+                        (status_tile(tr(lang, "upload 24h", "upload 24ч"), &humanize_bytes(total_up), "var(--ink)"))
+                    }
+                    div title=(tr(lang, "Total download bytes (server → client) across every node over the last 24 hours.", "Total download-байт (сервер → клиент) по всем нодам за последние 24 часа.")) {
+                        (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(total_dn), "var(--ink)"))
+                    }
+                }
+                // Per-server breakdown — compact mono table.
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                    thead {
+                        tr style="border-bottom: 1px solid var(--ink);" {
+                            th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "server", "сервер")) }
+                            th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "active", "активных")) }
+                            th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "upload", "upload")) }
+                            th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "download", "download")) }
+                            th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "last poll", "последний")) }
+                        }
+                    }
+                    tbody {
+                        @for (sid, act) in rows {
+                            tr style="border-bottom: 1px dotted var(--rule);" {
+                                td style="padding: 4px 8px;" {
+                                    a href=(format!("/admin/servers/{}", crate::http_util::path_segment_encode(&sid.0))) style="color: var(--ink); text-decoration: none;" { (sid.0) }
+                                }
+                                td style="padding: 4px 8px; text-align: right;" { (act.active_now) }
+                                td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(act.bytes_up_window)) }
+                                td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(act.bytes_dn_window)) }
+                                td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
+                                    @match act.last_sample_ts {
+                                        Some(ts) => (ts.format("%m-%d %H:%M").to_string()),
+                                        None => (tr(lang, "—", "—")),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn dashboard_alerts_tile(unacked: u64, lang: crate::i18n::Locale) -> Markup {
     use crate::i18n::tr;
     html! {
@@ -7785,6 +7893,20 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Phase 4b — server-wide live activity rollup (active conns
+    // now, bytes up/down over the last 24h, last poll ts). Failure
+    // → zero-default; the section still renders so the operator
+    // sees the diagnostic in journalctl + a clean «no data yet»
+    // tile instead of a 500.
+    let live_activity = state
+        .inv
+        .server_live_activity(&sid, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server_live_activity failed");
+            vpnctl_inventory::ServerLiveActivity::default()
+        });
+
     // Per-server secrets — only read here so kernel-specific sections
     // (currently wgturn's VK-link form) can display their current state.
     // Fetched even when no such kernel is enabled because the cost is
@@ -7919,6 +8041,12 @@ pub(crate) async fn server_detail(
 
         // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
+
+        // Phase 4b — live activity tile (server-wide totals from
+        // clash-api; per-user attribution blocked by NM-11 sing-box
+        // upstream, dashboard tile shows zero «attributed users»
+        // intentionally to make the limit explicit).
+        (server_detail_live_activity_section(&live_activity, lang))
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
@@ -8157,6 +8285,67 @@ fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
         div style="border: 1px solid var(--rule); padding: 10px 12px; background: var(--paper);" {
             div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" { (label) }
             div style=(format!("font-family: var(--serif); font-size: 22px; color: {value_color}; margin-top: 2px;")) { (value) }
+        }
+    }
+}
+
+/// Phase 4b — server-wide live activity tile (active conns now +
+/// 24h bytes up/down + last poll ts + attributed-users counter).
+/// Companion to the per-user «Live VPN stats» section on
+/// /admin/users/<id>; that one shows ONE user across all servers,
+/// this one shows ALL traffic on ONE server.
+///
+/// NM-11 caveat surfaced in the empty-state copy: per-user
+/// attribution from clash-api is blocked by a sing-box upstream
+/// bug (TrackerMetadata.MarshalJSON omits the User field). Server-
+/// wide totals work, per-user counts always read 0 until upstream
+/// PR lands or operator adopts a forked sing-box build.
+fn server_detail_live_activity_section(
+    activity: &vpnctl_inventory::ServerLiveActivity,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let last_seen_str = activity
+        .last_sample_ts
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| tr(lang, "never", "никогда").to_string());
+    let total_bytes = activity
+        .bytes_up_window
+        .saturating_add(activity.bytes_dn_window);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Live activity · last 24h", "Живая активность · 24 часа"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Server-wide totals from this node's clash-api (5-minute tick). Numbers reflect actual VPN traffic — VLESS, TUIC, Trojan auth all summed. AmneziaWG / wgturn are kernel-level and not visible to clash-api, so they're NOT counted here. ",
+                "Сервер-агрегатные показатели из clash-api ноды (тик 5 минут). Числа отражают реальный VPN-трафик — VLESS, TUIC, Trojan сложены вместе. AmneziaWG / wgturn — kernel-уровень, не видны clash-api, поэтому НЕ учитываются.",
+            ))
+        }
+        div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 8px;" {
+            div title=(tr(lang, "Active connections from the freshest clash-api snapshot (5-min tick). Includes all auth-bearing connections sing-box currently holds open.", "Активные соединения из самого свежего snapshot clash-api (тик 5 минут). Включает все авторизованные соединения, которые sing-box сейчас держит открытыми.")) {
+                (status_tile(tr(lang, "active now", "активных сейчас"), &activity.active_now.to_string(), "var(--ink)"))
+            }
+            div title=(tr(lang, "Total bytes (upload + download) summed across every clash-api tick in the last 24 hours.", "Всего байт (upload + download), сумма по всем тикам clash-api за последние 24 часа.")) {
+                (status_tile(tr(lang, "total 24h", "всего 24ч"), &humanize_bytes(total_bytes), "var(--ink)"))
+            }
+            div title=(tr(lang, "Upload bytes (client → server) over the last 24 hours.", "Upload-байт (клиент → сервер) за последние 24 часа.")) {
+                (status_tile(tr(lang, "upload 24h", "upload 24ч"), &humanize_bytes(activity.bytes_up_window), "var(--ink)"))
+            }
+            div title=(tr(lang, "Download bytes (server → client) over the last 24 hours.", "Download-байт (сервер → клиент) за последние 24 часа.")) {
+                (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(activity.bytes_dn_window), "var(--ink)"))
+            }
+        }
+        // Last-sample line + NM-11 attribution badge — making the
+        // upstream limit explicit instead of silently absent.
+        p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 4px 0 14px;" {
+            (tr(lang, "last poll: ", "последний поллинг: "))
+            b style="color: var(--ink);" { (last_seen_str) }
+            " · "
+            (activity.distinct_users_attributed)
+            (tr(lang, " users attributed (NM-11: sing-box upstream strips per-user from clash-api; server-wide totals work)", " юзеров attributed (NM-11: sing-box upstream удаляет per-user из clash-api; сервер-агрегатные totals работают)"))
         }
     }
 }

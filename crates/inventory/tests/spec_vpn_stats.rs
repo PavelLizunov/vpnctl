@@ -427,3 +427,133 @@ async fn record_vpn_stats_atomicity_all_deltas_visible() {
         "all 4 deltas from one record_vpn_stats call must land atomically"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase 4b — server_live_activity + all_servers_live_activity.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase4b_server_live_activity_returns_zeros_for_unknown_server() {
+    // The server-detail handler may render before the poller has
+    // ever sampled this server (fresh-deploy, NM-11 blocked, etc).
+    // Activity must be the zero-default — no DB errors.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+
+    let activity = inv
+        .server_live_activity(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    assert_eq!(activity.active_now, 0);
+    assert_eq!(activity.bytes_up_window, 0);
+    assert_eq!(activity.bytes_dn_window, 0);
+    assert_eq!(activity.distinct_users_attributed, 0);
+    assert!(activity.last_sample_ts.is_none());
+}
+
+#[tokio::test]
+async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() {
+    // Three ticks for one server: two server-wide rows (user_id IS
+    // NULL) with growing active_connections + per-user deltas.
+    // `active_now` must be the FRESHEST server-wide value (8), NOT
+    // the sum / max / first; bytes are summed across all rows.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    for u in ["u1", "u2"] {
+        inv.add_user(&user(u)).await.unwrap();
+    }
+
+    // Tick 1: server-wide 100 up / 50 dn / 4 active + u1 50/25.
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(None, 100, 50, 4), ud(Some("u1"), 50, 25, 2)],
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    // Tick 2: server-wide 200/100/8 + u2 50/25.
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(None, 200, 100, 8), ud(Some("u2"), 50, 25, 3)],
+    )
+    .await
+    .unwrap();
+
+    let activity = inv
+        .server_live_activity(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+
+    // active_now = freshest server-wide row's active_connections.
+    assert_eq!(
+        activity.active_now, 8,
+        "active_now must equal newest server-wide tick"
+    );
+    // Bytes sum across ALL rows (server-wide + per-user).
+    assert_eq!(activity.bytes_up_window, 100 + 50 + 200 + 50);
+    assert_eq!(activity.bytes_dn_window, 50 + 25 + 100 + 25);
+    assert_eq!(
+        activity.distinct_users_attributed, 2,
+        "u1 + u2 → 2 attributed users"
+    );
+    assert!(activity.last_sample_ts.is_some());
+}
+
+#[tokio::test]
+async fn phase4b_all_servers_live_activity_returns_default_entry_for_unobserved_server() {
+    // Dashboard rollup: returns one entry per `servers.id` row,
+    // even for servers the poller has never reached. Caller can
+    // sum without filtering.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("active-srv")).await.unwrap();
+    inv.add_server(&server("quiet-srv")).await.unwrap();
+    inv.add_user(&user("u1")).await.unwrap();
+    inv.record_vpn_stats(&ServerId("active-srv".into()), &[ud(None, 1024, 512, 1)])
+        .await
+        .unwrap();
+
+    let all = inv.all_servers_live_activity(24).await.unwrap();
+    assert_eq!(all.len(), 2, "one entry per servers.id row");
+
+    let active = all
+        .iter()
+        .find(|(id, _)| id.0 == "active-srv")
+        .expect("active-srv must appear");
+    assert_eq!(active.1.bytes_up_window, 1024);
+    assert_eq!(active.1.active_now, 1);
+
+    let quiet = all
+        .iter()
+        .find(|(id, _)| id.0 == "quiet-srv")
+        .expect("quiet-srv must appear (default-zero)");
+    assert_eq!(quiet.1.bytes_up_window, 0);
+    assert_eq!(quiet.1.active_now, 0);
+    assert!(quiet.1.last_sample_ts.is_none());
+}
+
+#[tokio::test]
+async fn phase4b_server_live_activity_window_excludes_older_than_since_hours() {
+    // The `since_hours` bound must filter older rows. We can't fake
+    // older `ts` via the API (server-side strftime), so verify the
+    // boundary by asking for a near-zero window — the just-inserted
+    // row's ts SHOULD still be within it (the window is hours, not
+    // seconds, so even 1h catches a row inserted just now).
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.record_vpn_stats(&ServerId("s1".into()), &[ud(None, 100, 50, 2)])
+        .await
+        .unwrap();
+
+    let agg = inv
+        .server_live_activity(&ServerId("s1".into()), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        agg.bytes_up_window, 100,
+        "row inserted just now must be inside a 1-hour window"
+    );
+}

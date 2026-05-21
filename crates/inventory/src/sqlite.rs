@@ -195,6 +195,36 @@ pub struct Ban {
     pub reason: String,
 }
 
+/// Phase 4b — server-wide live activity rollup for the dashboard +
+/// server-detail page. Aggregated over a configurable look-back
+/// window via `server_live_activity`. NM-11 hard-limits per-user
+/// attribution from clash-api to NULL, but server-wide totals work
+/// without upstream sing-box changes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerLiveActivity {
+    /// Currently-active connections — the value of
+    /// `active_connections` from the freshest server-wide row
+    /// (user_id IS NULL). `0` when no sample exists.
+    pub active_now: u32,
+    /// Sum of `upload_bytes` deltas across server-wide rows in
+    /// the window. Counts ALL traffic the kernel saw, regardless
+    /// of whether per-user attribution worked.
+    pub bytes_up_window: u64,
+    /// Sum of `download_bytes` deltas across server-wide rows in
+    /// the window. Same caveat as `bytes_up_window`.
+    pub bytes_dn_window: u64,
+    /// Timestamp of the most recent sample for this server, real
+    /// or aggregate. None when the poller has NEVER seen this
+    /// server (fresh-deploy state).
+    pub last_sample_ts: Option<DateTime<Utc>>,
+    /// Distinct number of per-user attributed rows in the window.
+    /// When NM-11 lands a fix (sing-box PR or fork), this will
+    /// climb past zero. Today: always 0 on production. Surface as
+    /// «N attributed users · last 24h» pinch to make the upstream
+    /// limit explicit instead of silently absent.
+    pub distinct_users_attributed: u32,
+}
+
 /// One row in `vpn_connection_stats` (Track-3 chunk 2). The poller
 /// writes deltas (not totals) per (server, user) on every tick where
 /// the delta is non-zero.
@@ -2410,6 +2440,101 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
+    /// Phase 4b — single-query rollup of server-wide live activity
+    /// for the server-detail tile + dashboard aggregate. Uses
+    /// server-wide rows (user_id IS NULL) for the «active now»
+    /// counter (clash-api per-tick `active_connections` value) and
+    /// sums every row (per-user + server-wide) for the bytes-in-
+    /// window counters. `distinct_users_attributed` reports how
+    /// many per-user rows landed in the window — meaningful only
+    /// AFTER the NM-11 sing-box upstream fix; today the operator
+    /// sees `0` and the user-detail's «Live VPN stats» empty-
+    /// state explains why.
+    pub async fn server_live_activity(
+        &self,
+        server_id: &ServerId,
+        since_hours: u32,
+    ) -> Result<ServerLiveActivity> {
+        let since = format!("-{since_hours} hours");
+        // Single SELECT (Phase 4b post-review fix #2): the previous
+        // two-query version had a race where a poller insert
+        // between aggregates and «latest active» queries could
+        // produce an `active_now` from a tick newer than
+        // `last_sample_ts`. SQLite WITH clause holds the row set
+        // for both correlated reads in one snapshot.
+        let row = sqlx::query(
+            "WITH win AS (
+                SELECT upload_bytes, download_bytes, ts, user_id, active_connections
+                FROM vpn_connection_stats
+                WHERE server_id = ?1
+                  AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+            )
+            SELECT
+                COALESCE((SELECT SUM(upload_bytes)   FROM win), 0) AS bytes_up,
+                COALESCE((SELECT SUM(download_bytes) FROM win), 0) AS bytes_dn,
+                (SELECT MAX(ts) FROM win)                           AS last_ts,
+                (SELECT COUNT(DISTINCT user_id) FROM win WHERE user_id IS NOT NULL) AS attributed,
+                (SELECT active_connections FROM vpn_connection_stats
+                 WHERE server_id = ?1 AND user_id IS NULL
+                 ORDER BY ts DESC LIMIT 1)                          AS active_now",
+        )
+        .bind(&server_id.0)
+        .bind(&since)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let bytes_up: i64 = row.try_get("bytes_up")?;
+        let bytes_dn: i64 = row.try_get("bytes_dn")?;
+        let last_ts_s: Option<String> = row.try_get("last_ts")?;
+        let attributed: i64 = row.try_get("attributed")?;
+        let active_now_opt: Option<i64> = row.try_get("active_now")?;
+        let active_now: u32 = match active_now_opt {
+            Some(v) => u32::try_from(v.max(0)).unwrap_or(u32::MAX),
+            None => 0,
+        };
+
+        Ok(ServerLiveActivity {
+            active_now,
+            bytes_up_window: bytes_up.max(0) as u64,
+            bytes_dn_window: bytes_dn.max(0) as u64,
+            last_sample_ts: last_ts_s.and_then(|t| {
+                DateTime::parse_from_rfc3339(&t)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
+            distinct_users_attributed: u32::try_from(attributed.max(0)).unwrap_or(u32::MAX),
+        })
+    }
+
+    /// Phase 4b — dashboard rollup across every known server.
+    /// Returns one `ServerLiveActivity` per `servers.id` (even for
+    /// servers the poller never reached — they get the default-
+    /// zeroed struct). Caller iterates + sums for the global
+    /// dashboard KPI; the per-server map is also available for a
+    /// «which server is busy» breakdown.
+    pub async fn all_servers_live_activity(
+        &self,
+        since_hours: u32,
+    ) -> Result<Vec<(ServerId, ServerLiveActivity)>> {
+        // Returns a Vec keyed by ServerId — Vec rather than
+        // HashMap/BTreeMap because the dashboard renderer iterates
+        // in insertion order anyway, and the `SELECT … ORDER BY id`
+        // below pre-sorts the keys alphabetically, so a Vec is the
+        // simplest container that preserves that order at the
+        // render site.
+        let server_ids = sqlx::query("SELECT id FROM servers ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(server_ids.len());
+        for r in server_ids {
+            let id: String = r.try_get("id")?;
+            let sid = ServerId(id);
+            let activity = self.server_live_activity(&sid, since_hours).await?;
+            out.push((sid, activity));
+        }
+        Ok(out)
     }
 
     /// Drop rows older than `days`. Mirrors `purge_sub_access_older_than`

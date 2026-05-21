@@ -10833,3 +10833,146 @@ async fn phase4a_user_detail_counter_uses_plural_rows_when_more_than_one_hidden(
             .collect::<String>()
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 4b — server-detail Live activity tile + dashboard VPN-activity.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
+    // Pavel: even before the poller has sampled, the section must
+    // render (with empty-state «active now: 0», «last poll: never»)
+    // so the page structure is predictable. NM-11 caveat copy
+    // present.
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("emptynode".into()),
+            address: "192.0.2.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers/emptynode").await;
+    assert!(
+        html.contains("Live activity · last 24h"),
+        "server-detail must surface the Phase 4b live-activity section eyebrow"
+    );
+    assert!(
+        html.contains("NM-11"),
+        "section must mention NM-11 upstream caveat so the operator knows why per-user is zero"
+    );
+    assert!(
+        html.contains("active now") && html.contains("upload 24h") && html.contains("download 24h"),
+        "all 4 tile labels must render"
+    );
+    assert!(
+        html.contains("last poll: ") && html.contains("never"),
+        "empty-state must read «last poll: never»"
+    );
+}
+
+#[tokio::test]
+async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown() {
+    // Two servers; one has a sample, one doesn't. Dashboard tile
+    // must render with the per-server breakdown table; quiet server
+    // still appears with zeros.
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for (id, addr) in [("busy", "203.0.113.1"), ("quiet", "203.0.113.2")] {
+        s.inv
+            .add_server(&Server {
+                id: ServerId(id.into()),
+                address: addr.into(),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernels: vec![KernelId("sing-box".into())],
+                enabled_protocols: Vec::new(),
+                trusted_host_fingerprint: None,
+                hoster: "generic".into(),
+                jump_via: None,
+                usage_coefficient: 1.0,
+            })
+            .await
+            .unwrap();
+    }
+    s.inv
+        .add_user(&User {
+            id: UserId("u1".into()),
+            uuid: "u10".into(),
+            sub_token: None,
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    // Record server-wide tick on `busy` (user_id = None).
+    s.inv
+        .record_vpn_stats(
+            &ServerId("busy".into()),
+            &[VpnStatsDelta {
+                user_id: None,
+                upload_bytes: 12_345,
+                download_bytes: 54_321,
+                active_connections: 7,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("VPN activity · last 24h"),
+        "dashboard must surface the new VPN-activity tile"
+    );
+    assert!(html.contains("NM-11"), "tile must surface NM-11 explainer");
+    // Pin the busy server's `<td>7</td>` row specifically so an
+    // unrelated «7» in a sibling tile (page counter, server total
+    // etc.) can't satisfy this assertion. Review-agent Phase 4b #7.
+    let busy_anchor = "href=\"/admin/servers/busy\"";
+    let busy_pos = html
+        .find(busy_anchor)
+        .expect("busy server link must render");
+    let busy_row = &html[busy_pos..busy_pos.saturating_add(400)];
+    assert!(
+        busy_row.contains(">7<"),
+        "busy server's active-now cell must be 7, got row: …{busy_row}…"
+    );
+    // Per-server breakdown links to each server-detail page.
+    assert!(
+        html.contains(busy_anchor) && html.contains("href=\"/admin/servers/quiet\""),
+        "both servers must appear in the per-server breakdown"
+    );
+}
+
+#[tokio::test]
+async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
+    // No samples anywhere — the tile must render the empty-state
+    // copy pointing at the Servers list, NOT crash or hide.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // No servers at all → list is empty.
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("VPN activity · last 24h"),
+        "tile must always render"
+    );
+    assert!(
+        html.contains("No clash-api samples yet"),
+        "empty-state copy must mention «No clash-api samples yet»"
+    );
+}
