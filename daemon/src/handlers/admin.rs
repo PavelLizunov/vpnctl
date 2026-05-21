@@ -2707,7 +2707,11 @@ pub(crate) async fn user_detail(
                 // self-heal button.
                 div style="padding: 12px 0;" {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        "No WireGuard keypair on this user. Imported from the legacy bash project, or created before the auto-gen default."
+                        (crate::i18n::tr(
+                            lang,
+                            "No WireGuard keypair on this user. Imported from the legacy bash project, or created before the auto-gen default.",
+                            "У этого пользователя нет WireGuard-пары. Импортирован из старого bash-проекта или создан до того как auto-gen стал дефолтом.",
+                        ))
                     }
                     form method="post"
                          action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
@@ -2775,16 +2779,22 @@ pub(crate) async fn user_detail(
                                 ")"
                             }
                             @if granted_ids.contains(&s.id) {
-                                span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
+                                span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
+                                    (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
+                                }
                                 form method="post"
                                      action=(format!("/admin/users/{}/grants/{}/revoke",
                                                      path_segment_encode(&user.id.0),
                                                      path_segment_encode(&s.id.0)))
                                      style="margin: 0;" {
+                                    @let title_str = match lang {
+                                        crate::i18n::Locale::En => format!("Revoke {}'s access to {}", user.id.0, s.id.0),
+                                        crate::i18n::Locale::Ru => format!("Отозвать доступ {} к {}", user.id.0, s.id.0),
+                                    };
                                     button type="submit"
-                                           title=(format!("Revoke {}'s access to {}", user.id.0, s.id.0))
+                                           title=(title_str)
                                            style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                        "revoke"
+                                        (crate::i18n::tr(lang, "revoke", "отозвать"))
                                     }
                                 }
                             } @else {
@@ -2794,10 +2804,14 @@ pub(crate) async fn user_detail(
                                                      path_segment_encode(&user.id.0),
                                                      path_segment_encode(&s.id.0)))
                                      style="margin: 0;" {
+                                    @let title_str = match lang {
+                                        crate::i18n::Locale::En => format!("Grant {} access to {}", user.id.0, s.id.0),
+                                        crate::i18n::Locale::Ru => format!("Выдать доступ {} к {}", user.id.0, s.id.0),
+                                    };
                                     button type="submit"
-                                           title=(format!("Grant {} access to {}", user.id.0, s.id.0))
+                                           title=(title_str)
                                            style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                        "grant"
+                                        (crate::i18n::tr(lang, "grant", "выдать"))
                                     }
                                 }
                             }
@@ -2819,6 +2833,7 @@ pub(crate) async fn user_detail(
                                 hidden_per_server.get(&s.id),
                                 &user_overrides,
                                 &state.registry,
+                                lang,
                             ))
                         }
                     }
@@ -2997,11 +3012,15 @@ async fn ua_clusters_section(
 
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "UA fingerprint · last 24h" }
+        div.ed-art-eyebrow {
+            (crate::i18n::tr(lang, "UA fingerprint · last 24h", "Отпечаток User-Agent · за 24ч"))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "Heuristic. One device usually roams within one ISP /16, "
-            "while a shared sub URL spreads across many ISPs. "
-            "Labels: orange = likely shared, green = likely roaming."
+            (crate::i18n::tr(
+                lang,
+                "Heuristic. One device usually roams within one ISP /16, while a shared sub URL spreads across many ISPs. Labels: orange = likely shared, green = likely roaming.",
+                "Эвристика. Одно устройство обычно ходит в пределах одного ISP /16, а расшаренный sub URL расползается по разным ISP. Метки: оранжевый = вероятно расшарен, зелёный = вероятно роуминг.",
+            ))
         }
         table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
             thead {
@@ -5019,40 +5038,50 @@ pub(crate) async fn audit(
                         "Под текущий фильтр не подошла ни одна строка аудита.",
                     ))
                 } @else {
-                    "No audit rows yet — this stream fills as the daemon does work."
+                    (crate::i18n::tr(
+                        lang,
+                        "No audit rows yet — this stream fills as the daemon does work.",
+                        "Записей аудита ещё нет — поток наполняется по мере работы демона.",
+                    ))
                 }
             }
         } @else {
-            (audit_timeline_grouped(&visible))
+            (audit_timeline_grouped(&visible, lang))
         }
 
-        // Pagination links. URLs preserve the active filters.
         div style="display: flex; gap: 16px; padding: 16px 0; font-family: var(--mono); font-size: 12px;" {
             @if has_prev {
                 a href=(audit_url("/admin/audit", actor, action, Some(page - 1)))
                   style="color: var(--ink); text-decoration: none;" {
-                    "← prev"
+                    (crate::i18n::tr(lang, "← prev", "← назад"))
                 }
             } @else {
-                span style="color: var(--mute);" { "← prev" }
+                span style="color: var(--mute);" {
+                    (crate::i18n::tr(lang, "← prev", "← назад"))
+                }
             }
-            // URL uses 0-based `?page=N` (omitted when 0); label is
-            // 1-based for humans. Bookmark `/admin/audit?page=1` =
-            // visible "page 2". Tooltip keeps the convention
-            // discoverable so an operator who's bookmarking pages
-            // (or scripting CSV exports) doesn't get bitten by the
-            // off-by-one. Bug-audit-agent 2026-05-21.
-            span style="color: var(--mute);"
-                 title=(format!("URL convention: ?page=N is 0-based (omitted when 0). Current URL: ?page={page}. Visible label: page {n_for_humans}.", n_for_humans = page + 1)) {
-                "page " (page + 1)
+            @let page_title = match lang {
+                crate::i18n::Locale::En => format!(
+                    "URL convention: ?page=N is 0-based (omitted when 0). Current URL: ?page={page}. Visible label: page {}.",
+                    page + 1
+                ),
+                crate::i18n::Locale::Ru => format!(
+                    "Конвенция URL: ?page=N считается с 0 (пропускается когда 0). Текущий URL: ?page={page}. Видимая метка: страница {}.",
+                    page + 1
+                ),
+            };
+            span style="color: var(--mute);" title=(page_title) {
+                (crate::i18n::tr(lang, "page ", "стр. ")) (page + 1)
             }
             @if has_next {
                 a href=(audit_url("/admin/audit", actor, action, Some(page + 1)))
                   style="color: var(--ink); text-decoration: none;" {
-                    "next →"
+                    (crate::i18n::tr(lang, "next →", "вперёд →"))
                 }
             } @else {
-                span style="color: var(--mute);" { "next →" }
+                span style="color: var(--mute);" {
+                    (crate::i18n::tr(lang, "next →", "вперёд →"))
+                }
             }
         }
     };
@@ -5095,7 +5124,11 @@ fn audit_url(base: &str, actor: Option<&str>, action: Option<&str>, page: Option
 /// Render the entries grouped by date with sticky `Today / Yesterday
 /// / <date>` section headers. Reuses the existing `dashboard_audit`
 /// row markup so the visual style stays consistent.
-fn audit_timeline_grouped(entries: &[&vpnctl_inventory::AuditEntry]) -> Markup {
+fn audit_timeline_grouped(
+    entries: &[&vpnctl_inventory::AuditEntry],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
     use chrono::{Duration, Utc};
     let today = Utc::now().date_naive();
     let yesterday = today - Duration::days(1);
@@ -5105,9 +5138,9 @@ fn audit_timeline_grouped(entries: &[&vpnctl_inventory::AuditEntry]) -> Markup {
             @for e in entries {
                 @let day = e.ts.date_naive();
                 @let label = if day == today {
-                    "Today".to_string()
+                    tr(lang, "Today", "Сегодня").to_string()
                 } else if day == yesterday {
-                    "Yesterday".to_string()
+                    tr(lang, "Yesterday", "Вчера").to_string()
                 } else {
                     day.format("%Y-%m-%d").to_string()
                 };
@@ -5128,7 +5161,7 @@ fn audit_timeline_grouped(entries: &[&vpnctl_inventory::AuditEntry]) -> Markup {
                         }
                     }
                     span.ed-time-row__pl {
-                        "by " (e.actor)
+                        (tr(lang, "by ", "автор: ")) (e.actor)
                         @if let Some(p) = &e.payload {
                             @let summary = summarize_audit_payload(p);
                             @if !summary.is_empty() {
@@ -5585,16 +5618,22 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                         thead style="position: sticky; top: 0; background: var(--paper); z-index: 1;" {
                             tr {
-                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "created (UTC)" }
-                                th style="text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "size" }
-                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "action" }
+                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                    (crate::i18n::tr(lang, "created (UTC)", "создан (UTC)"))
+                                }
+                                th style="text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                    (crate::i18n::tr(lang, "size", "размер"))
+                                }
+                                th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                    (crate::i18n::tr(lang, "action", "действие"))
+                                }
                             }
                         }
                         tbody {
                             @for snap in list.iter().take(60) {
                                 tr {
                                     td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
-                                        (snap.created.as_deref().unwrap_or("(unparseable timestamp)"))
+                                        (snap.created.as_deref().unwrap_or_else(|| crate::i18n::tr(lang, "(unparseable timestamp)", "(не разобран timestamp)")))
                                     }
                                     td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule); text-align: right; color: var(--soft);" {
                                         (format_size_bytes(snap.size_bytes))
@@ -5602,9 +5641,13 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                                     td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
                                         a href=(format!("/admin/backup/download/{}", path_segment_encode(&snap.file_name)))
                                           download=(&snap.file_name)
-                                          title="Save this snapshot to your local disk for off-site storage"
+                                          title=(crate::i18n::tr(
+                                              lang,
+                                              "Save this snapshot to your local disk for off-site storage",
+                                              "Скачать этот снэпшот на локальный диск для off-site хранения",
+                                          ))
                                           style="color: var(--ink); text-decoration: underline;" {
-                                            "download"
+                                            (crate::i18n::tr(lang, "download", "скачать"))
                                         }
                                     }
                                 }
@@ -5614,17 +5657,30 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 }
                 @if list.len() > 60 {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 11px; margin-top: 8px;" {
-                        "(" (list.len() - 60) " older snapshot"
-                        @if list.len() - 60 != 1 { "s" }
-                        " hidden — the retention policy caps total count, so the table won't grow unbounded.)"
+                        "(" (list.len() - 60)
+                        @if list.len() - 60 != 1 {
+                            (crate::i18n::tr(lang, " older snapshots hidden", " более старых снэпшотов скрыто"))
+                        } @else {
+                            (crate::i18n::tr(lang, " older snapshot hidden", " более старый снэпшот скрыт"))
+                        }
+                        (crate::i18n::tr(
+                            lang,
+                            " — the retention policy caps total count, so the table won't grow unbounded.)",
+                            " — политика хранения ограничивает количество, таблица не растёт бесконечно.)",
+                        ))
                     }
                 }
             }
             Err(e) => {
                 p style="font-family: var(--serif); font-style: italic; color: var(--red); font-size: 12px;" {
-                    "Can't list snapshots in "
+                    (crate::i18n::tr(lang, "Can't list snapshots in ", "Не удалось перечислить снэпшоты в "))
                     span.ed-mono { (crate::app::DEFAULT_BACKUP_DIR) }
-                    ": " (e) ". Most likely the daemon user doesn't have access — check "
+                    ": " (e)
+                    (crate::i18n::tr(
+                        lang,
+                        ". Most likely the daemon user doesn't have access — check ",
+                        ". Скорее всего у пользователя демона нет доступа — проверь ",
+                    ))
                     span.ed-mono { "ls -la /var/lib/vpnctl/" }
                     "."
                 }
@@ -5636,20 +5692,37 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         // fragment anchor (`#telegram-notifications`) and the
         // browser scrolls back to this section instead of jumping
         // to the top of /admin/settings.
-        div #telegram-notifications.ed-art-eyebrow { "Notifications — Telegram bot" }
+        div #telegram-notifications.ed-art-eyebrow {
+            (crate::i18n::tr(
+                lang,
+                "Notifications — Telegram bot",
+                "Уведомления — Telegram-бот",
+            ))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "When an alert fires (probe-detector or service flip), vpnctld POSTs a one-line message to a Telegram chat via "
+            (crate::i18n::tr(
+                lang,
+                "When an alert fires (probe-detector or service flip), vpnctld POSTs a one-line message to a Telegram chat via ",
+                "Когда срабатывает алерт (probe-detector или поднятие/падение сервиса), vpnctld POST-ит однострочное сообщение в Telegram-чат через ",
+            ))
             span.ed-mono { "api.telegram.org/bot<token>/sendMessage" }
-            ". One operator, one chat — paste the bot token and your numeric chat-id below. "
-            "Create the bot via "
+            (crate::i18n::tr(
+                lang,
+                ". One operator, one chat — paste the bot token and your numeric chat-id below. Create the bot via ",
+                ". Один оператор, один чат — вставь bot-токен и свой числовой chat-id ниже. Создай бота через ",
+            ))
             span.ed-mono { "@BotFather" }
-            " on Telegram; get your chat-id by messaging "
+            (crate::i18n::tr(lang, " on Telegram; get your chat-id by messaging ", " в Telegram; узнай свой chat-id написав "))
             span.ed-mono { "@userinfobot" }
             ". "
-            b { "The token is a secret" }
-            " — stored in "
+            b { (crate::i18n::tr(lang, "The token is a secret", "Токен — секрет")) }
+            (crate::i18n::tr(lang, " — stored in ", " — хранится в "))
             span.ed-mono { "/var/lib/vpnctl/inv.db" }
-            " (daemon-owned 0640), masked in this page after save. Clear both fields and re-save to disable."
+            (crate::i18n::tr(
+                lang,
+                " (daemon-owned 0640), masked in this page after save. Clear both fields and re-save to disable.",
+                " (демон-only 0640), маскируется на этой странице после сохранения. Очисти оба поля и сохрани снова чтобы отключить.",
+            ))
         }
 
         // Status line — tells the operator at a glance whether the
@@ -5658,42 +5731,48 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         @match &telegram_cfg {
             Err(e) => {
                 p style="font-family: var(--serif); font-style: italic; color: var(--red); font-size: 12px;" {
-                    "Can't read notification settings: " (e)
+                    (crate::i18n::tr(lang, "Can't read notification settings: ", "Не удалось прочитать настройки уведомлений: ")) (e)
                 }
             }
             Ok(None) => {
-                // notification_settings singleton row missing — would
-                // happen only if migration 0014 was rolled back. Loud
-                // surface so the operator notices.
                 p style="font-family: var(--serif); font-style: italic; color: var(--red); font-size: 12px;" {
-                    "Settings row missing — migration 0014 didn't seed it. Daemon restart should re-run migrations."
+                    (crate::i18n::tr(
+                        lang,
+                        "Settings row missing — migration 0014 didn't seed it. Daemon restart should re-run migrations.",
+                        "Строка settings отсутствует — миграция 0014 не записала её. Перезапуск демона прогонит миграции заново.",
+                    ))
                 }
             }
             Ok(Some(cfg)) if cfg.is_enabled() => {
                 p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 10px;" {
-                    "Status: " b { "enabled" } " · token "
+                    (crate::i18n::tr(lang, "Status: ", "Статус: ")) b { (crate::i18n::tr(lang, "enabled", "включено")) }
+                    (crate::i18n::tr(lang, " · token ", " · токен "))
                     span style="color: var(--mute);" { "••••" (cfg.token_last4()) }
-                    " · chat "
+                    (crate::i18n::tr(lang, " · chat ", " · чат "))
                     span style="color: var(--mute);" { (cfg.chat_id.as_deref().unwrap_or("")) }
                 }
             }
             Ok(Some(cfg)) if cfg.token.is_some() || cfg.chat_id.is_some() => {
-                // Partial config — one half present, the other NULL.
-                // Common cause: operator pasted only one field on the
-                // last save. Loud-ish surface so the stranded half is
-                // visible (otherwise the «disabled» status hides the
-                // fact that a token might still be sitting in inv.db).
-                @let which_missing = if cfg.token.is_none() { "bot token" } else { "chat-id" };
+                @let which_missing = if cfg.token.is_none() {
+                    crate::i18n::tr(lang, "bot token", "bot-токен")
+                } else {
+                    crate::i18n::tr(lang, "chat-id", "chat-id")
+                };
                 p style="font-family: var(--mono); font-size: 12px; color: var(--red); margin: 0 0 10px;" {
-                    "Status: " b { "partial config" }
-                    " — " (which_missing) " missing, transport effectively disabled. "
-                    "Fill in the missing field below + save, OR clear both fields to fully reset."
+                    (crate::i18n::tr(lang, "Status: ", "Статус: ")) b { (crate::i18n::tr(lang, "partial config", "конфиг неполный")) }
+                    " — " (which_missing)
+                    (crate::i18n::tr(
+                        lang,
+                        " missing, transport effectively disabled. Fill in the missing field below + save, OR clear both fields to fully reset.",
+                        " отсутствует, транспорт фактически выключен. Заполни недостающее поле ниже + сохрани, ЛИБО очисти оба чтобы сбросить.",
+                    ))
                 }
             }
             Ok(Some(_)) => {
                 p style="font-family: var(--mono); font-size: 12px; color: var(--mute); margin: 0 0 10px;" {
-                    "Status: " b style="color: var(--ink);" { "disabled" }
-                    " — fill in both fields below + save."
+                    (crate::i18n::tr(lang, "Status: ", "Статус: "))
+                    b style="color: var(--ink);" { (crate::i18n::tr(lang, "disabled", "выключено")) }
+                    (crate::i18n::tr(lang, " — fill in both fields below + save.", " — заполни оба поля ниже + сохрани."))
                 }
             }
         }
@@ -5701,17 +5780,25 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         form method="post" action="/admin/settings/telegram" style="margin: 0 0 14px;" {
             div style="display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
                 label for="telegram_bot_token" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    "bot token"
+                    (crate::i18n::tr(lang, "bot token", "bot-токен"))
                 }
                 input type="password"
                       id="telegram_bot_token"
                       name="telegram_bot_token"
-                      placeholder="leave blank to keep existing; paste new value to replace; clear BOTH fields to disable"
+                      placeholder=(crate::i18n::tr(
+                          lang,
+                          "leave blank to keep existing; paste new value to replace; clear BOTH fields to disable",
+                          "пусто = оставить как есть; новое значение = заменить; ОЧИСТИТЬ ОБА поля = выключить",
+                      ))
                       autocomplete="off"
-                      title="Token from @BotFather, shape `123456:ABC-XYZ...`. Stored in inv.db, masked after save. Empty + empty chat-id disables the Telegram sink entirely."
+                      title=(crate::i18n::tr(
+                          lang,
+                          "Token from @BotFather, shape `123456:ABC-XYZ...`. Stored in inv.db, masked after save. Empty + empty chat-id disables the Telegram sink entirely.",
+                          "Токен от @BotFather, форма `123456:ABC-XYZ...`. Хранится в inv.db, маскируется после сохранения. Пустой токен + пустой chat-id = полное отключение Telegram.",
+                      ))
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
                 label for="telegram_chat_id" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    "chat-id"
+                    (crate::i18n::tr(lang, "chat-id", "chat-id"))
                 }
                 input type="text"
                       id="telegram_chat_id"
@@ -5720,13 +5807,20 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                           Ok(Some(cfg)) => cfg.chat_id.as_deref().unwrap_or(""),
                           _ => "",
                       })
-                      placeholder="numeric, e.g. 123456789 (or @your_channel)"
-                      title="Numeric user/group id from @userinfobot OR a public @channel handle. Test-send button below checks this end-to-end."
+                      placeholder=(crate::i18n::tr(
+                          lang,
+                          "numeric, e.g. 123456789 (or @your_channel)",
+                          "число, напр. 123456789 (или @your_channel)",
+                      ))
+                      title=(crate::i18n::tr(
+                          lang,
+                          "Numeric user/group id from @userinfobot OR a public @channel handle. Test-send button below checks this end-to-end.",
+                          "Числовой user/group id от @userinfobot ИЛИ публичный @channel-хэндл. Кнопка тестового сообщения ниже проверяет всю цепочку.",
+                      ))
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
 
-                // ─── Phase G chunk 3.5 — proxy-via-server dropdown ──
                 label for="proxy_via_server_id" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    "egress"
+                    (crate::i18n::tr(lang, "egress", "выход"))
                 }
                 @let current_proxy_id: &str = match &telegram_cfg {
                     Ok(Some(cfg)) => cfg.proxy_via_server_id.as_deref().unwrap_or(""),
@@ -5734,14 +5828,18 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 };
                 select name="proxy_via_server_id"
                        id="proxy_via_server_id"
-                       title="If the daemon host can't reach api.telegram.org directly (РФ blocks, NAT, etc), route the call through an inventory server's network instead. Uses the existing deploy SSH key — the public half must be on root@<proxy-server>:~/.ssh/authorized_keys (see «Deploy SSH key» section below to copy)."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "If the daemon host can't reach api.telegram.org directly (РФ blocks, NAT, etc), route the call through an inventory server's network instead. Uses the existing deploy SSH key — the public half must be on root@<proxy-server>:~/.ssh/authorized_keys (see «Deploy SSH key» section below to copy).",
+                           "Если хост демона не может достучаться до api.telegram.org напрямую (блоки РФ, NAT и т.п.), направь вызов через сеть одного из серверов инвентаря. Использует существующий deploy SSH-ключ — его публичная половина должна быть на root@<proxy-server>:~/.ssh/authorized_keys (см. секцию «Deploy SSH key» ниже).",
+                       ))
                        style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);" {
                     option value="" selected[current_proxy_id.is_empty()] {
-                        "direct (local network)"
+                        (crate::i18n::tr(lang, "direct (local network)", "напрямую (локальная сеть)"))
                     }
                     @for s in &servers_for_proxy_dropdown {
                         option value=(s.id.0) selected[current_proxy_id == s.id.0] {
-                            "via server: " (s.id.0) " (" (s.address) ")"
+                            (crate::i18n::tr(lang, "via server: ", "через сервер: ")) (s.id.0) " (" (s.address) ")"
                         }
                     }
                 }
@@ -5749,28 +5847,46 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
 
             @if servers_for_proxy_dropdown.is_empty() {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0; max-width: 720px;" {
-                    "No servers in inventory yet — only " b { "direct" } " egress is available. "
-                    "Add a server on " span.ed-mono { "/admin/servers" }
-                    " first if your daemon host can't reach " span.ed-mono { "api.telegram.org" } "."
+                    (crate::i18n::tr(lang, "No servers in inventory yet — only ", "Серверов в инвентаре пока нет — доступен только "))
+                    b { (crate::i18n::tr(lang, "direct", "напрямую")) }
+                    (crate::i18n::tr(lang, " egress is available. Add a server on ", " выход. Добавь сервер на "))
+                    span.ed-mono { "/admin/servers" }
+                    (crate::i18n::tr(lang, " first if your daemon host can't reach ", " если хост демона не достучивается до "))
+                    span.ed-mono { "api.telegram.org" } "."
                 }
             } @else {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0; max-width: 720px;" {
-                    "Picking a " b { "via server: …" } " option requires the daemon's "
-                    "deploy SSH pubkey to be on that server's "
-                    span.ed-mono { "~/.ssh/authorized_keys" } ". The pubkey lives in the "
+                    (crate::i18n::tr(lang, "Picking a ", "Выбор опции "))
+                    b { (crate::i18n::tr(lang, "via server: …", "через сервер: …")) }
+                    (crate::i18n::tr(
+                        lang,
+                        " option requires the daemon's deploy SSH pubkey to be on that server's ",
+                        " требует чтобы deploy SSH публичный ключ демона был в ",
+                    ))
+                    span.ed-mono { "~/.ssh/authorized_keys" }
+                    (crate::i18n::tr(lang, ". The pubkey lives in the ", " этого сервера. Pubkey лежит в секции "))
                     a href="#deploy-ssh-key" style="color: var(--ink);" {
-                        b { "Deploy SSH key" }
+                        b { (crate::i18n::tr(lang, "Deploy SSH key", "Deploy SSH-ключ")) }
                     }
-                    " section below — copy it once, then "
-                    em { "send test message" } " confirms the path works."
+                    (crate::i18n::tr(
+                        lang,
+                        " section below — copy it once, then ",
+                        " ниже — скопируй один раз, затем ",
+                    ))
+                    em { (crate::i18n::tr(lang, "send test message", "отправить тестовое сообщение")) }
+                    (crate::i18n::tr(lang, " confirms the path works.", " подтвердит что путь работает."))
                 }
             }
 
             div style="margin-top: 12px;" {
                 button type="submit"
-                       title="Save all three fields. Empty token = keep existing (unless chat-id is ALSO empty, then clear). Empty chat-id = clear. Egress dropdown is always overwritten with the selected value."
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Save all three fields. Empty token = keep existing (unless chat-id is ALSO empty, then clear). Empty chat-id = clear. Egress dropdown is always overwritten with the selected value.",
+                           "Сохранить все три поля. Пустой токен = оставить как есть (если chat-id ТОЖЕ пуст, тогда очистить). Пустой chat-id = очистить. Egress dropdown всегда переписывается выбранным значением.",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "save"
+                    (crate::i18n::t(lang, crate::i18n::K::BtnSave))
                 }
             }
         }
@@ -5784,38 +5900,59 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
             Ok(Some(cfg)) if cfg.is_enabled() => {
                 form method="post" action="/admin/settings/telegram/test" style="margin-top: 10px;" {
                     button type="submit"
-                           title="Send a test message to the configured chat. Surfaces curl / Telegram-API errors inline."
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Send a test message to the configured chat. Surfaces curl / Telegram-API errors inline.",
+                               "Отправить тестовое сообщение в настроенный чат. Ошибки curl / Telegram-API показываются прямо здесь.",
+                           ))
                            style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        "send test message"
+                        (crate::i18n::tr(lang, "send test message", "отправить тестовое сообщение"))
                     }
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
-                        "Posts «🔵 vpnctld · info · test · vpnctld test message ...» to your chat."
+                        (crate::i18n::tr(
+                            lang,
+                            "Posts «🔵 vpnctld · info · test · vpnctld test message ...» to your chat.",
+                            "Пошлёт «🔵 vpnctld · info · test · vpnctld test message ...» в твой чат.",
+                        ))
                     }
                 }
             }
             _ => {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 10px 0 0;" {
-                    "Test-send button appears after both fields are saved + status is "
-                    b style="color: var(--ink);" { "enabled" } "."
+                    (crate::i18n::tr(
+                        lang,
+                        "Test-send button appears after both fields are saved + status is ",
+                        "Кнопка тестового сообщения появится после сохранения обоих полей и когда статус ",
+                    ))
+                    b style="color: var(--ink);" { (crate::i18n::tr(lang, "enabled", "включено")) } "."
                 }
             }
         }
 
         div.ed-rule {}
-        // `id` so the via-server SSH error message and any future
-        // cross-link can anchor here. Eyebrow was previously
-        // missing — fixed 2026-05-18 same commit that added the
-        // anchor support.
-        div #deploy-ssh-key.ed-art-eyebrow { "Deploy SSH key" }
+        div #deploy-ssh-key.ed-art-eyebrow {
+            (crate::i18n::tr(lang, "Deploy SSH key", "Deploy SSH-ключ"))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "vpnctld auto-generated this Curve25519 keypair on first start. "
-            "The private half stays in "
+            (crate::i18n::tr(
+                lang,
+                "vpnctld auto-generated this Curve25519 keypair on first start. The private half stays in ",
+                "vpnctld сгенерировал эту Curve25519-пару при первом старте. Приватная половина остаётся в ",
+            ))
             span.ed-mono { (crate::app::DEFAULT_DEPLOY_KEY_PATH) }
-            " — never shown. The public half (below) goes into each VPN node's "
+            (crate::i18n::tr(
+                lang,
+                " — never shown. The public half (below) goes into each VPN node's ",
+                " — никогда не показывается. Публичная половина (ниже) идёт в ",
+            ))
             span.ed-mono { "~/.ssh/authorized_keys" }
-            ". Once authorised, every "
-            b { "deploy →" }
-            " button click pushes configs through vpnctld → ssh subprocess → node, no operator-typed CLI needed."
+            (crate::i18n::tr(lang, ". Once authorised, every ", " каждой VPN-ноды. Когда авторизован, каждый клик "))
+            b { (crate::i18n::tr(lang, "deploy →", "деплой →")) }
+            (crate::i18n::tr(
+                lang,
+                " button click pushes configs through vpnctld → ssh subprocess → node, no operator-typed CLI needed.",
+                " пушит конфиги по пути vpnctld → ssh-подпроцесс → нода, без ручных CLI-команд оператора.",
+            ))
         }
         @match deploy_pubkey {
             Ok(pk) => {
@@ -5823,31 +5960,41 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     (pk)
                 }
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0;" {
-                    "Authorise this key on a server via the "
+                    (crate::i18n::tr(lang, "Authorise this key on a server via the ", "Авторизуй этот ключ на сервере через "))
                     a href="/admin/servers" style="color: var(--ink);" {
                         b { "/admin/servers" }
                     }
-                    " list → pick a server → "
-                    span.ed-mono { "«Deploy SSH key — push to this server»" }
-                    " section → "
-                    span.ed-mono { "«push deploy key»" }
-                    " button. "
-                    "The daemon handles the SSH dance for you — no manual "
+                    (crate::i18n::tr(lang, " list → pick a server → ", " → выбрать сервер → "))
+                    span.ed-mono { (crate::i18n::tr(lang, "«Deploy SSH key — push to this server»", "«Deploy SSH key — push to this server»")) }
+                    (crate::i18n::tr(lang, " section → ", " секция → "))
+                    span.ed-mono { (crate::i18n::tr(lang, "«push deploy key»", "«push deploy key»")) }
+                    (crate::i18n::tr(
+                        lang,
+                        " button. The daemon handles the SSH dance for you — no manual ",
+                        " кнопка. Демон делает SSH-танец сам — без ручного ",
+                    ))
                     span.ed-mono { "ssh root@…" }
-                    " or "
+                    (crate::i18n::tr(lang, " or ", " или редактирования "))
                     span.ed-mono { "authorized_keys" }
-                    " editing. The pubkey above is shown for diagnostic / "
-                    "out-of-band-paste use only (e.g. you want to authorise the "
-                    "key on something that ISN'T in vpnctl's inventory)."
+                    (crate::i18n::tr(
+                        lang,
+                        " editing. The pubkey above is shown for diagnostic / out-of-band-paste use only (e.g. you want to authorise the key on something that ISN'T in vpnctl's inventory).",
+                        " вручную. Pubkey выше показан только для диагностики / out-of-band вставки (например если ты хочешь авторизовать ключ на чём-то ВНЕ инвентаря vpnctl).",
+                    ))
                 }
             }
             Err(e) => {
                 p style="font-family: var(--serif); font-style: italic; color: var(--red);" {
-                    "Public key file unreadable: " (e) ". Most common cause: "
+                    (crate::i18n::tr(lang, "Public key file unreadable: ", "Публичный ключ не читается: ")) (e)
+                    (crate::i18n::tr(lang, ". Most common cause: ", ". Чаще всего: "))
                     span.ed-mono { "/var/lib/vpnctl/.ssh" }
-                    " not writable by the daemon. Check "
+                    (crate::i18n::tr(lang, " not writable by the daemon. Check ", " недоступен на запись демону. Проверь "))
                     span.ed-mono { "ls -la /var/lib/vpnctl/" }
-                    "; vpnctld writes there as the systemd-unit user (typically "
+                    (crate::i18n::tr(
+                        lang,
+                        "; vpnctld writes there as the systemd-unit user (typically ",
+                        "; vpnctld пишет туда из-под пользователя systemd-юнита (обычно ",
+                    ))
                     span.ed-mono { "user" } ")."
                 }
             }
@@ -6517,16 +6664,26 @@ fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// Cancel link leads back to `/admin/servers`.
 pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
     let (theme, accent, lang) = theme_accent_lang(&headers);
+    use crate::i18n::tr;
     let body = html! {
-        div.ed-art-eyebrow { "Add server · step 1 of 3" }
+        div.ed-art-eyebrow { (tr(lang, "Add server · step 1 of 3", "Добавить сервер · шаг 1 из 3")) }
         h1.ed-art-h1 {
-            "Paste an " em { "IP" } " and the " em { "root password" }
+            (tr(lang, "Paste an ", "Вставь ")) em { "IP" }
+            (tr(lang, " and the ", " и ")) em { (tr(lang, "root password", "root-пароль")) }
         }
         p.ed-art-deck {
-            "The daemon will SSH in as " span.ed-mono { "root" } ", push its key, "
-            "create a non-root user, harden " span.ed-mono { "sshd_config" } ", "
-            "install fail2ban + sing-box, render the config, and prove the service "
-            "is live — all on the next screen."
+            (tr(lang, "The daemon will SSH in as ", "Демон зайдёт по SSH как ")) span.ed-mono { "root" }
+            (tr(
+                lang,
+                ", push its key, create a non-root user, harden ",
+                ", запушит свой ключ, создаст non-root пользователя, усилит ",
+            ))
+            span.ed-mono { "sshd_config" }
+            (tr(
+                lang,
+                ", install fail2ban + sing-box, render the config, and prove the service is live — all on the next screen.",
+                ", установит fail2ban + sing-box, отрендерит конфиг и проверит что сервис живёт — всё это на следующем экране.",
+            ))
         }
 
         form method="post" action="/admin/servers/new"
@@ -6534,54 +6691,76 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
             div style="display: flex; flex-direction: column; gap: 4px;" {
                 label for="address"
                       style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "address"
+                    (tr(lang, "address", "адрес"))
                 }
                 input id="address" name="address" type="text" required="required"
                       placeholder="198.51.100.42 or vpn-de1.example.org"
                       autocomplete="off" autocapitalize="none" spellcheck="false"
                       pattern="[A-Za-z0-9.:_-]+"
-                      title="IPv4, IPv6 or hostname — no shell metacharacters"
+                      title=(tr(
+                          lang,
+                          "IPv4, IPv6 or hostname — no shell metacharacters",
+                          "IPv4, IPv6 или хост — без shell-метасимволов",
+                      ))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
-                    "DigitalOcean droplets must keep SSH on port 22 (Cloud Firewall blocks the rest); other hosters get the harden-to-2222 step automatically on the next screen."
+                    (tr(
+                        lang,
+                        "DigitalOcean droplets must keep SSH on port 22 (Cloud Firewall blocks the rest); other hosters get the harden-to-2222 step automatically on the next screen.",
+                        "Дроплеты DigitalOcean должны держать SSH на 22 (Cloud Firewall блокирует остальное); другие хостеры получают шаг harden-to-2222 автоматически на следующем экране.",
+                    ))
                 }
             }
             div style="display: flex; flex-direction: column; gap: 4px;" {
                 label for="root_password"
                       style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "root password"
+                    (tr(lang, "root password", "root-пароль"))
                 }
                 input id="root_password" name="root_password" type="password" required="required"
                       autocomplete="new-password"
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
-                    "Used once to push our SSH key, then password auth gets disabled. Held in daemon memory for 10 minutes; nothing is written to disk."
+                    (tr(
+                        lang,
+                        "Used once to push our SSH key, then password auth gets disabled. Held in daemon memory for 10 minutes; nothing is written to disk.",
+                        "Используется один раз чтобы запушить наш SSH-ключ, затем password-auth отключается. Лежит в памяти демона 10 минут; на диск ничего не пишется.",
+                    ))
                 }
             }
             div style="display: flex; flex-direction: column; gap: 4px;" {
                 label for="ssh_port"
                       style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    "ssh port (optional, default 22)"
+                    (tr(lang, "ssh port (optional, default 22)", "ssh порт (опционально, по умолч. 22)"))
                 }
                 input id="ssh_port" name="ssh_port" type="text" inputmode="numeric"
                       placeholder="22"
                       autocomplete="off" autocapitalize="none" spellcheck="false"
                       pattern="[0-9]*"
-                      title="leave blank for 22; Cloudzy ships 2222"
+                      title=(tr(lang, "leave blank for 22; Cloudzy ships 2222", "оставь пусто для 22; у Cloudzy — 2222"))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); max-width: 140px;";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
-                    "Leave blank for 22 (the common case). Cloudzy is " span.ed-mono { "2222" } "; check the hoster's panel if SSH connect-fails on the next screen."
+                    (tr(lang, "Leave blank for 22 (the common case). Cloudzy is ", "Оставь пусто для 22 (обычный случай). Cloudzy — это "))
+                    span.ed-mono { "2222" }
+                    (tr(
+                        lang,
+                        "; check the hoster's panel if SSH connect-fails on the next screen.",
+                        "; проверь панель хостера если SSH-коннект упадёт на следующем экране.",
+                    ))
                 }
             }
             div style="display: flex; gap: 12px; align-items: center; margin-top: 6px;" {
                 button type="submit"
-                       title="Validate inputs and continue to the bootstrap log"
+                       title=(tr(
+                           lang,
+                           "Validate inputs and continue to the bootstrap log",
+                           "Проверить ввод и продолжить к bootstrap-логу",
+                       ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    "continue →"
+                    (tr(lang, "continue →", "продолжить →"))
                 }
                 a href="/admin/servers"
                   style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none; padding: 6px 8px;" {
-                    "cancel"
+                    (tr(lang, "cancel", "отмена"))
                 }
             }
         }
@@ -7101,14 +7280,14 @@ pub(crate) async fn server_detail(
         (server_detail_hero(&latest, &server, lang))
 
         // Declared vs observed drift
-        (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some()))
+        (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
 
         // Kernels — multi-kernel runtime selection. Mirrors the
         // Protocols section right below; same enable/disable shape.
         // Adding wireguard support to a node that today runs only
         // sing-box now means: enable amneziawg kernel here →
         // enable wireguard protocol below → `vpnctl deploy`.
-        (server_detail_kernels_section(&server, &state.registry))
+        (server_detail_kernels_section(&server, &state.registry, lang))
 
         // Enabled protocols — checkbox list of every registered protocol
         // with current enable state. Toggle posts back to this same
@@ -7183,15 +7362,20 @@ pub(crate) async fn server_detail(
                             }
                         }
                         @if granted_user_ids.contains(&u.id) {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" { "✓ access" }
-                            // Server-side route — redirect back HERE.
+                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
+                                (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
+                            }
                             form method="post"
                                  action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}/revoke"))
                                  style="margin: 0; padding: 0;" {
+                                @let title_str = match lang {
+                                    crate::i18n::Locale::En => format!("Revoke {}'s access on {}", u.id.0, server.id.0),
+                                    crate::i18n::Locale::Ru => format!("Отозвать доступ {} на {}", u.id.0, server.id.0),
+                                };
                                 button type="submit"
-                                       title=(format!("Revoke {}'s access on {}", u.id.0, server.id.0))
+                                       title=(title_str)
                                        style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                    "revoke"
+                                    (crate::i18n::tr(lang, "revoke", "отозвать"))
                                 }
                             }
                         } @else {
@@ -7199,10 +7383,14 @@ pub(crate) async fn server_detail(
                             form method="post"
                                  action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}"))
                                  style="margin: 0; padding: 0;" {
+                                @let title_str = match lang {
+                                    crate::i18n::Locale::En => format!("Grant {} access on {}", u.id.0, server.id.0),
+                                    crate::i18n::Locale::Ru => format!("Выдать {} доступ на {}", u.id.0, server.id.0),
+                                };
                                 button type="submit"
-                                       title=(format!("Grant {} access on {}", u.id.0, server.id.0))
+                                       title=(title_str)
                                        style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                                    "grant"
+                                    (crate::i18n::tr(lang, "grant", "выдать"))
                                 }
                             }
                         }
@@ -7338,36 +7526,45 @@ fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
 fn server_detail_kernels_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     let enabled: std::collections::HashSet<&vpnctl_core::KernelId> =
         server.kernels.iter().collect();
     let all_kernels = registry.kernel_ids();
     let sid_enc = path_segment_encode(&server.id.0);
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Kernels" }
+        div.ed-art-eyebrow { (tr(lang, "Kernels", "Ядра")) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
-            "Daemons running on this node. One physical VPS can host multiple "
-            "(sing-box on 443/TCP + amneziawg on 51820/UDP cohabit cleanly)."
+            (tr(
+                lang,
+                "Daemons running on this node. One physical VPS can host multiple (sing-box on 443/TCP + amneziawg on 51820/UDP cohabit cleanly).",
+                "Демоны, работающие на этой ноде. Один физический VPS может держать несколько (sing-box на 443/TCP + amneziawg на 51820/UDP уживаются нормально).",
+            ))
         }
-        // Loud deploy-required notice (Pavel 2026-05-19:
-        // «не очень понимаю логику взаимодействия с server, если я
-        // включаю trojan, мне нужно жать deploy или он сразу при клики
-        // включается»). The toggle ONLY mutates inventory; the live
-        // node sees the change after `deploy →` is clicked above.
-        // Accent border + ⚠ glyph make this hard to miss vs the
-        // pre-2026-05-19 mute-italic «takes effect on next deploy»
-        // tooltip that Pavel didn't read.
         div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
-                "⚠ toggle here = inventory only"
+                (tr(
+                    lang,
+                    "⚠ toggle here = inventory only",
+                    "⚠ тогл здесь = только инвентарь",
+                ))
             }
-            " — the live node sees the change only after you click "
+            (tr(
+                lang,
+                " — the live node sees the change only after you click ",
+                " — живая нода увидит изменение только после клика по ",
+            ))
             a href="#deploy-button"
               style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { "deploy →" }
+                span.ed-mono { (tr(lang, "deploy →", "деплой →")) }
             }
-            " at the top of this page. We never SSH-push a config without an explicit operator click (no surprise redeploys)."
+            (tr(
+                lang,
+                " at the top of this page. We never SSH-push a config without an explicit operator click (no surprise redeploys).",
+                " вверху страницы. Мы никогда не пушим конфиг через SSH без явного клика оператора (без сюрпризов-redeploy).",
+            ))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for kid in &all_kernels {
@@ -8007,7 +8204,9 @@ fn user_detail_per_protocol_grid(
         bool,
     >,
     registry: &vpnctl_core::Registry,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     let uid_enc = path_segment_encode(&uid.0);
     let sid_enc = path_segment_encode(&server.id.0);
     // Iterate the `server_protocols` table directly (not the in-memory
@@ -8024,16 +8223,22 @@ fn user_detail_per_protocol_grid(
     html! {
         div style="margin: 8px 0 4px 16px; padding: 8px 12px 6px; border-left: 2px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.6;" {
             div style="color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; font-size: 10px; margin-bottom: 6px;" {
-                "Per-protocol delivery"
+                (tr(lang, "Per-protocol delivery", "Доставка по протоколам"))
             }
             @if pids.is_empty() {
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 0; font-size: 12px;" {
-                    "No protocols enabled on this server yet. Add one on the "
+                    (tr(
+                        lang,
+                        "No protocols enabled on this server yet. Add one on the ",
+                        "На этом сервере пока ничего не включено. Добавь хотя бы один через ",
+                    ))
                     a href=(format!("/admin/servers/{sid_enc}"))
                       target="_blank"
                       rel="noopener"
-                      style="color: var(--ink);" { "server detail page" }
-                    " — then the per-protocol toggles will appear here."
+                      style="color: var(--ink);" {
+                        (tr(lang, "server detail page", "страницу сервера"))
+                    }
+                    (tr(lang, " — then the per-protocol toggles will appear here.", " — тогда тоглы по протоколам появятся здесь."))
                 }
             } @else {
                 ul style="list-style: none; padding: 0; margin: 0;" {
@@ -8072,47 +8277,56 @@ fn user_detail_per_protocol_grid(
                                 }
                             }
                             @if is_hidden && is_user_blocked {
-                                // Both axes deny — show both, but the
-                                // server-hidden flag is the binding
-                                // one (operator can't un-block via
-                                // this row alone).
-                                span style="color: var(--mute);" { "server-hidden + user-blocked" }
+                                span style="color: var(--mute);" {
+                                    (tr(lang, "server-hidden + user-blocked", "скрыт-на-сервере + заблокирован-у-юзера"))
+                                }
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/enable"))
                                      style="margin: 0;" {
                                     button type="submit"
-                                           title="Clear this user's override. Server-hidden flag remains — adjust on the server detail page."
+                                           title=(tr(
+                                               lang,
+                                               "Clear this user's override. Server-hidden flag remains — adjust on the server detail page.",
+                                               "Очистить override этого пользователя. Флаг server-hidden останется — правится на странице сервера.",
+                                           ))
                                            style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        "unblock (user)"
+                                        (tr(lang, "unblock (user)", "разблокировать (юзер)"))
                                     }
                                 }
                             } @else if is_hidden {
-                                // Server-hidden only — no per-user
-                                // button (clicking "block" would
-                                // record a redundant override; the
-                                // operator's intent is unambiguous
-                                // when only one axis is set).
-                                span style="color: var(--mute);" { "server-hidden (read-only here)" }
+                                span style="color: var(--mute);" {
+                                    (tr(lang, "server-hidden (read-only here)", "скрыт на сервере (здесь только чтение)"))
+                                }
                             } @else if is_user_blocked {
-                                span style="color: var(--acc);" { "✗ user-blocked" }
+                                span style="color: var(--acc);" {
+                                    (tr(lang, "✗ user-blocked", "✗ заблокирован у юзера"))
+                                }
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/enable"))
                                      style="margin: 0;" {
+                                    @let unblock_title = match lang {
+                                        crate::i18n::Locale::En => format!("Deliver {} to {} again on {}", pid.0, uid.0, server.id.0),
+                                        crate::i18n::Locale::Ru => format!("Начать снова доставлять {} пользователю {} на {}", pid.0, uid.0, server.id.0),
+                                    };
                                     button type="submit"
-                                           title=(format!("Deliver {} to {} again on {}", pid.0, uid.0, server.id.0))
+                                           title=(unblock_title)
                                            style="padding: 1px 6px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        "unblock"
+                                        (tr(lang, "unblock", "разблокировать"))
                                     }
                                 }
                             } @else {
-                                span style="color: var(--acc);" { "✓ delivered" }
+                                span style="color: var(--acc);" { (tr(lang, "✓ delivered", "✓ доставляется")) }
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/disable"))
                                      style="margin: 0;" {
+                                    @let block_title = match lang {
+                                        crate::i18n::Locale::En => format!("Stop delivering {} to {} on {} (per-user override; other users keep getting it)", pid.0, uid.0, server.id.0),
+                                        crate::i18n::Locale::Ru => format!("Перестать доставлять {} пользователю {} на {} (per-user override; остальным продолжает идти)", pid.0, uid.0, server.id.0),
+                                    };
                                     button type="submit"
-                                           title=(format!("Stop delivering {} to {} on {} (per-user override; other users keep getting it)", pid.0, uid.0, server.id.0))
+                                           title=(block_title)
                                            style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        "block"
+                                        (tr(lang, "block", "заблокировать"))
                                     }
                                 }
                             }
@@ -8130,7 +8344,9 @@ fn server_detail_drift_section(
     missing: &[(String, u16)],
     extra: &[(String, u16)],
     have_probe: bool,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::i18n::tr;
     let declared: Vec<String> = server
         .enabled_protocols
         .iter()
@@ -8138,18 +8354,22 @@ fn server_detail_drift_section(
         .collect();
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Declared vs observed" }
+        div.ed-art-eyebrow { (tr(lang, "Declared vs observed", "Заявлено vs наблюдается")) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "Inventory says this server runs the protocols below; the latest probe sees the listening sockets on the right. Drift in orange."
+            (tr(
+                lang,
+                "Inventory says this server runs the protocols below; the latest probe sees the listening sockets on the right. Drift in orange.",
+                "Инвентарь говорит что этот сервер крутит протоколы ниже; последний probe видит слушающие сокеты справа. Дрейф — оранжевым.",
+            ))
         }
         div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;" {
             div {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
-                    "declared protocols"
+                    (tr(lang, "declared protocols", "заявленные протоколы"))
                 }
                 @if declared.is_empty() {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        "(none in inventory)"
+                        (tr(lang, "(none in inventory)", "(нет в инвентаре)"))
                     }
                 } @else {
                     ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
@@ -8161,15 +8381,15 @@ fn server_detail_drift_section(
             }
             div {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
-                    "observed listening sockets"
+                    (tr(lang, "observed listening sockets", "наблюдаемые слушающие сокеты"))
                 }
                 @if !have_probe {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        "(no probe — chunk 4 pending)"
+                        (tr(lang, "(no probe — chunk 4 pending)", "(probe ещё нет — chunk 4 в очереди)"))
                     }
                 } @else if observed.is_empty() {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        "(probe ran but no sockets listed)"
+                        (tr(lang, "(probe ran but no sockets listed)", "(probe прошёл, но сокетов не нашлось)"))
                     }
                 } @else {
                     ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
@@ -8183,11 +8403,12 @@ fn server_detail_drift_section(
         @if have_probe && (!missing.is_empty() || !extra.is_empty()) {
             div style="margin-top: 14px; padding: 10px 12px; border: 1px solid var(--acc); background: var(--paper);" {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--acc); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px;" {
-                    "drift detected"
+                    (tr(lang, "drift detected", "обнаружен дрейф"))
                 }
                 @if !missing.is_empty() {
                     p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
-                        "Declared but " b { "NOT listening" } ": "
+                        (tr(lang, "Declared but ", "Заявлено, но "))
+                        b { (tr(lang, "NOT listening", "НЕ слушает")) } ": "
                         @for (i, (proto, port)) in missing.iter().enumerate() {
                             @if i > 0 { ", " }
                             span.ed-mono { (proto) "/" (port) }
@@ -8196,7 +8417,8 @@ fn server_detail_drift_section(
                 }
                 @if !extra.is_empty() {
                     p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
-                        "Listening but " b { "NOT declared" } ": "
+                        (tr(lang, "Listening but ", "Слушает, но "))
+                        b { (tr(lang, "NOT declared", "НЕ заявлено")) } ": "
                         @for (i, (proto, port)) in extra.iter().enumerate() {
                             @if i > 0 { ", " }
                             span.ed-mono { (proto) "/" (port) }
@@ -8206,7 +8428,7 @@ fn server_detail_drift_section(
             }
         } @else if have_probe {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 10px;" {
-                "Declared and observed match. No drift."
+                (tr(lang, "Declared and observed match. No drift.", "Заявленное и наблюдаемое совпадают. Дрейфа нет."))
             }
         }
     }
