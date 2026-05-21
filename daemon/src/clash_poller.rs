@@ -72,12 +72,35 @@ impl DiffEngine {
     /// In both cases the poller should NOT call `record_vpn_stats`
     /// on an empty Vec — the inventory layer treats empty as a no-op
     /// but the audit/log noise is unnecessary.
-    pub fn tick(&mut self, server_id: &ServerId, snapshot: &Snapshot) -> Vec<VpnStatsDelta> {
+    ///
+    /// Phase 4e — `attribution` is a `(source_ip, source_port) →
+    /// user_id` map derived from sing-box log scraping. We use it
+    /// as the user resolver when `metadata.user` is None (which is
+    /// always the case in production due to NM-11 — sing-box's
+    /// clash-api drops the field). Empty map → no per-user
+    /// attribution this tick (server-wide row still lands).
+    pub fn tick(
+        &mut self,
+        server_id: &ServerId,
+        snapshot: &Snapshot,
+        attribution: &crate::sing_box_log_scraper::AttributionMap,
+    ) -> Vec<VpnStatsDelta> {
         let prior = self.state.get(server_id).cloned();
-        // Build new state from this snapshot.
+        // Build new state from this snapshot. Resolve user_id
+        // per-connection: first try metadata.user (works on
+        // patched sing-box builds where NM-11 is fixed), then
+        // fall back to the log-derived attribution map (works on
+        // upstream-stock sing-box). Connections that resolve to
+        // None are still credited to the server-wide row but NOT
+        // to any user.
         let mut new_per_user: HashMap<String, (u64, u64)> = HashMap::new();
         for c in &snapshot.connections {
-            if let Some(u) = c.metadata.user.as_deref() {
+            let user_resolved: Option<&str> = c.metadata.user.as_deref().or_else(|| {
+                attribution
+                    .get(&(c.metadata.source_ip.clone(), c.metadata.source_port.clone()))
+                    .map(|s| s.as_str())
+            });
+            if let Some(u) = user_resolved {
                 let entry = new_per_user.entry(u.to_string()).or_default();
                 entry.0 = entry.0.saturating_add(c.upload);
                 entry.1 = entry.1.saturating_add(c.download);
@@ -136,11 +159,26 @@ impl DiffEngine {
                 Some(&(p_up, p_dn)) => (new_up.saturating_sub(p_up), new_dn.saturating_sub(p_dn)),
                 None => (new_up, new_dn),
             };
+            // Phase 4e — count active conns using the SAME resolver
+            // we used to accumulate bytes above; otherwise the
+            // (bytes, active) pair for one user could disagree
+            // (bytes from attribution map, active from metadata.user
+            // which is always None on stock sing-box).
             let active = u32::try_from(
                 snapshot
                     .connections
                     .iter()
-                    .filter(|c| c.metadata.user.as_deref() == Some(user.as_str()))
+                    .filter(|c| {
+                        let r = c.metadata.user.as_deref().or_else(|| {
+                            attribution
+                                .get(&(
+                                    c.metadata.source_ip.clone(),
+                                    c.metadata.source_port.clone(),
+                                ))
+                                .map(|s| s.as_str())
+                        });
+                        r == Some(user.as_str())
+                    })
                     .count(),
             )
             .unwrap_or(u32::MAX);
@@ -383,7 +421,17 @@ async fn poll_one_server(
         );
     }
 
-    let deltas = engine.tick(&server.id, &snapshot);
+    // Phase 4e — feed the log-derived attribution map into the
+    // diff engine so per-user deltas land with the correct
+    // user_id (NM-11 work-around). We borrow the just-stored
+    // entry from the cache to avoid cloning the map twice; if
+    // the cache store failed (poisoned RwLock) we fall through
+    // with an empty map = server-wide only delta this tick.
+    let attribution_for_tick: crate::sing_box_log_scraper::AttributionMap = snapshot_cache
+        .get(&server.id)
+        .map(|s| s.attribution.clone())
+        .unwrap_or_default();
+    let deltas = engine.tick(&server.id, &snapshot, &attribution_for_tick);
     if deltas.is_empty() {
         tracing::debug!(
             target = "vpnctld::poller",
@@ -450,7 +498,7 @@ mod tests {
     fn first_snapshot_emits_no_rows_just_seeds() {
         let mut e = DiffEngine::new();
         let s = snap(1024, 2048, vec![("alice", 100, 200)]);
-        let out = e.tick(&sid("srv-1"), &s);
+        let out = e.tick(&sid("srv-1"), &s, &HashMap::new());
         assert!(out.is_empty(), "first snapshot must emit nothing");
         assert_eq!(e.tracked_servers(), 1);
     }
@@ -458,8 +506,16 @@ mod tests {
     #[test]
     fn second_snapshot_emits_per_server_and_per_user_deltas() {
         let mut e = DiffEngine::new();
-        e.tick(&sid("srv-1"), &snap(1024, 2048, vec![("alice", 100, 200)]));
-        let out = e.tick(&sid("srv-1"), &snap(1500, 3000, vec![("alice", 250, 500)]));
+        e.tick(
+            &sid("srv-1"),
+            &snap(1024, 2048, vec![("alice", 100, 200)]),
+            &HashMap::new(),
+        );
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap(1500, 3000, vec![("alice", 250, 500)]),
+            &HashMap::new(),
+        );
         // Expect: 1 server-wide row + 1 per-alice row.
         assert_eq!(out.len(), 2);
         let server_row = out
@@ -482,8 +538,8 @@ mod tests {
     fn quiet_tick_emits_nothing() {
         let mut e = DiffEngine::new();
         let s = snap(1024, 2048, vec![]);
-        e.tick(&sid("srv-1"), &s);
-        let out = e.tick(&sid("srv-1"), &s);
+        e.tick(&sid("srv-1"), &s, &HashMap::new());
+        let out = e.tick(&sid("srv-1"), &s, &HashMap::new());
         assert!(
             out.is_empty(),
             "no movement + no connections must emit no rows"
@@ -501,8 +557,13 @@ mod tests {
         e.tick(
             &sid("srv-1"),
             &snap(10_000, 20_000, vec![("alice", 5_000, 10_000)]),
+            &HashMap::new(),
         );
-        let out = e.tick(&sid("srv-1"), &snap(50, 100, vec![("alice", 30, 60)]));
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap(50, 100, vec![("alice", 30, 60)]),
+            &HashMap::new(),
+        );
         let server_row = out.iter().find(|d| d.user_id.is_none()).unwrap();
         assert_eq!(
             server_row.upload_bytes, 50,
@@ -537,12 +598,17 @@ mod tests {
         e.tick(
             &sid("srv-1"),
             &snap(1000, 2000, vec![("alice", 1000, 2000)]),
+            &HashMap::new(),
         );
         // Tick 2: that connection closed, alice opened a fresh small
         // one at 100 up / 200 down. Server total grew (sing-box still
         // remembers the closed connection's bytes), but the per-user
         // sum (across active conns only) shrank.
-        let out = e.tick(&sid("srv-1"), &snap(2000, 4000, vec![("alice", 100, 200)]));
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap(2000, 4000, vec![("alice", 100, 200)]),
+            &HashMap::new(),
+        );
         let alice_row = out
             .iter()
             .find(|d| d.user_id.as_ref().map(|u| u.0.as_str()) == Some("alice"))
@@ -564,10 +630,11 @@ mod tests {
     #[test]
     fn engine_actually_computes_deltas_not_always_empty() {
         let mut e = DiffEngine::new();
-        e.tick(&sid("srv-1"), &snap(0, 0, vec![]));
+        e.tick(&sid("srv-1"), &snap(0, 0, vec![]), &HashMap::new());
         let out = e.tick(
             &sid("srv-1"),
             &snap(123_456, 789_012, vec![("alice", 100, 200)]),
+            &HashMap::new(),
         );
         assert!(
             !out.is_empty(),
@@ -581,10 +648,15 @@ mod tests {
     #[test]
     fn new_user_appearing_emits_their_full_totals_as_delta() {
         let mut e = DiffEngine::new();
-        e.tick(&sid("srv-1"), &snap(1024, 2048, vec![("alice", 100, 200)]));
+        e.tick(
+            &sid("srv-1"),
+            &snap(1024, 2048, vec![("alice", 100, 200)]),
+            &HashMap::new(),
+        );
         let out = e.tick(
             &sid("srv-1"),
             &snap(2048, 4096, vec![("alice", 100, 200), ("bob", 500, 1000)]),
+            &HashMap::new(),
         );
         let bob_row = out
             .iter()
@@ -597,10 +669,10 @@ mod tests {
     #[test]
     fn multi_server_state_isolated() {
         let mut e = DiffEngine::new();
-        e.tick(&sid("srv-1"), &snap(1024, 0, vec![]));
-        e.tick(&sid("srv-2"), &snap(2048, 0, vec![]));
-        let out_1 = e.tick(&sid("srv-1"), &snap(1100, 0, vec![]));
-        let out_2 = e.tick(&sid("srv-2"), &snap(2100, 0, vec![]));
+        e.tick(&sid("srv-1"), &snap(1024, 0, vec![]), &HashMap::new());
+        e.tick(&sid("srv-2"), &snap(2048, 0, vec![]), &HashMap::new());
+        let out_1 = e.tick(&sid("srv-1"), &snap(1100, 0, vec![]), &HashMap::new());
+        let out_2 = e.tick(&sid("srv-2"), &snap(2100, 0, vec![]), &HashMap::new());
         // srv-1 delta is 76, srv-2 delta is 52 — must not cross-pollinate.
         assert_eq!(out_1[0].upload_bytes, 76);
         assert_eq!(out_2[0].upload_bytes, 52);
@@ -609,14 +681,183 @@ mod tests {
     #[test]
     fn forget_drops_state_so_next_tick_is_treated_as_first() {
         let mut e = DiffEngine::new();
-        e.tick(&sid("srv-1"), &snap(1024, 0, vec![]));
+        e.tick(&sid("srv-1"), &snap(1024, 0, vec![]), &HashMap::new());
         assert_eq!(e.tracked_servers(), 1);
         e.forget(&sid("srv-1"));
         assert_eq!(e.tracked_servers(), 0);
-        let out = e.tick(&sid("srv-1"), &snap(2048, 0, vec![]));
+        let out = e.tick(&sid("srv-1"), &snap(2048, 0, vec![]), &HashMap::new());
         assert!(
             out.is_empty(),
             "after forget, next tick is treated as first snapshot"
+        );
+    }
+
+    // ── Phase 4e — log-derived attribution resolves user_id ──
+
+    /// Build a snapshot connection where metadata.user is None
+    /// (NM-11 production reality) but source_ip + source_port are
+    /// populated — exactly the input pattern the attribution map
+    /// needs to resolve to a user.
+    fn snap_with_sources(
+        server_up: u64,
+        server_dn: u64,
+        conns: Vec<(&str, &str, u64, u64)>, // (src_ip, src_port, upload, download)
+    ) -> Snapshot {
+        Snapshot {
+            upload_total: server_up,
+            download_total: server_dn,
+            connections: conns
+                .into_iter()
+                .enumerate()
+                .map(|(i, (ip, port, up, dn))| Connection {
+                    id: format!("c{i}"),
+                    upload: up,
+                    download: dn,
+                    start: "2026-05-21T20:30:00Z".into(),
+                    metadata: ConnectionMeta {
+                        network: "tcp".into(),
+                        destination_ip: "1.2.3.4".into(),
+                        destination_port: "443".into(),
+                        source_ip: ip.into(),
+                        source_port: port.into(),
+                        host: String::new(),
+                        // NM-11 reality — sing-box drops this field
+                        // on the wire even though it knows the user
+                        // server-side.
+                        user: None,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn attribution_map_resolves_user_id_when_metadata_user_is_none() {
+        // Snapshot has two connections from the same source IP
+        // (different ports — different conns on one device).
+        // Attribution map says (1.1.1.1, 11111) → alice and
+        // (1.1.1.1, 22222) → alice. Both bytes should be credited
+        // to alice as a single per-user row.
+        let mut e = DiffEngine::new();
+        let attr: HashMap<(String, String), String> = [
+            (
+                ("1.1.1.1".to_string(), "11111".to_string()),
+                "alice".to_string(),
+            ),
+            (
+                ("1.1.1.1".to_string(), "22222".to_string()),
+                "alice".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // First tick seeds the prior totals; emits no rows.
+        e.tick(
+            &sid("srv-1"),
+            &snap_with_sources(0, 0, vec![]),
+            &HashMap::new(),
+        );
+        // Second tick — alice's two conns appear.
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap_with_sources(
+                1000,
+                2000,
+                vec![
+                    ("1.1.1.1", "11111", 400, 800),
+                    ("1.1.1.1", "22222", 600, 1200),
+                ],
+            ),
+            &attr,
+        );
+        let alice_row = out
+            .iter()
+            .find(|d| d.user_id.as_ref().map(|u| u.0.as_str()) == Some("alice"))
+            .expect("alice row must exist when attribution resolved both conns");
+        assert_eq!(alice_row.upload_bytes, 1000, "400+600 = both conns summed");
+        assert_eq!(
+            alice_row.download_bytes, 2000,
+            "800+1200 = both conns summed"
+        );
+        assert_eq!(
+            alice_row.active_connections, 2,
+            "two conns counted as active"
+        );
+    }
+
+    #[test]
+    fn no_attribution_for_unmapped_source_means_no_per_user_row() {
+        // Snapshot has one conn from an IP that's NOT in the
+        // attribution map → no per-user row, only the server-wide
+        // delta. metadata.user is None per NM-11.
+        let mut e = DiffEngine::new();
+        e.tick(
+            &sid("srv-1"),
+            &snap_with_sources(0, 0, vec![]),
+            &HashMap::new(),
+        );
+        let out = e.tick(
+            &sid("srv-1"),
+            &snap_with_sources(500, 1000, vec![("9.9.9.9", "5555", 500, 1000)]),
+            &HashMap::new(), // empty attribution
+        );
+        assert!(
+            out.iter().all(|d| d.user_id.is_none()),
+            "no attribution → no per-user rows; got {:?}",
+            out.iter().map(|d| &d.user_id).collect::<Vec<_>>()
+        );
+        let server_row = out
+            .iter()
+            .find(|d| d.user_id.is_none())
+            .expect("server row");
+        assert_eq!(server_row.upload_bytes, 500);
+    }
+
+    #[test]
+    fn metadata_user_wins_over_attribution_map_when_both_present() {
+        // Forward-compat: if a future sing-box build (or upstream
+        // patch) emits `metadata.user`, we use it directly and
+        // ignore the attribution fallback. Defends against
+        // post-NM-11-fix drift where both could disagree.
+        let mut e = DiffEngine::new();
+        let attr: HashMap<(String, String), String> = [(
+            ("1.1.1.1".to_string(), "11111".to_string()),
+            "wrong-from-log".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let mut snap = snap_with_sources(0, 0, vec![]);
+        snap.upload_total = 100;
+        snap.download_total = 200;
+        snap.connections.push(Connection {
+            id: "c0".into(),
+            upload: 100,
+            download: 200,
+            start: "2026-05-21T20:30:00Z".into(),
+            metadata: ConnectionMeta {
+                network: "tcp".into(),
+                destination_ip: "1.2.3.4".into(),
+                destination_port: "443".into(),
+                source_ip: "1.1.1.1".into(),
+                source_port: "11111".into(),
+                host: String::new(),
+                user: Some("right-from-wire".into()), // sing-box patched
+            },
+        });
+        e.tick(
+            &sid("srv-1"),
+            &snap_with_sources(0, 0, vec![]),
+            &HashMap::new(),
+        );
+        let out = e.tick(&sid("srv-1"), &snap, &attr);
+        let user_rows: Vec<&str> = out
+            .iter()
+            .filter_map(|d| d.user_id.as_ref().map(|u| u.0.as_str()))
+            .collect();
+        assert_eq!(
+            user_rows,
+            vec!["right-from-wire"],
+            "metadata.user from the wire wins; attribution fallback ignored"
         );
     }
 }
