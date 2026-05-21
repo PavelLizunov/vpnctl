@@ -90,7 +90,7 @@ futures-core = "0.3"
 # behind the `geoip` feature so builds without the .mmdb files
 # stay light; runtime gracefully degrades to disabled-lookup when
 # VPNCTLD_GEOIP_DIR is unset OR the DB files are missing.
-maxminddb = { version = "0.24", optional = true }
+maxminddb = { version = "0.27", optional = true }
 
 [features]
 # Default: GeoIP enabled (pure-Rust dep, no native code). Operators

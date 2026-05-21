@@ -195,27 +195,31 @@ impl GeoLookup {
         let inner = self.inner.as_ref()?;
         let mut info = GeoInfo::default();
         if let Some(reader) = &inner.city {
-            // maxminddb 0.24 returns Result<T, MaxMindDBError> where
-            // T == geoip2::City (NOT Option<City>); the not-found case
-            // surfaces as `MaxMindDBError::AddressNotFoundError`. We
-            // swallow all errors → None (best-effort enrichment).
-            if let Ok(city_rec) = reader.lookup::<geoip2::City>(ip) {
-                if let Some(c) = city_rec.country.as_ref() {
-                    info.country_iso = c.iso_code.map(|s| s.to_string());
-                }
-                if let Some(c) = city_rec.city.as_ref() {
-                    if let Some(names) = c.names.as_ref() {
-                        info.city = names.get("en").map(|s| s.to_string());
+            // maxminddb 0.27 API: `lookup(ip)` returns
+            // `Result<LookupResult<T>, MaxMindDbError>`, then
+            // `.decode::<TypedRecord>()` extracts the typed record
+            // (also Result, Option-wrapped). City + Country are now
+            // bare structs with empty defaults (no Option), but the
+            // inner `iso_code` / `english` fields are still Option.
+            // We swallow every error layer → None (best-effort
+            // enrichment).
+            if let Ok(lookup) = reader.lookup(ip) {
+                if let Ok(Some(city_rec)) = lookup.decode::<geoip2::City>() {
+                    info.country_iso = city_rec.country.iso_code.map(|s| s.to_string());
+                    if let Some(en) = city_rec.city.names.english {
+                        info.city = Some(en.to_string());
                     }
                 }
             }
         }
         if let Some(reader) = &inner.asn {
-            if let Ok(asn_rec) = reader.lookup::<geoip2::Asn>(ip) {
-                info.asn = asn_rec.autonomous_system_number;
-                info.org = asn_rec
-                    .autonomous_system_organization
-                    .map(|s| s.to_string());
+            if let Ok(lookup) = reader.lookup(ip) {
+                if let Ok(Some(asn_rec)) = lookup.decode::<geoip2::Asn>() {
+                    info.asn = asn_rec.autonomous_system_number;
+                    info.org = asn_rec
+                        .autonomous_system_organization
+                        .map(|s| s.to_string());
+                }
             }
         }
         if info.country_iso.is_none()
