@@ -280,6 +280,15 @@ pub(crate) async fn get(
             // response stays 200 — we never block on the log write
             // and we never spawn an unbounded number of tasks. See
             // `crate::access_log` module docs for the full rationale.
+            // Track-1.4 — TLS fingerprint from nginx-forwarded
+            // headers, GATED by VPNCTLD_TRUSTED_PROXIES. peer_ip is
+            // the raw TCP peer (NOT the XFF-resolved one) since the
+            // trust gate keys on the immediate connection's source.
+            // Stays None until an operator installs an nginx-side
+            // JA3/JA4 module (e.g. phuslu/nginx-ssl-fingerprint).
+            let (tls_ja3, tls_ja4) = peer_ip
+                .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
+                .unwrap_or((None, None));
             let _ = crate::access_log::try_enqueue(
                 &state.access_log_tx,
                 crate::access_log::AccessLogRecord {
@@ -295,6 +304,8 @@ pub(crate) async fn get(
                     // always sends None.
                     geo_country: None,
                     geo_asn: None,
+                    tls_ja3,
+                    tls_ja4,
                 },
             );
 

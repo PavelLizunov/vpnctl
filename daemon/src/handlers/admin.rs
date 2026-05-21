@@ -1888,6 +1888,15 @@ fn share_link_card(link: &str, footnote: &Markup) -> Markup {
 /// doesn't wrap awkwardly.
 const QR_DISPLAY_PX: u32 = 220;
 
+/// Number of leading chars rendered inside JA3 / JA4 chips on the
+/// subscription-access table. Full value is in the chip's `title=`
+/// tooltip. Eight is a sweet spot — long enough that two distinct
+/// fingerprints diverge in the rendered prefix (JA3 starts with the
+/// numeric TLS-version-and-cipher-list, JA4 with the protocol-class
+/// `t13d1516h2_…` segment), short enough to keep the chip from
+/// dominating the row. Pinned by track_1_4 admin_smoke tests.
+const JA_CHIP_PREFIX_CHARS: usize = 8;
+
 fn qr_svg(url: &str) -> Markup {
     use qrcode::QrCode;
     use qrcode::render::svg;
@@ -3056,6 +3065,30 @@ pub(crate) async fn user_detail(
                                     span style="font-family: var(--mono); font-size: 9px; color: var(--mute); margin-left: 2px;"
                                          title=(crate::i18n::tr(lang, "HTTP version negotiated", "Согласованная версия HTTP")) {
                                         (http_v)
+                                    }
+                                }
+                                // Track-1.4 — TLS JA3 / JA4 fingerprint chip
+                                // (migration 0020). NULL until an nginx-side
+                                // JA3 module forwards `X-SSL-JA3` /
+                                // `X-SSL-JA4` headers. Hash itself is long;
+                                // render the first JA_CHIP_PREFIX_CHARS only,
+                                // full value lives in the title= tooltip.
+                                @if let Some(ja3) = row.tls_ja3.as_deref() {
+                                    " "
+                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
+                                         title=(format!("{}\n{}",
+                                            crate::i18n::tr(lang, "JA3 TLS ClientHello fingerprint (Salesforce). Same device through IP changes = same JA3.", "JA3 — отпечаток TLS ClientHello (Salesforce). Одно и то же устройство через смену IP = тот же JA3."),
+                                            ja3)) {
+                                        "JA3 " ((ja3.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
+                                    }
+                                }
+                                @if let Some(ja4) = row.tls_ja4.as_deref() {
+                                    " "
+                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
+                                         title=(format!("{}\n{}",
+                                            crate::i18n::tr(lang, "JA4 TLS fingerprint (FoxIO 2023). Protocol-aware, harder to randomise than JA3.", "JA4 — отпечаток TLS (FoxIO 2023). Знает протокол, сложнее рандомизируется чем JA3."),
+                                            ja4)) {
+                                        "JA4 " ((ja4.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
                                     }
                                 }
                             }

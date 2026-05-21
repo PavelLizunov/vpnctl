@@ -1,0 +1,42 @@
+-- Phase Track-1.4: TLS client fingerprint columns on sub_access_log.
+--
+-- Pavel 2026-05-21 follow-up: «начинай это [TLS JA3/JA4 fingerprint]».
+-- The vpnctld deployment terminates TLS at nginx on 192.168.0.207
+-- (Phase 5 cutover) so the ClientHello bytes never reach vpnctld
+-- directly. nginx CAN compute the JA3 / JA4 hash and forward it
+-- as a request header IF (and only if) an nginx-side module is
+-- installed — see `daemon/src/real_ip.rs:resolve_real_ip` for the
+-- analogous header-from-trusted-proxy pattern.
+--
+-- This migration adds the storage; the wire-up reads
+-- `X-SSL-JA3` / `X-SSL-JA4` headers in handlers ONLY when the
+-- immediate peer is in `VPNCTLD_TRUSTED_PROXIES`. Until the
+-- operator installs an nginx module (phuslu/nginx-ssl-fingerprint
+-- is the recommended path — single source tree producing
+-- $http_ssl_ja3 + $http_ssl_ja4 + $http2_fingerprint) both
+-- columns stay NULL. Same shape as `geo_country` was before
+-- the DB-IP Lite drop.
+--
+-- Why JA3 + JA4 in one migration:
+--   - JA3 (Salesforce 2017): MD5 of 5 concatenated ClientHello
+--     fields. 32-char hex. Industry baseline, lots of historical
+--     reference data, but vulnerable to client field-shuffling.
+--   - JA4 (FoxIO 2023): composite `t13d1516h2_<hash1>_<hash2>`
+--     ~36 chars. Protocol-aware (`q` for QUIC, `t` for TCP),
+--     better SNI handling, harder to randomise. Industry trend
+--     is JA4-first; JA3 stays for legacy correlation.
+-- Storing both means one schema migration covers the next 5+
+-- years; if nginx-side starts only emitting one of them, the
+-- other column stays NULL with no daemon-side change needed.
+--
+-- Backwards-compat: both columns nullable, no DEFAULT, no index.
+-- Migration is O(1) SQLite ALTER TABLE ADD COLUMN. Render-side
+-- treats None as "—" / hides the chip (no defensive code beyond
+-- the existing `if let Some(x)` flow used for geo_country /
+-- geo_asn).
+--
+-- Size profile per row when both filled: ≤72 chars. Negligible
+-- against the existing `ua` (often 200+ chars) and `geo_asn`.
+
+ALTER TABLE sub_access_log ADD COLUMN tls_ja3 TEXT;  -- 32 hex chars
+ALTER TABLE sub_access_log ADD COLUMN tls_ja4 TEXT;  -- ~36 chars composite

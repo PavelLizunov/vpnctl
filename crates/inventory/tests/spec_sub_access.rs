@@ -451,6 +451,11 @@ async fn log_sub_access_rich_round_trips_all_track_1_2_columns() {
         Some("Hiddify"),
         Some("US"),
         Some("AS15169 GOOGLE"),
+        // Track-1.4 — TLS fingerprint columns. None here exercises
+        // the half-populated row case (some clients yes, some no);
+        // the next test populates both.
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -469,6 +474,49 @@ async fn log_sub_access_rich_round_trips_all_track_1_2_columns() {
     assert_eq!(r.device_class.as_deref(), Some("Hiddify"));
     assert_eq!(r.geo_country.as_deref(), Some("US"));
     assert_eq!(r.geo_asn.as_deref(), Some("AS15169 GOOGLE"));
+    assert!(r.tls_ja3.is_none());
+    assert!(r.tls_ja4.is_none());
+}
+
+#[tokio::test]
+async fn log_sub_access_rich_round_trips_tls_fingerprint_columns() {
+    // Track-1.4 (migration 0020) — pin that JA3 + JA4 fields
+    // round-trip through the writer + reader. Schema change is
+    // additive; future operator wiring nginx-side JA3 module
+    // makes these fields populate, no daemon code change needed.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "203.0.113.7",
+        Some("Hiddify/iOS/2.5.0"),
+        200,
+        4096,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("769,49195-49199,0-23-65281,29-23-24,0"), // JA3-style
+        Some("t13d1516h2_8daaf6152771_b186095e22b6"),  // JA4
+    )
+    .await
+    .unwrap();
+
+    let r = &inv
+        .recent_sub_access(&UserId("alice".into()), 5)
+        .await
+        .unwrap()[0];
+    assert_eq!(
+        r.tls_ja3.as_deref(),
+        Some("769,49195-49199,0-23-65281,29-23-24,0")
+    );
+    assert_eq!(
+        r.tls_ja4.as_deref(),
+        Some("t13d1516h2_8daaf6152771_b186095e22b6")
+    );
 }
 
 #[tokio::test]

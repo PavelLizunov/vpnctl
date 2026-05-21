@@ -1,0 +1,80 @@
+[Unit]
+Description=vpnctl GeoIP DB refresh (DB-IP Lite, monthly)
+Documentation=https://github.com/PavelLizunov/vpnctl
+# Don't fire while vpnctld is being restarted itself — they share
+# the geoip dir; the atomic-rename in `vpnctl geoip-update` is safe
+# even if vpnctld is reading the old mmap (`mmap` survives an
+# inode-replacement) but the start order is still cleaner with the
+# After= directive. NOTE: `After=` orders STARTUP only — once both
+# are running, this oneshot can fire while vpnctld is alive; the
+# atomic-rename is what makes that safe.
+After=vpnctld.service
+# Network needed for the DB-IP download (~140 MB total).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same user/group as the daemon — owns /var/lib/vpnctl/geoip.
+User=user
+Group=user
+# Reads VPNCTLD_GEOIP_DIR. Empty default = /var/lib/vpnctl/geoip
+# (resolved inside `cli/src/cmd/geoip.rs`).
+EnvironmentFile=-/etc/vpnctl/vpnctld.env
+# `vpnctl` CLI binary co-installed with the daemon (path matches
+# the deploy pattern; tweak if your install prefix differs).
+ExecStart=/usr/local/bin/vpnctl geoip-update
+# Total budget: download + decompress + validate two .mmdb files
+# (~150 MB combined). 10 minutes is generous; on a flaky network
+# DB-IP can be slow but rarely 600s+.
+TimeoutStartSec=600
+# Don't restart automatically on failure — the next monthly tick
+# (or the operator clicking the Settings button) is the recovery
+# path. systemd-journal will surface the error.
+Restart=no
+
+# ── Sandbox / hardening ────────────────────────────────────────────
+# Mirrors scripts/vpnctld.service posture (audited 2026-05-18). This
+# oneshot is even more constrained than the daemon: it only needs
+# outbound HTTPS, read of vpnctld.env, and write of one directory.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vpnctl/geoip
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+
+# Caps: oneshot CLI never needs root capabilities. Drop them all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Syscall filter — `@system-service` is the maintained allowlist for
+# normal long-running services; identical exclusions to vpnctld.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @raw-io @reboot @swap @debug @cpu-emulation @mount
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+# Address families — IPv4/IPv6 outbound + unix sockets. The DB-IP
+# fetch is plain HTTPS, no AF_NETLINK / AF_PACKET / AF_BLUETOOTH.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Resource ceilings (low-effort DoS defense).
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

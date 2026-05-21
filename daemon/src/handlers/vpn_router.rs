@@ -547,6 +547,13 @@ pub(crate) async fn get_config(
         .map(|s| s.chars().take(120).collect::<String>());
     let http_version = Some(crate::ua::http_version_label(request.version()).to_owned());
     let device_class = crate::ua::parse_ua_short(ua_for_log.as_deref()).map(str::to_owned);
+    // Track-1.4 — TLS fingerprint from nginx-forwarded headers,
+    // gated by VPNCTLD_TRUSTED_PROXIES. peer_ip is the raw TCP peer
+    // (NOT the XFF-resolved one) since the trust gate keys on the
+    // immediate connection's source.
+    let (tls_ja3, tls_ja4) = peer_ip
+        .map(|p| crate::real_ip::collect_tls_fingerprints(&headers, p))
+        .unwrap_or((None, None));
     let _ = crate::access_log::try_enqueue(
         &state.access_log_tx,
         crate::access_log::AccessLogRecord {
@@ -561,6 +568,8 @@ pub(crate) async fn get_config(
             // GeoIP fields populated by writer task.
             geo_country: None,
             geo_asn: None,
+            tls_ja3,
+            tls_ja4,
         },
     );
 

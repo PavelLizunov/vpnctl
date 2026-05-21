@@ -129,6 +129,13 @@ pub struct SubAccessEntry {
     pub device_class: Option<String>,
     pub geo_country: Option<String>,
     pub geo_asn: Option<String>,
+    // Track-1.4 (migration 0020) — TLS client fingerprint forwarded
+    // by nginx (X-SSL-JA3 / X-SSL-JA4) when an nginx-side JA3/JA4
+    // module is installed AND the peer is in
+    // VPNCTLD_TRUSTED_PROXIES. None until that path is wired —
+    // schema is ready, capture is gated on host config.
+    pub tls_ja3: Option<String>,
+    pub tls_ja4: Option<String>,
 }
 
 /// One row of `sub_rate_bans` (Phase Track-2 chunk 2). Persistent
@@ -1587,18 +1594,23 @@ impl SqliteInventory {
         bytes: u64,
     ) -> Result<()> {
         // Convenience wrapper for tests + old call sites — passes None
-        // for the 5 Track-1.2 metadata columns (migration 0019). The
+        // for the Track-1.2 metadata columns (migration 0019) AND the
+        // Track-1.4 TLS fingerprint columns (migration 0020). The
         // production writer task on the access-log channel calls
-        // `log_sub_access_rich` directly so it can pass parsed UA /
-        // Accept-Language / HTTP version / GeoIP results.
-        self.log_sub_access_rich(user_id, ip, ua, status, bytes, None, None, None, None, None)
-            .await
+        // `log_sub_access_rich` directly so it can pass the captured
+        // UA / Accept-Language / HTTP version / GeoIP / TLS-JA3/JA4
+        // results.
+        self.log_sub_access_rich(
+            user_id, ip, ua, status, bytes, None, None, None, None, None, None, None,
+        )
+        .await
     }
 
-    /// Full sub-access logging — accepts the 5 new metadata columns
-    /// (Track-1.2 migration 0019). Called from the access-log writer
-    /// task; handlers populate the captured-from-request fields and
-    /// the writer enriches with GeoIP before passing through here.
+    /// Full sub-access logging — accepts all Track-1.2 + Track-1.4
+    /// metadata columns (migrations 0019, 0020). Called from the
+    /// access-log writer task; handlers populate the captured-from-
+    /// request fields and the writer enriches with GeoIP before
+    /// passing through here.
     #[allow(clippy::too_many_arguments)]
     pub async fn log_sub_access_rich(
         &self,
@@ -1612,13 +1624,15 @@ impl SqliteInventory {
         device_class: Option<&str>,
         geo_country: Option<&str>,
         geo_asn: Option<&str>,
+        tls_ja3: Option<&str>,
+        tls_ja4: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO sub_access_log
              (user_id, ip, ua, status, bytes,
               accept_language, http_version, device_class,
-              geo_country, geo_asn)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              geo_country, geo_asn, tls_ja3, tls_ja4)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )
         .bind(&user_id.0)
         .bind(ip)
@@ -1631,6 +1645,8 @@ impl SqliteInventory {
         .bind(device_class)
         .bind(geo_country)
         .bind(geo_asn)
+        .bind(tls_ja3)
+        .bind(tls_ja4)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1677,7 +1693,7 @@ impl SqliteInventory {
         let rows = sqlx::query(
             "SELECT id, ts, user_id, ip, ua, status, bytes,
                     accept_language, http_version, device_class,
-                    geo_country, geo_asn
+                    geo_country, geo_asn, tls_ja3, tls_ja4
              FROM sub_access_log
              WHERE user_id = ?1
              ORDER BY id DESC
@@ -2747,6 +2763,9 @@ fn row_to_sub_access(r: sqlx::sqlite::SqliteRow) -> Result<SubAccessEntry> {
         device_class: r.try_get("device_class")?,
         geo_country: r.try_get("geo_country")?,
         geo_asn: r.try_get("geo_asn")?,
+        // Track-1.4 (migration 0020) — same NULL-tolerant pattern.
+        tls_ja3: r.try_get("tls_ja3")?,
+        tls_ja4: r.try_get("tls_ja4")?,
     })
 }
 

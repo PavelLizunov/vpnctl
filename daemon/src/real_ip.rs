@@ -102,6 +102,60 @@ pub fn resolve_real_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
         .unwrap_or(peer)
 }
 
+/// Same trust-gate as `resolve_real_ip` applied to a different
+/// header. Track-1.4 (migration 0020): if the immediate peer is in
+/// `VPNCTLD_TRUSTED_PROXIES`, return the value of `header_name` —
+/// after a SHAPE check that rejects obvious garbage. Otherwise
+/// return None unconditionally (spoof defense — an untrusted peer
+/// can claim any JA3 / JA4 it wants).
+///
+/// Shape check (tight allowlist): ASCII alphanumerics + the small
+/// punctuation set `, . - _ :` that covers every JA3 (digits, `,`,
+/// `-`) and JA4 (alnum, `_`) form we know about, plus generous room
+/// for future `_xxx` / dotted-version suffixes. Max length 120.
+/// This is intentionally STRICTER than "rejects HTML/log-line
+/// breakers": the value flows into the admin HTML (maud escapes
+/// anyway) and into journalctl JSON (the tight allowlist makes log
+/// injection structurally impossible). Anything outside the
+/// allowlist → None, conservative-by-default.
+pub fn resolve_trusted_header(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    header_name: &str,
+) -> Option<String> {
+    if !trusted_proxies().contains(&peer) {
+        return None;
+    }
+    let raw = headers.get(header_name)?.to_str().ok()?;
+    if raw.is_empty() || raw.len() > 120 {
+        return None;
+    }
+    if raw
+        .bytes()
+        .any(|b| !(b.is_ascii_alphanumeric() || matches!(b, b',' | b'.' | b'-' | b'_' | b':')))
+    {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+/// Convenience helper for Track-1.4 callers (sub.rs + vpn_router.rs)
+/// that need both JA3 and JA4 chips from the same request. Returns
+/// `(ja3, ja4)`, each gated independently through the trust list
+/// and shape check via `resolve_trusted_header`. Centralising the
+/// header names (`x-ssl-ja3` and `x-ssl-ja4`) in ONE place means a
+/// future header rename (or a third fingerprint family like
+/// `x-tls-version`) doesn't have to be touched in every handler.
+pub fn collect_tls_fingerprints(
+    headers: &HeaderMap,
+    peer: IpAddr,
+) -> (Option<String>, Option<String>) {
+    (
+        resolve_trusted_header(headers, peer, "x-ssl-ja3"),
+        resolve_trusted_header(headers, peer, "x-ssl-ja4"),
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -159,5 +213,138 @@ mod tests {
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         let got = resolve_real_ip(&h, trusted);
         assert_eq!(got.to_string(), "2001:db8::42");
+    }
+
+    // ── Track-1.4 — resolve_trusted_header (JA3 / JA4) ─────────────
+
+    fn ja_header(name: &str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn trusted_header_untrusted_peer_returns_none() {
+        let h = ja_header("x-ssl-ja3", "769,49195-49199,0-23-65281,29-23-24,0");
+        assert_eq!(
+            resolve_trusted_header(&h, peer(100), "x-ssl-ja3"),
+            None,
+            "untrusted peer must not be able to spoof a JA3 header"
+        );
+    }
+
+    #[test]
+    fn trusted_header_trusted_peer_returns_value() {
+        let h = ja_header("x-ssl-ja3", "abcdef0123456789abcdef0123456789");
+        let got = resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3");
+        assert_eq!(got.as_deref(), Some("abcdef0123456789abcdef0123456789"));
+    }
+
+    #[test]
+    fn trusted_header_rejects_oversized() {
+        let big = "a".repeat(200);
+        let h = ja_header("x-ssl-ja3", &big);
+        assert_eq!(
+            resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+            None,
+            "≥121-char header must be rejected (log-bomb defense)"
+        );
+    }
+
+    #[test]
+    fn trusted_header_rejects_whitespace_and_quotes() {
+        for bad in [
+            "abc def",  // space
+            "abc\tdef", // tab
+            "abc<def",  // HTML-attr breaker
+            "abc\"def", // quote
+            "abc'def",  // apostrophe
+        ] {
+            let h = ja_header("x-ssl-ja3", bad);
+            assert_eq!(
+                resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+                None,
+                "header value {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_header_rejects_shell_and_log_metacharacters() {
+        // Track-1.4 hardening: the shape check is a TIGHT allowlist
+        // (alnum + `,._-:`), not just "rejects HTML breakers". Every
+        // char below would parse as ASCII and pass the loose v1
+        // check; the tight allowlist rejects them, making log/shell
+        // injection structurally impossible if any future caller
+        // shells out the value or writes it into a non-escaping log.
+        for bad in [
+            "abc;def",  // shell separator
+            "abc$def",  // var expansion
+            "abc`def",  // backtick
+            "abc|def",  // pipe
+            "abc&def",  // background
+            "abc(def",  // subshell open
+            "abc)def",  // subshell close
+            "abc\\def", // backslash
+            "abc=def",  // env-assign
+            "abc/def",  // path separator (forbid — JA3/JA4 never contain /)
+        ] {
+            let h = ja_header("x-ssl-ja3", bad);
+            assert_eq!(
+                resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+                None,
+                "header value {bad:?} must be rejected by the tight allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_header_rejects_non_ascii() {
+        let h = ja_header("x-ssl-ja3", "Дашборд");
+        assert_eq!(
+            resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+            None,
+            "non-ASCII must be rejected"
+        );
+    }
+
+    #[test]
+    fn trusted_header_accepts_ja4_composite_shape() {
+        // FoxIO JA4 shape: `t13d1516h2_8daaf6152771_b186095e22b6`.
+        // Underscore + alphanumerics. Must pass the shape check.
+        let h = ja_header("x-ssl-ja4", "t13d1516h2_8daaf6152771_b186095e22b6");
+        let got = resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja4");
+        assert_eq!(got.as_deref(), Some("t13d1516h2_8daaf6152771_b186095e22b6"));
+    }
+
+    // ── Track-1.4 — collect_tls_fingerprints convenience ───────────
+
+    #[test]
+    fn collect_tls_fingerprints_returns_both_when_trusted() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-ssl-ja3",
+            HeaderValue::from_static("769,49195-49199,0-23-65281,29-23-24,0"),
+        );
+        h.insert(
+            "x-ssl-ja4",
+            HeaderValue::from_static("t13d1516h2_8daaf6152771_b186095e22b6"),
+        );
+        let (ja3, ja4) = collect_tls_fingerprints(&h, DEFAULT_TRUSTED_PROXY_LAN);
+        assert!(ja3.is_some(), "ja3 must be captured");
+        assert!(ja4.is_some(), "ja4 must be captured");
+    }
+
+    #[test]
+    fn collect_tls_fingerprints_untrusted_peer_returns_both_none() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ssl-ja3", HeaderValue::from_static("abc123"));
+        h.insert("x-ssl-ja4", HeaderValue::from_static("def456"));
+        let (ja3, ja4) = collect_tls_fingerprints(&h, peer(100));
+        assert_eq!(ja3, None, "untrusted peer must not be able to spoof JA3");
+        assert_eq!(ja4, None, "untrusted peer must not be able to spoof JA4");
     }
 }

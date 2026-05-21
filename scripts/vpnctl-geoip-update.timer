@@ -1,0 +1,23 @@
+[Unit]
+Description=vpnctl GeoIP DB refresh timer (monthly, DB-IP Lite)
+Documentation=https://github.com/PavelLizunov/vpnctl
+
+[Timer]
+# DB-IP publishes new monthly databases on the 1st-2nd of the month.
+# Run on the 4th at 04:00 UTC so the file is reliably available; the
+# `vpnctl geoip-update` command retries the previous month on a 404
+# so a late publish doesn't break the update — but 4 AM is past the
+# nightly backup window (vpnctl-backup.timer runs 03:00 UTC) and
+# avoids contention.
+OnCalendar=*-*-04 04:00:00
+# Persistent: if the host was off when the timer would have fired
+# (homelab is rarely down for a full month, but be defensive),
+# run on next boot.
+Persistent=true
+# 600 sec random delay so a future fleet doesn't hammer DB-IP at
+# the same UTC second. Single homelab today; future-proof.
+RandomizedDelaySec=600
+Unit=vpnctl-geoip-update.service
+
+[Install]
+WantedBy=timers.target

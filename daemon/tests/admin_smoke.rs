@@ -2402,6 +2402,8 @@ async fn access_log_back_pressure_drops_records_when_full() {
         device_class: None,
         geo_country: None,
         geo_asn: None,
+        tls_ja3: None,
+        tls_ja4: None,
     };
 
     // First two enqueues fill the buffer → both return true.
@@ -10075,6 +10077,8 @@ async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
         Some("Hiddify"),
         Some("US"),
         Some("AS15169 GOOGLE"),
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -10164,6 +10168,8 @@ async fn enqueue_one_and_drain(
             device_class: device_class.map(str::to_owned),
             geo_country: None,
             geo_asn: None,
+            tls_ja3: None,
+            tls_ja4: None,
         },
     );
     // Writer is async; small sleep + drain is the same pattern the
@@ -10297,5 +10303,103 @@ async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
     assert!(
         html.contains("(missing — run") || html.contains("(отсутствует — запусти"),
         "expected the 'missing' empty-state for both City + ASN"
+    );
+}
+
+#[tokio::test]
+async fn track_1_4_subscription_access_renders_ja3_ja4_chips_when_set() {
+    // Pin Track-1.4 (migration 0020) render: when sub_access_log
+    // carries tls_ja3 + tls_ja4 (because operator wired an
+    // nginx-side JA3 module), the row renders both chips with
+    // the first 8 chars of each + a tooltip explaining the
+    // fingerprint family.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&User {
+        id: UserId("fry".into()),
+        uuid: "fr0".into(),
+        sub_token: Some("frtok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+
+    inv.log_sub_access_rich(
+        &UserId("fry".into()),
+        "8.8.8.8",
+        Some("Hiddify/iOS/2.5.0"),
+        200,
+        4096,
+        None,
+        Some("HTTP/2.0"),
+        Some("Hiddify"),
+        Some("US"),
+        Some("AS15169 GOOGLE"),
+        Some("769,49195-49199,0-23-65281,29-23-24,0"),
+        Some("t13d1516h2_8daaf6152771_b186095e22b6"),
+    )
+    .await
+    .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/fry").await;
+    // JA3 chip — first 8 chars of the fingerprint, prefixed «JA3 ».
+    assert!(
+        html.contains("JA3 769,4919"),
+        "expected JA3 chip with first 8 chars of fingerprint, got HTML around chips: …{}…",
+        html.split("JA3")
+            .nth(1)
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>()
+    );
+    // JA3 full value lives in the title= tooltip.
+    assert!(
+        html.contains("769,49195-49199,0-23-65281,29-23-24,0"),
+        "JA3 full value must be in tooltip"
+    );
+    // JA4 chip — `t13d1516` prefix.
+    assert!(
+        html.contains("JA4 t13d1516"),
+        "expected JA4 chip with first 8 chars of fingerprint"
+    );
+    // JA4 full value in tooltip.
+    assert!(
+        html.contains("t13d1516h2_8daaf6152771_b186095e22b6"),
+        "JA4 full value must be in tooltip"
+    );
+}
+
+#[tokio::test]
+async fn track_1_4_subscription_access_omits_ja_chips_when_null() {
+    // Symmetric: rows with NULL tls_ja3 + tls_ja4 (default today;
+    // nginx-side module not installed) render WITHOUT the JA chips.
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&User {
+        id: UserId("bender".into()),
+        uuid: "be0".into(),
+        sub_token: Some("betok".into()),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        vpn_router_device_id: None,
+    })
+    .await
+    .unwrap();
+    inv.log_sub_access(&UserId("bender".into()), "1.2.3.4", None, 200, 0)
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/bender").await;
+    assert!(
+        !html.contains("JA3 ") && !html.contains("JA4 "),
+        "JA chips must not render when columns are NULL"
     );
 }

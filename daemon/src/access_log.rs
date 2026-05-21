@@ -72,6 +72,14 @@ pub struct AccessLogRecord {
     // None for these.
     pub geo_country: Option<String>,
     pub geo_asn: Option<String>,
+    // Track-1.4 (migration 0020) — TLS client fingerprint forwarded
+    // by nginx via `X-SSL-JA3` / `X-SSL-JA4` headers. Handler reads
+    // them ONLY when the immediate peer is in
+    // `VPNCTLD_TRUSTED_PROXIES` (same trust gate as XFF). Stays
+    // None until the operator installs an nginx-side JA3/JA4 module
+    // — schema is ready; capture is gated on host config.
+    pub tls_ja3: Option<String>,
+    pub tls_ja4: Option<String>,
 }
 
 /// Spin up the writer task. Returns the channel sender (handed to
@@ -146,6 +154,8 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                 rec.device_class.as_deref(),
                 rec.geo_country.as_deref(),
                 rec.geo_asn.as_deref(),
+                rec.tls_ja3.as_deref(),
+                rec.tls_ja4.as_deref(),
             )
             .await;
         match log_result {
