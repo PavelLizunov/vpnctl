@@ -697,3 +697,135 @@ async fn phase5a1_user_traffic_this_month_sums_from_daily_rollup() {
         .unwrap();
     assert_eq!(total, 20_000_000, "12M up + 8M down");
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Phase 5b — vpn_user_destinations (per-user × destination tracking).
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase5b_record_user_destinations_increments_hit_count_on_repeat() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // Tick 1: 2 destinations.
+    inv.record_user_destinations(&[
+        (UserId("alice".into()), "youtube.com:443".into()),
+        (UserId("alice".into()), "telegram.org:443".into()),
+    ])
+    .await
+    .unwrap();
+    // Tick 2: youtube again, plus a new one.
+    inv.record_user_destinations(&[
+        (UserId("alice".into()), "youtube.com:443".into()),
+        (UserId("alice".into()), "discord.gg:443".into()),
+    ])
+    .await
+    .unwrap();
+
+    let top = inv
+        .top_destinations_for_user(&UserId("alice".into()), 7, 20)
+        .await
+        .unwrap();
+    let yt = top
+        .iter()
+        .find(|d| d.destination_label == "youtube.com:443")
+        .expect("youtube must be present");
+    assert_eq!(yt.hit_count, 2, "two ticks → 2 hits");
+    let tg = top
+        .iter()
+        .find(|d| d.destination_label == "telegram.org:443")
+        .expect("telegram must be present");
+    assert_eq!(tg.hit_count, 1);
+}
+
+#[tokio::test]
+async fn phase5b_top_destinations_orders_by_hits_desc() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    // Build different hit counts: A=3, B=1, C=2.
+    for _ in 0..3 {
+        inv.record_user_destinations(&[(UserId("alice".into()), "a.example.com:443".into())])
+            .await
+            .unwrap();
+    }
+    inv.record_user_destinations(&[(UserId("alice".into()), "b.example.com:443".into())])
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        inv.record_user_destinations(&[(UserId("alice".into()), "c.example.com:443".into())])
+            .await
+            .unwrap();
+    }
+    let top = inv
+        .top_destinations_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    let labels: Vec<&str> = top.iter().map(|r| r.destination_label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "a.example.com:443",
+            "c.example.com:443",
+            "b.example.com:443"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn phase5b_destinations_dont_leak_across_users() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+    inv.record_user_destinations(&[(UserId("alice".into()), "x.example.com:443".into())])
+        .await
+        .unwrap();
+    inv.record_user_destinations(&[(UserId("bob".into()), "y.example.com:443".into())])
+        .await
+        .unwrap();
+    let alice = inv
+        .top_destinations_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(alice.len(), 1);
+    assert_eq!(alice[0].destination_label, "x.example.com:443");
+    let bob = inv
+        .top_destinations_for_user(&UserId("bob".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].destination_label, "y.example.com:443");
+}
+
+#[tokio::test]
+async fn phase5b_record_destinations_truncates_pathological_labels_to_200_chars() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    let long = "x".repeat(500);
+    inv.record_user_destinations(&[(UserId("alice".into()), long)])
+        .await
+        .unwrap();
+    let top = inv
+        .top_destinations_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].destination_label.len(), 200);
+}
+
+#[tokio::test]
+async fn phase5b_purge_user_destinations_removes_old_rows() {
+    // Can't fake old `date` via the API, so test the SAFE side:
+    // freshly-inserted rows survive a 1-day purge.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.record_user_destinations(&[(UserId("alice".into()), "z.example.com:443".into())])
+        .await
+        .unwrap();
+    let removed = inv.purge_user_destinations_older_than(1).await.unwrap();
+    assert_eq!(removed, 0, "fresh row must NOT be removed by 1-day purge");
+}

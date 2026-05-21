@@ -3368,6 +3368,7 @@ pub(crate) async fn user_detail(
 
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
         (live_vpn_stats_section(&state, &uid, lang).await)
+        (user_top_destinations_section(&state, &uid, lang).await)
 
         // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
         // Show current month-to-date usage + the configured cap
@@ -3743,6 +3744,78 @@ async fn user_traffic_limit_section(
                    title="Set both fields. 0 GiB = clear the limit (no cap)."
                    style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer; margin-left: auto;" {
                 "save"
+            }
+        }
+    }
+}
+
+/// Phase 5b — «Куда ходит этот юзер» section. Top destinations
+/// over the last 7 days, ranked by hit count (number of 5-min
+/// clash-poll ticks where the pair was observed). Empty until
+/// the poller has run at least one tick post-Phase-5b deploy.
+async fn user_top_destinations_section(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    const TOP_N: u32 = 20;
+    const WINDOW_DAYS: u32 = 7;
+    let rows = state
+        .inv
+        .top_destinations_for_user(uid, WINDOW_DAYS, TOP_N)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "top_destinations_for_user failed");
+            Vec::new()
+        });
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Top destinations · last 7 days", "Топ destinations · 7 дней"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Which hosts this user connects to most often. Derived from clash-api snapshots (one hit per 5-minute tick where a connection to that destination was active). Reverse-DNS resolved when possible (Phase 5a-2 cache).",
+                "На какие хосты юзер ходит чаще всего. Источник — snapshot'ы clash-api (один hit на 5-минутный тик, в котором соединение к этому destination было активно). Reverse-DNS подставляется когда возможно (Phase 5a-2 cache).",
+            ))
+        }
+        @if rows.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                (tr(
+                    lang,
+                    "No destination history yet. The poller writes one hit per (destination, 5-min tick) — wait for the next clash-api scrape to fill this section.",
+                    "Истории destinations ещё нет. Поллер пишет один hit на (destination, 5-минутный тик) — подожди следующий скрейп clash-api.",
+                ))
+            }
+        } @else {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "destination", "destination"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;"
+                           title=(tr(lang, "Number of 5-min ticks where a connection to this destination was alive. Not connection count — a long-lived connection contributes N hits, N = ticks-it-was-up.", "Число 5-мин тиков, в которых соединение к этому destination было активно. Не число соединений — долгое соединение даёт N hits, N = тиков-сколько-жило.")) {
+                            (tr(lang, "hits · 7d", "hits · 7д"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "last seen", "последний раз"))
+                        }
+                    }
+                }
+                tbody {
+                    @for r in &rows {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 4px 8px; overflow-wrap: anywhere;" { (r.destination_label) }
+                            td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (r.hit_count) }
+                            td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
+                                (r.last_seen.format("%m-%d %H:%M").to_string())
+                            }
+                        }
+                    }
+                }
             }
         }
     }

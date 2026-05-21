@@ -431,6 +431,59 @@ async fn poll_one_server(
         .get(&server.id)
         .map(|s| s.attribution.clone())
         .unwrap_or_default();
+
+    // Phase 5b — record «куда ходит этот юзер» pairs (one per
+    // (resolved user_id, destination_label) seen in this tick).
+    // Dedupe at tick level: ONE hit per (user, dest) regardless
+    // of how many connections share the pair, since the table
+    // is hit-COUNT-per-tick, not connection-count.
+    let dest_pairs: Vec<(vpnctl_core::UserId, String)> = {
+        let mut dedup: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for c in &snapshot.connections {
+            let user = c.metadata.user.as_deref().or_else(|| {
+                attribution_for_tick
+                    .get(&(c.metadata.source_ip.clone(), c.metadata.source_port.clone()))
+                    .map(|s| s.as_str())
+            });
+            if let Some(user_id) = user {
+                let label = if !c.metadata.host.is_empty() {
+                    if c.metadata.destination_port.is_empty() {
+                        c.metadata.host.clone()
+                    } else {
+                        format!("{}:{}", c.metadata.host, c.metadata.destination_port)
+                    }
+                } else if !c.metadata.destination_ip.is_empty() {
+                    if c.metadata.destination_port.is_empty() {
+                        c.metadata.destination_ip.clone()
+                    } else {
+                        format!(
+                            "{}:{}",
+                            c.metadata.destination_ip, c.metadata.destination_port
+                        )
+                    }
+                } else {
+                    continue;
+                };
+                dedup.insert((user_id.to_string(), label));
+            }
+        }
+        dedup
+            .into_iter()
+            .map(|(u, l)| (vpnctl_core::UserId(u), l))
+            .collect()
+    };
+    if !dest_pairs.is_empty() {
+        if let Err(e) = inv.record_user_destinations(&dest_pairs).await {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %e,
+                "record_user_destinations failed (will retry next tick)"
+            );
+        }
+    }
+
     let deltas = engine.tick(&server.id, &snapshot, &attribution_for_tick);
     if deltas.is_empty() {
         tracing::debug!(

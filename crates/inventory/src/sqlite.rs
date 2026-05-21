@@ -225,6 +225,20 @@ pub struct ServerLiveActivity {
     pub distinct_users_attributed: u32,
 }
 
+/// One row in `vpn_user_destinations` (Phase 5b) — per-(user,
+/// destination_label, date) hit counter. Used to render «куда
+/// ходит этот юзер» on /admin/users/<id>. NOT a byte counter —
+/// the writer increments `hit_count` per clash-poll tick where
+/// the pair was observed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VpnUserDestinationRow {
+    pub user_id: UserId,
+    pub destination_label: String,
+    pub date: String,
+    pub hit_count: u64,
+    pub last_seen: DateTime<Utc>,
+}
+
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
 /// date) aggregated traffic + peak conns. Long-term retention
 /// counterpart to the rolling 30-day `vpn_connection_stats`.
@@ -2806,6 +2820,93 @@ impl SqliteInventory {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Phase 5b — per-user × destination tracking.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Bulk-record (user, destination_label) pairs observed in
+    /// the current clash-poll tick. Each call atomically UPSERTs
+    /// per-pair rows for TODAY's UTC date — hit_count += 1,
+    /// last_seen = now. Pairs are de-duplicated by the caller
+    /// before passing in (one tick contributes ONE hit per pair,
+    /// regardless of how many connections share the (user, dest)).
+    pub async fn record_user_destinations(&self, pairs: &[(UserId, String)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (user_id, dest) in pairs {
+            // Bound destination label to 200 chars (pathological
+            // hostnames don't blow up the row).
+            let dest_truncated = if dest.len() > 200 {
+                &dest[..200]
+            } else {
+                dest.as_str()
+            };
+            sqlx::query(
+                "INSERT INTO vpn_user_destinations
+                    (user_id, destination_label, date, hit_count, last_seen)
+                 VALUES (?1, ?2, strftime('%Y-%m-%d', 'now'), 1,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 ON CONFLICT(user_id, destination_label, date) DO UPDATE SET
+                     hit_count = hit_count + 1,
+                     last_seen = excluded.last_seen",
+            )
+            .bind(&user_id.0)
+            .bind(dest_truncated)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Top destinations for one user across the last `days`
+    /// days, sorted by total hits DESC. Used by the user-detail
+    /// «куда ходит этот юзер» section.
+    pub async fn top_destinations_for_user(
+        &self,
+        user_id: &UserId,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<VpnUserDestinationRow>> {
+        let cutoff = format!("-{days} days");
+        let rows = sqlx::query(
+            "SELECT user_id, destination_label, date, hit_count, last_seen
+             FROM (
+                SELECT user_id, destination_label,
+                       MAX(date)        AS date,
+                       SUM(hit_count)   AS hit_count,
+                       MAX(last_seen)   AS last_seen
+                FROM vpn_user_destinations
+                WHERE user_id = ?1
+                  AND date >= strftime('%Y-%m-%d', 'now', ?2)
+                GROUP BY user_id, destination_label
+             )
+             ORDER BY hit_count DESC, last_seen DESC
+             LIMIT ?3",
+        )
+        .bind(&user_id.0)
+        .bind(&cutoff)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_user_destination).collect()
+    }
+
+    /// Purge destination rows older than `days`. Wired into the
+    /// hourly retention task at the standard 30-day default.
+    pub async fn purge_user_destinations_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM vpn_user_destinations
+             WHERE date < strftime('%Y-%m-%d', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Phase 5a-2 — reverse-DNS (PTR) cache for destination IPs.
     //
     // Pattern: the DNS resolver task in daemon/src/dns_resolver.rs
@@ -3507,6 +3608,29 @@ fn row_to_admin_alert(r: sqlx::sqlite::SqliteRow) -> Result<AdminAlert> {
         summary: r.try_get("summary")?,
         payload_json: r.try_get("payload_json")?,
         acked_at,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_user_destination(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDestinationRow> {
+    let user_id: String = r.try_get("user_id")?;
+    let destination_label: String = r.try_get("destination_label")?;
+    let date: String = r.try_get("date")?;
+    let hits: i64 = r.try_get("hit_count")?;
+    let last_seen_s: String = r.try_get("last_seen")?;
+    let last_seen = DateTime::parse_from_rfc3339(&last_seen_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!(
+                "vpn_user_destinations.last_seen malformed: {last_seen_s}: {e}"
+            ))
+        })?;
+    Ok(VpnUserDestinationRow {
+        user_id: UserId(user_id),
+        destination_label,
+        date,
+        hit_count: hits.max(0) as u64,
+        last_seen,
     })
 }
 
