@@ -10134,3 +10134,146 @@ async fn track_1_2_subscription_access_legacy_row_renders_bare_ip() {
         "no country chip when geo_country is None — currently no such substring"
     );
 }
+
+// ─── sub_access.suspicious_local_ip alert spec (Pavel 2026-05-21) ───
+//
+// «если видим 127.0.0.1 или любой из 192.168/10/172.16-31 (метка
+// LAN) и 169.254.* то это инцидент, который требует разбирательства».
+// The writer task fires an admin_alert per (user_id) bucket when a
+// LAN/loopback/link-local IP is paired with a UA that's NOT on the
+// allowlist (only `phase6-monitor (canary)` today).
+
+/// Helper: send one record through the writer + wait for it to drain
+/// + return the inventory handle for assertions.
+async fn enqueue_one_and_drain(
+    s: &vpnctld::AppState,
+    user_id: &str,
+    ip: &str,
+    device_class: Option<&str>,
+) {
+    let _ = vpnctld::access_log::try_enqueue(
+        &s.access_log_tx,
+        vpnctld::access_log::AccessLogRecord {
+            user_id: vpnctl_core::UserId(user_id.to_string()),
+            ip: ip.to_string(),
+            ua: device_class.map(str::to_owned),
+            status: 200,
+            bytes: 0,
+            accept_language: None,
+            http_version: Some("HTTP/1.1".to_string()),
+            device_class: device_class.map(str::to_owned),
+            geo_country: None,
+            geo_asn: None,
+        },
+    );
+    // Writer is async; small sleep + drain is the same pattern the
+    // existing `sub_access_writer_persists_one_hit` test uses.
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+}
+
+#[tokio::test]
+async fn track_1_3_suspicious_local_ip_fires_for_localhost_with_unknown_ua() {
+    // Pavel's exact scenario: a row with `ip = 127.0.0.1` AND a UA
+    // outside the allowlist MUST raise the alert.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    enqueue_one_and_drain(&s, "u0", "127.0.0.1", Some("v2rayN / Windows")).await;
+
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    let suspicious: Vec<_> = alerts
+        .iter()
+        .filter(|a| a.kind.starts_with("sub_access.suspicious_local_ip:"))
+        .collect();
+    assert_eq!(
+        suspicious.len(),
+        1,
+        "exactly one suspicious-local-ip alert must fire for u0 + 127.0.0.1 + non-allowlisted UA"
+    );
+    let a = suspicious[0];
+    assert_eq!(a.kind, "sub_access.suspicious_local_ip:u0");
+    assert_eq!(a.severity, "warning");
+    assert!(
+        a.summary.contains("127.0.0.1"),
+        "summary must surface the IP, got {}",
+        a.summary
+    );
+    assert!(
+        a.summary.contains("loopback"),
+        "summary must surface the IP-kind label, got {}",
+        a.summary
+    );
+    // Payload MUST NOT carry any user-secrets (sub_token, uuid,
+    // wireguard_private, tuic_password). Pin via raw substring
+    // search on the JSON.
+    let payload_str = a.payload_json.as_deref().unwrap_or("").to_string();
+    for secret in &["sub_token", "wireguard_private", "tuic_password", "uuid"] {
+        assert!(
+            !payload_str.contains(secret),
+            "alert payload must not leak `{secret}`, got: {payload_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn track_1_3_suspicious_local_ip_phase6_monitor_canary_is_exempt() {
+    // The /etc/cron.d/phase6-monitor canary hits localhost every
+    // day at 09:00 UTC. Its UA is tagged `phase6-monitor/1.0`,
+    // which `parse_ua_short` collapses to `"phase6-monitor (canary)"`.
+    // That's the SINGLE allowlist entry — must NOT trigger.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    enqueue_one_and_drain(&s, "u0", "127.0.0.1", Some("phase6-monitor (canary)")).await;
+    let n = inv.unacked_alert_count().await.unwrap();
+    assert_eq!(
+        n, 0,
+        "phase6-monitor canary on localhost must NOT raise the alert (allowlist)"
+    );
+}
+
+#[tokio::test]
+async fn track_1_3_suspicious_local_ip_public_ip_never_fires() {
+    // Symmetric: a Public IP (8.8.8.8) must NOT fire regardless of
+    // UA. Pins the `IpKind::Public` arm so a future expansion of
+    // `classify_ip` (e.g. adding CGNAT 100.64/10) can't accidentally
+    // flag real external clients.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    enqueue_one_and_drain(&s, "u0", "8.8.8.8", Some("v2rayN / Windows")).await;
+    let n = inv.unacked_alert_count().await.unwrap();
+    assert_eq!(n, 0, "public IP must NEVER raise the alert");
+}
+
+#[tokio::test]
+async fn track_1_3_suspicious_local_ip_dedup_is_per_user() {
+    // Fire two suspicious rows for u0 + one for u1 → exactly 2
+    // unacked alerts (one per user). The partial UNIQUE index on
+    // (kind, COALESCE(server_id,'__GLOBAL__')) WHERE acked_at IS NULL
+    // gives each user their own dedup bucket via the
+    // `:<user_id>` suffix in the kind string.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 2, &[]).await;
+    let inv = s.inv.clone();
+    enqueue_one_and_drain(&s, "u0", "127.0.0.1", Some("v2rayN / Windows")).await;
+    enqueue_one_and_drain(&s, "u0", "192.168.0.5", Some("curl")).await;
+    enqueue_one_and_drain(&s, "u1", "10.0.0.7", Some("curl")).await;
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    let suspicious: std::collections::HashSet<String> = alerts
+        .iter()
+        .filter(|a| a.kind.starts_with("sub_access.suspicious_local_ip:"))
+        .map(|a| a.kind.clone())
+        .collect();
+    assert_eq!(
+        suspicious.len(),
+        2,
+        "expected 2 per-user buckets, got: {suspicious:?}"
+    );
+    assert!(suspicious.contains("sub_access.suspicious_local_ip:u0"));
+    assert!(suspicious.contains("sub_access.suspicious_local_ip:u1"));
+}

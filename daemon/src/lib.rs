@@ -20,6 +20,10 @@ pub mod geoip;
 // rendering. Lives outside `handlers::admin` so both surfaces share
 // one truth (Track-1.2 / migration 0019).
 pub mod ua;
+// IPv4 classifier (loopback / RFC1918 / link-local / public) shared
+// between admin render (chip colour) and access-log writer
+// (suspicious-LAN-IP alert predicate). Pavel 2026-05-21.
+pub mod ip_kind;
 // Real-client-IP resolution from X-Forwarded-For when the immediate
 // peer is a trusted reverse proxy (post-Phase-5 nginx cutover).
 // Without this every external client collapses to the nginx peer IP

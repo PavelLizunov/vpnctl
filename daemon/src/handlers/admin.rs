@@ -609,86 +609,51 @@ fn clip_ts(ts: &str) -> String {
 /// that visible at a glance instead of looking like a mystery
 /// external client.
 ///
-/// Rules (RFC 1918 + loopback + link-local; IPv6 left untouched
-/// for now — a homelab almost never sees IPv6 sub fetches):
-/// - `127.0.0.0/8`         → `Loopback`
-/// - `10.0.0.0/8`,
-///   `172.16.0.0/12`,
-///   `192.168.0.0/16`      → `LanRfc1918`
-/// - `169.254.0.0/16`      → `LinkLocal` (DHCP-failure fallback)
-/// - otherwise             → `Public` (no tag, no tooltip override)
-#[derive(Clone, Copy)]
-enum IpKind {
-    Loopback,
-    LanRfc1918,
-    LinkLocal,
-    Public,
-}
+// `IpKind` + `classify_ip` moved to `crate::ip_kind` (single source
+// of truth for both the admin render here AND the access-log writer
+// that fires `sub_access.suspicious_local_ip` alerts). Render-side
+// chip tag / tooltip / colour are admin-render-specific and stay
+// here as a free-standing fn rather than methods on the shared
+// enum (the enum doesn't need a `crate::i18n::Locale` dep).
+use crate::ip_kind::{IpKind, classify_ip};
 
-impl IpKind {
-    fn tag(self, lang: crate::i18n::Locale) -> Option<&'static str> {
-        match self {
-            IpKind::Loopback => Some(crate::i18n::tr(lang, "localhost", "localhost")),
-            IpKind::LanRfc1918 => Some(crate::i18n::tr(lang, "LAN", "LAN")),
-            IpKind::LinkLocal => Some(crate::i18n::tr(lang, "link-local", "link-local")),
-            IpKind::Public => None,
-        }
-    }
-    fn tooltip(self, lang: crate::i18n::Locale) -> &'static str {
-        match self {
-            IpKind::Loopback => crate::i18n::tr(
-                lang,
-                "Loopback (127.0.0.0/8). Hit came from a script running ON the daemon host itself (curl localhost, SSH tunnel, internal poller). Not an external client.",
-                "Loopback (127.0.0.0/8). Запрос пришёл от скрипта, запущенного НА самом хосте демона (curl localhost, SSH-туннель, внутренний поллер). НЕ внешний клиент.",
-            ),
-            IpKind::LanRfc1918 => crate::i18n::tr(
-                lang,
-                "RFC 1918 private address (10/8, 172.16/12, 192.168/16). Same LAN as the daemon — likely your nginx proxy or another homelab host. Real client IP should arrive via X-Forwarded-For if the peer is in VPNCTLD_TRUSTED_PROXIES.",
-                "Приватный адрес по RFC 1918 (10/8, 172.16/12, 192.168/16). Та же LAN что и демон — скорее всего твой nginx-прокси или другой homelab-хост. Реальный IP клиента должен приходить через X-Forwarded-For если пир в VPNCTLD_TRUSTED_PROXIES.",
-            ),
-            IpKind::LinkLocal => crate::i18n::tr(
-                lang,
-                "Link-local (169.254.0.0/16). DHCP-failure fallback address; should never appear in a sub-access log on a healthy network.",
-                "Link-local (169.254.0.0/16). Fallback-адрес при сбое DHCP; в access-log здоровой сети появляться не должен.",
-            ),
-            IpKind::Public => "",
-        }
-    }
-    fn color(self) -> &'static str {
-        match self {
-            IpKind::Loopback => "var(--mute)",
-            IpKind::LanRfc1918 => "var(--mute)",
-            IpKind::LinkLocal => "var(--acc)",
-            IpKind::Public => "var(--rule)",
-        }
+fn ip_kind_tag(k: IpKind, lang: crate::i18n::Locale) -> Option<&'static str> {
+    match k {
+        IpKind::Loopback => Some(crate::i18n::tr(lang, "localhost", "localhost")),
+        IpKind::LanRfc1918 => Some(crate::i18n::tr(lang, "LAN", "LAN")),
+        IpKind::LinkLocal => Some(crate::i18n::tr(lang, "link-local", "link-local")),
+        IpKind::Public => None,
     }
 }
 
-fn classify_ip(ip: &str) -> IpKind {
-    // Cheap textual classifier — avoids pulling in a full IPv4 parser
-    // for the hot path. Handles the 4 RFC 1918 + loopback + link-local
-    // cases; everything else is Public. IPv6 not classified (homelab
-    // almost never sees IPv6 sub pulls).
-    if ip == "127.0.0.1" || ip.starts_with("127.") {
-        return IpKind::Loopback;
+fn ip_kind_tooltip(k: IpKind, lang: crate::i18n::Locale) -> &'static str {
+    match k {
+        IpKind::Loopback => crate::i18n::tr(
+            lang,
+            "Loopback (127.0.0.0/8). Hit came from a script running ON the daemon host itself (curl localhost, SSH tunnel, internal poller). Not an external client.",
+            "Loopback (127.0.0.0/8). Запрос пришёл от скрипта, запущенного НА самом хосте демона (curl localhost, SSH-туннель, внутренний поллер). НЕ внешний клиент.",
+        ),
+        IpKind::LanRfc1918 => crate::i18n::tr(
+            lang,
+            "RFC 1918 private address (10/8, 172.16/12, 192.168/16). Same LAN as the daemon — likely your nginx proxy or another homelab host. Real client IP should arrive via X-Forwarded-For if the peer is in VPNCTLD_TRUSTED_PROXIES.",
+            "Приватный адрес по RFC 1918 (10/8, 172.16/12, 192.168/16). Та же LAN что и демон — скорее всего твой nginx-прокси или другой homelab-хост. Реальный IP клиента должен приходить через X-Forwarded-For если пир в VPNCTLD_TRUSTED_PROXIES.",
+        ),
+        IpKind::LinkLocal => crate::i18n::tr(
+            lang,
+            "Link-local (169.254.0.0/16). DHCP-failure fallback address; should never appear in a sub-access log on a healthy network.",
+            "Link-local (169.254.0.0/16). Fallback-адрес при сбое DHCP; в access-log здоровой сети появляться не должен.",
+        ),
+        IpKind::Public => "",
     }
-    if ip.starts_with("10.") || ip.starts_with("192.168.") || ip.starts_with("169.254.") {
-        return if ip.starts_with("169.254.") {
-            IpKind::LinkLocal
-        } else {
-            IpKind::LanRfc1918
-        };
+}
+
+fn ip_kind_color(k: IpKind) -> &'static str {
+    match k {
+        IpKind::Loopback => "var(--mute)",
+        IpKind::LanRfc1918 => "var(--mute)",
+        IpKind::LinkLocal => "var(--acc)",
+        IpKind::Public => "var(--rule)",
     }
-    if let Some(rest) = ip.strip_prefix("172.") {
-        if let Some((octet, _)) = rest.split_once('.') {
-            if let Ok(n) = octet.parse::<u8>() {
-                if (16..=31).contains(&n) {
-                    return IpKind::LanRfc1918;
-                }
-            }
-        }
-    }
-    IpKind::Public
 }
 
 // `parse_ua_short` moved to `crate::ua` (Track-1.2 / migration 0019)
@@ -699,27 +664,10 @@ fn classify_ip(ip: &str) -> IpKind {
 // `clippy::empty-line-after-doc-comments` since there's no `fn` it
 // could document anymore.
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod ip_classify_tests {
-    use super::*;
-
-    #[test]
-    fn classify_ip_buckets() {
-        assert!(matches!(classify_ip("127.0.0.1"), IpKind::Loopback));
-        assert!(matches!(classify_ip("127.1.2.3"), IpKind::Loopback));
-        assert!(matches!(classify_ip("10.0.0.1"), IpKind::LanRfc1918));
-        assert!(matches!(classify_ip("192.168.0.236"), IpKind::LanRfc1918));
-        assert!(matches!(classify_ip("172.16.5.1"), IpKind::LanRfc1918));
-        assert!(matches!(classify_ip("172.31.255.254"), IpKind::LanRfc1918));
-        // Outside 16-31 → not RFC 1918, classified Public.
-        assert!(matches!(classify_ip("172.15.0.1"), IpKind::Public));
-        assert!(matches!(classify_ip("172.32.0.1"), IpKind::Public));
-        assert!(matches!(classify_ip("169.254.0.1"), IpKind::LinkLocal));
-        assert!(matches!(classify_ip("104.194.156.93"), IpKind::Public));
-        assert!(matches!(classify_ip("8.8.8.8"), IpKind::Public));
-    }
-}
+// `classify_ip` unit tests moved with the implementation to
+// `crate::ip_kind::tests`. The render-side wrappers
+// (`ip_kind_tag` / `_tooltip` / `_color`) are exercised end-to-end
+// via the admin_smoke `track_1_2_*` tests.
 
 pub(crate) async fn dashboard(
     headers: HeaderMap,
@@ -3076,11 +3024,11 @@ pub(crate) async fn user_detail(
                             td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
                                 (clip_ts(&row.ts.to_rfc3339()))
                             }
-                            td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind.tooltip(lang)) {
+                            td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind_tooltip(ip_kind, lang)) {
                                 (row.ip)
-                                @if let Some(tag) = ip_kind.tag(lang) {
+                                @if let Some(tag) = ip_kind_tag(ip_kind, lang) {
                                     " "
-                                    span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind.color())) {
+                                    span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind_color(ip_kind))) {
                                         (tag)
                                     }
                                 }

@@ -134,7 +134,7 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                 }
             }
         }
-        if let Err(e) = inv
+        let log_result = inv
             .log_sub_access_rich(
                 &rec.user_id,
                 &rec.ip,
@@ -147,21 +147,120 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                 rec.geo_country.as_deref(),
                 rec.geo_asn.as_deref(),
             )
-            .await
-        {
-            tracing::warn!(
-                target = "vpnctld::access_log_writer",
-                user = %rec.user_id,
-                ip = %rec.ip,
-                error = %e,
-                "log_sub_access write failed (record dropped)"
-            );
+            .await;
+        match log_result {
+            Ok(()) => {
+                // Pavel 2026-05-21: «если видим 127.0.0.1 или любой из
+                // 192.168/10/172.16-31 (метка LAN) и 169.254.* — это
+                // инцидент, который требует разбирательства». The
+                // writer is the right hook site — handler stays
+                // latency-stable, the persisted row is linkable from
+                // the alert payload, the predicate is a pure match on
+                // `IpKind` + a `&str` compare on `device_class`.
+                //
+                // Dedup bucket is per-user (`sub_access.suspicious_local_ip:<user_id>`)
+                // so one chatty user can't swallow another user's
+                // alert via the partial UNIQUE index on
+                // (kind, COALESCE(server_id,'__GLOBAL__')) WHERE
+                // acked_at IS NULL. The single allowlist entry today
+                // is the phase6-monitor canary (see
+                // /etc/cron.d/phase6-monitor on the daemon host; UA
+                // tagged `phase6-monitor/1.0 (…-compat probe)` →
+                // `parse_ua_short` returns `Some("phase6-monitor (canary)")`).
+                let kind = crate::ip_kind::classify_ip(&rec.ip);
+                if kind.is_lan_or_loopback() && !is_lan_alert_allowed(rec.device_class.as_deref()) {
+                    if let Err(e) = fire_suspicious_local_ip_alert(&inv, &rec, kind).await {
+                        tracing::warn!(
+                            target = "vpnctld::access_log_writer",
+                            user = %rec.user_id,
+                            ip = %rec.ip,
+                            kind = kind.label(),
+                            error = %e,
+                            "sub_access.suspicious_local_ip alert insert failed (row persisted, no alert raised this time)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::access_log_writer",
+                    user = %rec.user_id,
+                    ip = %rec.ip,
+                    error = %e,
+                    "log_sub_access write failed (record dropped)"
+                );
+            }
         }
     }
     tracing::info!(
         target = "vpnctld::access_log_writer",
         "channel closed, writer exiting cleanly"
     );
+}
+
+/// User-Agent labels that are EXPECTED to hit a LAN / loopback peer
+/// IP and therefore should NOT raise
+/// `sub_access.suspicious_local_ip`. The values are the
+/// `parse_ua_short` output strings (NOT raw UA — the snapshot
+/// already normalises across UA-version drift).
+///
+/// Today this list has one entry — Pavel's `/etc/cron.d/phase6-monitor`
+/// canary, which hits localhost daily and was the original false-
+/// positive that motivated the alert design. Promote to an
+/// `admin_settings` row (operator-editable via /admin/settings)
+/// once we have a second entry — until then the recompile-to-extend
+/// posture is the safer default (every addition forces a
+/// review-agent gate).
+const SUSPICIOUS_LAN_ALLOWED_UAS: &[&str] = &["phase6-monitor (canary)"];
+
+/// True when this `device_class` snapshot is on the allowlist for
+/// LAN/loopback peer IPs (i.e. don't fire the alert).
+fn is_lan_alert_allowed(device_class: Option<&str>) -> bool {
+    match device_class {
+        Some(s) => SUSPICIOUS_LAN_ALLOWED_UAS.contains(&s),
+        None => false,
+    }
+}
+
+/// Fire (or no-op-dedup against an existing unacked) the
+/// `sub_access.suspicious_local_ip:<user_id>` alert. The
+/// `:<user_id>` suffix gives each user its own dedup bucket via
+/// the partial UNIQUE index on `(kind, COALESCE(server_id,
+/// '__GLOBAL__')) WHERE acked_at IS NULL`. Severity is `warning`
+/// — this is a discrepancy worth investigating, not an outage.
+///
+/// Payload is strictly non-secret: never include `sub_token`,
+/// `uuid`, `wireguard_private`, etc.
+async fn fire_suspicious_local_ip_alert(
+    inv: &SqliteInventory,
+    rec: &AccessLogRecord,
+    kind: crate::ip_kind::IpKind,
+) -> anyhow::Result<()> {
+    let kind_str = format!("sub_access.suspicious_local_ip:{}", rec.user_id);
+    let ua_label = rec
+        .device_class
+        .as_deref()
+        .unwrap_or_else(|| rec.ua.as_deref().unwrap_or("(none)"));
+    let summary = format!(
+        "local-loop fetch · user={} · ip={} [{}] · ua={}",
+        rec.user_id,
+        rec.ip,
+        kind.label(),
+        ua_label,
+    );
+    let payload = serde_json::json!({
+        "user_id": rec.user_id.0,
+        "ip": rec.ip,
+        "ip_kind": kind.label(),
+        "ua": rec.ua,
+        "device_class": rec.device_class,
+        "accept_language": rec.accept_language,
+        "http_version": rec.http_version,
+    });
+    let payload_str = payload.to_string();
+    inv.insert_alert_if_no_unacked(&kind_str, None, "warning", &summary, Some(&payload_str))
+        .await?;
+    Ok(())
 }
 
 /// Helper used by the `/sub` handler: try to enqueue a record without
