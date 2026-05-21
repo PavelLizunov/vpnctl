@@ -8525,7 +8525,7 @@ async fn nm10_server_detail_post_hide_persists_and_redirects() {
     assert!(
         audit
             .iter()
-            .any(|a| a.action == "server_protocol.set_hidden"),
+            .any(|a| a.action == "server.protocol.set_hidden"),
         "POST /hide must write an audit row"
     );
 }
@@ -8821,8 +8821,8 @@ async fn nm10_user_detail_post_block_persists_and_redirects() {
     assert!(
         audit
             .iter()
-            .any(|a| a.action == "grant_protocol.set_override"),
-        "POST /disable must write a grant_protocol.set_override audit row, got: {:?}",
+            .any(|a| a.action == "grant.protocol.set_override"),
+        "POST /disable must write a grant.protocol.set_override audit row, got: {:?}",
         audit.iter().map(|a| &a.action).collect::<Vec<_>>()
     );
 }

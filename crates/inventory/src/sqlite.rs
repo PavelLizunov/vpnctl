@@ -670,7 +670,7 @@ impl SqliteInventory {
              VALUES (?1, ?2, ?3, ?4)",
         )
         .bind("admin")
-        .bind("server_protocol.set_hidden")
+        .bind("server.protocol.set_hidden")
         .bind(&sid.0)
         .bind(payload_str)
         .execute(&mut *tx)
@@ -685,7 +685,7 @@ impl SqliteInventory {
     /// `disabled = false` deletes the override row (back to inherit-
     /// from-server). FK-fails (returns Invalid) if no grant exists for
     /// (user, server) — operator must grant first via `grant()`. Writes
-    /// audit `grant_protocol.set_override`.
+    /// audit `grant.protocol.set_override`.
     pub async fn set_grant_protocol_override(
         &self,
         uid: &UserId,
@@ -757,7 +757,7 @@ impl SqliteInventory {
              VALUES (?1, ?2, ?3, ?4)",
         )
         .bind("admin")
-        .bind("grant_protocol.set_override")
+        .bind("grant.protocol.set_override")
         .bind(&uid.0)
         .bind(payload_str)
         .execute(&mut *tx)

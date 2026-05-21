@@ -165,7 +165,12 @@ fn foot() -> Markup {
         div.ed-foot {
             div.ed-foot__l {
                 span { "vpnctld " (env!("CARGO_PKG_VERSION")) }
-                span { "· axum + maud + htmx" }
+                // The admin UI is server-rendered with maud; htmx was
+                // considered for the wizard but never landed (every
+                // mutation today is a plain POST + 303 redirect, no
+                // partial swaps). Bug-audit-agent 2026-05-21 caught
+                // the footer claiming htmx — corrected.
+                span { "· axum + maud" }
             }
             span { "github.com/PavelLizunov/vpnctl" }
         }
@@ -3051,8 +3056,8 @@ async fn live_vpn_stats_section(state: &AppState, uid: &vpnctl_core::UserId) -> 
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 "No live stats yet. The clash-api poller is shipped (Track-3 chunks 1+2) "
                 "but the daemon-side scheduler that pulls snapshots from each VPN node "
-                "is queued for chunk 4 — it needs the SSH key on "
-                span.ed-mono { "192.168.0.236:/var/lib/vpnctl/.ssh" }
+                "is queued for chunk 4 — it needs the SSH key on the vpnctld host's "
+                span.ed-mono { "/var/lib/vpnctl/.ssh" }
                 " plus per-node authorisation. Once wired, this section will show real "
                 "per-user upload/download totals and active connection counts."
             }
@@ -4667,6 +4672,7 @@ pub(crate) async fn audit(
              style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 16px 0 24px; font-family: var(--mono); font-size: 11px;" {
             label { "actor" }
             select name="actor"
+                   title="admin = web UI, cli = vpnctl binary on the daemon host, daemon = scheduler / background job"
                    style="padding: 3px 6px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;" {
                 option value="" { "(any)" }
                 @for opt in ["admin", "cli", "daemon"] {
@@ -4680,19 +4686,23 @@ pub(crate) async fn audit(
             label { "action prefix" }
             input type="text" name="action"
                   value=(action.unwrap_or(""))
-                  placeholder="user. / server. / grant"
-                  style="padding: 3px 6px; max-width: 220px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
+                  placeholder="server.protocol. / user. / grant. / settings."
+                  title="Substring/prefix match on action column. Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Underscores allowed INSIDE a verb."
+                  style="padding: 3px 6px; max-width: 320px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
             button type="submit"
+                   title="Apply actor + action-prefix filters. URL stores them so the page is bookmarkable."
                    style="padding: 3px 10px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                 "filter"
             }
             // Reset button — empty params clear all filters.
             a href="/admin/audit"
+              title="Clear all filters and return to the unfiltered timeline."
               style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 "reset"
             }
             // CSV export uses the same query string.
             a href=(audit_url("/admin/audit.csv", actor, action, None))
+              title="Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters."
               style="margin-left: auto; padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 "export csv"
             }
@@ -4723,7 +4733,14 @@ pub(crate) async fn audit(
             } @else {
                 span style="color: var(--mute);" { "← prev" }
             }
-            span style="color: var(--mute);" {
+            // URL uses 0-based `?page=N` (omitted when 0); label is
+            // 1-based for humans. Bookmark `/admin/audit?page=1` =
+            // visible "page 2". Tooltip keeps the convention
+            // discoverable so an operator who's bookmarking pages
+            // (or scripting CSV exports) doesn't get bitten by the
+            // off-by-one. Bug-audit-agent 2026-05-21.
+            span style="color: var(--mute);"
+                 title=(format!("URL convention: ?page=N is 0-based (omitted when 0). Current URL: ?page={page}. Visible label: page {n_for_humans}.", n_for_humans = page + 1)) {
                 "page " (page + 1)
             }
             @if has_next {

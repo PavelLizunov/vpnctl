@@ -247,7 +247,7 @@ async fn writes_audit_rows_with_matching_payloads() {
     let recent = inv.recent_audit(50).await.unwrap();
     let h = recent
         .iter()
-        .find(|r| r.action == "server_protocol.set_hidden")
+        .find(|r| r.action == "server.protocol.set_hidden")
         .expect("set_hidden audit row");
     assert_eq!(h.target.as_deref(), Some("vps-x"));
     let pay = h.payload.as_ref().expect("hide payload");
@@ -258,7 +258,7 @@ async fn writes_audit_rows_with_matching_payloads() {
 
     let o = recent
         .iter()
-        .find(|r| r.action == "grant_protocol.set_override")
+        .find(|r| r.action == "grant.protocol.set_override")
         .expect("set_override audit row");
     assert_eq!(o.target.as_deref(), Some("alice"));
     let pay = o.payload.as_ref().expect("override payload");
