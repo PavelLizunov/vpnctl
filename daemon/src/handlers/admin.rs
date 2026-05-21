@@ -5654,6 +5654,114 @@ fn severity_class(s: &str) -> &'static str {
     }
 }
 
+/// Render the «GeoIP — IP enrichment» section on Settings.
+///
+/// Reads `VPNCTLD_GEOIP_DIR` (defaults to `/var/lib/vpnctl/geoip`)
+/// and reports per-file: present? last-modified? size?
+///
+/// No mutation actions here — Pavel's update flow is `vpnctl
+/// geoip-update` (CLI, runs alongside the daemon on the same host).
+/// A future iteration can add an `/admin/settings/geoip/update` POST
+/// that shells out to the same command + streams the log via SSE.
+fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::tr;
+    let dir = std::env::var_os("VPNCTLD_GEOIP_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/vpnctl/geoip"));
+    let city = dir.join("GeoLite2-City.mmdb");
+    let asn = dir.join("GeoLite2-ASN.mmdb");
+    let describe = |p: &std::path::Path| -> Option<(u64, String)> {
+        let meta = std::fs::metadata(p).ok()?;
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            })
+            .unwrap_or_else(|| "?".to_string());
+        Some((size, mtime))
+    };
+    let city_meta = describe(&city);
+    let asn_meta = describe(&asn);
+    let any_loaded = city_meta.is_some() || asn_meta.is_some();
+    maud::html! {
+        div.ed-art-eyebrow {
+            (tr(lang, "GeoIP — IP enrichment", "GeoIP — обогащение IP-адресов"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "When the DB-IP Lite (or MaxMind GeoLite2) MMDB files are present in this dir, every new sub_access_log row is enriched with country ISO + ASN before being persisted. Old rows + dimensions the DB doesn't recognise stay NULL — render falls back to bare IP. The DBs are queried OFFLINE — no network requests during request handling.",
+                "Когда в этой папке лежат файлы DB-IP Lite (или MaxMind GeoLite2) в формате MMDB, каждая новая строка sub_access_log обогащается ISO-кодом страны + ASN перед сохранением. Старые строки и dimensions, которые DB не распознала, остаются NULL — рендер откатывается к голому IP. БД читаются ОФФЛАЙН — никаких сетевых запросов на пути запроса.",
+            ))
+        }
+        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
+            div { (tr(lang, "dir   ", "папка ")) (dir.display()) }
+            div {
+                "City  "
+                @match &city_meta {
+                    Some((size, mtime)) => {
+                        b style="color: var(--soft);" {
+                            (tr(lang, "present", "загружен"))
+                        }
+                        " · " (size) " " (tr(lang, "bytes", "байт"))
+                        " · " (tr(lang, "modified ", "изменён "))
+                        (mtime)
+                    }
+                    None => {
+                        em style="color: var(--mute);" {
+                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                        }
+                    }
+                }
+            }
+            div {
+                "ASN   "
+                @match &asn_meta {
+                    Some((size, mtime)) => {
+                        b style="color: var(--soft);" {
+                            (tr(lang, "present", "загружен"))
+                        }
+                        " · " (size) " " (tr(lang, "bytes", "байт"))
+                        " · " (tr(lang, "modified ", "изменён "))
+                        (mtime)
+                    }
+                    None => {
+                        em style="color: var(--mute);" {
+                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                        }
+                    }
+                }
+            }
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            @if any_loaded {
+                (tr(
+                    lang,
+                    "Update once a month with ",
+                    "Обновлять раз в месяц через ",
+                ))
+            } @else {
+                (tr(
+                    lang,
+                    "Drop fresh MMDB files into the dir + restart the daemon, or run ",
+                    "Положи свежие MMDB-файлы в папку + перезапусти демон, либо запусти ",
+                ))
+            }
+            span.ed-mono { "vpnctl geoip-update" }
+            (tr(
+                lang,
+                " on the daemon host. The command downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir. Restart vpnctld for the new DB to load.",
+                " на хосте демона. Команда скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Перезапусти vpnctld чтобы новая БД загрузилась.",
+            ))
+        }
+    }
+}
+
 pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) -> Markup {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     // Auto-generated by vpnctld on startup (see
@@ -6091,6 +6199,9 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 }
             }
         }
+
+        div.ed-rule {}
+        (settings_geoip_section(lang))
 
         div.ed-rule {}
         div #deploy-ssh-key.ed-art-eyebrow {

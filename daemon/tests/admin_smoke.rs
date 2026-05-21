@@ -10277,3 +10277,25 @@ async fn track_1_3_suspicious_local_ip_dedup_is_per_user() {
     assert!(suspicious.contains("sub_access.suspicious_local_ip:u0"));
     assert!(suspicious.contains("sub_access.suspicious_local_ip:u1"));
 }
+
+#[tokio::test]
+async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
+    // The fresh-test harness doesn't drop MMDB files, so the
+    // section should report both DBs as «missing» and surface
+    // the `vpnctl geoip-update` instruction.
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/settings").await;
+    assert!(
+        html.contains("GeoIP — IP enrichment"),
+        "Settings page must include the GeoIP eyebrow"
+    );
+    assert!(
+        html.contains("vpnctl geoip-update"),
+        "missing-DB branch must mention the CLI command"
+    );
+    assert!(
+        html.contains("(missing — run") || html.contains("(отсутствует — запусти"),
+        "expected the 'missing' empty-state for both City + ASN"
+    );
+}

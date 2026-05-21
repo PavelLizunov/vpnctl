@@ -107,6 +107,17 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MigrateCmd,
     },
+    /// Download + atomic-install the current month's DB-IP Lite City +
+    /// ASN MaxMind-compatible MMDB files into `VPNCTLD_GEOIP_DIR`
+    /// (default `/var/lib/vpnctl/geoip`). DB-IP Lite is CC-BY 4.0 +
+    /// no signup — pure-Rust reqwest download, no curl shell-out.
+    /// Restart vpnctld after to load the new DBs.
+    GeoipUpdate {
+        /// Override target dir (default reads `VPNCTLD_GEOIP_DIR` env
+        /// var, falls back to `/var/lib/vpnctl/geoip`).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -141,6 +152,7 @@ async fn main() -> std::process::ExitCode {
                 cmd::migrate::run_from_bash(args, cli.db, cli.output).await
             }
         },
+        Cmd::GeoipUpdate { dir } => cmd::geoip::run(dir).await,
     };
 
     match res {

@@ -4,6 +4,7 @@
 pub(crate) mod backup;
 pub(crate) mod bootstrap;
 pub(crate) mod deploy;
+pub(crate) mod geoip;
 pub(crate) mod grant;
 pub(crate) mod migrate;
 pub(crate) mod registry_cmd;

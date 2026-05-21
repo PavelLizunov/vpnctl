@@ -28,6 +28,17 @@ serde_json = { workspace = true }
 dirs = "5"
 comfy-table = "7"
 qrcode = { version = "0.14", default-features = false }
+# Track-1.2 (Pavel 2026-05-21) — `vpnctl geoip-update` subcommand.
+# Downloads DB-IP Lite (CC-BY 4.0, no signup) MMDB files, validates
+# them, atomic-renames into VPNCTLD_GEOIP_DIR. rustls features
+# (no openssl-sys / native-tls per workspace invariants).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+flate2 = "1"
+# Validate the downloaded .mmdb before atomic install. Same crate
+# the daemon uses (0.27 — RUSTSEC-2025-0132 clean).
+maxminddb = "0.27"
+futures-util = "0.3"
 
 [lints]
 workspace = true
