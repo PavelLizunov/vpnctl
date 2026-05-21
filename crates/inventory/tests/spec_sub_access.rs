@@ -826,3 +826,78 @@ async fn phase4a_add_server_retroactively_flags_existing_rows_for_new_address() 
         "after add_server, exactly the matching historical row must be flagged"
     );
 }
+
+#[tokio::test]
+async fn phase4c_users_for_source_ips_groups_by_ip_with_top_user_first() {
+    // Pavel: NM-11 work-around — match a clash-api sourceIP against
+    // sub_access_log rows so we know «which of our users last fetched
+    // subscription from this IP» = likely owner of active connections.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    // alice hits sub URL 3 times from 8.8.8.8.
+    for _ in 0..3 {
+        inv.log_sub_access(&UserId("alice".into()), "8.8.8.8", None, 200, 100)
+            .await
+            .unwrap();
+    }
+    // bob hits sub URL 1 time from 8.8.8.8.
+    inv.log_sub_access(&UserId("bob".into()), "8.8.8.8", None, 200, 100)
+        .await
+        .unwrap();
+    // alice ALSO hits sub URL from a different IP — not asked about.
+    inv.log_sub_access(&UserId("alice".into()), "1.1.1.1", None, 200, 100)
+        .await
+        .unwrap();
+
+    let result = inv
+        .users_for_source_ips(&["8.8.8.8".to_string()], 7)
+        .await
+        .unwrap();
+
+    let users = result.get("8.8.8.8").expect("8.8.8.8 must have entries");
+    assert_eq!(users.len(), 2);
+    // alice (3 hits) before bob (1 hit) — DESC by hit count.
+    assert_eq!(users[0].0.0, "alice");
+    assert_eq!(users[0].1, 3);
+    assert_eq!(users[1].0.0, "bob");
+    assert_eq!(users[1].1, 1);
+    // 1.1.1.1 was NOT in the input — must NOT appear in output.
+    assert!(!result.contains_key("1.1.1.1"));
+}
+
+#[tokio::test]
+async fn phase4c_users_for_source_ips_empty_ips_returns_empty_map() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let result = inv.users_for_source_ips(&[], 7).await.unwrap();
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn phase4c_users_for_source_ips_excludes_vpn_egress_rows() {
+    // Egress rows = src IP is one of our own VPN servers, those are
+    // full-tunnel noise, NOT real client devices. They must NOT
+    // pollute the source-IP-to-user mapping.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    add_test_server(&inv, "de", "10.20.30.40").await;
+
+    inv.log_sub_access(&UserId("alice".into()), "10.20.30.40", None, 200, 100)
+        .await
+        .unwrap();
+
+    let result = inv
+        .users_for_source_ips(&["10.20.30.40".to_string()], 7)
+        .await
+        .unwrap();
+    // Empty Vec or absent key — both are acceptable «no match».
+    let users = result.get("10.20.30.40").cloned().unwrap_or_default();
+    assert!(
+        users.is_empty(),
+        "egress-flagged rows must NOT contribute to source-IP correlation"
+    );
+}

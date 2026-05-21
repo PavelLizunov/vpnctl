@@ -7907,6 +7907,36 @@ pub(crate) async fn server_detail(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
+    // Phase 4c — last clash-api snapshot for the «Live connections»
+    // drill-down. None when the poller has never reached this
+    // server (fresh daemon start / no key / etc); the renderer
+    // handles that with an empty-state.
+    let last_snapshot = state.snapshot_cache.get(&sid);
+    // Phase 4c — source-IP → user_id correlation. We extract the
+    // unique sourceIPs from the snapshot, then ask inventory which
+    // users have hit subscription URL from those IPs in the last
+    // 7 days. NM-11 work-around: sing-box drops `user` but
+    // preserves `sourceIP`, so we attribute via the side-channel.
+    let source_user_map = if let Some(snap) = last_snapshot.as_ref() {
+        let mut ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in &snap.connections {
+            if !c.metadata.source_ip.is_empty() {
+                ips.insert(c.metadata.source_ip.clone());
+            }
+        }
+        let ips_vec: Vec<String> = ips.into_iter().collect();
+        state
+            .inv
+            .users_for_source_ips(&ips_vec, 7)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "users_for_source_ips failed");
+                std::collections::HashMap::new()
+            })
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Per-server secrets — only read here so kernel-specific sections
     // (currently wgturn's VK-link form) can display their current state.
     // Fetched even when no such kernel is enabled because the cost is
@@ -8047,6 +8077,11 @@ pub(crate) async fn server_detail(
         // upstream, dashboard tile shows zero «attributed users»
         // intentionally to make the limit explicit).
         (server_detail_live_activity_section(&live_activity, lang))
+
+        // Phase 4c — per-connection drill-down (top destinations
+        // + top source IPs with user correlation + TCP/UDP split)
+        // from the last clash-api snapshot.
+        (server_detail_live_connections_section(last_snapshot.as_deref(), &source_user_map, lang))
 
         // Declared vs observed drift
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
@@ -8346,6 +8381,196 @@ fn server_detail_live_activity_section(
             " · "
             (activity.distinct_users_attributed)
             (tr(lang, " users attributed (NM-11: sing-box upstream strips per-user from clash-api; server-wide totals work)", " юзеров attributed (NM-11: sing-box upstream удаляет per-user из clash-api; сервер-агрегатные totals работают)"))
+        }
+    }
+}
+
+/// Phase 4c — per-connection drill-down for the server-detail page.
+/// Renders three views from the last clash-api snapshot:
+///   1. Top destinations by bytes (host or IP:port)
+///   2. Top source IPs (= per-device proxy) with user_id
+///      correlation from sub_access_log
+///   3. TCP / UDP / other network split
+///
+/// Empty-state (no snapshot yet) explains that the poller fires
+/// every 5 minutes and tells the operator to come back. No
+/// «restart vpnctld» / SSH instructions per operator-action policy.
+fn server_detail_live_connections_section(
+    snapshot: Option<&crate::clash_api::Snapshot>,
+    source_user_map: &std::collections::HashMap<String, Vec<(vpnctl_core::UserId, u64)>>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use crate::snapshot_cache::{aggregate_by_destination, aggregate_by_source, network_breakdown};
+    const TOP_N: usize = 10;
+
+    let Some(snap) = snapshot else {
+        return html! {
+            div.ed-rule {}
+            div.ed-art-eyebrow { (tr(lang, "Live connections", "Активные соединения")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                (tr(
+                    lang,
+                    "No clash-api snapshot for this server yet. The poller fires every 5 minutes; refresh after the next tick. Empty also if the deploy key isn't authorised on this node (see Settings → Deploy SSH key).",
+                    "Снимка clash-api по этому серверу ещё нет. Поллер запускается каждые 5 минут; обнови после следующего тика. Также пусто если deploy-ключ ещё не авторизован на этой ноде (см. Settings → Deploy SSH key).",
+                ))
+            }
+        };
+    };
+
+    let nb = network_breakdown(snap);
+    let top_dests = aggregate_by_destination(snap, TOP_N);
+    let top_sources = aggregate_by_source(snap, TOP_N);
+    let total_conns = snap.connections.len();
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Live connections", "Активные соединения"))
+            span style="color: var(--mute); margin-left: 12px; font-family: var(--mono); font-size: 11px; letter-spacing: 0;" {
+                "· " (total_conns) " "
+                (tr(lang, "connections in the last 5-min snapshot", "соединений в последнем 5-минутном снимке"))
+            }
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Per-connection detail from clash-api. NM-11 (sing-box upstream) drops the `user` field on the wire, so we attribute connections to users via the source-IP ↔ subscription-fetch IP correlation (last 7 days). Best-effort — accuracy drops for NAT collisions.",
+                "Деталь per-connection из clash-api. NM-11 (sing-box upstream) убирает поле `user` из wire-формата, поэтому атрибуция идёт через корреляцию source IP ↔ IP запроса подписки (последние 7 дней). Best-effort — точность падает при коллизии NAT.",
+            ))
+        }
+        // Network breakdown row.
+        div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
+            (status_tile(
+                tr(lang, "tcp", "tcp"),
+                &format!("{} · {}", nb.tcp_conns, humanize_bytes(nb.tcp_bytes)),
+                "var(--ink)",
+            ))
+            (status_tile(
+                tr(lang, "udp", "udp"),
+                &format!("{} · {}", nb.udp_conns, humanize_bytes(nb.udp_bytes)),
+                "var(--ink)",
+            ))
+            (status_tile(
+                tr(lang, "other", "иные"),
+                &format!("{} · {}", nb.other_conns, humanize_bytes(nb.other_bytes)),
+                "var(--ink)",
+            ))
+        }
+
+        // Top destinations table.
+        h4 style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin: 16px 0 6px;" {
+            (tr(lang, "top destinations · this snapshot", "топ destinations · этот снимок"))
+        }
+        @if top_dests.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                (tr(lang, "no active connections", "активных соединений нет"))
+            }
+        } @else {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "host / ip", "host / ip"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "conns", "соед."))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "upload", "upload"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "download", "download"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "total", "всего"))
+                        }
+                    }
+                }
+                tbody {
+                    @for d in &top_dests {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 4px 8px; overflow-wrap: anywhere;" { (d.label) }
+                            td style="padding: 4px 8px; text-align: right;" { (d.conns) }
+                            td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(d.upload)) }
+                            td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(d.download)) }
+                            td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (humanize_bytes(d.upload.saturating_add(d.download))) }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Top source IPs table — with user correlation.
+        h4 style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin: 16px 0 6px;" {
+            (tr(lang, "top sources · this snapshot · likely user", "топ source IP · этот снимок · вероятный юзер"))
+        }
+        @if top_sources.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                (tr(lang, "no active source IPs", "активных source IP нет"))
+            }
+        } @else {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "source ip", "source ip"))
+                        }
+                        th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;"
+                           title=(tr(lang, "Most-likely user_id based on which user has hit subscription URL from this IP in the last 7 days (sub_access_log JOIN). «—» = no match.", "Наиболее вероятный user_id на основе того, какой юзер за последние 7 дней дёргал subscription URL с этого IP (JOIN на sub_access_log). «—» = совпадений нет.")) {
+                            (tr(lang, "likely user", "вероятный юзер"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "conns", "соед."))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "upload", "upload"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "download", "download"))
+                        }
+                        th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "total", "всего"))
+                        }
+                    }
+                }
+                tbody {
+                    @for s in &top_sources {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 4px 8px;" { (s.label) }
+                            td style="padding: 4px 8px;" {
+                                @match source_user_map.get(&s.label) {
+                                    Some(users) if !users.is_empty() => {
+                                        @let (top_uid, top_hits) = &users[0];
+                                        a href=(format!("/admin/users/{}", crate::http_util::path_segment_encode(&top_uid.0)))
+                                          style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--rule);"
+                                          title=(format!(
+                                              "{} hit{} from this IP in the last 7 days. Click to open user-detail.",
+                                              top_hits,
+                                              if *top_hits == 1 { "" } else { "s" }
+                                          )) {
+                                            (top_uid.0)
+                                        }
+                                        @if users.len() > 1 {
+                                            span style="color: var(--mute); margin-left: 6px;" {
+                                                "+" (users.len() - 1) " "
+                                                (tr(lang, "more", "ещё"))
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        span style="color: var(--mute);" { "—" }
+                                    }
+                                }
+                            }
+                            td style="padding: 4px 8px; text-align: right;" { (s.conns) }
+                            td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(s.upload)) }
+                            td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(s.download)) }
+                            td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (humanize_bytes(s.upload.saturating_add(s.download))) }
+                        }
+                    }
+                }
+            }
         }
     }
 }

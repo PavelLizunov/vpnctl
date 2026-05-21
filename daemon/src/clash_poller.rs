@@ -219,7 +219,10 @@ fn delta(prior: u64, new: u64) -> u64 {
 /// to the system `/usr/bin/ssh` binary (bookworm-2.36-native, no
 /// glibc-2.38 syscalls). Previously gated behind `polling`; the
 /// gate was removed when Path C (subprocess wrapper) landed.
-pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
+pub fn spawn_clash_poller(
+    inv: SqliteInventory,
+    snapshot_cache: crate::snapshot_cache::SnapshotCache,
+) -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     use tokio::time::{MissedTickBehavior, interval};
 
@@ -275,7 +278,7 @@ pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
             }
 
             for server in &servers {
-                poll_one_server(&inv, &mut engine, server).await;
+                poll_one_server(&inv, &mut engine, &snapshot_cache, server).await;
             }
         }
     })
@@ -286,6 +289,7 @@ pub fn spawn_clash_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
 async fn poll_one_server(
     inv: &SqliteInventory,
     engine: &mut DiffEngine,
+    snapshot_cache: &crate::snapshot_cache::SnapshotCache,
     server: &vpnctl_core::Server,
 ) {
     // Only sing-box nodes expose clash-api at 9090 today. AmneziaWG
@@ -344,6 +348,13 @@ async fn poll_one_server(
         }
     };
 
+    // Phase 4c — store the full snapshot (per-connection detail)
+    // in the shared cache BEFORE we agregate. The cache feeds the
+    // server-detail page's «Live connections» drill-down. We clone
+    // the snapshot because `engine.tick` borrows it; cheap (clone
+    // is one Vec allocation for the connections array).
+    snapshot_cache.store(server.id.clone(), snapshot.clone());
+
     let deltas = engine.tick(&server.id, &snapshot);
     if deltas.is_empty() {
         tracing::debug!(
@@ -393,6 +404,9 @@ mod tests {
                         network: "tcp".into(),
                         destination_ip: "1.2.3.4".into(),
                         destination_port: "443".into(),
+                        source_ip: "10.0.0.1".into(),
+                        source_port: "12345".into(),
+                        host: String::new(),
                         user: Some(user.into()),
                     },
                 })

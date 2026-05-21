@@ -83,7 +83,7 @@ pub struct Connection {
 /// Metadata sing-box attaches to each connection. Most fields are
 /// informational; `user` is the per-inbound user name we attribute
 /// traffic against.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionMeta {
     /// `tcp` or `udp`.
@@ -95,15 +95,40 @@ pub struct ConnectionMeta {
     /// Field name is `destinationIP` (uppercase IP) on the wire, which
     /// is NOT what `rename_all = "camelCase"` produces (it would expect
     /// `destinationIp`). Clash spec uses uppercase initialisms — we
-    /// override per-field. Same story for `sourceIP` if we ever add it.
+    /// override per-field. Same story for `sourceIP` below.
     #[serde(default, rename = "destinationIP")]
     pub destination_ip: String,
     /// Destination port as a STRING — Clash wire format quirk.
     #[serde(default)]
     pub destination_port: String,
+    /// Phase 4c — source IP of the client behind the VLESS / TUIC
+    /// auth. This is the **real public IP** of the user's device
+    /// as seen by sing-box AFTER the inbound auth, NOT a NAT'd
+    /// internal address. Preserved by sing-box despite NM-11
+    /// (which only drops `user`), so it gives us a per-device
+    /// attribution proxy: same source IP across multiple
+    /// connections = (usually) same device. Joining against
+    /// `sub_access_log.ip` lets us map source IP → user_id when
+    /// the same client recently fetched their subscription URL.
+    #[serde(default, rename = "sourceIP")]
+    pub source_ip: String,
+    /// Source port (Clash wire-format quirk: also a STRING).
+    /// Per-connection, changes every dial.
+    #[serde(default)]
+    pub source_port: String,
+    /// DNS name the client asked for, when sing-box resolved one
+    /// (typically present for HTTPS SNI / HTTP Host). Empty when
+    /// sing-box only got the raw IP. Far more useful than
+    /// `destination_ip` for the operator («youtube.com» vs
+    /// «172.217.16.142»).
+    #[serde(default)]
+    pub host: String,
     /// Inbound user name as configured in sing-box. Maps to our
     /// `User.id` (operator-typed, e.g. "alice"), NOT to the protocol
-    /// UUID.
+    /// UUID. **Currently always None on production** because of
+    /// NM-11 (sing-box upstream's TrackerMetadata.MarshalJSON
+    /// drops this field). See NM-11 in CLAUDE.md for the upstream
+    /// fix path.
     #[serde(default)]
     pub user: Option<String>,
 }

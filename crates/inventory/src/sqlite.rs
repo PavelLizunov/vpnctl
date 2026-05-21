@@ -2508,6 +2508,73 @@ impl SqliteInventory {
         })
     }
 
+    /// Phase 4c — given a list of source IPs (from a clash-api
+    /// snapshot's `metadata.sourceIP` fields), find for each IP the
+    /// most-likely `user_id` by counting hits in `sub_access_log`
+    /// over the look-back window. Returns a map `source_ip ->
+    /// Vec<(user_id, hit_count)>` sorted DESC by hit count, so the
+    /// top entry is the most plausible owner. Empty Vec means no
+    /// user has hit subscription URL from that IP in the window.
+    ///
+    /// Why this works despite NM-11: sing-box's clash-api still
+    /// emits `sourceIP` (real public IP of client behind VLESS/TUIC
+    /// auth). vpnctld's `sub_access_log.ip` also stores the real
+    /// client IP for every `/api/v1/app/config/<device>` and
+    /// `/sub/<token>` request. The intersection identifies «whose
+    /// devices are talking from that IP right now» without sing-box
+    /// needing to emit the `user` field. False positives possible
+    /// (NAT collision: two real users behind one CGNAT IP), so the
+    /// UI labels this «likely» not «is».
+    ///
+    /// Bounded by `ips.len()` * `look_back_days` rows of
+    /// sub_access_log — single GROUP BY query with `WHERE ip IN
+    /// (?, ?, ?, …)`. Skips VPN-egress rows (is_vpn_egress = 0)
+    /// because those are our own server IPs, not real clients.
+    pub async fn users_for_source_ips(
+        &self,
+        ips: &[String],
+        look_back_days: u32,
+    ) -> Result<std::collections::HashMap<String, Vec<(UserId, u64)>>> {
+        use std::collections::HashMap;
+        if ips.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // Build the IN-clause placeholders dynamically (sqlx doesn't
+        // support `IN (?)` with an array binding). Safe because
+        // every `?` gets a single string bind; no string interp of
+        // user-controlled data into the SQL itself.
+        let placeholders = std::iter::repeat_n("?", ips.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT ip, user_id, COUNT(*) AS hits
+             FROM sub_access_log
+             WHERE ip IN ({placeholders})
+               AND is_vpn_egress = 0
+               AND user_id IS NOT NULL
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+             GROUP BY ip, user_id
+             ORDER BY ip, hits DESC"
+        );
+        let cutoff = format!("-{look_back_days} days");
+        let mut q = sqlx::query(&sql);
+        for ip in ips {
+            q = q.bind(ip);
+        }
+        q = q.bind(&cutoff);
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut out: HashMap<String, Vec<(UserId, u64)>> = HashMap::new();
+        for r in rows {
+            let ip: String = r.try_get("ip")?;
+            let uid: String = r.try_get("user_id")?;
+            let hits: i64 = r.try_get("hits")?;
+            out.entry(ip)
+                .or_default()
+                .push((UserId(uid), hits.max(0) as u64));
+        }
+        Ok(out)
+    }
+
     /// Phase 4b — dashboard rollup across every known server.
     /// Returns one `ServerLiveActivity` per `servers.id` (even for
     /// servers the poller never reached — they get the default-

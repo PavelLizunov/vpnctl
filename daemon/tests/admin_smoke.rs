@@ -10976,3 +10976,147 @@ async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
         "empty-state copy must mention «No clash-api samples yet»"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Phase 4c — server-detail Live connections drill-down section
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn phase4c_server_detail_renders_empty_state_when_no_snapshot() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("emptynode".into()),
+            address: "192.0.2.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/emptynode").await;
+    assert!(
+        html.contains("Live connections"),
+        "server-detail must surface the Phase 4c section eyebrow even without data"
+    );
+    assert!(
+        html.contains("No clash-api snapshot for this server yet"),
+        "empty-state copy must explain the 5-minute poller cadence"
+    );
+}
+
+#[tokio::test]
+async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapshot() {
+    // Manually inject a snapshot into the cache so we don't need a
+    // real clash-api running. Pin: top destinations + top sources +
+    // network breakdown tiles + correlation column header.
+    use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("active".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: Vec::new(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("brat".into()),
+            uuid: "br0".into(),
+            sub_token: Some("brtok".into()),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    // brat fetched subscription from 83.97.108.34 → correlation
+    // should surface that user_id when 83.97.108.34 appears as
+    // sourceIP in the live snapshot.
+    s.inv
+        .log_sub_access(&UserId("brat".into()), "83.97.108.34", None, 200, 100)
+        .await
+        .unwrap();
+
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+    let snap = Snapshot {
+        upload_total: 5000,
+        download_total: 10000,
+        connections: vec![
+            Connection {
+                id: "c1".into(),
+                upload: 1000,
+                download: 5000,
+                start: "2026-05-21T18:00:00Z".into(),
+                metadata: ConnectionMeta {
+                    network: "tcp".into(),
+                    destination_ip: "172.217.16.142".into(),
+                    destination_port: "443".into(),
+                    source_ip: "83.97.108.34".into(),
+                    source_port: "55555".into(),
+                    host: "youtube.com".into(),
+                    user: None,
+                },
+            },
+            Connection {
+                id: "c2".into(),
+                upload: 100,
+                download: 200,
+                start: "2026-05-21T18:00:01Z".into(),
+                metadata: ConnectionMeta {
+                    network: "udp".into(),
+                    destination_ip: "1.1.1.1".into(),
+                    destination_port: "53".into(),
+                    source_ip: "83.97.108.34".into(),
+                    source_port: "55556".into(),
+                    host: String::new(),
+                    user: None,
+                },
+            },
+        ],
+    };
+    s.snapshot_cache.store(ServerId("active".into()), snap);
+
+    let html = fetch_html(router(s), "/admin/servers/active").await;
+    assert!(html.contains("Live connections"));
+    // Top destinations must include youtube.com (preferred over IP).
+    assert!(
+        html.contains("youtube.com:443"),
+        "top destinations must render host:port preferring DNS name"
+    );
+    // Top sources must include the real client IP.
+    assert!(
+        html.contains("83.97.108.34"),
+        "top sources must render the real source IP"
+    );
+    // Correlation should resolve `83.97.108.34` → `brat`.
+    assert!(
+        html.contains("href=\"/admin/users/brat\""),
+        "source-IP-to-user correlation must surface brat as the likely owner of 83.97.108.34"
+    );
+    // Network breakdown tiles (TCP 1 / UDP 1).
+    assert!(html.contains(">tcp<") || html.contains("tcp"));
+    assert!(html.contains("udp"));
+    // NM-11 caveat copy
+    assert!(
+        html.contains("NM-11"),
+        "section must surface NM-11 explainer"
+    );
+}

@@ -50,6 +50,12 @@ pub struct AppState {
     /// step-1 POST and the step-2 SSE handler. See `crate::wizard`
     /// for TTL + key schema.
     pub wizard: Arc<WizardStore>,
+    /// Phase 4c — in-memory cache of the last clash-api snapshot
+    /// per VPN server. Filled by `spawn_clash_poller` on every
+    /// successful 5-minute tick; read by the server-detail handler
+    /// to render the «Live connections» drill-down. Cheap to
+    /// `.clone()` (internal `Arc`).
+    pub snapshot_cache: crate::snapshot_cache::SnapshotCache,
 }
 
 impl std::fmt::Debug for AppState {
@@ -115,7 +121,15 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // gate + no glibc 2.38 dep. Spawned unconditionally; the poller
     // itself logs-and-skips when the SSH key isn't on the homelab
     // host yet OR when a node hasn't authorised it.
-    drop(crate::clash_poller::spawn_clash_poller(inv.clone()));
+    //
+    // Phase 4c — the poller also fills `snapshot_cache` with the
+    // full per-tick snapshot (per-connection detail) so the admin
+    // UI's «Live connections» drill-down has data to render.
+    let snapshot_cache = crate::snapshot_cache::SnapshotCache::new();
+    drop(crate::clash_poller::spawn_clash_poller(
+        inv.clone(),
+        snapshot_cache.clone(),
+    ));
 
     // Phase H chunk 4 — periodic node_health probe (systemctl /
     // disk / mem / load / listening ports / sing-box log size).
@@ -173,6 +187,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         access_log_tx,
         rate_limiter,
         wizard: Arc::new(WizardStore::new()),
+        snapshot_cache,
     };
     Ok(router(state))
 }
@@ -212,6 +227,7 @@ pub fn make_app_state_with_rate_limiter(
             access_log_tx,
             rate_limiter,
             wizard: Arc::new(WizardStore::new()),
+            snapshot_cache: crate::snapshot_cache::SnapshotCache::new(),
         },
         handle,
     )

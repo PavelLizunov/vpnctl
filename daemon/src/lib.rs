@@ -50,6 +50,12 @@ pub mod rate_limit;
 // of linking russh. Lets vpnctld talk to nodes without pulling
 // glibc 2.38; see ssh_subprocess.rs for the rationale.
 pub mod ssh_subprocess;
+// Phase 4c — in-memory cache of the last clash-api snapshot per VPN
+// server, plus per-destination / per-source aggregation helpers
+// for the Live-connections drill-down on /admin/servers/<id>.
+// Cache is shared between the poller (writer) and admin handlers
+// (readers) through a SnapshotCache handle that lives in AppState.
+pub mod snapshot_cache;
 // Phase 3c — SSE backend for the Settings GeoIP «update now» button.
 // Wraps `/usr/local/bin/vpnctl geoip-update` via `std::process::Command`
 // + `tokio::task::spawn_blocking`. NOT `tokio::process` (glibc 2.39+
