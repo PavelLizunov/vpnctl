@@ -44,8 +44,18 @@
 #      /etc/vpnctl/backup-recipient.txt. Only the private key holder
 #      (Pavel's laptop + 207 escrow) can decrypt.
 #   4. scp to user@192.168.0.207:~/backups/vpnctl/<date>.tar.zst.age
-#   5. Rotate on 207: keep last RETENTION_DAYS days; delete older.
-#   6. Clean up local /tmp staging.
+#      (PRIMARY archive store, fast LAN access for self-test + restore).
+#   5. **Off-site push (Phase 5b)**: also scp to root@<OFFSITE_HOST>
+#      :OFFSITE_DIR/. Different jurisdiction + power grid + ISP from
+#      the 236/207 LAN — protects against the «all-LAN-burned» mode.
+#      Best-effort: failure logs WARN but does NOT fail the script,
+#      because the primary 207 archive is still good. The off-site
+#      step needs its own SSH key (we reuse the vpnctld deploy key
+#      that's already authorised on every VPN node — see CLAUDE.md
+#      «Server invariant — deploy-key authorization»).
+#   6. Rotate on 207 (RETENTION_DAYS) + off-site (OFFSITE_RETENTION_DAYS,
+#      longer because off-site is the «if everything else burns» tier).
+#   7. Clean up local /tmp staging.
 #
 # Failure modes
 # -------------
@@ -80,6 +90,17 @@ IPTABLES_RULES=${IPTABLES_RULES:-/etc/iptables/rules.v4}
 TARGET_HOST=${TARGET_HOST:-user@192.168.0.207}
 TARGET_DIR=${TARGET_DIR:-/home/user/backups/vpnctl}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
+# Off-site target (Phase 5b). Default = `is` VPN node (Iceland), the
+# geographically + jurisdictionally most-distant from RU/EU. Override
+# OFFSITE_HOST="" to disable off-site push entirely.
+OFFSITE_HOST=${OFFSITE_HOST:-root@93.95.226.167}
+OFFSITE_PORT=${OFFSITE_PORT:-22}
+OFFSITE_DIR=${OFFSITE_DIR:-/root/vpnctl-backups}
+OFFSITE_KEY=${OFFSITE_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}
+# Off-site retention is LONGER than primary — when off-site is
+# needed, primary 207 is presumed gone, so we want as deep a
+# history as the off-site disk tolerates.
+OFFSITE_RETENTION_DAYS=${OFFSITE_RETENTION_DAYS:-30}
 TMPDIR=${TMPDIR:-/tmp}
 
 ## ── derived ─────────────────────────────────────────────────────────────
@@ -170,6 +191,34 @@ log "rotating ${TARGET_DIR} (keep ${RETENTION_DAYS} days)"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET_HOST" \
     "find '${TARGET_DIR}' -maxdepth 1 -name '*.tar.zst.age' -mtime +${RETENTION_DAYS} -delete" \
     || log "WARN: rotation step failed (non-fatal — manual cleanup possible)"
+
+## ── 6. off-site push (Phase 5b) ─────────────────────────────────────────
+# Best-effort: failures here log WARN and continue. The primary 207
+# archive is already safe at this point; off-site is the «if 207 also
+# burns» tier. We pin the deploy key explicitly because the script
+# runs as `user` (not root) and `user`'s default ~/.ssh/id_* may have
+# different authorisation surfaces on the VPN nodes.
+if [ -n "${OFFSITE_HOST:-}" ]; then
+    if [ ! -r "$OFFSITE_KEY" ]; then
+        log "WARN: off-site SSH key not readable: $OFFSITE_KEY (skipping off-site push)"
+    else
+        log "off-site uploading to ${OFFSITE_HOST}:${OFFSITE_DIR}/ (port ${OFFSITE_PORT})"
+        if scp -q -i "$OFFSITE_KEY" -P "$OFFSITE_PORT" \
+            -o BatchMode=yes -o ConnectTimeout=10 \
+            "$LOCAL_PATH" \
+            "${OFFSITE_HOST}:${OFFSITE_DIR}/${ARCHIVE_NAME}"; then
+            log "off-site rotating ${OFFSITE_DIR} (keep ${OFFSITE_RETENTION_DAYS} days)"
+            ssh -i "$OFFSITE_KEY" -p "$OFFSITE_PORT" \
+                -o BatchMode=yes -o ConnectTimeout=10 "$OFFSITE_HOST" \
+                "find '${OFFSITE_DIR}' -maxdepth 1 -name '*.tar.zst.age' -mtime +${OFFSITE_RETENTION_DAYS} -delete" \
+                || log "WARN: off-site rotation failed (non-fatal)"
+        else
+            log "WARN: off-site scp failed (non-fatal — primary archive on ${TARGET_HOST} is safe)"
+        fi
+    fi
+else
+    log "off-site push disabled (OFFSITE_HOST empty)"
+fi
 
 log "ok ${ARCHIVE_NAME}"
 exit 0
