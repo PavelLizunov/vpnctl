@@ -934,11 +934,15 @@ get oriented without reading the whole methodology block.
     The AUTONOMOUS_PLAN.md:273 «raw SQL workaround» note is HISTORICAL —
     that was the 2026-05-16 fire-drill day, the proper feature shipped
     the day after. Memory was stale.
-  - ⏳ `decode_form_value` UTF-8 fix (3 call sites, masked today by
-    validators — deferred minor from `e250789` audit). **Re-verify before
-    treating as open:** if validators now block non-ASCII inputs (which
-    seemed the case in NM-13 NM rollup), this is no longer a latent
-    bug.
+  - ✅ `decode_form_value` UTF-8 review — re-verified 2026-05-22, NOT a
+    latent bug. Implementation in `daemon/src/http_util.rs:39-72` is
+    bounds-checked (`b'%' if i + 2 < bytes.len()`), uses `from_utf8_lossy`
+    (correct lenient policy for form input — paste-from-broken-Windows-
+    clipboard MUST not 4xx the operator), and every consumer routes
+    through `form_field` which further validates per-field. The
+    `e250789` audit's «deferred minor» note was about being LESS lenient
+    (rejecting invalid UTF-8 explicitly); on reflection that would be
+    a regression in UX. Closed as «no fix needed».
   - ✅ Bulk-ack of admin_alerts via web — shipped 2026-05-22.
     `POST /admin/alerts/ack-all` + «ack all (N)» button on /admin/alerts
     header (renders only when `unacked_total > 0`, double-submit
@@ -956,9 +960,20 @@ get oriented without reading the whole methodology block.
     `js_single_quote_escape` helper + forward-compat smoke test that
     asserts inner confirm() body has 0 bare apostrophes, so a future
     `don't` in translated copy can't silently break the dialog).
-  - ⏳ NM-11: file the 1-line upstream PR against sing-box to add
-    `"user": t.Metadata.User` in `TrackerMetadata.MarshalJSON`. Until
-    accepted, per-user clash-api attribution stays NULL.
+  - ✅ NM-11 upstream PR filed 2026-05-22 — [SagerNet/sing-box#4159](https://github.com/SagerNet/sing-box/pull/4159)
+    against `testing` branch (verified via `gh pr list --repo
+    SagerNet/sing-box --state merged` — every recent PR merges to
+    `testing`, not `dev-next` which was my first wrong guess). 1-line
+    diff: `"user": t.Metadata.User` added in the JSON marshal map in
+    `experimental/clashapi/trafficontrol/tracker.go`. Fork lives at
+    `PavelLizunov/sing-box`, branch `feat/clashapi-emit-user-field`,
+    commit `c29c5db`. PR body explains the driver (vpnctld's NULL
+    `vpn_connection_stats.user_id`), the compatibility (additive JSON
+    key, no schema/protocol break), and the test plan (manual curl
+    against clash-api with VLESS-authenticated connection). Until/
+    unless upstream accepts, per-user clash-api attribution stays
+    NULL — but the **upstream gate** is now in flight rather than
+    sitting as a TODO.
 - **v1.0** far away — defined as "everything in roadmap shipped + months
   of operating experience without rolling back"
 

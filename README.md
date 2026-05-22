@@ -3,75 +3,140 @@
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
-Lightweight, fail-safe, Linux-only control plane for self-hosted VPN
-infrastructure. Single static binary, no daemon required, **architecturally
-ready for new server kernels and wire protocols** without touching CLI,
-inventory, SSH or crypto layers.
+Lightweight, fail-safe, Linux-only **control plane** for self-hosted VPN
+infrastructure. CLI + daemon + admin UI from a single workspace; SSH-first,
+no node-side agent, plug-in architecture for adding new wire protocols or
+node daemons.
 
-Successor to bash-based `vpn-control`. Same domain (sing-box +
-VLESS+REALITY + TUIC v5), but with type-safe state, transactional inventory,
-and a plug-in architecture.
+Built as a successor to a bash-based deployment toolkit, with type-safe
+state, transactional inventory, audit-on-mutation, and an editorial-style
+admin UI that's the operator's **only** required surface — every CLI
+action also has a web button.
 
-> **Canonical home: [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl)**
+> **Canonical home:** [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl).
 > A mirror is published to a private Forgejo at `192.168.0.207:18300/slovn/vpnctl`
 > for LAN-only development. Issues and PRs go on GitHub.
 
-## Status
+## Status — v0.8 in flight
 
-**v0.2 in progress.**
+Operating in production on a 3-node fleet (`de` / `fi` / `is`) with ~33
+users, ~600 daily clash-api probe rows per node, and a bilingual EN/RU
+admin UI.
 
-- ✅ Scaffold — workspace, traits, registry, smoke binary
-- ✅ CI — clippy/fmt/test/deny/audit gates green
-- ✅ SSH transport — `russh` 0.60, key auth, host-key TOFU, exec/upload/read,
-      4 integration tests against live SSH
-- ⏳ SQLite inventory with migrations
-- ⏳ CLI commands `server add/list/deploy`, `user add/grant/sub`, `status`
-- ⏳ End-to-end deploy smoke test via testcontainers
+### What ships today
 
-See [`CLAUDE.md`](CLAUDE.md) for the operational handbook.
+| Area | State |
+|---|---|
+| Workspace + traits + CI | ✅ |
+| SSH transport (subprocess `/usr/bin/ssh`, glibc 2.36 compatible) | ✅ |
+| `vpnctl` CLI — server / user / grant / deploy / sub / status / migrate / bootstrap | ✅ |
+| `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
+| Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
+| Kernels — `sing-box`, `amneziawg`, `wgturn` (VK-TURN-relayed WireGuard) | ✅ |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `wgturn` | ✅ (8 across 3 kernels) |
+| Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
+| Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
+| Backups — VACUUM INTO snapshot + hourly retention + off-site copy to Iceland + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
+| Subscription endpoint — byte-equivalent migration from legacy Python server (33 users) | ✅ |
+| Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
+| DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY/wgturn Strong; tuic/anytls Moderate; rest Weak) | ✅ |
+| Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + per-user UA fingerprint heuristic | ✅ |
+| Audit timeline — paginated + filtered + CSV export | ✅ |
+| Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
+| **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
+| Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
+| 1010 workspace tests, GitHub Actions CI green | ✅ |
+
+### Known gaps (carried into v0.9)
+
+- **Per-user clash-api attribution** — depends on [SagerNet/sing-box#4159](https://github.com/SagerNet/sing-box/pull/4159)
+  (1-line `TrackerMetadata.MarshalJSON` patch to emit `"user"`). Until
+  accepted upstream, `vpn_connection_stats.user_id` is NULL on every
+  row; server-wide totals on the dashboard still work.
+- **Wave-3 EN/RU translation** — server-detail Kernels / Enabled-
+  protocols / drift / deploy-key body (~600 lines) and user-detail
+  sub-token / WG / traffic-limit / per-protocol grid body (~800 lines)
+  remain English-only.
+- **Stale-fingerprint detection** — TOFU host-key rotation today
+  surfaces as a cryptic `server.unreachable` alert. A proactive
+  `server.fingerprint.changed` alert with one-click «accept new» would
+  close the gap.
+
+See [`CLAUDE.md`](CLAUDE.md) for the full operational handbook,
+roadmap, methodology rules, and post-incident notes.
 
 ## Architecture
 
-Two orthogonal abstractions:
+Two orthogonal abstractions — adding either side does **not** touch
+the other:
 
 | Trait | Meaning | Examples |
 |---|---|---|
-| `Kernel` | The daemon that runs on the node | `sing-box`, `wgturn`, `xray` |
-| `Protocol` | The wire protocol presented to the client | `vless+reality`, `tuic-v5`, `wireguard` |
+| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `wgturn` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `wireguard`, `hysteria2`, ... |
 
-A `Kernel` declares which `Protocol`s it can host. Adding a new kernel = one
-new file in `crates/kernels/src/`. Adding a new protocol = one new file in
-`crates/protocols/src/`. The CLI, inventory, SSH layer and crypto are
-**unaffected**.
+A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
+`Registry::validate_server` catches incompatible combinations **before** an
+SSH session opens.
+
+Adding a new kernel (e.g. `xray`) = one new file in `crates/kernels/src/` +
+one `register_kernel` line. Adding a new protocol = one new file in
+`crates/protocols/src/` + one `register_protocol` line. CLI, inventory, SSH
+layer, daemon, admin UI, and crypto stay **unaffected**.
+
+Protocols are **stateless** — per-server secrets arrive via `RenderCtx`,
+never live on the protocol struct.
 
 ## Workspace layout
 
 ```
-crates/
-├── core/        traits Kernel & Protocol, Registry, domain types, errors
-├── crypto/      UUID v4, x25519 keypair, REALITY short_id, password gen
-├── ssh/         SshTransport trait, RusshTransport (russh 0.60), MockTransport
-├── protocols/   impl Protocol — vless+reality, tuic-v5
-├── kernels/     impl Kernel  — sing-box (full)
-├── hosters/     DigitalOcean / Cloudzy / Generic (SSH port quirks)
-└── inventory/   InMemoryInventory (sqlx+sqlite in v0.2)
-cli/             clap-based binary `vpnctl`
+vpnctl/
+├── crates/
+│   ├── core/             traits Kernel & Protocol, Registry, domain types
+│   ├── crypto/           UUID v4, x25519, REALITY short_id, password gen
+│   ├── host-fingerprint/ ssh-keyscan wrapper + SHA256 validate_shape
+│   ├── ssh/              SshTransport trait + russh implementations
+│   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
+│   │                     anytls, trojan, wgturn
+│   ├── kernels/          sing-box (full), amneziawg, wgturn
+│   ├── hosters/          DigitalOcean / Cloudzy / Generic
+│   └── inventory/        SqliteInventory, migrations, audit_log
+├── cli/                  clap binary `vpnctl`
+└── daemon/               axum binary `vpnctld` (admin UI + /sub + REST)
 ```
 
 ## Quickstart
 
 ```bash
 just check       # cargo check --workspace --all-targets
-just test        # cargo test --workspace
+just test        # cargo test --workspace (1010 tests)
 just clippy      # cargo clippy --workspace --all-targets -- -D warnings
 just fmt         # rustfmt all crates
+just deny        # cargo deny check (no openssl-sys, no native-tls)
 just ci          # full local CI sweep before push
 
 just run uuid          # generate a fresh UUID v4
 just run registry      # list registered kernels & protocols
 ```
 
-To run SSH integration tests against a live server:
+## Operator flows (all web-driven)
+
+Every action below has both a CLI subcommand and a web button. The web
+form is the canonical operator surface; CLI is for automation /
+scripting / disaster recovery.
+
+| Goal | Web | CLI |
+|---|---|---|
+| Add a new server | `/admin/servers/quick-add` wizard, SSE-streamed bootstrap | `vpnctl bootstrap <ip> <password>` then `vpnctl deploy <id>` |
+| Add a user | `/admin/users` + form | `vpnctl user add <name>` |
+| Grant a user access to a server | `/admin/users/<id>` per-server toggle | `vpnctl grant <user> <server>` |
+| Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
+| Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
+| Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
+| Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
+| Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+
+## SSH integration tests
 
 ```bash
 VPNCTL_TEST_HOST=192.168.0.207 \
@@ -80,12 +145,17 @@ VPNCTL_TEST_KEY=$HOME/.ssh/id_ed25519 \
   cargo test -p vpnctl-ssh --test integration -- --ignored
 ```
 
-## Roadmap
+## Roadmap (high-level)
 
-- **v0.2** — `russh` transport ✅, SQLite inventory with migrations, `vpnctl deploy`, `vpnctl user add`, `vpnctl status` end-to-end against a real node.
-- **v0.3** — `vpnctl sub <user>` subscription URL generator, `vpnctl rotate` for REALITY keypair re-issuance, ProxyJump in SSH transport.
-- **v0.4** — daemon mode `vpnctld` (axum + REST API + `/sub/<token>` for clients).
-- **v0.5** — optional node-side mTLS gRPC agent for live stats and push updates.
+- **v0.1** scaffold + CI ✅
+- **v0.2** SSH transport, SQLite inventory, CLI subcommands ✅
+- **v0.3** bootstrap fresh-node, ProxyJump, subscription URLs ✅
+- **v0.4** daemon + REST + `/sub/<token>` + admin UI shell + dashboard ✅
+- **v0.5** admin UI feature delivery — users/grants/regen/abuse-signal ✅
+- **v0.6** backups + bash-migration ✅
+- **v0.7** add-server wizard + protocol breadth (8 protocols) + monitoring + audit + UA fingerprint + Phase H node probe ✅
+- **v0.8** restore close-out · uptime SLO chips · bulk-ack alerts · subscription-server migration · DPI-risk tiers · bilingual EN/RU ✅ in flight
+- **v1.0** _"everything in roadmap shipped + months of operating experience without rolling back"_
 
 ## License
 
