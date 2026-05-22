@@ -12,9 +12,34 @@
 #   1. SQLite hot snapshot via `.backup` (works under WAL — no need
 #      to stop vpnctld; the backup API takes a consistent point-in-
 #      time copy without locking writers).
-#   2. Tar together: snap.db + /etc/vpnctl/vpnctld.env (basic-auth
-#      creds) + /opt/vpnctl/assets/ (favicon + admin.css). zstd-19
-#      gives ~10× compression on text-heavy SQLite + assets.
+#   2. Tar together: snap.db + every CRITICAL path + every OPTIONAL
+#      path that exists on this host. zstd-19 gives ~10× compression.
+#
+#      CRITICAL paths (script aborts if missing):
+#        - inv.db (the snapshot itself)
+#        - /etc/vpnctl/vpnctld.env (basic-auth + telegram + env config)
+#        - /opt/vpnctl/assets (favicon + admin.css)
+#
+#      OPTIONAL paths (warn + skip if missing — newer install or
+#      host without this surface):
+#        - /var/lib/vpnctl/.ssh/id_ed25519{,.pub} (DEPLOY KEY — without
+#          this, restored vpnctld can't reach any VPN node; HARD invariant
+#          per CLAUDE.md "Server invariant — deploy-key authorization").
+#        - /var/lib/vpnctl/.ssh/known_hosts (TOFU-pinned host keys —
+#          without this, first SSH after restore prompts unknown-host).
+#        - /etc/vpnctl/backup-recipient.txt (without it, the restored
+#          host can't push NEW backups — chicken-and-egg).
+#        - /var/lib/vpnctl/geoip (DB-IP City + ASN mmdb — re-fetchable
+#          via `vpnctl geoip-update`, but bundling avoids the first-boot
+#          fetch round-trip).
+#        - /etc/systemd/system/vpnctld.service (so the restored host
+#          knows how vpnctld is supposed to run).
+#        - /etc/systemd/system/vpnctl-backup.{service,timer} (so the
+#          backup loop self-bootstraps after restore).
+#        - /etc/iptables/rules.v4 (without it the iptables INPUT
+#          policy DROP blocks port 18402 — restored vpnctld up but
+#          unreachable).
+#
 #   3. age-encrypt to the recipient public key in
 #      /etc/vpnctl/backup-recipient.txt. Only the private key holder
 #      (Pavel's laptop + 207 escrow) can decrypt.
@@ -29,6 +54,7 @@
 # * scp fails → exit 11 (network or 207-side issue — local snapshot
 #   stays in place for manual recovery).
 # * age fails → exit 12 (recipient key rotated or corrupted).
+# * Required path missing → exit 13 (install-time bug or path drift).
 # Any non-zero exit triggers the systemd unit's failure handling
 # (operator sees `systemctl status vpnctl-backup`).
 #
@@ -42,7 +68,15 @@ set -euo pipefail
 DB_PATH=${DB_PATH:-/var/lib/vpnctl/inv.db}
 ENV_FILE=${ENV_FILE:-/etc/vpnctl/vpnctld.env}
 ASSETS_DIR=${ASSETS_DIR:-/opt/vpnctl/assets}
+DEPLOY_KEY=${DEPLOY_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}
+DEPLOY_KEY_PUB=${DEPLOY_KEY_PUB:-/var/lib/vpnctl/.ssh/id_ed25519.pub}
+DEPLOY_KNOWN_HOSTS=${DEPLOY_KNOWN_HOSTS:-/var/lib/vpnctl/.ssh/known_hosts}
 RECIPIENT_FILE=${RECIPIENT_FILE:-/etc/vpnctl/backup-recipient.txt}
+GEOIP_DIR=${GEOIP_DIR:-/var/lib/vpnctl/geoip}
+SYSTEMD_UNIT_VPNCTLD=${SYSTEMD_UNIT_VPNCTLD:-/etc/systemd/system/vpnctld.service}
+SYSTEMD_UNIT_BACKUP_SERVICE=${SYSTEMD_UNIT_BACKUP_SERVICE:-/etc/systemd/system/vpnctl-backup.service}
+SYSTEMD_UNIT_BACKUP_TIMER=${SYSTEMD_UNIT_BACKUP_TIMER:-/etc/systemd/system/vpnctl-backup.timer}
+IPTABLES_RULES=${IPTABLES_RULES:-/etc/iptables/rules.v4}
 TARGET_HOST=${TARGET_HOST:-user@192.168.0.207}
 TARGET_DIR=${TARGET_DIR:-/home/user/backups/vpnctl}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
@@ -66,17 +100,47 @@ sqlite3 "$DB_PATH" ".backup '${WORK}/inv.db'" \
     || fail "sqlite3 .backup failed" 10
 
 ## ── 2. tar + zstd ───────────────────────────────────────────────────────
-# Use absolute paths so the tar can be inspected with `tar tjf` without
-# guessing layout. zstd at level 19 is slow but the workload is small
-# (single-digit MB) and the result is air-tight.
-log "tarring snap + env + assets"
+# Strategy: build a list of "files to include" by checking each path's
+# existence on this host. CRITICAL paths abort the script if missing;
+# OPTIONAL paths are logged and skipped. The transform rewrites all
+# absolute paths into the `vpnctl-snap/` prefix so `tar tjf <archive>`
+# shows a clean tree without leading-slash surprises.
+log "collecting files to archive"
+
+REQUIRED=(
+    "$ENV_FILE"
+    "$ASSETS_DIR"
+)
+for p in "${REQUIRED[@]}"; do
+    [ -e "$p" ] || fail "required path missing: $p" 13
+done
+
+OPTIONAL=(
+    "$DEPLOY_KEY"
+    "$DEPLOY_KEY_PUB"
+    "$DEPLOY_KNOWN_HOSTS"
+    "$RECIPIENT_FILE"
+    "$GEOIP_DIR"
+    "$SYSTEMD_UNIT_VPNCTLD"
+    "$SYSTEMD_UNIT_BACKUP_SERVICE"
+    "$SYSTEMD_UNIT_BACKUP_TIMER"
+    "$IPTABLES_RULES"
+)
+TAR_PATHS=("inv.db" "${REQUIRED[@]}")
+for p in "${OPTIONAL[@]}"; do
+    if [ -e "$p" ]; then
+        TAR_PATHS+=("$p")
+    else
+        log "  skip (absent on host): $p"
+    fi
+done
+
+log "tarring ${#TAR_PATHS[@]} paths"
 tar -C "$WORK" \
     --transform='s|^|vpnctl-snap/|' \
     --absolute-names \
     -cf "${WORK}/snap.tar" \
-    inv.db \
-    "$ENV_FILE" \
-    "$ASSETS_DIR"
+    "${TAR_PATHS[@]}"
 zstd -q -19 -o "${WORK}/snap.tar.zst" "${WORK}/snap.tar" \
     || fail "zstd compress failed" 10
 rm -f "${WORK}/snap.tar"
