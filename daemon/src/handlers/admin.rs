@@ -727,6 +727,32 @@ pub(crate) async fn dashboard(
         Vec::new()
     });
 
+    // Post-2026-05-22 — fleet-wide uptime tile. Loops `list_servers`
+    // and aggregates `uptime_for_server` for 24h / 7d / 30d. Loop
+    // (vs a single SUM-of-SUMs SQL helper) keeps it dead-simple +
+    // reuses the already-spec-tested per-server path; for ≤100
+    // servers in a homelab the N+1 query cost is negligible.
+    // Per-server detail page still gives drill-in.
+    let fleet_uptime = match state.inv.list_servers().await {
+        Ok(servers) => {
+            let mut rows: Vec<(
+                vpnctl_core::ServerId,
+                [Option<vpnctl_inventory::UptimeStat>; 3],
+            )> = Vec::with_capacity(servers.len());
+            for s in &servers {
+                let u24h = state.inv.uptime_for_server(&s.id, 24).await.ok();
+                let u7d = state.inv.uptime_for_server(&s.id, 24 * 7).await.ok();
+                let u30d = state.inv.uptime_for_server(&s.id, 24 * 30).await.ok();
+                rows.push((s.id.clone(), [u24h, u7d, u30d]));
+            }
+            rows
+        }
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet uptime) failed");
+            Vec::new()
+        }
+    };
+
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         h1.ed-art-h1 {
@@ -753,6 +779,7 @@ pub(crate) async fn dashboard(
             ))
         }
         (dashboard_metrics(&stats, lang))
+        (dashboard_fleet_uptime(&fleet_uptime, lang))
         (dashboard_vpn_activity(&live_activity, lang))
         (dashboard_alerts_tile(unacked_alerts, lang))
         (dashboard_limit_alerts(&alerting, lang))
@@ -760,6 +787,150 @@ pub(crate) async fn dashboard(
         (dashboard_audit(&audit, lang))
     };
     Ok(shell("dashboard", &theme, &accent, lang, body))
+}
+
+/// Colour bucket for an uptime percentage. Shared by the per-server
+/// `server_detail_uptime_section` chips and the dashboard-wide
+/// `dashboard_fleet_uptime` chips so palette stays in one place. The
+/// thresholds (≥99 green, ≥95 amber, <95 red, None grey) match Pavel's
+/// confirmed SLO buckets for sing-box service uptime.
+fn pct_color(pct: Option<u8>) -> &'static str {
+    match pct {
+        Some(p) if p >= 99 => "#2e7d32", // green
+        Some(p) if p >= 95 => "#e6a23c", // amber
+        Some(_) => "#c62828",            // red (incl. Some(0))
+        None => "var(--mute)",           // grey
+    }
+}
+
+/// Renders an uptime percent as the chip's visible text. `Some(p) →
+/// "p%"` (integer; see `UptimeStat::uptime_pct` doc for why integer
+/// vs decimal). `None → bilingual "— no data" / "— нет данных"` so
+/// the empty branch is visually distinct from `Some(0%)` (down-the-
+/// whole-window).
+fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
+    match pct {
+        Some(p) => format!("{p}%"),
+        None => crate::i18n::tr(lang, "— no data", "— нет данных").to_string(),
+    }
+}
+
+/// Fleet-wide uptime tile — dashboard companion to the per-server
+/// `server_detail_uptime_section`. Three chips (24h / 7d / 30d) each
+/// carrying the **fleet-weighted average** sing-box uptime%.
+///
+/// **Aggregation choice (probe-weighted, not server-equal-weighted):**
+/// SUM(up_rows across all servers) / SUM(decidable_rows across all servers).
+/// A server polled ½ as often contributes ½ as much to the average — this
+/// matches the per-server semantics (each chip already counts probe rows
+/// not server-days) and means a single fresh server with 1 probe doesn't
+/// drown out 3 mature servers with 600 probes each. Servers with zero
+/// decidable rows are silently excluded from BOTH numerator + denominator.
+///
+/// Renders ONLY when at least one server has at least one decidable
+/// probe in some window. Otherwise the section is omitted — the operator
+/// already gets «no servers polled yet» context from the absence of any
+/// per-server uptime data on /admin/servers detail pages.
+///
+/// Chip-click navigates to /admin/servers (list) — per-server drill-in
+/// lives there. Stable `data-fleet-uptime-pct` attribute for scrape
+/// targets + future SLO export.
+fn dashboard_fleet_uptime(
+    rows: &[(
+        vpnctl_core::ServerId,
+        [Option<vpnctl_inventory::UptimeStat>; 3],
+    )],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+
+    // Aggregate one window across all servers into (up_rows, total_decidable, n_servers).
+    // `total_decidable = total_rows - unknown_rows` — we exclude
+    // probes where sing_box_active is NULL (probe failed mid-flight)
+    // from BOTH halves of the ratio, matching `UptimeStat::uptime_pct`'s
+    // own definition. Server-count is also tallied so the chip footer
+    // can read «N/M servers polled».
+    let agg = |window_idx: usize| -> (u64, u64, usize) {
+        let mut up: u64 = 0;
+        let mut decidable: u64 = 0;
+        let mut polled_servers: usize = 0;
+        for (_, windows) in rows {
+            if let Some(stat) = windows[window_idx].as_ref() {
+                let dec = stat.total_rows.saturating_sub(stat.unknown_rows);
+                if dec > 0 {
+                    up = up.saturating_add(stat.up_rows);
+                    decidable = decidable.saturating_add(dec);
+                    polled_servers += 1;
+                }
+            }
+        }
+        (up, decidable, polled_servers)
+    };
+
+    let totals: [(u64, u64, usize); 3] = [agg(0), agg(1), agg(2)];
+    let total_servers = rows.len();
+
+    // Empty-fleet branch: NO server has decidable data in any window.
+    // Render nothing — quiet dashboard for an unpolled fleet.
+    if totals.iter().all(|(_, dec, _)| *dec == 0) {
+        return html! {};
+    }
+
+    let pct_for = |up: u64, dec: u64| -> Option<u8> {
+        if dec == 0 {
+            None
+        } else {
+            // u128 to be safe with very large probe counts;
+            // saturating cast back to u8 (% can't exceed 100).
+            let p = ((u128::from(up) * 100) / u128::from(dec)) as u64;
+            Some(p.min(100) as u8)
+        }
+    };
+
+    let chip = |label: &str, totals: (u64, u64, usize)| -> Markup {
+        let (up, dec, polled) = totals;
+        let pct = pct_for(up, dec);
+        let color = pct_color(pct);
+        let pct_text = pct_label(pct, lang);
+        // `data-fleet-uptime-pct` mirrors the per-server chip
+        // attribute — same scrape contract, different prefix.
+        let pct_attr = pct.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
+        html! {
+            div data-fleet-uptime-pct=(pct_attr)
+                style="display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid var(--rule); background: var(--paper); min-width: 120px;" {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" {
+                    (label)
+                }
+                div style=(format!("font-family: var(--serif); font-weight: 500; color: {color}; font-size: 22px; line-height: 1;")) {
+                    (pct_text)
+                }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                    (dec) " " (tr(lang, "probes", "проб"))
+                    " · " (polled) "/" (total_servers) " " (tr(lang, "polled", "опрош."))
+                }
+            }
+        }
+    };
+
+    html! {
+        section id="fleet-uptime" style="margin-top: 28px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Fleet uptime · sing-box services", "Аптайм флота · сервисы sing-box"))
+            }
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
+                (tr(
+                    lang,
+                    "Probe-weighted average across all polled servers. Drill into a server detail page for per-window breakdown + last outage.",
+                    "Среднее взвешенное по пробам со всех опрошенных серверов. На странице сервера — детальный разбор по окнам и время последнего инцидента.",
+                ))
+            }
+            div style="display: flex; gap: 12px; flex-wrap: wrap;" {
+                (chip(tr(lang, "last 24h", "24 часа"), totals[0]))
+                (chip(tr(lang, "last 7d",  "7 дней"),  totals[1]))
+                (chip(tr(lang, "last 30d", "30 дней"), totals[2]))
+            }
+        }
+    }
 }
 
 /// Phase G — single-line alerts tile under the metric row. Renders
@@ -9128,22 +9299,6 @@ fn server_detail_uptime_section(
         || u30d.is_some_and(|s| s.total_rows > 0);
     if !any_data {
         return html! {};
-    }
-
-    fn pct_color(pct: Option<u8>) -> &'static str {
-        match pct {
-            Some(p) if p >= 99 => "#2e7d32", // green
-            Some(p) if p >= 95 => "#e6a23c", // amber
-            Some(_) => "#c62828",            // red (incl. Some(0))
-            None => "var(--mute)",           // grey
-        }
-    }
-
-    fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
-        match pct {
-            Some(p) => format!("{p}%"),
-            None => tr(lang, "— no data", "— нет данных").to_string(),
-        }
     }
 
     let chip = |label: &str, stat: Option<&vpnctl_inventory::UptimeStat>| -> Markup {

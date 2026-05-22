@@ -11514,3 +11514,207 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
         "chip footer must show «N probes» count"
     );
 }
+
+// ── Phase H+ — dashboard FLEET uptime tile ──────────────────────────
+//
+// Companion to `server_detail_uptime_*` tests above. The dashboard
+// tile aggregates probe-weighted across all servers. Empty fleet =
+// section omitted; populated fleet = 3 chips with
+// `data-fleet-uptime-pct` attribute.
+
+#[tokio::test]
+async fn dashboard_fleet_uptime_section_omitted_when_no_servers_polled() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Add a server but write ZERO node_health rows. The aggregator
+    // must see «no decidable data anywhere» and suppress the section.
+    st.inv
+        .add_server(&Server {
+            id: ServerId("fresh".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("id=\"fleet-uptime\""),
+        "fleet-uptime section must NOT render when no server has decidable probes"
+    );
+    assert!(
+        !html.contains("Fleet uptime"),
+        "fleet-uptime eyebrow must NOT render when section is suppressed"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_fleet_uptime_section_renders_with_probe_data() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Two servers: alpha all-up (4 rows), bravo also all-up (3 rows).
+    // Aggregate = (4+3) up / (4+3) decidable = 100% in every window.
+    for (sid_s, n_rows) in [("alpha", 4), ("bravo", 3)] {
+        let sid = ServerId(sid_s.into());
+        st.inv
+            .add_server(&Server {
+                id: sid.clone(),
+                address: format!("203.0.113.{}", if sid_s == "alpha" { 1 } else { 2 }),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernels: vec![KernelId("sing-box".into())],
+                enabled_protocols: vec![],
+                trusted_host_fingerprint: None,
+                hoster: "generic".into(),
+                jump_via: None,
+                usage_coefficient: 1.0,
+            })
+            .await
+            .unwrap();
+        for _ in 0..n_rows {
+            st.inv
+                .record_node_health(
+                    &sid,
+                    Some(true),
+                    Some(true),
+                    Some(1024),
+                    Some(10240),
+                    Some(500),
+                    Some(1024),
+                    Some(50),
+                    Some("[\"tcp/443\"]"),
+                    Some(1024 * 1024),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // Section anchor + eyebrow present.
+    assert!(
+        html.contains("id=\"fleet-uptime\""),
+        "fleet-uptime section anchor must render"
+    );
+    assert!(
+        html.contains("Fleet uptime · sing-box services"),
+        "fleet-uptime EN eyebrow must render"
+    );
+    // 3 chips × 100% via the stable scrape attribute (not inline
+    // text — admin page has many unrelated «100%» substrings).
+    let pct_attr_count = html.matches("data-fleet-uptime-pct=\"100\"").count();
+    assert_eq!(
+        pct_attr_count, 3,
+        "all three fleet-uptime chips must carry data-fleet-uptime-pct=\"100\" \
+         (found {pct_attr_count})"
+    );
+    // Polled / total ratio chip footer must read «2/2 polled»
+    // (both seeded servers contributed probes).
+    assert!(
+        html.contains("2/2"),
+        "chip footer must show «2/2 polled» when both seeded servers contributed"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
+    // Mixed fleet: one server polled, one fresh. Aggregator should
+    // EXCLUDE the fresh one from the «polled» count (numerator)
+    // but INCLUDE it in the total-servers count (denominator) →
+    // footer reads «1/2 polled». Pins the «fresh server doesn't
+    // poison the average» guarantee from the doc-comment.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    for sid_s in ["polled", "fresh"] {
+        st.inv
+            .add_server(&Server {
+                id: ServerId(sid_s.into()),
+                address: format!("203.0.113.{}", if sid_s == "polled" { 11 } else { 12 }),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernels: vec![KernelId("sing-box".into())],
+                enabled_protocols: vec![],
+                trusted_host_fingerprint: None,
+                hoster: "generic".into(),
+                jump_via: None,
+                usage_coefficient: 1.0,
+            })
+            .await
+            .unwrap();
+    }
+    // Only «polled» gets probes.
+    let polled = ServerId("polled".into());
+    for _ in 0..5 {
+        st.inv
+            .record_node_health(
+                &polled,
+                Some(true),
+                Some(true),
+                Some(1024),
+                Some(10240),
+                Some(500),
+                Some(1024),
+                Some(50),
+                Some("[\"tcp/443\"]"),
+                Some(1024 * 1024),
+            )
+            .await
+            .unwrap();
+    }
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("id=\"fleet-uptime\""),
+        "fleet-uptime section must render when at least one server is polled"
+    );
+    assert!(
+        html.contains("1/2"),
+        "chip footer must show «1/2 polled» (one polled, one fresh)"
+    );
+    // The polled server is 100% → all 3 chips must read 100.
+    let pct_attr_count = html.matches("data-fleet-uptime-pct=\"100\"").count();
+    assert_eq!(
+        pct_attr_count, 3,
+        "all three chips must carry data-fleet-uptime-pct=\"100\" \
+         when the only polled server is 100% up"
+    );
+}
