@@ -11370,3 +11370,147 @@ async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribu
         "«likely user» cell must render «—» for orphan IP, got window: …{window}…"
     );
 }
+
+// ── Phase H+ — per-server uptime SLO section ─────────────────────────
+//
+// Two tests pin the section's render contract:
+//   1. Empty (no node_health rows) — section MUST NOT render. The
+//      hero already owns the «no probes yet» empty-state; stacking
+//      another would be noise. This is the «empty branch returns
+//      `html! {}`» guard.
+//   2. With probe rows — section renders with eyebrow + 3 chips
+//      labelled 24h/7d/30d + percent text «100%» (all-up).
+
+#[tokio::test]
+async fn server_detail_uptime_section_omitted_when_no_probes() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("nuevo".into()),
+            address: "203.0.113.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/nuevo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // The section's anchor id + eyebrow text are the canonical
+    // markers; both must be absent when there are no probes.
+    assert!(
+        !html.contains("id=\"uptime-section\""),
+        "uptime section must NOT render for a server with zero node_health rows"
+    );
+    assert!(
+        !html.contains("Uptime · sing-box service"),
+        "uptime section eyebrow must NOT render when section is suppressed"
+    );
+}
+
+#[tokio::test]
+async fn server_detail_uptime_section_renders_with_probe_data() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let sid = ServerId("with-data".into());
+    st.inv
+        .add_server(&Server {
+            id: sid.clone(),
+            address: "203.0.113.50".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // Seed 5 all-up probes. record_node_health uses ts=now so all
+    // will fall inside the 24h/7d/30d windows.
+    for _ in 0..5 {
+        st.inv
+            .record_node_health(
+                &sid,
+                Some(true),  // sing_box_active
+                Some(true),  // fail2ban_active
+                Some(1024),  // disk_used_mib
+                Some(10240), // disk_total_mib
+                Some(500),   // mem_available_mib
+                Some(1024),  // mem_total_mib
+                Some(50),    // load_1min_x100
+                Some("[\"tcp/443\",\"udp/8443\"]"),
+                Some(1024 * 1024),
+            )
+            .await
+            .unwrap();
+    }
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/with-data")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // Section anchor + eyebrow must both appear.
+    assert!(
+        html.contains("id=\"uptime-section\""),
+        "uptime section must render when probes exist"
+    );
+    assert!(
+        html.contains("Uptime · sing-box service"),
+        "eyebrow copy must render (EN default)"
+    );
+    // All three window labels must be present.
+    for chip in &["last 24h", "last 7d", "last 30d"] {
+        assert!(
+            html.contains(chip),
+            "chip label «{chip}» must render in uptime section"
+        );
+    }
+    // With 5 up probes + 0 down, all three chips MUST read 100%.
+    // We assert on the stable `data-uptime-pct="100"` attribute
+    // (review-agent NM-uptime catch) rather than scanning for the
+    // literal «100%» text — the admin page has 11+ unrelated
+    // `100%` substrings (CSS `width: 100%`, full-disk tile, etc.)
+    // and a regression where all three chips fell through to
+    // `None` could falsely pass an inline-text count.
+    let pct_attr_count = html.matches("data-uptime-pct=\"100\"").count();
+    assert_eq!(
+        pct_attr_count,
+        3,
+        "all three uptime chips must carry data-uptime-pct=\"100\" \
+         (found {pct_attr_count}); html len = {} bytes",
+        html.len()
+    );
+    // Probe count chip footer must mention «probes».
+    assert!(
+        html.contains("probes"),
+        "chip footer must show «N probes» count"
+    );
+}

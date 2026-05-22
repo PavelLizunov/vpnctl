@@ -335,6 +335,32 @@ pub struct NodeHealthRow {
     pub sing_box_log_bytes: Option<u64>,
 }
 
+/// Phase H+ — rolling-window aggregate computed by
+/// [`SqliteInventory::uptime_for_server`]. Pure data carrier — all
+/// derivation (chip colour, time-since-outage formatting) belongs
+/// in the UI layer.
+///
+/// `uptime_pct` is `Option<u8>` rather than e.g. `f32` because:
+///   * UI renders integer % (`99%`, never `98.7%`) — the 10-min
+///     probe cadence doesn't justify fractional precision and the
+///     extra digits would falsely imply otherwise. `u8` is cheaper
+///     to format + compare than a float.
+///   * `None` is a distinct state from `Some(0)` — the former means
+///     «no decidable data in window», the latter «server was DOWN
+///     for the entire window». Conflating them via a sentinel float
+///     (NaN, -1) loses signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UptimeStat {
+    pub window_hours: u32,
+    pub total_rows: u64,
+    pub up_rows: u64,
+    pub down_rows: u64,
+    pub unknown_rows: u64,
+    pub uptime_pct: Option<u8>,
+    pub last_outage_at: Option<DateTime<Utc>>,
+    pub last_probe_at: Option<DateTime<Utc>>,
+}
+
 /// Phase G — one operator-facing alert row.
 ///
 /// Written by `daemon::health_monitor` when a node_health snapshot
@@ -3230,6 +3256,90 @@ impl SqliteInventory {
         .fetch_optional(&self.pool)
         .await?;
         row_opt.map(row_to_node_health).transpose()
+    }
+
+    /// Phase H+ — uptime aggregation for the per-server detail page.
+    ///
+    /// Single SQL round-trip returns the rolling-window counts +
+    /// last-outage + last-probe timestamps over `window_hours`. The
+    /// UI builds three of these (24h, 7d, 30d) for one server with
+    /// effectively the cost of three indexed range scans against
+    /// `(server_id, ts)` — cheap even on the 632-row/day production
+    /// rate that the live `is` node generates today.
+    ///
+    /// Definitions:
+    ///   * "up" = `sing_box_active=1` — what users care about (the
+    ///     daemon serving VPN traffic).
+    ///   * "down" = `sing_box_active=0` — sing-box.service in any
+    ///     non-active state at probe time.
+    ///   * "unknown" = `sing_box_active IS NULL` — probe ran but
+    ///     couldn't decide (early-bootstrap row before sing-box was
+    ///     installed, or SSH probe partial-failure).
+    ///
+    /// `uptime_pct` excludes "unknown" from the denominator. A
+    /// freshly-added server whose only rows are unknown reports
+    /// `uptime_pct = None` rather than `0%`, which would be a wrong
+    /// alarm in the chip ("0% over 30d" looks dire — "no data"
+    /// is the honest answer).
+    pub async fn uptime_for_server(
+        &self,
+        server_id: &ServerId,
+        window_hours: u32,
+    ) -> Result<UptimeStat> {
+        let row = sqlx::query(
+            "SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN sing_box_active = 1 THEN 1 ELSE 0 END) AS up_count,
+                SUM(CASE WHEN sing_box_active = 0 THEN 1 ELSE 0 END) AS down_count,
+                SUM(CASE WHEN sing_box_active IS NULL THEN 1 ELSE 0 END) AS unknown_count,
+                MAX(CASE WHEN sing_box_active = 0 THEN ts ELSE NULL END) AS last_outage,
+                MAX(ts) AS last_probe
+             FROM node_health
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{window_hours} hours"))
+        .fetch_one(&self.pool)
+        .await?;
+
+        // `COUNT(*)` is always non-null; `SUM(...)` returns NULL
+        // when there are zero rows. `try_get` with default-on-NULL
+        // semantics avoids panicking on the empty-window case
+        // (server brand-new, no probes in this window).
+        let total: i64 = row.try_get("total").unwrap_or(0);
+        let up: i64 = row.try_get("up_count").unwrap_or(0);
+        let down: i64 = row.try_get("down_count").unwrap_or(0);
+        let unknown: i64 = row.try_get("unknown_count").unwrap_or(0);
+        let last_outage_s: Option<String> = row.try_get("last_outage").ok();
+        let last_probe_s: Option<String> = row.try_get("last_probe").ok();
+
+        // uptime% over decidable rows. None when no up+down rows.
+        let uptime_pct: Option<u8> = if up + down > 0 {
+            // u8 fits 0..=100 even with i64 inputs since we clamp.
+            Some(((up * 100) / (up + down)).clamp(0, 100) as u8)
+        } else {
+            None
+        };
+
+        // Strings from SQLite come back ISO-8601 UTC (the column is
+        // written that way by the writer). Parse → DateTime<Utc>.
+        let parse = |s: Option<String>| -> Option<DateTime<Utc>> {
+            s.as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&Utc))
+        };
+
+        Ok(UptimeStat {
+            window_hours,
+            total_rows: total.max(0) as u64,
+            up_rows: up.max(0) as u64,
+            down_rows: down.max(0) as u64,
+            unknown_rows: unknown.max(0) as u64,
+            uptime_pct,
+            last_outage_at: parse(last_outage_s),
+            last_probe_at: parse(last_probe_s),
+        })
     }
 
     /// Drop rows older than `days`. Wired by chunk 3 into the

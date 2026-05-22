@@ -8695,6 +8695,18 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Phase H+ — rolling uptime windows for the per-server SLO chip
+    // section. Three independent SQL aggregates (24h / 7d / 30d) —
+    // each is one indexed scan against `(server_id, ts)`. Failure
+    // → render an empty-state block, not 500: the rest of the page
+    // is still valuable when uptime is the broken part. Bonus: the
+    // 30d query is the only one whose denominator might be empty
+    // for a new server, which `UptimeStat.uptime_pct: Option<u8>`
+    // already encodes («None = no data» vs «Some(0) = was down»).
+    let uptime_24h = state.inv.uptime_for_server(&sid, 24).await.ok();
+    let uptime_7d = state.inv.uptime_for_server(&sid, 24 * 7).await.ok();
+    let uptime_30d = state.inv.uptime_for_server(&sid, 24 * 30).await.ok();
+
     // Phase 4b — server-wide live activity rollup (active conns
     // now, bytes up/down over the last 24h, last poll ts). Failure
     // → zero-default; the section still renders so the operator
@@ -8901,6 +8913,18 @@ pub(crate) async fn server_detail(
         // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
 
+        // Phase H+ — rolling uptime SLO (24h / 7d / 30d) over the
+        // probe data the hero showed «right-now». Renders nothing
+        // when ALL three windows have no data (fresh server, no
+        // probes yet — hero already covers that case with the
+        // empty-state).
+        (server_detail_uptime_section(
+            uptime_24h.as_ref(),
+            uptime_7d.as_ref(),
+            uptime_30d.as_ref(),
+            lang,
+        ))
+
         // Phase 4b — live activity tile (server-wide totals from
         // clash-api; per-user attribution blocked by NM-11 sing-box
         // upstream, dashboard tile shows zero «attributed users»
@@ -9040,9 +9064,192 @@ pub(crate) async fn server_detail(
     Ok(shell("servers", &theme, &accent, lang, body))
 }
 
+/// Phase H+ — rolling uptime SLO section. Three chips (24h / 7d /
+/// 30d) under the live-status hero. Reads `UptimeStat` values
+/// fetched in the handler (uptime_for_server SQL aggregate, one
+/// indexed range scan per window).
+///
+/// Renders NOTHING when all three windows have None — the hero
+/// already shows the «no probes yet» empty state and stacking
+/// another empty block would be UI noise.
+///
+/// Chip colour rules (per chip, independent of the others):
+///   * `Some(100)`          → green «100%» — perfect, no outages
+///   * `Some(>= 99)`        → green
+///   * `Some(>= 95)`        → amber
+///   * `Some(< 95)`         → red
+///   * `Some(0)`            → red «0%» (was DOWN for the entire
+///     window — distinct from None!)
+///   * `None`               → grey «— no data» (no decidable rows)
+///
+/// Display precision is **integer %** (formatted via `{p}%` on `u8`)
+/// — not one-decimal. `Option<u8>` carries enough resolution for the
+/// «pick a colour bucket» purpose without false-precision in the
+/// rendered chip («99%» vs «98.7%» — the latter implies precision
+/// the 10-min poll cadence simply doesn't deliver).
+///
+/// Last-outage display: shows ISO timestamp of the most recent
+/// `sing_box_active=0` row across ALL THREE windows (the widest is
+/// 30d so it captures any). Renders only if found.
+///
+/// Last-probe staleness: if the most recent probe across all three
+/// windows is older than 1200s (= 2× the DEFAULT 600s probe
+/// interval), render an amber «poller may be stale» footer. The
+/// threshold is hardcoded rather than reading
+/// `VPNCTLD_NODE_PROBE_INTERVAL_SECS` from env — the env override
+/// is daemon-startup only and the UI would have to observe its
+/// own process to read it. **Caveat:** if the operator has set
+/// `VPNCTLD_NODE_PROBE_INTERVAL_SECS=1800` or higher, this 1200s
+/// threshold will false-positive the «stale» chip after the first
+/// natural-interval tick. Acceptable today (production runs with
+/// the default 600s) — file a follow-up if Pavel ever raises the
+/// interval persistently.
+fn server_detail_uptime_section(
+    u24h: Option<&vpnctl_inventory::UptimeStat>,
+    u7d: Option<&vpnctl_inventory::UptimeStat>,
+    u30d: Option<&vpnctl_inventory::UptimeStat>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+
+    // Don't render the section when there's literally no data:
+    //   * All three queries failed → suppress (DB error path).
+    //   * All three returned `total_rows == 0` → suppress (the
+    //     hero already shows «no probes yet» — stacking another
+    //     empty block would be UI noise).
+    //
+    // Subtlety: `uptime_for_server` returns `Ok(UptimeStat { 0,
+    // 0, 0, ... })` for an empty window — it does NOT return
+    // `Err`. So an `is_none()` check on the Option would always
+    // be false in practice (only Err → None via `.ok()`). The
+    // load-bearing check is on `total_rows`.
+    let any_data = u24h.is_some_and(|s| s.total_rows > 0)
+        || u7d.is_some_and(|s| s.total_rows > 0)
+        || u30d.is_some_and(|s| s.total_rows > 0);
+    if !any_data {
+        return html! {};
+    }
+
+    fn pct_color(pct: Option<u8>) -> &'static str {
+        match pct {
+            Some(p) if p >= 99 => "#2e7d32", // green
+            Some(p) if p >= 95 => "#e6a23c", // amber
+            Some(_) => "#c62828",            // red (incl. Some(0))
+            None => "var(--mute)",           // grey
+        }
+    }
+
+    fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
+        match pct {
+            Some(p) => format!("{p}%"),
+            None => tr(lang, "— no data", "— нет данных").to_string(),
+        }
+    }
+
+    let chip = |label: &str, stat: Option<&vpnctl_inventory::UptimeStat>| -> Markup {
+        let pct = stat.and_then(|s| s.uptime_pct);
+        let color = pct_color(pct);
+        let pct_text = pct_label(pct, lang);
+        let row_count: u64 = stat.map(|s| s.total_rows).unwrap_or(0);
+        let down_count: u64 = stat.map(|s| s.down_rows).unwrap_or(0);
+        // `data-uptime-pct` is a stable scrape-target for admin_smoke
+        // tests + a future operator tool that wants to extract SLOs
+        // without parsing the CSS. The value is the raw u8 or the
+        // literal string "none" for the no-data branch. Choosing the
+        // attribute over inline-text means the test can't false-pass
+        // on unrelated `100%` substrings elsewhere on the page (e.g.
+        // disk-pressure tile at 100%).
+        let pct_attr = pct.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
+        html! {
+            div data-uptime-pct=(pct_attr)
+                style="display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid var(--rule); background: var(--paper); min-width: 110px;" {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" {
+                    (label)
+                }
+                div style=(format!("font-family: var(--serif); font-weight: 500; color: {color}; font-size: 22px; line-height: 1;")) {
+                    (pct_text)
+                }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                    (row_count) " " (tr(lang, "probes", "проб"))
+                    @if down_count > 0 {
+                        " · " (down_count) " " (tr(lang, "down", "падений"))
+                    }
+                }
+            }
+        }
+    };
+
+    // Pick the most recent outage across all three windows (30d is
+    // widest, so if it has one, that's our answer; fall through if
+    // somehow the wider window missed but a narrower didn't).
+    let last_outage = u30d
+        .and_then(|s| s.last_outage_at)
+        .or_else(|| u7d.and_then(|s| s.last_outage_at))
+        .or_else(|| u24h.and_then(|s| s.last_outage_at));
+
+    // Most recent probe (any state). For staleness chip.
+    let last_probe = u24h
+        .and_then(|s| s.last_probe_at)
+        .or_else(|| u7d.and_then(|s| s.last_probe_at))
+        .or_else(|| u30d.and_then(|s| s.last_probe_at));
+
+    let stale = last_probe
+        .map(|ts| (chrono::Utc::now() - ts).num_seconds() > 1200)
+        .unwrap_or(false);
+
+    html! {
+        div #uptime-section style="margin-top: 18px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Uptime · sing-box service", "Uptime · сервис sing-box"))
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 4px 0 12px;" {
+                (tr(
+                    lang,
+                    "Rolling-window aggregate over `sing_box_active` from the node_probe poller (10-min default tick). \u{00ab}up\u{00bb} = systemctl reports active at probe time. Unknown probes (e.g. probe ran but sing-box wasn't installed yet) are excluded from the denominator.",
+                    "Скользящие окна агрегата `sing_box_active` от node_probe-поллера (по умолчанию тик 10 минут). \u{00ab}up\u{00bb} = systemctl показал active в момент пробы. Неопределённые пробы (например проба прошла а sing-box ещё не установлен) не учитываются в знаменателе.",
+                ))
+            }
+            div style="display: flex; gap: 12px; flex-wrap: wrap;" {
+                (chip(tr(lang, "last 24h", "24 часа"), u24h))
+                (chip(tr(lang, "last 7d",  "7 дней"),  u7d))
+                (chip(tr(lang, "last 30d", "30 дней"), u30d))
+            }
+            @if last_outage.is_some() || stale {
+                div style="margin-top: 12px; font-family: var(--mono); font-size: 11px; color: var(--mute); display: flex; flex-direction: column; gap: 4px;" {
+                    @if let Some(ts) = last_outage {
+                        @let mins = chrono::Utc::now().signed_duration_since(ts).num_minutes().max(0);
+                        div {
+                            (tr(lang, "Last outage observed: ", "Последнее падение: "))
+                            span style="color: var(--ink);" { (ts.format("%Y-%m-%d %H:%M UTC").to_string()) }
+                            " ("
+                            @if mins < 60 {
+                                (mins) " " (tr(lang, "min ago", "мин назад"))
+                            } @else if mins < 24 * 60 {
+                                (mins / 60) " " (tr(lang, "h ago", "ч назад"))
+                            } @else {
+                                (mins / (24 * 60)) " " (tr(lang, "d ago", "д назад"))
+                            }
+                            ")"
+                        }
+                    }
+                    @if stale {
+                        div style="color: #e6a23c;" {
+                            (tr(
+                                lang,
+                                "Most recent probe is >20 min old — poller may be stalled. Check journalctl on 236.",
+                                "Последняя проба старше 20 минут — поллер может быть остановлен. Проверь journalctl на 236.",
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Hero block — most-recent probe at-a-glance KPIs, OR an empty state
-/// pointing at chunk 4 (the not-yet-shipped poller) so the operator
-/// knows WHY the box is empty.
+/// describing why the box is empty (no probe data yet — either fresh
+/// server, deploy key not pushed, or poller not running).
 fn server_detail_hero(
     latest: &Option<vpnctl_inventory::NodeHealthRow>,
     server: &vpnctl_core::Server,
