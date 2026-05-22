@@ -4607,6 +4607,216 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     resp
 }
 
+/// `POST /admin/backup/self-test` — restore fire-drill.
+///
+/// Picks the most recent local snapshot in `DEFAULT_BACKUP_DIR`,
+/// runs [`vpnctl_inventory::verify_snapshot`] on it (which copies
+/// it into a per-call tmpfile + replays migrations + queries data
+/// presence metrics) and renders the report inline as HTML.
+///
+/// This is the «is our DR insurance actually valid?» button —
+/// converts the periodic-bit-rot risk from «catches it the day 236
+/// burns» to «catches it the next time the operator clicks the
+/// button». Future work (cron-scheduled run + Telegram alert on
+/// Fail) layers on top of this same primitive.
+///
+/// Audit row written every invocation with the report status; one
+/// place an operator (or post-mortem) can see the history.
+pub(crate) async fn backup_self_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
+    let snapshots = match vpnctl_inventory::list_snapshots(&backup_dir) {
+        Ok(list) => list,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let Some(latest) = snapshots.into_iter().next() else {
+        return error_resp(
+            StatusCode::CONFLICT,
+            "no snapshot to verify yet — click 'snapshot now' on /admin/settings first, \
+             or wait for the hourly scheduler to fire",
+        );
+    };
+    // Run + audit on EVERY attempt (incl. Err) so post-mortem replay
+    // sees the operator's click even when verify itself broke. TOCTOU
+    // friendliness: the snapshot can be pruned between `list_snapshots`
+    // and `verify_snapshot` — return 409 in that narrow case rather
+    // than a misleading 500.
+    let verify_result = vpnctl_inventory::verify_snapshot(&latest.path).await;
+    match &verify_result {
+        Ok(report) => {
+            if let Err(e) = state
+                .inv
+                .audit(
+                    "admin",
+                    "backup.self_test",
+                    Some(&latest.file_name),
+                    Some(&serde_json::json!({
+                        "snapshot_path": &report.snapshot_path,
+                        "snapshot_age_seconds": report.snapshot_age_seconds,
+                        "overall": report.overall.label(),
+                        "duration_ms": report.duration_ms,
+                        "user_count": report.user_count,
+                        "server_count": report.server_count,
+                        "grant_count": report.grant_count,
+                    })),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target = "vpnctld::backup",
+                    error = %e,
+                    "audit write failed for backup.self_test"
+                );
+            }
+        }
+        Err(err) => {
+            if let Err(e) = state
+                .inv
+                .audit(
+                    "admin",
+                    "backup.self_test",
+                    Some(&latest.file_name),
+                    Some(&serde_json::json!({
+                        "overall": "error",
+                        "error": err.to_string(),
+                    })),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target = "vpnctld::backup",
+                    error = %e,
+                    "audit write failed for backup.self_test (err branch)"
+                );
+            }
+        }
+    }
+
+    let report = match verify_result {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("stat snapshot") {
+                return error_resp(
+                    StatusCode::CONFLICT,
+                    "snapshot vanished between list and verify — click 'run restore self-test' again",
+                );
+            }
+            return internal_error(anyhow::Error::new(e));
+        }
+    };
+
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+    let body = render_self_test_report(&report, lang);
+    shell("settings", &theme, &accent, lang, body).into_response()
+}
+
+/// Render the HTML body for the self-test result page. Pulled out
+/// so a future «show last result on /admin/settings» pass can reuse
+/// it without re-fetching the report.
+fn render_self_test_report(
+    report: &vpnctl_inventory::SelfTestReport,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use vpnctl_inventory::CheckStatus;
+    let overall_color = match report.overall {
+        // Inline hex (not CSS vars): `--ok` and `--warn` aren't in
+        // admin.css today and inlining keeps the self-test page's
+        // colour palette self-contained. `--red` IS defined but we
+        // keep the literal here for symmetry with the other two.
+        CheckStatus::Ok => "#2e7d32",
+        CheckStatus::Warn => "#e6a23c",
+        CheckStatus::Fail => "#c62828",
+    };
+    let overall_label = match report.overall {
+        CheckStatus::Ok => tr(lang, "PASS", "ПРОЙДЕНО"),
+        CheckStatus::Warn => tr(
+            lang,
+            "PASS · with warnings",
+            "ПРОЙДЕНО · с предупреждениями",
+        ),
+        CheckStatus::Fail => tr(lang, "FAIL", "ПРОВАЛ"),
+    };
+    let age_str = match report.snapshot_age_seconds {
+        Some(s) if s < 3600 => format!("{} min", s / 60),
+        Some(s) if s < 86400 => format!("{} h", s / 3600),
+        Some(s) => format!("{} d", s / 86400),
+        None => tr(lang, "(unknown)", "(неизвестно)").to_string(),
+    };
+    html! {
+        h1 style="font-family: var(--serif); font-weight: 400; margin: 24px 0 4px;" {
+            (tr(lang, "Restore self-test", "Самопроверка восстановления"))
+        }
+        p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 0 0 18px;" {
+            (tr(
+                lang,
+                "Did the latest snapshot actually restore into a usable database? Run on every operator click; cron-schedulable next.",
+                "Восстанавливается ли последний снэпшот в рабочую БД? Запускается по клику оператора; cron-расписание — следующий шаг.",
+            ))
+        }
+        div style=(format!(
+            "display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; padding: 12px 14px; border: 2px solid {overall_color}; background: var(--paper); margin-bottom: 20px;"
+        )) {
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" { (tr(lang, "overall", "итог")) }
+            div style=(format!("font-family: var(--serif); font-weight: 500; color: {overall_color};")) { (overall_label) }
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" { (tr(lang, "snapshot", "снэпшот")) }
+            div style="font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere;" { (report.snapshot_path) }
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" { (tr(lang, "age", "возраст")) }
+            div style="font-family: var(--mono); font-size: 12px;" { (age_str) }
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" { (tr(lang, "duration", "длительность")) }
+            div style="font-family: var(--mono); font-size: 12px;" { (report.duration_ms) " ms" }
+        }
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Per-check results", "Результаты проверок")) }
+        table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; margin-top: 10px;" {
+            thead {
+                tr style="border-bottom: 1px solid var(--ink);" {
+                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                        (tr(lang, "check", "проверка"))
+                    }
+                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                        (tr(lang, "status", "статус"))
+                    }
+                    th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                        (tr(lang, "detail", "детали"))
+                    }
+                }
+            }
+            tbody {
+                @for c in &report.checks {
+                    @let color = match c.status {
+                        CheckStatus::Ok => "var(--ok, #2e7d32)",
+                        CheckStatus::Warn => "var(--warn, #e6a23c)",
+                        CheckStatus::Fail => "var(--red, #c62828)",
+                    };
+                    tr style="border-bottom: 1px dotted var(--rule);" {
+                        td style="padding: 6px 8px;" { (c.name) }
+                        td style=(format!("padding: 6px 8px; font-weight: 500; color: {color};")) {
+                            (c.status.label().to_uppercase())
+                        }
+                        td style="padding: 6px 8px;" { (c.detail) }
+                    }
+                }
+            }
+        }
+        div style="margin-top: 24px; display: flex; gap: 12px;" {
+            form method="post" action="/admin/backup/self-test" style="display: inline;" {
+                button type="submit"
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (tr(lang, "run again", "запустить снова"))
+                }
+            }
+            a href="/admin/settings#backups-section"
+              style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                (tr(lang, "back to Settings", "назад к настройкам"))
+            }
+        }
+    }
+}
+
 /// Strict accept for snapshot filename — only the EXACT pattern the
 /// scheduler emits passes. Delegates to
 /// `vpnctl_inventory::parse_snapshot_filename` so the validator stays
@@ -6514,7 +6724,7 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                 " рядом со снэпшотом и скопируй на USB / Forgejo / облако / куда доверяешь. Демон сам никуда не пушит.",
             ))
         }
-        div style="display: flex; gap: 12px; align-items: center; margin-bottom: 14px;" {
+        div style="display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap;" {
             form method="post" action="/admin/backup/snapshot" style="display: inline;" {
                 button type="submit"
                        title=(crate::i18n::tr(
@@ -6526,16 +6736,29 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас"))
                 }
             }
+            // Phase 5c — restore self-test button. Operator clicks →
+            // verify_snapshot runs against the latest snapshot in a
+            // tempdir → /admin/backup/self-test renders a pass/fail
+            // HTML report (no SSE — completes in <1s for our DB size).
+            form method="post" action="/admin/backup/self-test" style="display: inline;" {
+                button type="submit"
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Run restore fire-drill against the latest snapshot — does it actually restore into a usable DB? Safe to click any time; does NOT touch live inv.db.",
+                           "Запустить проверку восстановления на последнем снэпшоте — реально ли он восстанавливается в рабочую БД? Безопасно нажимать в любой момент; живую inv.db не трогает.",
+                       ))
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (crate::i18n::tr(lang, "run restore self-test", "проверить восстановление"))
+                }
+            }
             span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                (crate::i18n::tr(lang, "Restore is a ", "Восстановление — это команда "))
+                (crate::i18n::tr(lang, "Restore-in-place is a ", "Восстановление поверх живой БД — это команда "))
                 span.ed-mono { "vpnctl restore <snapshot>" }
                 (crate::i18n::tr(
                     lang,
-                    " CLI command — the daemon can't replace its own open DB while it's holding it. See doc-comment in ",
-                    " в CLI — демон не может заменить свою же открытую БД пока её держит. См. doc-comment в ",
+                    " CLI command (daemon can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
+                    " в CLI (демон не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
                 ))
-                span.ed-mono { "crates/inventory/src/backup.rs" }
-                "."
             }
         }
         @match snapshots {

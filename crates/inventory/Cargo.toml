@@ -25,9 +25,14 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
 ] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+# Phase 5c — restore self-test uses `NamedTempFile` to copy the
+# snapshot to a per-call scratch path BEFORE running the migrator
+# against it. Promoted from dev-dependencies (where it was used by
+# the snapshot tests) to a real dep so the self-test code path can
+# rely on RAII-style cleanup.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }

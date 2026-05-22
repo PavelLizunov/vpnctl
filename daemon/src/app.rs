@@ -960,6 +960,16 @@ fn admin_router(state: AppState) -> Router {
             "/admin/backup/download/{name}",
             get(admin::backup_download),
         )
+        // Phase 5c — restore self-test. POST runs `verify_snapshot`
+        // against the latest local snapshot in a tempdir (no touch
+        // to live inv.db) and renders an HTML report. URL is
+        // bookmarkable so the operator can browser-back to a stale
+        // report if they realise mid-investigation they wanted to
+        // compare with the previous run.
+        .route(
+            "/admin/backup/self-test",
+            post(admin::backup_self_test),
+        )
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);
