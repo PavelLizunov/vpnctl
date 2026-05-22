@@ -3445,6 +3445,36 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Ack EVERY currently-unacked alert in one UPDATE. Used by the
+    /// «ack all (N)» button on /admin/alerts so the operator can
+    /// clear a triaged backlog without 30 individual clicks.
+    ///
+    /// Returns the count of rows affected — caller uses it for the
+    /// audit row + the success-banner («acked N alerts»).
+    ///
+    /// **Contract:** the UPDATE filters `WHERE acked_at IS NULL` so
+    /// historical acks (already inside the 30-day retention window)
+    /// are NOT touched — `acked_at` keeps its original timestamp, not
+    /// the bulk-ack's «now». Pinned by
+    /// `ack_all_unacked_alerts_preserves_existing_ack_timestamps`.
+    ///
+    /// **No `WHERE kind = …` overload yet** — Pavel's «33 stale
+    /// suspicious_local_ip alerts» fire-drill (2026-05-22) is the
+    /// only use case so far and it wants to clear everything; a
+    /// per-kind variant can land when there's a second use case to
+    /// motivate it. The endpoint stays a POST with no body to keep
+    /// the contract «ack all» rather than «ack subset».
+    pub async fn ack_all_unacked_alerts(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE admin_alerts
+             SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE acked_at IS NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Fire-once-per-condition variant of [`insert_alert`].
     ///
     /// Insert a new alert row ONLY if there is no currently-unacked row

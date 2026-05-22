@@ -918,15 +918,44 @@ get oriented without reading the whole methodology block.
     self-test, CI-protected byte-equality via `daemon/tests/restore_e2e.rs`,
     Disaster Recovery section in /admin/settings consolidating the «what to
     do if 236 burns» story. See **DR-5** row in Roadmap.
-  - ⏳ L7 methodology fix: `vpnctl migrate from-bash --overwrite-existing`
-    must require explicit confirmation when `Server.address` changes.
-    Caught the hard way (vps-is-01 ↔ 104 cross-overwrite, 2026-05-17).
-    Resolution: `--i-really-mean-overwrite-address` flag shipped in `0068c8f`
-    (the L7 row in Roadmap is ✅ — this v0.8 line is stale).
-  - ⏳ `vpnctl server set-fingerprint <id>` CLI + web action — today
-    operators run raw SQL (noted in `docs/AUTONOMOUS_PLAN.md:273`).
+  - ✅ L7 methodology fix: `vpnctl migrate from-bash --overwrite-existing`
+    requires `--i-really-mean-overwrite-address` flag when `Server.address`
+    changes (shipped `0068c8f`, see L7 row in Roadmap). Stale line cleaned
+    2026-05-22.
+  - ✅ `vpnctl server set-fingerprint <id>` CLI + web action — shipped
+    `2fda5c6` (2026-05-17) + `ec275c5` (2026-05-18, extracted
+    `vpnctl-host-fingerprint` crate as single source of truth shared
+    between CLI + admin handler). `/admin/servers/{id}` exposes both an
+    «auto-detect via ssh-keyscan →» button + a «pin manually» input;
+    both POST to `/admin/servers/{id}/set-fingerprint`, audit emits
+    `server.set_fingerprint` with `{fingerprint, previous, source}`
+    payload. Verified live 2026-05-22: all 3 prod servers (de/fi/is)
+    pinned, no operator ever needs to drop to raw SQL or CLI for this.
+    The AUTONOMOUS_PLAN.md:273 «raw SQL workaround» note is HISTORICAL —
+    that was the 2026-05-16 fire-drill day, the proper feature shipped
+    the day after. Memory was stale.
   - ⏳ `decode_form_value` UTF-8 fix (3 call sites, masked today by
-    validators — deferred minor from `e250789` audit).
+    validators — deferred minor from `e250789` audit). **Re-verify before
+    treating as open:** if validators now block non-ASCII inputs (which
+    seemed the case in NM-13 NM rollup), this is no longer a latent
+    bug.
+  - ✅ Bulk-ack of admin_alerts via web — shipped 2026-05-22.
+    `POST /admin/alerts/ack-all` + «ack all (N)» button on /admin/alerts
+    header (renders only when `unacked_total > 0`, double-submit
+    confirm via JS). Inventory helper `ack_all_unacked_alerts()` does
+    one indexed UPDATE; preserves existing acked_at timestamps; audits
+    `alerts.ack_all` with `{count}` only when count > 0 (audit-on-
+    actual-mutation NM-10 contract). Trigger: 2026-05-22 fire-drill
+    where 33 `sub_access.suspicious_local_ip` alerts had accumulated
+    from legit LAN testing (claude-chat curl runs into /sub/* are real
+    LAN access → real alert per /sub fetch + user, but Pavel-the-tester
+    knew it was him). Pre-bulk-ack workaround was raw SQL (CLI
+    exception per «web is THE operator surface»). Live-used the new
+    button to clean the 33 backlog + 2 visual-demo seeds. Review-agent
+    1 important catch (JS apostrophe escape — added
+    `js_single_quote_escape` helper + forward-compat smoke test that
+    asserts inner confirm() body has 0 bare apostrophes, so a future
+    `don't` in translated copy can't silently break the dialog).
   - ⏳ NM-11: file the 1-line upstream PR against sing-box to add
     `"user": t.Metadata.User` in `TrackerMetadata.MarshalJSON`. Until
     accepted, per-user clash-api attribution stays NULL.

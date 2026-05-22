@@ -911,6 +911,7 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts", get(admin::alerts))
         .route("/admin/alerts/", get(admin::alerts))
         .route("/admin/alerts/{id}/ack", post(admin::alert_ack))
+        .route("/admin/alerts/ack-all", post(admin::alert_ack_all))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
         // Phase 3c — Settings GeoIP «update now» SSE source. Streams

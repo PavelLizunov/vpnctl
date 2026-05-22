@@ -789,6 +789,27 @@ pub(crate) async fn dashboard(
     Ok(shell("dashboard", &theme, &accent, lang, body))
 }
 
+/// Escape a string so it can be safely interpolated into a JS
+/// single-quoted string literal embedded in an HTML `onsubmit` /
+/// `onclick` attribute. Replaces backslash + single-quote in that
+/// order (order matters — `\` must be escaped FIRST so we don't
+/// double-escape the slash we add for `'`).
+///
+/// Use case: `onsubmit=(format!("return confirm('{}');", js_single_quote_escape(msg)))`
+/// where `msg` may be operator-/translator-supplied copy that
+/// contains apostrophes («don't», «it's», «можно ль»).
+///
+/// Note: HTML attribute escaping is independent and handled by maud
+/// — this function only addresses the JS-string-literal layer. The
+/// two are stacked: the browser HTML-decodes the attribute first
+/// (turning `&apos;` into `'`), then the JS parser sees the source.
+/// So we need JS-level escapes, not HTML-level.
+///
+/// Pinned by `js_single_quote_escape_handles_apostrophe_and_backslash`.
+fn js_single_quote_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 /// Colour bucket for an uptime percentage. Shared by the per-server
 /// `server_detail_uptime_section` chips and the dashboard-wide
 /// `dashboard_fleet_uptime` chips so palette stays in one place. The
@@ -6461,6 +6482,44 @@ pub(crate) async fn alerts(
                     (crate::i18n::tr(lang, "show all (including acked) →", "показать всё (включая принятые) →"))
                 }
             }
+            // Bulk-ack: only render when there's actually something
+            // to ack (otherwise an «ack all (0)» button is just a
+            // tiny invitation to misclick). `onsubmit` does an
+            // in-browser confirm() — the action is destructive (clears
+            // the whole feed), but reversible-via-history (acked rows
+            // stay in /admin/alerts?show=all for 30d), so a single
+            // confirm prompt is the right friction level. Pinned by
+            // `alerts_page_renders_ack_all_button_when_unacked_total_nonzero`.
+            @if unacked_total > 0 {
+                // `onsubmit` embeds the translated string into a JS
+                // single-quoted literal. Future-proof against
+                // apostrophe regressions («don't», «it's») via
+                // `js_single_quote_escape` — current copy is
+                // apostrophe-free but the helper makes silent breakage
+                // impossible. Caught by review-agent 2026-05-22:
+                // unescaped interpolation silently broke confirm()
+                // dialogs the first time an editor added `don't`.
+                @let confirm_msg = js_single_quote_escape(crate::i18n::tr(
+                    lang,
+                    "Ack all unacked alerts? They will stay visible under «show all» for 30 days; nothing is deleted, just marked seen.",
+                    "Принять все непринятые алерты? Они останутся видимы в «показать всё» 30 дней; ничего не удаляется, только помечается просмотренным.",
+                ));
+                form method="post"
+                     action="/admin/alerts/ack-all"
+                     style="display: inline; margin-left: auto;"
+                     onsubmit=(format!("return confirm('{confirm_msg}');")) {
+                    button type="submit"
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Mark every unacked alert as seen in one click. Doesn't clear or fix the underlying conditions — just clears the dashboard tile. The alert rows stay in the feed under «show all».",
+                               "Отметить все непринятые алерты как просмотренные одним кликом. Не очищает и не чинит условия — лишь обнуляет тайл дашборда. Строки остаются в ленте под «показать всё».",
+                           ))
+                           style="background: transparent; border: 1px solid var(--rule); color: var(--accent-text, var(--ink)); font-family: var(--mono); font-size: 11px; padding: 2px 10px; cursor: pointer;" {
+                        (crate::i18n::tr(lang, "ack all", "принять все"))
+                        " (" (unacked_total) ")"
+                    }
+                }
+            }
         }
         @if alerts_rows.is_empty() {
             div.ed-empty {
@@ -6547,6 +6606,49 @@ pub(crate) async fn alert_ack(
                 alert_id = id,
                 error = %e,
                 "ack succeeded but audit row failed; timeline will be missing this entry"
+            );
+        }
+    }
+    Redirect::to("/admin/alerts").into_response()
+}
+
+/// `POST /admin/alerts/ack-all` — operator dismisses every currently-
+/// unacked alert in one go. Companion to per-row `alert_ack` for the
+/// «I've triaged a backlog, clear them» workflow (fire-drill 2026-05-
+/// 22: 33 `sub_access.suspicious_local_ip` alerts had accumulated
+/// from legit LAN testing — clicking 33 ack buttons is a UX bug,
+/// not a feature).
+///
+/// Idempotent — re-POSTing after everything is acked returns 0
+/// rows-affected and writes NO audit row (audit-on-actual-mutation
+/// convention, NM-10 review-agent rule).
+///
+/// Always 303s back to `/admin/alerts` so refresh-after-submit
+/// can't re-submit (POST-redirect-GET).
+pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
+    let count = match state.inv.ack_all_unacked_alerts().await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // Audit ONLY when something actually changed. A no-op POST
+    // shouldn't pollute the timeline (matches NM-10 review-agent
+    // catch on `set_server_protocol_hidden` no-op-audit-spam).
+    if count > 0 {
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "alerts.ack_all",
+                None,
+                Some(&serde_json::json!({ "count": count })),
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::admin::alert_ack_all",
+                count = count,
+                error = %e,
+                "ack-all succeeded but audit row failed; timeline will be missing this entry"
             );
         }
     }

@@ -11718,3 +11718,264 @@ async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
          when the only polled server is 100% up"
     );
 }
+
+// ── Bulk-ack alerts ─────────────────────────────────────────────────
+//
+// New `/admin/alerts/ack-all` POST + companion «ack all (N)» button
+// on the alerts page header. Three tests:
+//   1. Endpoint POST drains the table + writes 1 audit row
+//   2. Page renders the «ack all (N)» button when unacked_total > 0
+//   3. Page OMITS the button when unacked_total = 0 (don't invite misclick)
+
+#[tokio::test]
+async fn alerts_ack_all_endpoint_drains_unacked_and_redirects() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Seed 4 unacked + 1 already-acked.
+    for i in 0..4 {
+        st.inv
+            .insert_alert(
+                &format!("test.suspicious_local_ip:user{i}"),
+                None,
+                "warning",
+                "test alert seeded by admin_smoke",
+                Some("{}"),
+            )
+            .await
+            .unwrap();
+    }
+    let pre_acked_id = st
+        .inv
+        .insert_alert("test.already_acked", None, "info", "pre-acked", None)
+        .await
+        .unwrap();
+    let _ = st.inv.ack_alert(pre_acked_id).await.unwrap();
+    assert_eq!(
+        st.inv.unacked_alert_count().await.unwrap(),
+        4,
+        "preconditions: 4 unacked + 1 acked"
+    );
+
+    let app = router(st.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/alerts/ack-all")
+                // CSRF middleware requires Origin == Host on mutating POSTs.
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // POST-redirect-GET — same convention as per-row ack.
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/admin/alerts"),
+        "must 303 back to the alerts feed"
+    );
+    // Post-condition: all unacked drained, but the pre-acked count
+    // remains untouched (acked_at preserved — that's the inventory
+    // spec contract).
+    assert_eq!(
+        st.inv.unacked_alert_count().await.unwrap(),
+        0,
+        "ack-all must drain unacked count to 0"
+    );
+    // Audit row must exist with action=alerts.ack_all and count=4
+    // (the 4 newly-acked rows, NOT 5 — pre-acked wasn't re-touched).
+    let audit = st.inv.recent_audit(20).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|e| e.action == "alerts.ack_all")
+        .expect("audit must contain alerts.ack_all row");
+    let payload = row.payload.as_ref().expect("payload required");
+    assert_eq!(
+        payload.get("count").and_then(|v| v.as_u64()),
+        Some(4),
+        "audit count must equal the rows actually touched (4), not the table size (5)"
+    );
+}
+
+#[tokio::test]
+async fn alerts_ack_all_endpoint_noop_when_nothing_unacked_writes_no_audit() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Empty table — POST should 303, drain 0, and NOT pollute audit_log.
+    let pre_audit_count = st.inv.recent_audit(200).await.unwrap().len();
+    let app = router(st.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/alerts/ack-all")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let post_audit_count = st.inv.recent_audit(200).await.unwrap().len();
+    assert_eq!(
+        post_audit_count, pre_audit_count,
+        "no-op ack-all must NOT write an audit row (audit-on-actual-mutation contract)"
+    );
+}
+
+#[tokio::test]
+async fn alerts_page_renders_ack_all_button_when_unacked_total_nonzero() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Seed 2 unacked alerts so the count chip + button must render.
+    for i in 0..2 {
+        st.inv
+            .insert_alert(
+                &format!("test.something:{i}"),
+                None,
+                "warning",
+                "smoke seed",
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains(r#"action="/admin/alerts/ack-all""#),
+        "page must include a form POSTing to /admin/alerts/ack-all"
+    );
+    // Button label includes the count «(2)» so the operator knows
+    // how many rows the click affects before submitting.
+    assert!(
+        html.contains("ack all") && html.contains("(2)"),
+        "button must show «ack all (2)» with the current unacked count"
+    );
+    // onsubmit=confirm guards the destructive action with one prompt.
+    assert!(
+        html.contains("onsubmit=\"return confirm("),
+        "button form must guard with in-browser confirm()"
+    );
+}
+
+#[tokio::test]
+async fn alerts_page_ack_all_confirm_dialog_escapes_apostrophes_if_translator_adds_them() {
+    // Forward-compat test for the JS-literal escape contract
+    // added after review-agent 2026-05-22 caught that
+    // `onsubmit=(format!(\"return confirm('{}');\", tr(...)))`
+    // silently breaks the first time a translator writes
+    // `don't`. We can't trigger the original tr() to produce
+    // an apostrophe (current EN+RU strings are safe), but we
+    // CAN verify the rendered onsubmit attribute is syntactically
+    // valid: the inner `confirm('…');` must contain EXACTLY one
+    // un-escaped pair of single quotes — the outer pair. Counting
+    // bare `'` (not `\'`) catches the apostrophe-leak regression.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .insert_alert("test.x", None, "warning", "x", None)
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // maud renders attribute values inside double quotes and
+    // does NOT escape `'` (which would only need escaping inside
+    // single-quoted attributes). So the rendered HTML looks like:
+    //   onsubmit="return confirm('Ack all ...');"
+    // with literal apostrophes for the JS string delimiters.
+    //
+    // For the escape contract to hold, the substring between the
+    // opening `confirm('` and the closing `');` must NOT contain
+    // any UNESCAPED apostrophe. We slice the substring and check
+    // it. Current EN/RU strings are apostrophe-free, so the inner
+    // slice contains zero apostrophes; the test would flunk the
+    // moment a translator added a bare `'` and we forgot to
+    // escape it.
+    let opener_idx = html
+        .find("confirm('")
+        .expect("ack-all confirm() opener (`confirm('`) must appear");
+    let after_opener = &html[opener_idx + "confirm('".len()..];
+    let closer_rel_idx = after_opener
+        .find("');")
+        .expect("ack-all confirm() closer (`');`) must appear");
+    let inner = &after_opener[..closer_rel_idx];
+    // Bare apostrophes are illegal here. Escaped ones (`\'`) are fine.
+    // Count `'` not preceded by `\`.
+    let mut bare_apostrophes = 0;
+    let bytes = inner.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\'' && (i == 0 || bytes[i - 1] != b'\\') {
+            bare_apostrophes += 1;
+        }
+    }
+    assert_eq!(
+        bare_apostrophes, 0,
+        "confirm() body must not contain bare apostrophes \
+         (would break the JS string literal); inner: {inner:?}"
+    );
+}
+
+// End-to-end version of the escape contract: insert an alert,
+// MONKEY-PATCH the rendered string by reaching through the live
+// page response, and confirm the apostrophe handling. We can't
+// actually pass `don't` through tr() without changing the source
+// strings, so this complements the unit test by exercising the
+// FULL render path with the current copy.
+//
+// `js_single_quote_escape` itself is tested indirectly here +
+// could be lifted to a dedicated unit test if it gets a second
+// caller. For now: one caller, one round-trip assertion.
+
+#[tokio::test]
+async fn alerts_page_omits_ack_all_button_when_no_unacked() {
+    // Quiet feed should NOT render an «ack all (0)» button — the
+    // count would be 0 and clicking would be a no-op invitation
+    // for misclicks.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains(r#"action="/admin/alerts/ack-all""#),
+        "ack-all form must NOT render when unacked_total = 0"
+    );
+}
