@@ -2811,6 +2811,33 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
+    /// **Fleet-wide raw stats** (2026-05-23 — backs the dashboard's
+    /// multi-window traffic chart). Same row shape as the per-
+    /// server/per-user variants but with no `WHERE` filter on the
+    /// subject — every server's every user's row in the window
+    /// returned, then the caller buckets / aggregates as it sees
+    /// fit.
+    ///
+    /// **Cardinality note:** at 5-min tick × N users × M servers,
+    /// the 30d window can pull ~864k rows for a 10-server, 100-user
+    /// fleet. Homelab scale (3 servers, 35 users) is comfortable
+    /// (~100k rows max at 30d, ~17 MB serialised) but a future
+    /// productisation should add a server-side bucket aggregate
+    /// helper. For now the chart aggregation runs Rust-side in
+    /// the daemon and the caller never paginates.
+    pub async fn recent_vpn_stats_fleet(&self, since_hours: u32) -> Result<Vec<VpnStatsRow>> {
+        let rows = sqlx::query(
+            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
+             FROM vpn_connection_stats
+             WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             ORDER BY ts DESC",
+        )
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
     /// Phase 4b — single-query rollup of server-wide live activity
     /// for the server-detail tile + dashboard aggregate. Uses
     /// server-wide rows (user_id IS NULL) for the «active now»

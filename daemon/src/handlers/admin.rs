@@ -718,11 +718,31 @@ fn ip_kind_color(k: IpKind) -> &'static str {
 // (`ip_kind_tag` / `_tooltip` / `_color`) are exercised end-to-end
 // via the admin_smoke `track_1_2_*` tests.
 
+/// Dashboard URL query — currently just the VPN traffic chart's
+/// window selector (`?vpn_window=24h|7d|30d|all`). Defaults to 24h.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct DashboardQuery {
+    pub vpn_window: Option<String>,
+}
+
 pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
+    // 2026-05-23 — multi-window fleet traffic chart on dashboard.
+    // Picks the same VpnSparklineWindow set the user-detail page
+    // uses (one source of truth in VPN_SPARKLINE_WINDOWS).
+    let fleet_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
+    let fleet_rows = state
+        .inv
+        .recent_vpn_stats_fleet(fleet_window.cells * fleet_window.bucket_hours)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
+            Vec::new()
+        });
 
     let (stats, audit) = collect_dashboard_data(&state)
         .await
@@ -842,6 +862,21 @@ pub(crate) async fn dashboard(
         (dashboard_metrics(&stats, lang))
         (dashboard_fleet_uptime(&fleet_uptime, lang))
         (dashboard_vpn_activity(&live_activity, lang))
+        // 2026-05-23 — fleet-wide traffic chart with multi-window
+        // tabs (24h / 7d / 30d / all). Same chart component the
+        // user-detail page uses, fed the fleet-aggregate Vec.
+        div id="vpn-traffic" style="margin-top: 24px;" {
+            div.ed-art-eyebrow {
+                (crate::i18n::tr(lang, "Fleet traffic", "Трафик флота"))
+                " · "
+                (match lang {
+                    crate::i18n::Locale::En => fleet_window.label_en,
+                    crate::i18n::Locale::Ru => fleet_window.label_ru,
+                })
+            }
+            (vpn_sparkline_tabs("/admin/", fleet_window.slug, lang))
+            (vpn_traffic_chart(&fleet_rows, fleet_window, lang))
+        }
         (dashboard_alerts_tile(unacked_alerts, lang))
         (dashboard_idle_users(&idle_users, lang))
         (dashboard_limit_alerts(&alerting, lang))
@@ -4200,16 +4235,103 @@ fn pick_vpn_sparkline_window(slug: Option<&str>) -> VpnSparklineWindow {
 /// rule so the operator can gauge «is this typical or a spike»,
 /// (d) inline SVG `<title>` tooltips on each bar so hover shows
 /// the absolute byte count for that bucket.
-fn vpn_sparkline(
+/// Round a byte count up to a «nice» tick value for Y-axis labels.
+/// Powers-of-1024 family: 1, 2, 5, 10, 20, 50 × {KiB, MiB, GiB, TiB}.
+/// Picks the smallest nice value ≥ `n`. Returns 1 KiB minimum so we
+/// never emit a `0`-labelled axis for trace-but-nonzero traffic.
+fn nice_byte_ceiling(n: u64) -> u64 {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+    let units = [
+        KIB,
+        2 * KIB,
+        5 * KIB,
+        10 * KIB,
+        20 * KIB,
+        50 * KIB,
+        100 * KIB,
+        200 * KIB,
+        500 * KIB,
+        MIB,
+        2 * MIB,
+        5 * MIB,
+        10 * MIB,
+        20 * MIB,
+        50 * MIB,
+        100 * MIB,
+        200 * MIB,
+        500 * MIB,
+        GIB,
+        2 * GIB,
+        5 * GIB,
+        10 * GIB,
+        20 * GIB,
+        50 * GIB,
+        100 * GIB,
+        200 * GIB,
+        500 * GIB,
+        TIB,
+        2 * TIB,
+        5 * TIB,
+        10 * TIB,
+    ];
+    for &u in &units {
+        if u >= n.max(1) {
+            return u;
+        }
+    }
+    n
+}
+
+/// Format an X-axis tick label for the given bucket-start instant.
+/// 1h buckets → `HH:MM` (e.g. «14:00»). 24h buckets → `MMM DD`
+/// (e.g. «May 17»). 30d buckets → `MMM YYYY` (e.g. «May 2026»).
+fn x_axis_tick_label(t: chrono::DateTime<chrono::Utc>, bucket_hours: u32) -> String {
+    if bucket_hours == 1 {
+        t.format("%H:%M").to_string()
+    } else if bucket_hours == 24 {
+        t.format("%b %d").to_string()
+    } else {
+        t.format("%b %Y").to_string()
+    }
+}
+
+/// PowerBI / Tableau-style stacked bar chart for VPN traffic.
+///
+/// Replaces the previous bare-bones sparkline. The redesign is
+/// 2026-05-23 follow-up to Pavel's feedback: «график без явных
+/// осей x и у… посмотри как оформляют аналитические данные в
+/// powerbi или в tableau». Now includes:
+///
+/// * **Y-axis** on the left with 5 tick labels (`0`, `25%`, `50%`,
+///   `75%`, `100%` of the «nice»-rounded max) — each labeled with
+///   the byte count, not a raw percentage.
+/// * **Horizontal grid lines** at every Y tick, drawn in
+///   `var(--rule)` so they recede visually behind the bars.
+/// * **X-axis** below with date / time labels at meaningful
+///   intervals (every 6h for 24h, every day for 7d, every 5 days
+///   for 30d, every 6 months for «all»). Dense windows skip ticks
+///   to avoid label collision.
+/// * **Stacked bars** — upload at bottom, download on top, both
+///   in the editorial accent palette.
+/// * **Legend** (`■ download · ■ upload`) below the chart so the
+///   colour mapping is unambiguous.
+/// * **Per-bar tooltip** via SVG `<title>` showing bucket start +
+///   absolute byte values.
+/// * **Summary line** below legend: `max X per Y · total Z`.
+///
+/// Chart geometry: 720×240 viewBox with 56 px left padding for
+/// Y labels and 32 px bottom padding for X labels. Scales
+/// responsively via `style="width: 100%; max-width: 720px;
+/// height: auto"`.
+fn vpn_traffic_chart(
     rows: &[vpnctl_inventory::VpnStatsRow],
     window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use chrono::{DurationRound, TimeDelta, Utc};
-    let label = match lang {
-        crate::i18n::Locale::En => window.label_en,
-        crate::i18n::Locale::Ru => window.label_ru,
-    };
     let per_bucket = match lang {
         crate::i18n::Locale::En => window.per_bucket_en,
         crate::i18n::Locale::Ru => window.per_bucket_ru,
@@ -4236,109 +4358,167 @@ fn vpn_sparkline(
         up_per_cell[idx] = up_per_cell[idx].saturating_add(r.upload_bytes);
         dn_per_cell[idx] = dn_per_cell[idx].saturating_add(r.download_bytes);
     }
-    let max_total = up_per_cell
+    let raw_max = up_per_cell
         .iter()
         .zip(dn_per_cell.iter())
         .map(|(u, d)| u.saturating_add(*d))
         .max()
         .unwrap_or(0);
-    // Bar geometry: wider bars when fewer cells (one-day-bucket
-    // 7-cell view looks pathetic at 14 px; 50 px feels right).
-    // Computed so the chart always fills the same overall width
-    // regardless of cell count.
-    let target_width: u32 = 480;
-    let cell_gap: u32 = if cells > 14 { 2 } else { 4 };
-    let cell_w: u32 =
-        ((target_width.saturating_sub(cell_gap * (cells as u32 - 1))) / cells as u32).max(6);
-    let max_h: u32 = 48;
-    let width = cells as u32 * cell_w + (cells as u32 - 1) * cell_gap;
-    let height = max_h + 4;
-    let mut svg_inner = String::new();
-    // 50%-of-max horizontal rule for visual gauging.
-    if max_total > 0 {
-        let mid_y = (max_h as f64) / 2.0 + 2.0;
-        svg_inner.push_str(&format!(
-            r#"<line x1="0" y1="{mid_y:.1}" x2="{width}" y2="{mid_y:.1}" stroke="var(--rule)" stroke-dasharray="2,2" stroke-width="0.5"/>"#
-        ));
-    }
-    for i in 0..cells {
-        let up = up_per_cell[i];
-        let dn = dn_per_cell[i];
-        let total = up.saturating_add(dn);
-        if max_total == 0 || total == 0 {
-            continue;
-        }
-        let up_h = (up as f64 / max_total as f64) * (max_h as f64);
-        let dn_h = (dn as f64 / max_total as f64) * (max_h as f64);
-        let x = (i as u32) * (cell_w + cell_gap);
-        let tooltip = format!(
-            "{}: ↓{} ↑{}",
-            i as i64 - cells as i64 + 1,
-            humanize_bytes(dn),
-            humanize_bytes(up),
-        );
-        // Upload sits at the bottom (var(--soft) muted), download
-        // stacks on top (var(--acc)). Each bar wrapped in a <g>
-        // with a <title> for native browser tooltip.
-        svg_inner.push_str(&format!("<g><title>{tooltip}</title>"));
-        let up_y = max_h as f64 - up_h + 2.0;
-        let dn_y = up_y - dn_h;
-        if up_h > 0.5 {
-            svg_inner.push_str(&format!(
-                r#"<rect x="{x}" y="{up_y:.1}" width="{cell_w}" height="{up_h:.1}" fill="var(--soft)"/>"#
-            ));
-        }
-        if dn_h > 0.5 {
-            svg_inner.push_str(&format!(
-                r#"<rect x="{x}" y="{dn_y:.1}" width="{cell_w}" height="{dn_h:.1}" fill="var(--acc)"/>"#
-            ));
-        }
-        svg_inner.push_str("</g>");
-    }
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" aria-label="upload+download sparkline" style="display: block;">{svg_inner}</svg>"#,
-    );
-    // Compute total over the whole window so operator sees an
-    // absolute «traffic this 30d» number alongside the per-bucket
-    // chart.
     let total_window: u64 = up_per_cell
         .iter()
         .zip(dn_per_cell.iter())
         .map(|(u, d)| u.saturating_add(*d))
         .sum();
-    let leftmost_label = format!(
-        "-{n}{unit}",
-        n = cells - 1,
-        unit = if window.bucket_hours == 1 {
-            "h"
-        } else if window.bucket_hours == 24 {
-            "d"
-        } else {
-            "mo"
+    // Y-axis ceiling rounded UP to the nearest «nice» power-of-1024
+    // step so the topmost label reads clean («10 GiB» instead of
+    // «8.7 GiB» — operators round in their head anyway, the chart
+    // should do it for them).
+    let y_max = nice_byte_ceiling(raw_max);
+    // Chart geometry. Coordinates are in SVG-user units; the outer
+    // <svg> uses `viewBox` so the chart scales responsively to its
+    // container width without distorting proportions.
+    let vb_w = 720;
+    let vb_h = 240;
+    let pad_l = 64; // y-axis label column
+    let pad_r = 16; // breathing room on right
+    let pad_t = 12; // top breathing room
+    let pad_b = 44; // x-axis label row + legend
+    let plot_w = (vb_w - pad_l - pad_r) as f64;
+    let plot_h = (vb_h - pad_t - pad_b) as f64;
+    let n_ticks_y: usize = 4;
+    let bar_slot = plot_w / cells as f64;
+    let bar_gap = if cells > 14 { 2.0 } else { 4.0 };
+    let bar_w = (bar_slot - bar_gap).max(2.0);
+    let mut svg_inner = String::new();
+    // Y-axis grid lines + labels at 0, 25%, 50%, 75%, 100% of y_max.
+    for t in 0..=n_ticks_y {
+        let frac = t as f64 / n_ticks_y as f64;
+        let val = ((y_max as f64) * frac) as u64;
+        let y = pad_t as f64 + plot_h - frac * plot_h;
+        // Grid line spans the plot area only (not over the label
+        // column) so the chart-area / label-column separation is
+        // clean. Skip the topmost line if it'd touch the chart
+        // border.
+        svg_inner.push_str(&format!(
+            r#"<line x1="{x1}" y1="{y:.1}" x2="{x2}" y2="{y:.1}" stroke="var(--rule)" stroke-width="0.5"/>"#,
+            x1 = pad_l,
+            x2 = vb_w - pad_r,
+        ));
+        // Right-aligned Y label.
+        svg_inner.push_str(&format!(
+            r#"<text x="{x:.1}" y="{ty:.1}" text-anchor="end" font-family="var(--mono)" font-size="10" fill="var(--mute)">{label}</text>"#,
+            x = pad_l as f64 - 6.0,
+            ty = y + 3.0,
+            label = if val == 0 {
+                "0".to_string()
+            } else {
+                humanize_bytes(val)
+            },
+        ));
+    }
+    // X-axis baseline (the «0» line is implicit in the lowest grid
+    // row above, but draw an explicit darker line so the chart has
+    // a clear floor).
+    svg_inner.push_str(&format!(
+        r#"<line x1="{x1}" y1="{y:.1}" x2="{x2}" y2="{y:.1}" stroke="var(--ink)" stroke-width="0.8"/>"#,
+        x1 = pad_l,
+        x2 = vb_w - pad_r,
+        y = pad_t as f64 + plot_h,
+    ));
+    // Bars + per-bar tooltips. Iterate cells; for each non-zero
+    // total, draw upload then download stacked.
+    for i in 0..cells {
+        let up = up_per_cell[i];
+        let dn = dn_per_cell[i];
+        let total = up.saturating_add(dn);
+        let x_left = pad_l as f64 + i as f64 * bar_slot + bar_gap / 2.0;
+        let bucket_start =
+            now - chrono::Duration::seconds((cells as i64 - 1 - i as i64) * bucket_seconds);
+        let tooltip = format!(
+            "{label}\n↓ download: {dn_h}\n↑ upload: {up_h}\ntotal: {t_h}",
+            label = x_axis_tick_label(bucket_start, window.bucket_hours),
+            dn_h = humanize_bytes(dn),
+            up_h = humanize_bytes(up),
+            t_h = humanize_bytes(total),
+        );
+        // Empty bar still gets a hover-rect so tooltip works even
+        // on quiet hours («0 download, 0 upload at 03:00»). Hover
+        // rect is invisible (fill="transparent") but full plot
+        // height for easy targeting.
+        svg_inner.push_str(&format!(
+            r#"<g><title>{tooltip}</title><rect x="{x:.1}" y="{ht_y}" width="{w:.1}" height="{ht_h:.1}" fill="transparent"/>"#,
+            x = x_left,
+            ht_y = pad_t,
+            w = bar_w,
+            ht_h = plot_h,
+        ));
+        if y_max > 0 && total > 0 {
+            let up_h = (up as f64 / y_max as f64) * plot_h;
+            let dn_h = (dn as f64 / y_max as f64) * plot_h;
+            let up_y = pad_t as f64 + plot_h - up_h;
+            let dn_y = up_y - dn_h;
+            if up_h > 0.3 {
+                svg_inner.push_str(&format!(
+                    r#"<rect x="{x:.1}" y="{up_y:.1}" width="{w:.1}" height="{up_h:.1}" fill="var(--soft)"/>"#,
+                    x = x_left,
+                    w = bar_w,
+                ));
+            }
+            if dn_h > 0.3 {
+                svg_inner.push_str(&format!(
+                    r#"<rect x="{x:.1}" y="{dn_y:.1}" width="{w:.1}" height="{dn_h:.1}" fill="var(--acc)"/>"#,
+                    x = x_left,
+                    w = bar_w,
+                ));
+            }
         }
+        svg_inner.push_str("</g>");
+    }
+    // X-axis labels. Pick tick interval so we render ~5-8 labels
+    // total — denser windows skip ticks to avoid collision.
+    let tick_every = match cells {
+        0..=8 => 1,
+        9..=16 => 2,
+        17..=32 => 5,
+        _ => 6,
+    };
+    for i in 0..cells {
+        if i % tick_every != 0 && i != cells - 1 {
+            continue;
+        }
+        let x_center = pad_l as f64 + i as f64 * bar_slot + bar_slot / 2.0;
+        let bucket_start =
+            now - chrono::Duration::seconds((cells as i64 - 1 - i as i64) * bucket_seconds);
+        let label = x_axis_tick_label(bucket_start, window.bucket_hours);
+        svg_inner.push_str(&format!(
+            r#"<text x="{x:.1}" y="{y}" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--mute)">{label}</text>"#,
+            x = x_center,
+            y = vb_h - pad_b + 18,
+        ));
+    }
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vb_w} {vb_h}" preserveAspectRatio="xMidYMid meet" aria-label="VPN traffic chart" style="display: block; width: 100%; max-width: 720px; height: auto;">{svg_inner}</svg>"#,
     );
     html! {
-        div style="margin: 12px 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
-            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px;" {
+        div style="margin: 12px 0; padding: 12px 14px; background: var(--paper); border: 1px solid var(--rule);" {
+            (maud::PreEscaped(svg))
+            // Legend + summary line. Inline-flex so they stay on
+            // one row when there's space and wrap on narrow viewports.
+            div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 12px; font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 4px; padding: 0 4px;" {
                 span {
-                    (label) " "
-                    (crate::i18n::tr(lang, "· download ", "· загрузка "))
-                    span style="display: inline-block; width: 8px; height: 8px; background: var(--acc); vertical-align: middle;" {}
-                    (crate::i18n::tr(lang, " · upload ", " · отправка "))
-                    span style="display: inline-block; width: 8px; height: 8px; background: var(--soft); vertical-align: middle;" {}
+                    span style="display: inline-block; width: 10px; height: 10px; background: var(--acc); vertical-align: middle; margin-right: 4px;" {}
+                    (crate::i18n::tr(lang, "download", "загрузка"))
+                    "  ·  "
+                    span style="display: inline-block; width: 10px; height: 10px; background: var(--soft); vertical-align: middle; margin-right: 4px;" {}
+                    (crate::i18n::tr(lang, "upload", "отправка"))
                 }
                 span {
                     (crate::i18n::tr(lang, "max ", "макс "))
-                    (humanize_bytes(max_total)) " " (per_bucket)
-                    " · "
+                    b style="color: var(--ink);" { (humanize_bytes(raw_max)) }
+                    " " (per_bucket) "  ·  "
                     (crate::i18n::tr(lang, "total ", "всего "))
-                    (humanize_bytes(total_window))
+                    b style="color: var(--ink);" { (humanize_bytes(total_window)) }
                 }
-            }
-            (maud::PreEscaped(svg))
-            div style="font-family: var(--mono); font-size: 9px; color: var(--mute); display: flex; justify-content: space-between; margin-top: 4px;" {
-                span { (leftmost_label) }
-                span { (crate::i18n::tr(lang, "now", "сейчас")) }
             }
         }
     }
@@ -4347,7 +4527,9 @@ fn vpn_sparkline(
 /// Tab nav for the multi-window sparkline. Selected window
 /// renders as bold-no-link; others as `<a href="?window=X">`. The
 /// `base_url` should be the absolute path WITHOUT query string —
-/// the tab links append `?window=...`.
+/// the tab links append `?window=...#vpn-traffic` so the browser
+/// scrolls back to the chart's anchor instead of jumping to the
+/// page top on every tab click (2026-05-23 UI bug fix).
 fn vpn_sparkline_tabs(base_url: &str, active_slug: &str, lang: crate::i18n::Locale) -> Markup {
     html! {
         div style="display: flex; gap: 16px; font-family: var(--mono); font-size: 11px; margin: 6px 0 2px; padding-left: 12px;" {
@@ -4362,7 +4544,7 @@ fn vpn_sparkline_tabs(base_url: &str, active_slug: &str, lang: crate::i18n::Loca
                 @if w.slug == active_slug {
                     span style="font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--ink);" { (label) }
                 } @else {
-                    a href=(format!("{base_url}?vpn_window={}", w.slug))
+                    a href=(format!("{base_url}?vpn_window={}#vpn-traffic", w.slug))
                       style="color: var(--mute); text-decoration: none; border-bottom: 1px dotted var(--mute);" {
                         (label)
                     }
@@ -4795,14 +4977,16 @@ async fn live_vpn_stats_section(
                 }
             }
         }
-        // 2026-05-23 redesign — multi-window sparkline (24h / 7d /
-        // 30d / all). Tabs above let the operator switch windows
-        // without leaving the page. Bars are wider when fewer cells
-        // and stack download-above-upload with a 50%-max dashed
-        // rule so a single hour of activity surrounded by quiet
-        // hours no longer reads as «system broken».
-        (vpn_sparkline_tabs(&base_url, window.slug, lang))
-        (vpn_sparkline(&rows, window, lang))
+        // 2026-05-23 redesign — PowerBI/Tableau-style chart with
+        // explicit axes, gridlines, byte-formatted Y labels and
+        // date-formatted X labels. Tabs above let the operator
+        // switch windows (24h / 7d / 30d / all); anchor on the
+        // wrapper div keeps the browser scrolled to the chart
+        // after tab clicks (fixed the «scroll-to-top» bug).
+        div id="vpn-traffic" {
+            (vpn_sparkline_tabs(&base_url, window.slug, lang))
+            (vpn_traffic_chart(&rows, window, lang))
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
             (crate::i18n::tr(lang, "Aggregated from ", "Агрегировано из ")) (rows.len())
             @if rows.len() == 1 {
