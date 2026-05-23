@@ -727,6 +727,18 @@ pub(crate) async fn dashboard(
         Vec::new()
     });
 
+    // A2 — idle users (audit 2026-05-22): users who haven't hit
+    // /sub or /api/v1/app/config in the last 30 days, plus users
+    // who have NEVER appeared in the access log (created and
+    // forgotten). Revoke candidates. Cap at 10 to keep the panel
+    // compact — operator can drill into /admin/users for the full
+    // list. Threshold of 30 days catches «forgotten phone in
+    // drawer» without surfacing normal-vacation users.
+    let idle_users = state.inv.idle_users(30, 10).await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "idle_users failed");
+        Vec::new()
+    });
+
     // Post-2026-05-22 — fleet-wide uptime tile. Loops `list_servers`
     // and aggregates `uptime_for_server` for 24h / 7d / 30d. Loop
     // (vs a single SUM-of-SUMs SQL helper) keeps it dead-simple +
@@ -782,6 +794,7 @@ pub(crate) async fn dashboard(
         (dashboard_fleet_uptime(&fleet_uptime, lang))
         (dashboard_vpn_activity(&live_activity, lang))
         (dashboard_alerts_tile(unacked_alerts, lang))
+        (dashboard_idle_users(&idle_users, lang))
         (dashboard_limit_alerts(&alerting, lang))
         (dashboard_heavy_users(&heavy_users, lang))
         (dashboard_audit(&audit, lang))
@@ -1075,6 +1088,84 @@ fn dashboard_alerts_tile(unacked: u64, lang: crate::i18n::Locale) -> Markup {
                             "see what the daemon's complaining about →",
                             "посмотреть на что жалуется демон →",
                         )) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A2 (audit 2026-05-22) — «idle users» panel. Lists users whose
+/// most recent `/sub` or `/api/v1/app/config` hit is older than 30
+/// days, OR who have never appeared in `sub_access_log` at all
+/// (created and forgotten). Helps the operator find revoke
+/// candidates without manually grep-ing the user list.
+///
+/// **Rendered only when there's at least one idle user** — quiet
+/// dashboard for a fleet with zero idle accounts. Each row links to
+/// `/admin/users/<id>` where the operator can revoke / disable / dig
+/// in. «Never seen» is displayed as «never» in italics so it visually
+/// distinguishes from «seen X days ago».
+fn dashboard_idle_users(
+    rows: &[(vpnctl_core::UserId, Option<chrono::DateTime<chrono::Utc>>)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if rows.is_empty() {
+        return html! {};
+    }
+    let now = chrono::Utc::now();
+    html! {
+        section id="idle-users" style="margin-top: 28px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Idle users · revoke candidates", "Простаивающие пользователи · кандидаты на отзыв"))
+            }
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
+                (tr(
+                    lang,
+                    "Users whose subscription URL hasn't been hit in 30+ days, or who have never connected. ",
+                    "Пользователи, чей URL подписки не запрашивался 30+ дней, либо ни разу не подключались. ",
+                ))
+                em { (tr(lang, "Click to drill in", "Кликни, чтобы зайти")) }
+                (tr(
+                    lang,
+                    " — common pattern: forgotten phone in a drawer; revoke + reclaim the sub-token slot.",
+                    " — типичный паттерн: забытый телефон в ящике; отзови и освободи слот sub-токена.",
+                ))
+            }
+            div.ed-time {
+                @for (uid, last_seen) in rows {
+                    div.ed-time-row {
+                        // Age column on the left so the operator can
+                        // scan «who's been gone longest» in one pass.
+                        span.ed-time-row__t {
+                            @match last_seen {
+                                Some(ts) => {
+                                    @let age_days = (now - *ts).num_days().max(0);
+                                    (age_days) " " (tr(lang, "d ago", "д назад"))
+                                }
+                                None => {
+                                    em style="color: var(--mute);" {
+                                        (tr(lang, "never", "никогда"))
+                                    }
+                                }
+                            }
+                        }
+                        span.ed-time-row__a {
+                            (tr(lang, "idle", "простой"))
+                        }
+                        span.ed-time-row__tgt {
+                            a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                              style="color: var(--ink); text-decoration: none;" {
+                                (uid.0)
+                            }
+                        }
+                        span.ed-time-row__pl style="color: var(--mute);" {
+                            @match last_seen {
+                                Some(ts) => (clip_ts(&ts.to_rfc3339())),
+                                None => "—",
+                            }
+                        }
                     }
                 }
             }

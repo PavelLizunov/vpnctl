@@ -12148,6 +12148,84 @@ async fn user_create_without_grant_all_grants_zero_servers() {
     );
 }
 
+// ── A2 — idle-users panel on dashboard ──────────────────────────────
+//
+// Lists users idle 30+ days OR never-seen. Renders only when there's
+// at least one idle user (quiet dashboard for a healthy fleet).
+
+#[tokio::test]
+async fn dashboard_idle_users_panel_omitted_when_no_users() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("id=\"idle-users\""),
+        "idle-users panel must be omitted on an empty inventory"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_idle_users_panel_renders_never_seen_user() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Create a user but never write a sub_access_log row → must
+    // appear in the idle panel with «never» marker.
+    st.inv
+        .add_user(&User {
+            id: UserId("ghost".into()),
+            uuid: "00000000-0000-0000-0000-000000000099".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("id=\"idle-users\""),
+        "idle-users panel must render when at least one user is idle"
+    );
+    assert!(
+        html.contains("Idle users") || html.contains("Простаивающие"),
+        "idle-users eyebrow must render"
+    );
+    // The «never» marker must appear for a user without any
+    // sub_access_log rows.
+    assert!(
+        html.contains(">never<") || html.contains(">никогда<"),
+        "never-seen marker must render for a user with no access-log rows"
+    );
+    // Link to user-detail must be there.
+    assert!(
+        html.contains("/admin/users/ghost"),
+        "row must link to /admin/users/<id> for drill-in"
+    );
+}
+
 #[tokio::test]
 async fn user_create_with_grant_all_renders_checked_checkbox_in_form() {
     // The form on /admin/users must render the checkbox CHECKED by

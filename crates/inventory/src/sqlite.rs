@@ -1627,6 +1627,69 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
+    /// **Idle users** — list `(user_id, last_seen)` for users whose
+    /// most recent `sub_access_log` row is older than `days` days, OR
+    /// who have never appeared in the access log at all (last_seen
+    /// is `None`).
+    ///
+    /// Backs the dashboard «Idle users — revoke candidates» panel
+    /// (audit A2). Cheap single LEFT-JOIN with one MAX aggregate;
+    /// rows are sorted oldest-first (`last_seen ASC NULLS FIRST`)
+    /// so the worst offenders appear at the top. Limit caps the
+    /// result set so the panel doesn't grow unbounded.
+    ///
+    /// **`days = 30` is the canonical threshold for the dashboard**
+    /// — a roughly-monthly cycle catches «forgotten phone in a
+    /// drawer» without being so aggressive it surfaces normal-
+    /// vacation users. Operator can pick a different number; the
+    /// query is parameterised.
+    ///
+    /// Pinned by `idle_users_returns_users_with_old_or_no_last_seen`.
+    pub async fn idle_users(
+        &self,
+        days: u32,
+        limit: i64,
+    ) -> Result<Vec<(UserId, Option<DateTime<Utc>>)>> {
+        let cutoff = format!("-{days} days");
+        // LEFT JOIN against an aggregate subquery: every user appears
+        // exactly once; users with no sub_access_log row get
+        // `last_seen = NULL`. WHERE filter keeps only `last_seen IS
+        // NULL` (never seen) OR `last_seen < cutoff` (seen but old).
+        // Sort `last_seen ASC NULLS FIRST` so never-seen users float
+        // to the top alongside the longest-idle ones.
+        let rows = sqlx::query(
+            "SELECT u.id AS user_id, la.last_seen AS last_seen
+             FROM users u
+             LEFT JOIN (
+                 SELECT user_id, MAX(ts) AS last_seen
+                 FROM sub_access_log
+                 WHERE is_vpn_egress = 0
+                 GROUP BY user_id
+             ) la ON la.user_id = u.id
+             WHERE la.last_seen IS NULL
+                OR la.last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             ORDER BY (la.last_seen IS NOT NULL), la.last_seen ASC
+             LIMIT ?2",
+        )
+        .bind(&cutoff)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out: Vec<(UserId, Option<DateTime<Utc>>)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let uid: String = row.try_get("user_id")?;
+            let last_seen_str: Option<String> = row.try_get("last_seen")?;
+            let last_seen = last_seen_str.and_then(|t| {
+                DateTime::parse_from_rfc3339(&t)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            });
+            out.push((UserId(uid), last_seen));
+        }
+        Ok(out)
+    }
+
     /// Map of `server_id → number of users granted access to it`. Servers
     /// with no grants are absent (callers default to 0). One query, no N+1
     /// — call this once and look up by ID when rendering a server list.
