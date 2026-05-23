@@ -183,15 +183,35 @@ fn render_vless_uri(
     server_tag: &str,
     client_name: &str,
 ) -> String {
-    // Param order: type, security, pbk, fp, sni, sid, spx, flow.
-    // No `encryption=none` (subscription-server omits it; vpnctld's
-    // /sub share_link does include it for bash-script byte-equality,
-    // but the ninitux endpoint must NOT include it).
+    // Param order: encryption, type, security, pbk, fp, sni, sid, spx, flow.
+    //
+    // 2026-05-23 quickfix (Pavel + другой пользователь):
+    // «через V2rayTun появляются в списке конфиги, при подключении
+    // интернет не работает; через Streisand / Shadowrocket — работает».
+    // Symptom signature: V2Ray-core-based clients (V2rayTun, v2rayN)
+    // require `encryption=none` even for REALITY (where encryption is
+    // not actually used — it's a no-op marker meaning «no extra
+    // encryption layer»). Without it, the V2Ray-core parser falls
+    // back to its default («auto») which doesn't exist for VLESS,
+    // and the dial silently returns ECONNRESET-shaped failures —
+    // the client shows «connected» but no packets flow.
+    //
+    // Streisand / Shadowrocket / sing-box / Hiddify tolerate the
+    // missing param. ADDING it doesn't change their behaviour:
+    // `encryption=none` is the canonical VLESS marker, a no-op for
+    // every client that already worked. So this is safe for every
+    // platform tested in production.
+    //
+    // The bash legacy `/sub/<token>` path always included
+    // `encryption=none` (byte-equality with `get-vless.sh`); we
+    // intentionally dropped it for the ninitux endpoint when
+    // subscription-server was decommissioned. That decision is now
+    // reverted — every endpoint emits the same vless:// shape.
     let pbk_e = utf8_percent_encode(pbk, NINITUX_QUOTE);
     let sni_e = utf8_percent_encode(sni, NINITUX_QUOTE);
     let sid_e = utf8_percent_encode(sid, NINITUX_QUOTE);
     let params = format!(
-        "type=tcp&security=reality&pbk={pbk_e}&fp=chrome&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
+        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=chrome&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
     );
 
     // Fragment format (post-2026-05-20 + post-rename + operator-side
@@ -699,7 +719,10 @@ mod tests {
             "tester-1", // ignored in label — kept for signature compat
         );
 
-        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
+        // Post-2026-05-23 V2rayTun-compat fix: `encryption=none`
+        // re-added at the front of the query string. See doc-comment
+        // on `render_vless_uri` for the full rationale.
+        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
         assert_eq!(got, expected, "vless URI fragment drifted");
     }
 
