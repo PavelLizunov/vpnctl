@@ -1770,7 +1770,14 @@ impl SqliteInventory {
                  GROUP BY user_id
              ) la ON la.user_id = u.id
              WHERE la.last_seen IS NULL
-                OR la.last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+                -- `<=` not `<`: a row whose ts equals the cutoff is
+                -- «no newer than the threshold» → idle. Also closes
+                -- a CI flake: a tight loop on a fast box can write
+                -- the access-log row + run idle_users(0) within one
+                -- millisecond, leaving ts == cutoff exactly; strict
+                -- `<` would have excluded the row and the test
+                -- would intermittently fail.
+                OR la.last_seen <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
              ORDER BY (la.last_seen IS NOT NULL), la.last_seen ASC
              LIMIT ?2",
         )
