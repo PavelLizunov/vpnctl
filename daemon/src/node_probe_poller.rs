@@ -507,7 +507,7 @@ async fn audit_alert_fire(
     }
 }
 
-async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
+pub(crate) async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
     let sink = match build_alert_sink(inv).await {
         Ok(Some(s)) => s,
         Ok(None) => return, // transport not configured — no-op

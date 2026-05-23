@@ -378,7 +378,148 @@ pub async fn scan_once(
             }
         }
     }
+    // C3 — user-traffic-limit crossing alert. Runs after the per-
+    // server diff loop so a single tick processes both infra +
+    // per-user signals. Fire-once-per-condition via
+    // insert_alert_if_no_unacked; recovery (auto-ack when user drops
+    // below threshold) deferred to a later bundle to keep this
+    // surface tight.
+    if let Err(e) = check_user_traffic_limits(inv).await {
+        tracing::warn!(
+            target = "vpnctld::health_monitor",
+            error = %e,
+            "check_user_traffic_limits failed; alert pass skipped this tick"
+        );
+    }
     Ok(())
+}
+
+/// Per-tick scan for users whose monthly traffic has crossed the
+/// configured `traffic_alert_threshold_pct`. Fires a
+/// `user.traffic_limit:<user_id>` alert (severity `warning`), routed
+/// through the standard `admin_alerts` → Telegram pipeline.
+///
+/// The kind suffix is the user_id (mirrors the existing
+/// `sub_access.suspicious_local_ip:<user_id>` convention from
+/// `access_log.rs`) so the partial-UNIQUE index on
+/// `(kind, COALESCE(server_id, '__GLOBAL__')) WHERE acked_at IS NULL`
+/// deduplicates per-user: one open alert at a time, not one per tick.
+///
+/// **Not in scope for this fn:** auto-ack on drop-below-threshold.
+/// Once Telegram fires, the operator acks via the web button OR the
+/// alert ages off after manual ack. If the user crosses again next
+/// month, a fresh alert fires (since the previous one is acked, the
+/// partial unique no longer blocks).
+pub async fn check_user_traffic_limits(
+    inv: &SqliteInventory,
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    let rows = inv.users_traffic_vs_limit().await?;
+    for (uid, used, lim, threshold_pct) in rows {
+        // Same percent math as the dashboard tile (admin.rs:706-711).
+        // Skip rows where the limit is 0 (no limit configured — the
+        // SQL filters with `WHERE u.monthly_bandwidth_limit_bytes IS
+        // NOT NULL` already, but defense in depth on the divide-by-
+        // zero edge).
+        if lim == 0 {
+            continue;
+        }
+        let pct = ((u128::from(used) * 100) / u128::from(lim)) as u64;
+        if pct < u64::from(threshold_pct) {
+            continue;
+        }
+        // Format used / limit as GiB-with-one-decimal for the Telegram
+        // line. Doing the format string Rust-side rather than relying
+        // on TelegramSink's formatting because we want the user-facing
+        // message to be short + scannable («user X: 95% / 18.5 of
+        // 20 GiB monthly»).
+        let used_gib = bytes_as_gib_text(used);
+        let lim_gib = bytes_as_gib_text(lim);
+        let kind = format!("user.traffic_limit:{}", uid.0);
+        let summary = format!(
+            "user {} crossed traffic threshold · {pct}% · {used_gib} of {lim_gib} this month",
+            uid.0
+        );
+        let payload = serde_json::json!({
+            "user_id": uid.0,
+            "used_bytes": used,
+            "limit_bytes": lim,
+            "pct": pct,
+            "threshold_pct": threshold_pct,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        match inv
+            .insert_alert_if_no_unacked(
+                &kind,
+                None, // not server-scoped
+                "warning",
+                &summary,
+                Some(&payload_str),
+            )
+            .await
+        {
+            Ok(Some(alert_id)) => {
+                tracing::info!(
+                    target = "vpnctld::health_monitor",
+                    alert_id,
+                    user = %uid.0,
+                    pct = pct,
+                    threshold_pct = threshold_pct,
+                    "fired user.traffic_limit alert"
+                );
+                // Mirror to audit_log so /admin/audit timeline shows
+                // the firing — same shape as the per-server alerts
+                // above + node_probe_poller's pattern.
+                if let Err(e) = inv
+                    .audit(
+                        "vpnctld",
+                        "alert.fire",
+                        Some(&uid.0),
+                        Some(&serde_json::json!({
+                            "alert_id": alert_id,
+                            "kind": kind,
+                            "severity": "warning",
+                            "summary": summary,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        alert_id,
+                        user = %uid.0,
+                        error = %e,
+                        "alert.fire audit row failed for user.traffic_limit"
+                    );
+                }
+                // Best-effort Telegram push (same pattern as
+                // node_probe_poller). Failures stay in the log; the
+                // admin_alerts row is the source of truth.
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+            }
+            Ok(None) => {
+                // Already-open alert for the same (kind, NULL) pair —
+                // partial UNIQUE index dedup. Nothing to do.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    user = %uid.0,
+                    error = %e,
+                    "insert user.traffic_limit alert failed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Format a byte count as «GiB with one decimal» for short alert
+/// summaries. `1610612736 → "1.5 GiB"`. Used by C3 traffic-limit
+/// alerts; not exported because the formatting is specific to that
+/// caller (e.g. it never says "MB" — the limit is always GiB-range).
+fn bytes_as_gib_text(b: u64) -> String {
+    let gib = (b as f64) / (1024.0 * 1024.0 * 1024.0);
+    format!("{gib:.1} GiB")
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────
@@ -551,5 +692,120 @@ mod tests {
         let kinds: Vec<&str> = evs.iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"server.singbox.down"));
         assert!(kinds.contains(&"server.disk.pressure"));
+    }
+
+    #[test]
+    fn bytes_as_gib_formats_one_decimal() {
+        // 2 GiB = 2 * 1024^3 = 2_147_483_648
+        assert_eq!(bytes_as_gib_text(2_147_483_648), "2.0 GiB");
+        // Halfway between 1 and 2 GiB.
+        assert_eq!(bytes_as_gib_text(1_610_612_736), "1.5 GiB");
+        // 0 → "0.0 GiB" (don't special-case; uniform shape simplifies
+        // the summary line).
+        assert_eq!(bytes_as_gib_text(0), "0.0 GiB");
+    }
+
+    // C3 — fire-once contract for `check_user_traffic_limits`.
+    // Uses a real SqliteInventory in tempdir to round-trip the
+    // partial-UNIQUE dedup index.
+    use tempfile::TempDir;
+    use vpnctl_core::{User, UserId};
+    use vpnctl_inventory::SqliteInventory;
+
+    async fn fresh_inv() -> (TempDir, SqliteInventory) {
+        let dir = TempDir::new().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        (dir, inv)
+    }
+
+    fn user_with_id(id: &str) -> User {
+        User {
+            id: UserId(id.into()),
+            uuid: format!("00000000-0000-0000-0000-{:012}", 7),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn check_user_traffic_limits_skips_users_under_threshold() {
+        let (_dir, inv) = fresh_inv().await;
+        inv.add_user(&user_with_id("u")).await.unwrap();
+        // 80% threshold, limit 100 GiB, used 1 GiB → 1% < 80%.
+        inv.set_user_traffic_limit(
+            &UserId("u".into()),
+            Some(100 * 1024 * 1024 * 1024),
+            Some(80),
+        )
+        .await
+        .unwrap();
+        check_user_traffic_limits(&inv).await.unwrap();
+        // No alert row should have been inserted.
+        let alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert!(
+            alerts.is_empty(),
+            "user under threshold must not produce an alert; got {alerts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_user_traffic_limits_fires_once_per_condition() {
+        let (_dir, inv) = fresh_inv().await;
+        // FK chain: vpn_connection_stats(server_id) → servers(id),
+        // and (user_id) → users(id). Seed both before recording.
+        inv.add_server(&vpnctl_core::Server {
+            id: ServerId("dummy".into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        inv.add_user(&user_with_id("heavy")).await.unwrap();
+        // 50% threshold, limit 100 bytes (tiny — easy to push past).
+        inv.set_user_traffic_limit(&UserId("heavy".into()), Some(100), Some(50))
+            .await
+            .unwrap();
+        // Seed bandwidth so used = 90 bytes (90% > 50% threshold).
+        // Same writer the clash-api ingest uses — keeps zero drift
+        // between test target and production target.
+        inv.record_vpn_stats(
+            &ServerId("dummy".into()),
+            &[vpnctl_inventory::VpnStatsDelta {
+                user_id: Some(UserId("heavy".into())),
+                upload_bytes: 50,
+                download_bytes: 40,
+                active_connections: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        // First scan: must fire one alert.
+        check_user_traffic_limits(&inv).await.unwrap();
+        let alerts1 = inv.recent_alerts(10, true).await.unwrap();
+        assert_eq!(alerts1.len(), 1, "must fire one alert on threshold cross");
+        assert_eq!(alerts1[0].kind, "user.traffic_limit:heavy");
+        assert_eq!(alerts1[0].severity, "warning");
+        // Second scan immediately after: NO new alert (partial-UNIQUE
+        // dedup). The single previously-fired alert is still the only
+        // row.
+        check_user_traffic_limits(&inv).await.unwrap();
+        let alerts2 = inv.recent_alerts(10, true).await.unwrap();
+        assert_eq!(
+            alerts2.len(),
+            1,
+            "second scan must not fire duplicate alert; got {alerts2:?}"
+        );
     }
 }
