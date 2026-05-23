@@ -75,7 +75,7 @@ static TRUSTED_PROXIES: OnceLock<Vec<IpAddr>> = OnceLock::new();
 /// switching to "trust no proxies" mid-deploy — but it also makes
 /// the FIRST request whose XFF would have been honoured fall back to
 /// the peer IP. That's the conservative direction.
-fn trusted_proxies() -> &'static [IpAddr] {
+pub(crate) fn trusted_proxies() -> &'static [IpAddr] {
     TRUSTED_PROXIES.get_or_init(|| {
         std::env::var("VPNCTLD_TRUSTED_PROXIES")
             .ok()

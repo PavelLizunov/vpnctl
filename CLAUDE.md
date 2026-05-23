@@ -731,6 +731,37 @@ volumes Docker compose (TODO для Pavel).
 `cargo sqlx prepare --workspace` локально + коммит `.sqlx/` директории +
 `SQLX_OFFLINE=true` в CI env.
 
+### `VPNCTLD_TRUSTED_PROXIES` **обязательная** переменная при reverse-proxy
+**После Bundle 1 (2026-05-22, commit `f881ba9`, аудит I4)** — default
+trusted-proxies список **пустой** (раньше был зашит `192.168.0.207`).
+Если демон стоит за nginx / любым reverse-proxy, который терминирует
+TLS и форвардит `X-Forwarded-For`, **обязательно** прописать в
+`/etc/vpnctl/vpnctld.env`:
+
+```
+VPNCTLD_TRUSTED_PROXIES=<IP-проксика>[,<IP2>,...]
+```
+
+Иначе:
+- `resolve_real_ip` будет игнорировать XFF → в `sub_access_log.ip`
+  попадёт сам прокси (LAN RFC1918) вместо реального клиента;
+- сработает `sub_access.suspicious_local_ip:<user>` warning **на каждый
+  легитимный** /sub запрос → alert-fatigue, реальные сигналы хоронятся.
+
+Случилось ровно так на проде 2026-05-23 после деплоя `f881ba9` (10
+false-positive за 2 часа). Защита от повторения добавлена в
+`access_log.rs::is_trusted_reverse_proxy` (commit `<this>`): даже если
+operator забыл выставить переменную, детектор сам сверяется со списком
+и не тревожит зря. **Но всё равно выставляй переменную явно** — без
+неё клиентский IP в логах останется = IP прокси, и весь IP-based
+intelligence (geolocation, abuse-detection, /16-clustering) ломается.
+
+При поднятии второго инстанса `vpnctld` за nginx — первым делом
+дописать `VPNCTLD_TRUSTED_PROXIES`. Проверить можно одной командой:
+```
+ssh user@<host> 'sudo grep VPNCTLD_TRUSTED_PROXIES /etc/vpnctl/vpnctld.env'
+```
+
 ## Связанные репо и серверы
 
 - **Старый bash-проект `vpn-control`** — живёт пока только в локальном

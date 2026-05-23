@@ -178,7 +178,10 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                 // tagged `phase6-monitor/1.0 (…-compat probe)` →
                 // `parse_ua_short` returns `Some("phase6-monitor (canary)")`).
                 let kind = crate::ip_kind::classify_ip(&rec.ip);
-                if kind.is_lan_or_loopback() && !is_lan_alert_allowed(rec.device_class.as_deref()) {
+                if kind.is_lan_or_loopback()
+                    && !is_lan_alert_allowed(rec.device_class.as_deref())
+                    && !is_trusted_reverse_proxy(&rec.ip)
+                {
                     if let Err(e) = fire_suspicious_local_ip_alert(&inv, &rec, kind).await {
                         tracing::warn!(
                             target = "vpnctld::access_log_writer",
@@ -229,6 +232,30 @@ fn is_lan_alert_allowed(device_class: Option<&str>) -> bool {
     match device_class {
         Some(s) => SUSPICIOUS_LAN_ALLOWED_UAS.contains(&s),
         None => false,
+    }
+}
+
+/// True when `ip_str` parses to an `IpAddr` that is **explicitly
+/// listed** in `VPNCTLD_TRUSTED_PROXIES`. In that case the LAN IP
+/// is the operator-configured reverse-proxy ingress (typically nginx
+/// terminating TLS on a different host), NOT a suspicious local
+/// fetch. Without this gate, a trusted-proxies misconfiguration
+/// (env-var unset OR proxy host added to the LAN but XFF not sent)
+/// produces one false-positive alert per legit external client —
+/// alert-fatigue that hides real LAN-fetch incidents.
+///
+/// **Regression catch (2026-05-23, follow-up to I4):** Bundle 1 made
+/// `trusted_proxies()` empty-by-default. On prod 192.168.0.236 the
+/// env-var wasn't set after deploy; every legit /sub fetch through
+/// nginx (192.168.0.207) fired this alert. The env-var was set
+/// post-incident, AND this trusted-proxy gate was added so a future
+/// operator hitting the same path («ah, trusted-proxies must be
+/// set») ALSO doesn't see false-positives from the LAN-detector
+/// during the few minutes between deploy and env-config.
+fn is_trusted_reverse_proxy(ip_str: &str) -> bool {
+    match ip_str.parse::<std::net::IpAddr>() {
+        Ok(ip) => crate::real_ip::trusted_proxies().contains(&ip),
+        Err(_) => false,
     }
 }
 
@@ -306,5 +333,36 @@ pub fn try_enqueue(tx: &mpsc::Sender<AccessLogRecord>, rec: AccessLogRecord) -> 
             );
             false
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// `is_trusted_reverse_proxy` returns false for any input on its
+    /// own — but it must not PANIC on garbage. The real
+    /// trusted-proxies set is env-driven (`VPNCTLD_TRUSTED_PROXIES`),
+    /// which makes a fully-positive test process-mutating + flaky
+    /// under cargo test. We pin the no-panic + obvious-false cases
+    /// here; the positive «IP is in the trusted list» branch is
+    /// covered indirectly by `real_ip::tests::*_with` variants
+    /// (which exercise the same `&[IpAddr]` lookup).
+    #[test]
+    fn is_trusted_reverse_proxy_returns_false_for_garbage_input() {
+        assert!(!is_trusted_reverse_proxy(""));
+        assert!(!is_trusted_reverse_proxy("not-an-ip"));
+        assert!(!is_trusted_reverse_proxy("999.999.999.999"));
+    }
+
+    #[test]
+    fn is_trusted_reverse_proxy_returns_false_when_env_empty() {
+        // Default test env has VPNCTLD_TRUSTED_PROXIES unset →
+        // `trusted_proxies()` returns `&[]` → no IP can match.
+        // (Post-I4 contract from Bundle 1.)
+        assert!(!is_trusted_reverse_proxy("192.168.0.207"));
+        assert!(!is_trusted_reverse_proxy("10.0.0.1"));
+        assert!(!is_trusted_reverse_proxy("127.0.0.1"));
     }
 }
