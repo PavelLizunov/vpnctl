@@ -46,6 +46,32 @@ pub fn is_valid_vpn_router_device_id(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Mint a fresh 32-hex `vpn_router_device_id` (16 random bytes ⇒
+/// 32 lowercase hex chars). Matches the shape
+/// [`is_valid_vpn_router_device_id`] enforces, so the round-trip
+/// `mint → store → look-up` is always valid.
+///
+/// **Bearer credential.** Anyone who knows this string can fetch
+/// the user's full VPN config via the public
+/// `/api/v1/app/config/<device_id>` endpoint. Treat with the same
+/// care as `sub_token`. NEVER log this value; the web UI displays
+/// it on the user-detail page (admin-gated) and embeds it into the
+/// production subscription URL Pavel shares with end users.
+pub fn gen_vpn_router_device_id() -> std::io::Result<String> {
+    let mut buf = [0u8; 16];
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut buf)
+        .map_err(|e| std::io::Error::other(format!("rng: {e}")))?;
+    // 32 lowercase hex chars — base16 lookup table.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(32);
+    for byte in &buf {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xF) as usize] as char);
+    }
+    Ok(out)
+}
+
 /// Криптостойкий пароль из URL-safe base64. Длина задаётся в байтах энтропии.
 pub fn gen_password(entropy_bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0u8; entropy_bytes];

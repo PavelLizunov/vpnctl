@@ -6123,6 +6123,19 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     let (wg_priv, wg_pub) = vpnctl_crypto::gen_wireguard_keypair();
+    // 2026-05-23 quickfix (Pavel: «добавил multiviruss и у него
+    // только локальный конфиг»). Pre-fix, web user_create left
+    // `vpn_router_device_id = NULL` and only the 33 Phase-3-imported
+    // users got the production ninitux URL. Now we auto-mint a
+    // 32-hex device_id on every web-create so the user-detail page
+    // shows the production URL straight away — the legacy
+    // `/sub/<token>` URL is demoted to «LAN fallback» as designed.
+    // Mint failure (RNG) is fatal for the whole create — better to
+    // refuse than to land in the «forgot the device_id again» state.
+    let device_id = match vpnctl_crypto::gen_vpn_router_device_id() {
+        Ok(d) => d,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
     let user = vpnctl_core::User {
         id: vpnctl_core::UserId(id_decoded.clone()),
         uuid: vpnctl_crypto::gen_uuid(),
@@ -6130,7 +6143,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         wireguard_pubkey: Some(wg_pub),
         wireguard_private: Some(wg_priv),
         sub_token: None,
-        vpn_router_device_id: None,
+        vpn_router_device_id: Some(device_id),
         // Migration 0026 default — newly-created users start enabled.
         disabled: false,
     };

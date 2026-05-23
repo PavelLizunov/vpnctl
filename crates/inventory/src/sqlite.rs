@@ -1128,9 +1128,14 @@ impl SqliteInventory {
         // to import a pre-disabled user (snapshot restore, future
         // bulk-disable workflow). i64 mirror of the bool.
         let disabled_i: i64 = if u.disabled { 1 } else { 0 };
+        // 2026-05-23 quickfix — also honour `vpn_router_device_id`
+        // on INSERT (was getting silently dropped, leaving every
+        // web-created user with NULL device_id → no production
+        // ninitux URL on user-detail). NULL is still valid for
+        // legacy imports that haven't been mapped to a device_id.
         let res = sqlx::query(
-            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, disabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&u.id.0)
         .bind(&u.uuid)
@@ -1138,6 +1143,7 @@ impl SqliteInventory {
         .bind(&u.wireguard_pubkey)
         .bind(&u.wireguard_private)
         .bind(&token)
+        .bind(u.vpn_router_device_id.as_deref())
         .bind(disabled_i)
         .execute(&self.pool)
         .await;
