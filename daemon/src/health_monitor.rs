@@ -484,10 +484,35 @@ pub async fn check_fingerprint_drift(
                 continue;
             }
         };
-        if observed == pinned {
-            continue; // Match — no drift.
-        }
         let kind = format!("server.fingerprint.drift:{}", server.id.0);
+        if observed == pinned {
+            // Auto-recovery: if the operator accepted the new key
+            // through the web UI (or it «recovered» on its own —
+            // e.g. SSH key rotated back), close any open drift
+            // alert for this server. Silent ack (no `*.recovered`
+            // info alert) — the audit_log keeps the timeline; an
+            // additional info alert would clutter the feed.
+            match inv.ack_open_alerts(&kind, Some(&server.id)).await {
+                Ok(0) => {} // No open alert; nothing to recover.
+                Ok(n) => {
+                    tracing::info!(
+                        target = "vpnctld::health_monitor",
+                        server = %server.id.0,
+                        acked = n,
+                        "auto-recovered server.fingerprint.drift — observed now matches pinned"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        server = %server.id.0,
+                        error = %e,
+                        "auto-recovery ack failed for server.fingerprint.drift"
+                    );
+                }
+            }
+            continue; // No drift, no fire.
+        }
         let summary = format!(
             "host fingerprint for {} differs from pinned value — either legitimate SSH key rotation OR active MITM",
             server.id.0
@@ -589,7 +614,37 @@ pub async fn check_user_traffic_limits(
             continue;
         }
         let pct = ((u128::from(used) * 100) / u128::from(lim)) as u64;
+        let kind = format!("user.traffic_limit:{}", uid.0);
         if pct < u64::from(threshold_pct) {
+            // Auto-recovery: drop below threshold (e.g. month
+            // rolled over, operator raised the limit, traffic
+            // stopped) → silently ack any open warning. Without
+            // this the alert sits in /admin/alerts forever and
+            // forces the operator to manually triage every
+            // monthly cycle. Server_id=None matches the original
+            // insert site (user-traffic alerts aren't server-
+            // scoped).
+            match inv.ack_open_alerts(&kind, None).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::info!(
+                        target = "vpnctld::health_monitor",
+                        user = %uid.0,
+                        pct = pct,
+                        threshold_pct = threshold_pct,
+                        acked = n,
+                        "auto-recovered user.traffic_limit — usage now below threshold"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        user = %uid.0,
+                        error = %e,
+                        "auto-recovery ack failed for user.traffic_limit"
+                    );
+                }
+            }
             continue;
         }
         // Format used / limit as GiB-with-one-decimal for the Telegram
@@ -599,7 +654,9 @@ pub async fn check_user_traffic_limits(
         // 20 GiB monthly»).
         let used_gib = bytes_as_gib_text(used);
         let lim_gib = bytes_as_gib_text(lim);
-        let kind = format!("user.traffic_limit:{}", uid.0);
+        // `kind` already bound above (used by the recovery branch
+        // before the threshold check). Reuse rather than rebind so
+        // the kind string is computed exactly once per row.
         let summary = format!(
             "user {} crossed traffic threshold · {pct}% · {used_gib} of {lim_gib} this month",
             uid.0
@@ -916,6 +973,70 @@ mod tests {
         assert!(
             alerts.is_empty(),
             "user under threshold must not produce an alert; got {alerts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_user_traffic_limits_auto_recovers_when_usage_drops_below() {
+        // Two-tick test: tick 1 fires (90% used vs 50% threshold);
+        // operator raises the limit; tick 2 must auto-ack the open
+        // warning (silent recovery — no info alert, just ack).
+        let (_dir, inv) = fresh_inv().await;
+        inv.add_server(&vpnctl_core::Server {
+            id: ServerId("dummy".into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        inv.add_user(&user_with_id("rocky")).await.unwrap();
+        // Tiny limit + tiny usage → 90% on tick 1.
+        inv.set_user_traffic_limit(&UserId("rocky".into()), Some(100), Some(50))
+            .await
+            .unwrap();
+        inv.record_vpn_stats(
+            &ServerId("dummy".into()),
+            &[vpnctl_inventory::VpnStatsDelta {
+                user_id: Some(UserId("rocky".into())),
+                upload_bytes: 50,
+                download_bytes: 40,
+                active_connections: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        check_user_traffic_limits(&inv).await.unwrap();
+        let unacked_before: Vec<_> = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none())
+            .collect();
+        assert_eq!(unacked_before.len(), 1, "tick 1 must fire one alert");
+
+        // Operator raises the limit so pct drops from 90% to ~0%.
+        inv.set_user_traffic_limit(&UserId("rocky".into()), Some(1_000_000), Some(50))
+            .await
+            .unwrap();
+        check_user_traffic_limits(&inv).await.unwrap();
+        let unacked_after: Vec<_> = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none())
+            .collect();
+        assert!(
+            unacked_after.is_empty(),
+            "tick 2 must auto-ack the open alert; got: {unacked_after:?}"
         );
     }
 
