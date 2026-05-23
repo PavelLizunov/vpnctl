@@ -2635,6 +2635,21 @@ pub(crate) async fn user_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // 2026-05-23 quickfix follow-up (Pavel + multiviruss incident):
+    // detect servers whose running config doesn't yet include this
+    // user's latest state — i.e. user was created / modified after
+    // the server's most recent deploy. Surfaces as an amber banner
+    // at the top of user-detail so the operator notices BEFORE the
+    // user reports «connected but no traffic».
+    let pending_deploy_servers: Vec<vpnctl_core::ServerId> = state
+        .inv
+        .servers_pending_deploy_for_user(&uid, &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid.0, error = %e, "servers_pending_deploy_for_user failed");
+            Vec::new()
+        });
+
     // Phase C-3.3: also need the FULL inventory of servers so the
     // detail page can show "ungranted" rows with a "grant" button.
     // The set of granted ids lets us split the full list visually.
@@ -2823,6 +2838,43 @@ pub(crate) async fn user_detail(
         h1.ed-art-h1 { (user.id.0) }
         p.ed-art-deck {
             "uuid " span.ed-mono { (user.uuid) }
+        }
+
+        // 2026-05-23 quickfix follow-up — pending-deploy banner.
+        // Surfaces servers whose running config doesn't yet include
+        // this user's current state. Hidden when empty (quiet
+        // dashboard contract). Each server name links straight to
+        // its detail page's #deploy-button anchor so one click moves
+        // the operator from «I see the warning» to «I'm one click
+        // from fixing it».
+        //
+        // Visual: amber border, prominent at the top so it's
+        // noticed before the operator starts copying the QR.
+        @if !pending_deploy_servers.is_empty() {
+            div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
+                div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px; margin-bottom: 4px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "⚠ Config not yet deployed to:",
+                        "⚠ Конфиг ещё не задеплоен на:",
+                    ))
+                    " "
+                    @for (i, sid) in pending_deploy_servers.iter().enumerate() {
+                        @if i > 0 { ", " }
+                        a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0)))
+                          style="color: var(--acc); font-family: var(--mono); font-weight: 600;" {
+                            (sid.0)
+                        }
+                    }
+                }
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0; font-size: 12px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "Until you click «deploy» on each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss.",
+                        "Пока не нажмёшь «deploy» на каждом сервере выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23.",
+                    ))
+                }
+            }
         }
 
         // Subscription URL + QR — the headline for this page.

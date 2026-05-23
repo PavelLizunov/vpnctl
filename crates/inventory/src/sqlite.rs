@@ -1715,6 +1715,77 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_admin_alert).collect()
     }
 
+    /// **Pending-deploy detection** (Option B from the 2026-05-23
+    /// «user-create → silent server miss» quickfix discussion).
+    ///
+    /// Given a user_id + list of granted server_ids, return the
+    /// subset of servers whose **latest `server.deploy` audit row
+    /// is older than the user's latest mutation** (`user.add`,
+    /// `user.grant`, `user.set_vpn_router_device_id`, `user.disable`,
+    /// `user.enable`). Those servers' running sing-box config does
+    /// NOT yet include the user's current state — clicking their
+    /// detail page's «deploy» button pushes the fresh render and
+    /// closes the gap.
+    ///
+    /// **Heuristic, not exact:** an alternative deploy via CLI (not
+    /// through the web button) doesn't write the same audit row.
+    /// Future-proof by extending the SQL `IN (...)` action list when
+    /// new audit actions appear.
+    ///
+    /// **`None`-deploy case:** a server never deployed via web (only
+    /// via CLI / wizard) has no `server.deploy` audit row. We treat
+    /// this as «pending» if the user has ANY mutation — operator
+    /// resolves by clicking deploy at least once, which then sets
+    /// a baseline timestamp.
+    pub async fn servers_pending_deploy_for_user(
+        &self,
+        user_id: &UserId,
+        granted_server_ids: &[ServerId],
+    ) -> Result<Vec<ServerId>> {
+        if granted_server_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Latest user-mutation timestamp from audit_log.
+        let user_row = sqlx::query(
+            "SELECT MAX(ts) AS ts FROM audit_log
+             WHERE target = ?1
+               AND action IN ('user.add', 'user.grant',
+                              'user.set_vpn_router_device_id',
+                              'user.disable', 'user.enable')",
+        )
+        .bind(&user_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let user_latest_ts: Option<String> = user_row.try_get("ts")?;
+        let Some(user_ts) = user_latest_ts else {
+            // User has zero audit mutations (legacy import?) — nothing
+            // to flag.
+            return Ok(Vec::new());
+        };
+        // For each granted server, fetch its latest deploy ts and
+        // compare. Loop is cheap at homelab scale (≤100 servers
+        // ⇒ ≤100 indexed lookups).
+        let mut out: Vec<ServerId> = Vec::new();
+        for sid in granted_server_ids {
+            let row = sqlx::query(
+                "SELECT MAX(ts) AS ts FROM audit_log
+                 WHERE target = ?1 AND action = 'server.deploy'",
+            )
+            .bind(&sid.0)
+            .fetch_one(&self.pool)
+            .await?;
+            let deploy_ts: Option<String> = row.try_get("ts")?;
+            // Pending if: no deploy ever recorded (None) OR last
+            // deploy is older than the user's last change.
+            match deploy_ts {
+                None => out.push(sid.clone()),
+                Some(dts) if dts < user_ts => out.push(sid.clone()),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
     /// Count of users with `disabled = 1` (B1.user, migration 0026).
     /// Cheap — backed by the partial `idx_users_disabled_partial`
     /// index which only contains the disabled rows, so this is O(N
