@@ -10975,9 +10975,13 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
         .unwrap();
 
     let html = fetch_html(router(s), "/admin/").await;
+    // Heading uses the active window label (default 24h, post-
+    // 2026-05-23 global window picker). «VPN activity · 24h»
+    // — same tile, just generic-windowed.
     assert!(
-        html.contains("VPN activity · last 24h"),
-        "dashboard must surface the new VPN-activity tile"
+        html.contains("VPN activity · 24h"),
+        "dashboard must surface the new VPN-activity tile; got: {}",
+        &html[..200.min(html.len())]
     );
     assert!(html.contains("NM-11"), "tile must surface NM-11 explainer");
     // Pin the busy server's `<td>7</td>` row specifically so an
@@ -11008,7 +11012,7 @@ async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
     // No servers at all → list is empty.
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("VPN activity · last 24h"),
+        html.contains("VPN activity · 24h"),
         "tile must always render"
     );
     assert!(

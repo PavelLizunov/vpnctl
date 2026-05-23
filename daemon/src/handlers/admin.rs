@@ -731,13 +731,16 @@ pub(crate) async fn dashboard(
     axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
-    // 2026-05-23 — multi-window fleet traffic chart on dashboard.
-    // Picks the same VpnSparklineWindow set the user-detail page
-    // uses (one source of truth in VPN_SPARKLINE_WINDOWS).
-    let fleet_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
+    // 2026-05-23 — ONE window picker drives every time-series
+    // tile on the dashboard: VPN activity, Heavy users, Fleet
+    // traffic chart. Single source of truth in
+    // VPN_SPARKLINE_WINDOWS; bookmarkable URL via
+    // `?vpn_window=24h|7d|30d|all`.
+    let window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
+    let since_hours = window.cells * window.bucket_hours;
     let fleet_rows = state
         .inv
-        .recent_vpn_stats_fleet(fleet_window.cells * fleet_window.bucket_hours)
+        .recent_vpn_stats_fleet(since_hours)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
@@ -748,14 +751,12 @@ pub(crate) async fn dashboard(
         .await
         .map_err(internal_error)?;
 
-    // Pavel iter D.6 — heavy-user heatmap. Surface the top-5
-    // bandwidth-consuming users over the last 24h so the operator
-    // can spot abuse-candidate accounts without drilling into each
-    // user's page. Empty Vec → the section's empty-state already
-    // explains why ("no live stats yet").
+    // Heavy users — top-5 bandwidth consumers over the selected
+    // window (was hardcoded 24h pre-2026-05-23). Same data source
+    // as before; tile heading + caption reflect the chosen window.
     let heavy_users = state
         .inv
-        .top_users_by_traffic(24, 5)
+        .top_users_by_traffic(since_hours, 5)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
@@ -791,7 +792,7 @@ pub(crate) async fn dashboard(
     // «VPN activity» tile. ONE call returns one entry per known
     // server (defaults to zeros for unpolled servers); we sum +
     // pass the per-server breakdown to the renderer.
-    let live_activity = state.inv.all_servers_live_activity(24).await.unwrap_or_else(|e| {
+    let live_activity = state.inv.all_servers_live_activity(since_hours).await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", error = %e, "all_servers_live_activity failed");
         Vec::new()
     });
@@ -860,27 +861,34 @@ pub(crate) async fn dashboard(
             ))
         }
         (dashboard_metrics(&stats, lang))
+        // 2026-05-23 — global time-window picker. ONE control
+        // drives VPN activity + Heavy users + Fleet traffic chart.
+        // Tabs use #timeframe anchor so click → scroll back to
+        // picker (not page top). Date range follows in a separate
+        // commit (Pavel «таки конкретного таймфрема, то есть
+        // промежутка дать» — picker shows them via tabs first,
+        // arbitrary from/to next session).
+        (window_picker_section("/admin/", window.slug, lang))
         (dashboard_fleet_uptime(&fleet_uptime, lang))
-        (dashboard_vpn_activity(&live_activity, lang))
-        // 2026-05-23 — fleet-wide traffic chart with multi-window
-        // tabs (24h / 7d / 30d / all). Same chart component the
-        // user-detail page uses, fed the fleet-aggregate Vec.
+        (dashboard_vpn_activity(&live_activity, window, lang))
+        // Fleet-wide traffic chart. Uses the same `window` the
+        // tiles above use — single picker, three tiles, one
+        // mental model.
         div id="vpn-traffic" style="margin-top: 24px;" {
             div.ed-art-eyebrow {
                 (crate::i18n::tr(lang, "Fleet traffic", "Трафик флота"))
                 " · "
                 (match lang {
-                    crate::i18n::Locale::En => fleet_window.label_en,
-                    crate::i18n::Locale::Ru => fleet_window.label_ru,
+                    crate::i18n::Locale::En => window.label_en,
+                    crate::i18n::Locale::Ru => window.label_ru,
                 })
             }
-            (vpn_sparkline_tabs("/admin/", fleet_window.slug, lang))
-            (vpn_traffic_chart(&fleet_rows, fleet_window, lang))
+            (vpn_traffic_chart(&fleet_rows, window, lang))
         }
         (dashboard_alerts_tile(unacked_alerts, lang))
         (dashboard_idle_users(&idle_users, lang))
         (dashboard_limit_alerts(&alerting, lang))
-        (dashboard_heavy_users(&heavy_users, lang))
+        (dashboard_heavy_users(&heavy_users, window, lang))
         (dashboard_audit(&audit, lang))
     };
     Ok(shell("dashboard", &theme, &accent, lang, body))
@@ -1064,6 +1072,7 @@ fn dashboard_fleet_uptime(
 /// is zero today.
 fn dashboard_vpn_activity(
     rows: &[(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)],
+    window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -1080,10 +1089,17 @@ fn dashboard_vpn_activity(
         .map(|(_, a)| a.active_now)
         .fold(0u32, u32::saturating_add);
     let any_polled = rows.iter().any(|(_, a)| a.last_sample_ts.is_some());
+    let window_label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
+    };
 
     html! {
         div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
-            div.ed-art-eyebrow { (tr(lang, "VPN activity · last 24h", "VPN-активность · 24 часа")) }
+            div.ed-art-eyebrow {
+                (tr(lang, "VPN activity · ", "VPN-активность · "))
+                (window_label)
+            }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (tr(
                     lang,
@@ -1110,11 +1126,15 @@ fn dashboard_vpn_activity(
                     div title=(tr(lang, "Sum of active_connections across all servers' freshest server-wide tick.", "Сумма active_connections по всем серверам (свежий сервер-агрегатный тик).")) {
                         (status_tile(tr(lang, "active now", "активных сейчас"), &total_active.to_string(), "var(--ink)"))
                     }
-                    div title=(tr(lang, "Total upload bytes (client → server) across every node over the last 24 hours.", "Total upload-байт (клиент → сервер) по всем нодам за последние 24 часа.")) {
-                        (status_tile(tr(lang, "upload 24h", "upload 24ч"), &humanize_bytes(total_up), "var(--ink)"))
+                    @let up_title = format!("{}{}", tr(lang, "Total upload bytes (client → server) across every node in window: ", "Total upload-байт (клиент → сервер) по всем нодам за окно: "), window_label);
+                    @let dn_title = format!("{}{}", tr(lang, "Total download bytes (server → client) across every node in window: ", "Total download-байт (сервер → клиент) по всем нодам за окно: "), window_label);
+                    @let up_label = format!("{} {}", tr(lang, "upload", "upload"), window_label);
+                    @let dn_label = format!("{} {}", tr(lang, "download", "download"), window_label);
+                    div title=(up_title) {
+                        (status_tile(&up_label, &humanize_bytes(total_up), "var(--ink)"))
                     }
-                    div title=(tr(lang, "Total download bytes (server → client) across every node over the last 24 hours.", "Total download-байт (сервер → клиент) по всем нодам за последние 24 часа.")) {
-                        (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(total_dn), "var(--ink)"))
+                    div title=(dn_title) {
+                        (status_tile(&dn_label, &humanize_bytes(total_dn), "var(--ink)"))
                     }
                 }
                 // Per-server breakdown — compact mono table.
@@ -1322,20 +1342,29 @@ fn dashboard_limit_alerts(
     }
 }
 
-/// Render the "heavy users · last 24h" section on the dashboard.
+/// Render the "heavy users · <window>" section on the dashboard.
 /// Sorted DESC by total bytes (upload + download). Empty list →
 /// explanatory empty-state explaining the polling prerequisite.
-fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)], lang: crate::i18n::Locale) -> Markup {
+fn dashboard_heavy_users(
+    rows: &[(vpnctl_core::UserId, u64)],
+    window: VpnSparklineWindow,
+    lang: crate::i18n::Locale,
+) -> Markup {
     use crate::i18n::{K, t, tr};
+    let window_label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
+    };
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow
             title=(tr(
                 lang,
-                "Top-N by sum of (upload+download bytes) across all servers, last 24 hours. Data source: clash-api 5-minute polls. wgturn / WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here.",
-                "Топ-N по сумме (upload+download байт) на всех серверах за 24 часа. Источник: 5-минутные опросы clash-api. Трафик wgturn / WireGuard НЕ учитывается (kernel-уровень, clash-api их не видит); только протоколы которые видит sing-box (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022).",
+                "Top-N by sum of (upload+download bytes) across all servers in the selected window. Data source: clash-api 5-minute polls. wgturn / WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here.",
+                "Топ-N по сумме (upload+download байт) на всех серверах за выбранное окно. Источник: 5-минутные опросы clash-api. Трафик wgturn / WireGuard НЕ учитывается (kernel-уровень, clash-api их не видит); только протоколы которые видит sing-box (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022).",
             )) {
-            (t(lang, K::EyebrowHeavyUsers))
+            (tr(lang, "Heavy users · ", "Тяжёлые пользователи · "))
+            (window_label)
         }
         @if rows.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
@@ -1358,10 +1387,12 @@ fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)], lang: crate::i18n:
         } @else {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 (tr(lang, "Top ", "Топ ")) (rows.len())
+                (tr(lang, " accounts by total (upload + download) over ", " аккаунтов по суммарному (upload + download) за "))
+                (window_label)
                 (tr(
                     lang,
-                    " accounts by total (upload + download) over the last 24 hours. Click through to investigate; the user page has the full breakdown + sparkline.",
-                    " аккаунтов по суммарному (upload + download) за 24 часа. Кликни чтобы разобраться — страница пользователя содержит полную разбивку + sparkline.",
+                    ". Click through to investigate; the user page has the full breakdown + sparkline.",
+                    ". Кликни чтобы разобраться — страница пользователя содержит полную разбивку + sparkline.",
                 ))
             }
             ol style="list-style: decimal; padding-left: 24px; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
@@ -3924,6 +3955,16 @@ pub(crate) async fn user_detail(
         // ── UA fingerprint (Phase Track-4) ──────────────────────
         (ua_clusters_section(&state, &uid, lang).await)
 
+        // 2026-05-23 — global time-window picker. Drives the Live
+        // VPN stats chart below (and any future time-series blocks
+        // on user-detail). Single picker keeps Pavel's mental
+        // model «pick once, all charts re-render».
+        (window_picker_section(
+            &format!("/admin/users/{}", path_segment_encode(&uid.0)),
+            pick_vpn_sparkline_window(query.vpn_window.as_deref()).slug,
+            lang,
+        ))
+
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
         (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
         (user_top_destinations_section(&state, &uid, lang).await)
@@ -4524,31 +4565,49 @@ fn vpn_traffic_chart(
     }
 }
 
-/// Tab nav for the multi-window sparkline. Selected window
-/// renders as bold-no-link; others as `<a href="?window=X">`. The
-/// `base_url` should be the absolute path WITHOUT query string —
-/// the tab links append `?window=...#vpn-traffic` so the browser
-/// scrolls back to the chart's anchor instead of jumping to the
-/// page top on every tab click (2026-05-23 UI bug fix).
-fn vpn_sparkline_tabs(base_url: &str, active_slug: &str, lang: crate::i18n::Locale) -> Markup {
+/// Top-of-page «time window» picker (2026-05-23 — Pavel «возможность
+/// выбора как window: 24h / 7 days / 30 days / all»).
+///
+/// Renders ONE shared picker that drives every time-series tile on
+/// the page below (VPN activity, Heavy users, Fleet traffic chart,
+/// user-detail Live VPN stats, …). Sits at the top so the operator
+/// picks once and scrolls down to see all tiles in sync.
+///
+/// Tab links use `#timeframe` anchor so a click jumps the browser
+/// BACK to this picker (not the page top) after the reload —
+/// preserves Pavel's «scroll-to-top is annoying» feedback.
+///
+/// `base_url` is the absolute path WITHOUT query string.
+fn window_picker_section(base_url: &str, active_slug: &str, lang: crate::i18n::Locale) -> Markup {
     html! {
-        div style="display: flex; gap: 16px; font-family: var(--mono); font-size: 11px; margin: 6px 0 2px; padding-left: 12px;" {
-            span style="color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
-                (crate::i18n::tr(lang, "window:", "окно:"))
+        div id="timeframe" style="margin: 20px 0 6px; padding: 10px 14px; border: 1px solid var(--rule); background: var(--paper); display: flex; flex-wrap: wrap; gap: 18px; align-items: baseline;" {
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
+                (crate::i18n::tr(lang, "Window", "Окно"))
             }
-            @for w in VPN_SPARKLINE_WINDOWS {
-                @let label = match lang {
-                    crate::i18n::Locale::En => w.label_en,
-                    crate::i18n::Locale::Ru => w.label_ru,
-                };
-                @if w.slug == active_slug {
-                    span style="font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--ink);" { (label) }
-                } @else {
-                    a href=(format!("{base_url}?vpn_window={}#vpn-traffic", w.slug))
-                      style="color: var(--mute); text-decoration: none; border-bottom: 1px dotted var(--mute);" {
-                        (label)
+            div style="display: flex; gap: 14px; font-family: var(--mono); font-size: 13px;" {
+                @for w in VPN_SPARKLINE_WINDOWS {
+                    @let label = match lang {
+                        crate::i18n::Locale::En => w.label_en,
+                        crate::i18n::Locale::Ru => w.label_ru,
+                    };
+                    @if w.slug == active_slug {
+                        span style="font-weight: 600; color: var(--ink); border-bottom: 1.5px solid var(--ink); padding-bottom: 1px;" {
+                            (label)
+                        }
+                    } @else {
+                        a href=(format!("{base_url}?vpn_window={}#timeframe", w.slug))
+                          style="color: var(--mute); text-decoration: none; border-bottom: 1px dotted var(--mute); padding-bottom: 1px;" {
+                            (label)
+                        }
                     }
                 }
+            }
+            span style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 11px; margin-left: auto;" {
+                (crate::i18n::tr(
+                    lang,
+                    "→ all charts + tiles below update together (custom date range — coming next)",
+                    "→ все графики и плитки ниже обновляются вместе (произвольный диапазон дат — в следующем релизе)",
+                ))
             }
         }
     }
@@ -4933,7 +4992,6 @@ async fn live_vpn_stats_section(
         crate::i18n::Locale::En => window.label_en,
         crate::i18n::Locale::Ru => window.label_ru,
     };
-    let base_url = format!("/admin/users/{}", path_segment_encode(&uid.0));
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow {
@@ -4977,14 +5035,13 @@ async fn live_vpn_stats_section(
                 }
             }
         }
-        // 2026-05-23 redesign — PowerBI/Tableau-style chart with
-        // explicit axes, gridlines, byte-formatted Y labels and
-        // date-formatted X labels. Tabs above let the operator
-        // switch windows (24h / 7d / 30d / all); anchor on the
-        // wrapper div keeps the browser scrolled to the chart
-        // after tab clicks (fixed the «scroll-to-top» bug).
+        // 2026-05-23 — PowerBI-style chart. Window picker now
+        // lives at top of page (`window_picker_section`); chart-
+        // internal tabs removed so the operator has one mental
+        // model «pick once, all tiles update». Anchor stays so
+        // tab clicks from the top picker (or anchor links from
+        // elsewhere) scroll back to the chart.
         div id="vpn-traffic" {
-            (vpn_sparkline_tabs(&base_url, window.slug, lang))
             (vpn_traffic_chart(&rows, window, lang))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
