@@ -16,7 +16,7 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::info;
 
-use vpnctld::DaemonConfig;
+use vpnctld::{DaemonConfig, assert_auth_safe_for_addr};
 
 #[derive(Parser, Debug)]
 #[command(name = "vpnctld", version, about = "vpnctl HTTP daemon")]
@@ -36,6 +36,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let config = DaemonConfig::resolve(cli.db, cli.addr).await?;
+    // Safety gate (audit B3, 2026-05-22): a non-loopback bind without
+    // admin credentials would have served the entire admin UI to any
+    // peer. Loopback binds + non-loopback-with-auth proceed; otherwise
+    // refuse to start with a concrete remediation message naming the
+    // env vars that need to be set.
+    assert_auth_safe_for_addr(config.addr)?;
     info!(
         target = "vpnctld",
         db = %config.db_path.display(),

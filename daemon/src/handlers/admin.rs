@@ -1206,10 +1206,18 @@ fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)], lang: crate::i18n:
     }
 }
 
-/// Convert any error into a plaintext 500 response. The body is one line
-/// (mirrors what the operator would see in `journalctl -u vpnctld`); a
-/// shell-rendered 500 page would need to re-derive theme/accent + cookies
-/// inside an error path and isn't worth the surface for an admin UI.
+/// Convert any error into a plaintext 500 response.
+///
+/// **Body is intentionally opaque.** Prior to 2026-05-22 this function
+/// inlined `err.to_string()` into the response so the operator could
+/// see the failure without checking journalctl. That bled sqlx /
+/// anyhow chains (schema names, file paths, occasionally row contents)
+/// to anyone who could reach the admin UI. For a single-LAN operator
+/// the leak was tolerable; for any external exposure (reverse proxy
+/// flapping, accidental 0.0.0.0 bind, future OAuth gating) it's a
+/// recon channel. Body is now a stable opaque string; the full chain
+/// stays in `journalctl -u vpnctld -t vpnctld::admin` where the
+/// operator can grep it.
 ///
 /// **Copy contract:** every backend response in the admin tree starts
 /// with `vpnctl admin:` so an operator grepping `journalctl` or tailing
@@ -1219,10 +1227,17 @@ fn dashboard_heavy_users(rows: &[(vpnctl_core::UserId, u64)], lang: crate::i18n:
 /// call sites clean (`.map_err(internal_error)`), so silence clippy.
 #[allow(clippy::needless_pass_by_value)]
 fn internal_error(err: anyhow::Error) -> Response {
-    tracing::error!(target = "vpnctld::admin", error = %err, "handler failed");
+    // Full chain to the log — the operator's debugging surface.
+    tracing::error!(
+        target = "vpnctld::admin",
+        error = format!("{err:#}"),
+        "handler failed; returning opaque 500 to client"
+    );
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        error_text(&err.to_string()),
+        // Opaque body — see doc-comment. Pinned by
+        // `internal_error_body_does_not_leak_anyhow_chain`.
+        error_text("internal error — see journalctl -u vpnctld"),
     )
         .into_response()
 }
@@ -9232,11 +9247,12 @@ pub(crate) async fn server_detail(
         (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
 
         // Trusted host fingerprint — TOFU pin for the daemon's SSH
-        // probe + clash-api poller + deploy. The CLAUDE.md note from
-        // vps-is-01 import (2026-05-16): «CLI command for this missing
-        // — TODO for vpnctl: `vpnctl server set-fingerprint <id>`».
-        // Web equivalent lives here so the operator never has to drop
-        // to a shell + raw SQL just to pin a host key.
+        // probe + clash-api poller + deploy. Both the web action below
+        // and the `vpnctl server set-fingerprint <id>` CLI shipped
+        // 2026-05-17 (`2fda5c6`) + 2026-05-18 (`ec275c5` — extracted
+        // `vpnctl-host-fingerprint` crate as single source of truth);
+        // operator never needs to drop to shell + raw SQL just to pin
+        // a host key. (Stale «TODO for vpnctl» note cleaned 2026-05-22.)
         (server_detail_fingerprint_section(&server, lang))
 
         // wgturn-specific settings — only renders when the server has

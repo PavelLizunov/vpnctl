@@ -14,10 +14,12 @@
 //!
 //! Pure-Rust `maxminddb` crate — no `openssl-sys`, no `native-tls`.
 //! mmap-backed reader: ~80 MB on disk (City + ASN combined), ~0 ms
-//! per lookup once loaded. Update is a manual operator-driven
-//! `vpnctl geoip-update` (TODO) or a drop-in replacement of the
-//! .mmdb file. License (GeoLite2 EULA) is free for internal use
-//! with monthly-refresh requirement.
+//! per lookup once loaded. Update is operator-driven via
+//! `vpnctl geoip-update` (CLI; shipped 2026-05-21) OR the
+//! `/admin/settings` «update GeoIP» SSE button (web). License (DB-IP
+//! Lite CC-BY 4.0 — no signup, monthly refresh) — both paths download
+//! from the same upstream + atomic-rename into `VPNCTLD_GEOIP_DIR`
+//! (default `/var/lib/vpnctl/geoip`).
 //!
 //! ## Failure modes
 //!

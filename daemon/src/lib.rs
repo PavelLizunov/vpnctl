@@ -82,7 +82,7 @@ pub mod wizard_bootstrap;
 pub use app::{
     AppState, build, make_app_state_for_tests, make_app_state_with_rate_limiter, router,
 };
-pub use config::DaemonConfig;
+pub use config::{DaemonConfig, assert_auth_safe_for_addr, assert_auth_safe_for_addr_with};
 
 /// Test-only re-export of the retention purger spawner so integration
 /// tests can verify the wiring. Production code uses

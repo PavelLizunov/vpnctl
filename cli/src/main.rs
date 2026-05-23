@@ -118,6 +118,32 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// `vpnctld` admin-side utilities. Today: hash an admin password
+    /// into the Argon2id PHC format expected by
+    /// `VPNCTLD_ADMIN_PASSWORD`. Was referenced in `daemon/handlers/
+    /// auth.rs` doc-comment for 9 months without an actual implementation
+    /// (audit B2, 2026-05-22) — anyone following the docs got
+    /// «unrecognized subcommand». Now real.
+    Admin {
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminCmd {
+    /// Hash a plaintext admin password to Argon2id PHC format. Read
+    /// the plaintext from stdin (recommended — never appears on the
+    /// process command line) or `--password <plain>` for ad-hoc use.
+    /// Writes the `$argon2id$v=19$…` line to stdout; paste into
+    /// `/etc/vpnctl/vpnctld.env` as `VPNCTLD_ADMIN_PASSWORD=…`.
+    HashPassword {
+        /// Plaintext password. If omitted, read one line from stdin.
+        /// Prefer stdin — passing on the command line leaves the
+        /// password in shell history + `/proc/<pid>/cmdline`.
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -153,6 +179,9 @@ async fn main() -> std::process::ExitCode {
             }
         },
         Cmd::GeoipUpdate { dir } => cmd::geoip::run(dir).await,
+        Cmd::Admin { cmd } => match cmd {
+            AdminCmd::HashPassword { password } => cmd::admin::hash_password(password),
+        },
     };
 
     match res {

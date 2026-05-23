@@ -1,6 +1,6 @@
 [package]
 name = "vpnctl"
-version = "0.1.0"
+version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -39,6 +39,15 @@ flate2 = "1"
 # the daemon uses (0.27 — RUSTSEC-2025-0132 clean).
 maxminddb = "0.27"
 futures-util = "0.3"
+# Audit B2 (2026-05-22) — `vpnctl admin hash-password` was documented
+# in `daemon/handlers/auth.rs` but unimplemented for 9 months. Same
+# argon2 features as the daemon (alloc + password-hash), no
+# std-only because we use the workspace-default profile here.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "std"] }
+# RNG for argon2 salt generation. `rand_core::OsRng` is the
+# crypto-suitable default and is what argon2 expects via
+# `password_hash::SaltString::generate(&mut OsRng)`.
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
 [lints]
 workspace = true

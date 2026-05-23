@@ -9,3 +9,4 @@
 # future segfaults can't recur it.
 /core
 /core.*
+scripts/__pycache__/

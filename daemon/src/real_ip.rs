@@ -31,10 +31,14 @@
 //! gate is "only parse the header when the immediate TCP peer is in
 //! the trusted-proxy allowlist". The allowlist is sourced from the
 //! `VPNCTLD_TRUSTED_PROXIES` env var (comma-separated `IpAddr`s);
-//! when the var is unset, the LAN-deployment default
-//! `192.168.0.207` (nginx host) is used. Setting it to the empty
-//! string OR a value that fails to parse falls back to the default
-//! (operator-typo-resilient).
+//! **when the var is unset, the allowlist is empty** — vpnctld
+//! reads the direct `ConnectInfo` peer IP and ignores any XFF
+//! header on the request. Operators behind a reverse proxy MUST
+//! set the env var explicitly (e.g. `VPNCTLD_TRUSTED_PROXIES=
+//! 192.168.0.207`). Pre-2026-05-22 the default was Pavel's homelab
+//! nginx (`192.168.0.207`); audit I4 defanged it so the daemon is
+//! safe-by-default for any operator who didn't reverse-engineer the
+//! magic IP.
 //!
 //! ## Header format
 //!
@@ -46,7 +50,7 @@
 //! leftmost — that's a different threat model (the trusted proxy
 //! itself is compromised) and out of scope here.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::OnceLock;
 
 use axum::http::HeaderMap;
@@ -56,16 +60,21 @@ use axum::http::HeaderMap;
 /// across daemon lifetime" model used by `BasicAuth::from_env`).
 static TRUSTED_PROXIES: OnceLock<Vec<IpAddr>> = OnceLock::new();
 
-/// Default LAN-deployment trust list: nginx host on 192.168.0.207.
-/// Documented in CLAUDE.md infrastructure section.
-const DEFAULT_TRUSTED_PROXY_LAN: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 207));
-
 /// Read `VPNCTLD_TRUSTED_PROXIES` (comma-separated `IpAddr` list).
-/// Unset OR empty after-trim OR no values parse cleanly → fall back
-/// to the single-host default. The `filter(|v| !v.is_empty())` after
-/// the parse means an operator typo (`VPNCTLD_TRUSTED_PROXIES="not.an.ip"`)
-/// falls back rather than disabling header parsing entirely (which
-/// would silently re-enable the post-Phase-5 collapse bug).
+///
+/// **Default is empty.** Pre-2026-05-22 this fell back to Pavel's
+/// homelab nginx (`192.168.0.207`) when the env var was unset — fine
+/// for Pavel's deployment, but for any other operator it meant a
+/// random LAN host's `X-Forwarded-For` would be trusted. Audit I4
+/// defanged the default: an unset env var now means "trust no
+/// proxies" (read direct peer IP via `ConnectInfo`); operators behind
+/// a reverse proxy MUST set the env var explicitly.
+///
+/// The `filter(|v| !v.is_empty())` after parsing keeps an operator
+/// typo (`VPNCTLD_TRUSTED_PROXIES="not.an.ip"`) from silently
+/// switching to "trust no proxies" mid-deploy — but it also makes
+/// the FIRST request whose XFF would have been honoured fall back to
+/// the peer IP. That's the conservative direction.
 fn trusted_proxies() -> &'static [IpAddr] {
     TRUSTED_PROXIES.get_or_init(|| {
         std::env::var("VPNCTLD_TRUSTED_PROXIES")
@@ -75,8 +84,7 @@ fn trusted_proxies() -> &'static [IpAddr] {
                     .filter_map(|x| x.trim().parse::<IpAddr>().ok())
                     .collect::<Vec<_>>()
             })
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| vec![DEFAULT_TRUSTED_PROXY_LAN])
+            .unwrap_or_default()
     })
 }
 
@@ -91,7 +99,15 @@ fn trusted_proxies() -> &'static [IpAddr] {
 /// Lowercase header lookup because axum normalises HTTP/1.1 header
 /// names to lowercase per RFC 7230 §3.2.
 pub fn resolve_real_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
-    if !trusted_proxies().contains(&peer) {
+    resolve_real_ip_with(headers, peer, trusted_proxies())
+}
+
+/// Pure inner helper — same logic as [`resolve_real_ip`] but with the
+/// trusted-proxy list lifted to a parameter. Lets tests exercise every
+/// branch without touching the process env (which under Rust 2024 +
+/// workspace `unsafe_code = "forbid"` would require unsafe blocks).
+pub fn resolve_real_ip_with(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr]) -> IpAddr {
+    if !trusted.contains(&peer) {
         return peer;
     }
     headers
@@ -123,7 +139,18 @@ pub fn resolve_trusted_header(
     peer: IpAddr,
     header_name: &str,
 ) -> Option<String> {
-    if !trusted_proxies().contains(&peer) {
+    resolve_trusted_header_with(headers, peer, header_name, trusted_proxies())
+}
+
+/// Pure inner helper for [`resolve_trusted_header`] — see [`resolve_real_ip_with`]
+/// for the rationale (test-friendly without env mutation).
+pub fn resolve_trusted_header_with(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    header_name: &str,
+    trusted: &[IpAddr],
+) -> Option<String> {
+    if !trusted.contains(&peer) {
         return None;
     }
     let raw = headers.get(header_name)?.to_str().ok()?;
@@ -150,9 +177,19 @@ pub fn collect_tls_fingerprints(
     headers: &HeaderMap,
     peer: IpAddr,
 ) -> (Option<String>, Option<String>) {
+    collect_tls_fingerprints_with(headers, peer, trusted_proxies())
+}
+
+/// Pure inner helper for [`collect_tls_fingerprints`] — see
+/// [`resolve_real_ip_with`] for the test-friendliness rationale.
+pub fn collect_tls_fingerprints_with(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    trusted: &[IpAddr],
+) -> (Option<String>, Option<String>) {
     (
-        resolve_trusted_header(headers, peer, "x-ssl-ja3"),
-        resolve_trusted_header(headers, peer, "x-ssl-ja4"),
+        resolve_trusted_header_with(headers, peer, "x-ssl-ja3", trusted),
+        resolve_trusted_header_with(headers, peer, "x-ssl-ja4", trusted),
     )
 }
 
@@ -162,6 +199,11 @@ mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
     use std::net::Ipv4Addr;
+
+    /// Pavel's homelab nginx — the historical default in production.
+    /// Kept as a test-only constant so the test bodies don't repeat
+    /// the literal; production no longer defaults to it (audit I4).
+    const DEFAULT_TRUSTED_PROXY_LAN: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 207));
 
     fn header(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -187,7 +229,10 @@ mod tests {
     fn trusted_peer_extracts_leftmost_xff() {
         let h = header("203.0.113.7, 192.168.0.207");
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
-        let got = resolve_real_ip(&h, trusted);
+        // Pass trusted list explicitly via `_with` variant —
+        // post-2026-05-22 audit I4, the env-driven default is
+        // empty so the test can't rely on a static fallback.
+        let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
     }
 
@@ -195,7 +240,7 @@ mod tests {
     fn trusted_peer_no_header_falls_back_to_peer() {
         let h = HeaderMap::new();
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
-        let got = resolve_real_ip(&h, trusted);
+        let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got, trusted);
     }
 
@@ -203,7 +248,7 @@ mod tests {
     fn trusted_peer_malformed_header_falls_back() {
         let h = header("not-an-ip, also-not");
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
-        let got = resolve_real_ip(&h, trusted);
+        let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got, trusted);
     }
 
@@ -211,7 +256,7 @@ mod tests {
     fn trusted_peer_extracts_ipv6_xff() {
         let h = header("2001:db8::42, 192.168.0.207");
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
-        let got = resolve_real_ip(&h, trusted);
+        let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got.to_string(), "2001:db8::42");
     }
 
@@ -239,7 +284,8 @@ mod tests {
     #[test]
     fn trusted_header_trusted_peer_returns_value() {
         let h = ja_header("x-ssl-ja3", "abcdef0123456789abcdef0123456789");
-        let got = resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3");
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        let got = resolve_trusted_header_with(&h, trusted, "x-ssl-ja3", &[trusted]);
         assert_eq!(got.as_deref(), Some("abcdef0123456789abcdef0123456789"));
     }
 
@@ -247,8 +293,9 @@ mod tests {
     fn trusted_header_rejects_oversized() {
         let big = "a".repeat(200);
         let h = ja_header("x-ssl-ja3", &big);
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         assert_eq!(
-            resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+            resolve_trusted_header_with(&h, trusted, "x-ssl-ja3", &[trusted]),
             None,
             "≥121-char header must be rejected (log-bomb defense)"
         );
@@ -256,6 +303,7 @@ mod tests {
 
     #[test]
     fn trusted_header_rejects_whitespace_and_quotes() {
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         for bad in [
             "abc def",  // space
             "abc\tdef", // tab
@@ -265,7 +313,7 @@ mod tests {
         ] {
             let h = ja_header("x-ssl-ja3", bad);
             assert_eq!(
-                resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+                resolve_trusted_header_with(&h, trusted, "x-ssl-ja3", &[trusted]),
                 None,
                 "header value {bad:?} must be rejected"
             );
@@ -280,6 +328,7 @@ mod tests {
         // check; the tight allowlist rejects them, making log/shell
         // injection structurally impossible if any future caller
         // shells out the value or writes it into a non-escaping log.
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         for bad in [
             "abc;def",  // shell separator
             "abc$def",  // var expansion
@@ -294,7 +343,7 @@ mod tests {
         ] {
             let h = ja_header("x-ssl-ja3", bad);
             assert_eq!(
-                resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+                resolve_trusted_header_with(&h, trusted, "x-ssl-ja3", &[trusted]),
                 None,
                 "header value {bad:?} must be rejected by the tight allowlist"
             );
@@ -304,8 +353,9 @@ mod tests {
     #[test]
     fn trusted_header_rejects_non_ascii() {
         let h = ja_header("x-ssl-ja3", "Дашборд");
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         assert_eq!(
-            resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja3"),
+            resolve_trusted_header_with(&h, trusted, "x-ssl-ja3", &[trusted]),
             None,
             "non-ASCII must be rejected"
         );
@@ -316,7 +366,8 @@ mod tests {
         // FoxIO JA4 shape: `t13d1516h2_8daaf6152771_b186095e22b6`.
         // Underscore + alphanumerics. Must pass the shape check.
         let h = ja_header("x-ssl-ja4", "t13d1516h2_8daaf6152771_b186095e22b6");
-        let got = resolve_trusted_header(&h, DEFAULT_TRUSTED_PROXY_LAN, "x-ssl-ja4");
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        let got = resolve_trusted_header_with(&h, trusted, "x-ssl-ja4", &[trusted]);
         assert_eq!(got.as_deref(), Some("t13d1516h2_8daaf6152771_b186095e22b6"));
     }
 
@@ -333,7 +384,8 @@ mod tests {
             "x-ssl-ja4",
             HeaderValue::from_static("t13d1516h2_8daaf6152771_b186095e22b6"),
         );
-        let (ja3, ja4) = collect_tls_fingerprints(&h, DEFAULT_TRUSTED_PROXY_LAN);
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        let (ja3, ja4) = collect_tls_fingerprints_with(&h, trusted, &[trusted]);
         assert!(ja3.is_some(), "ja3 must be captured");
         assert!(ja4.is_some(), "ja4 must be captured");
     }

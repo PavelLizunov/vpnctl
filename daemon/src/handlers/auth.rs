@@ -17,9 +17,19 @@
 //!     `$argon2`. Verified via `subtle::ConstantTimeEq`. Logs a startup
 //!     warn («consider hashing») once.
 //!
-//! Generate a hash via the `vpnctl admin hash-password <plain>` CLI
-//! (writes the `$argon2id$…` line to stdout, paste into the
-//! EnvironmentFile).
+//! Generate a hash via the `vpnctl admin hash-password` CLI
+//! (reads plaintext from stdin, writes the `$argon2id$…` line to
+//! stdout — paste into the EnvironmentFile):
+//!
+//! ```bash
+//! echo -n 'mySecret' | vpnctl admin hash-password
+//! # → $argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>
+//! ```
+//!
+//! Use `--password <plain>` for ad-hoc use; the CLI warns because
+//! the plaintext lands in shell history and `/proc/<pid>/cmdline`.
+//! The implementation is in `cli/src/cmd/admin.rs`; before
+//! 2026-05-22 this doc-comment referenced a non-existent subcommand.
 //!
 //! ## Constant-time
 //!

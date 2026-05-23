@@ -1,13 +1,14 @@
 //! Inventory — хранение состояния (servers/users/grants/audit).
 //!
-//! Два варианта реализации:
-//!
-//! - `InMemoryInventory` (`mem.rs`) — для unit-тестов в других крейтах.
-//! - `SqliteInventory` (`sqlite.rs`) — production: persistence через `sqlx`,
-//!   embedded migrations, WAL, FK enforcement, audit log.
+//! Backing store: `SqliteInventory` (`sqlite.rs`) — production
+//! persistence через `sqlx`, embedded migrations, WAL, FK
+//! enforcement, audit log. Tests use a per-test TempDir + the same
+//! `SqliteInventory::open` so the test-target ↔ production-target gap
+//! is zero (no separate `InMemoryInventory` to drift). The previous
+//! `mem.rs` stub was deleted 2026-05-22 as orphan code — no caller
+//! used it in 9 months (audit I3 catch).
 
 pub mod backup;
-pub mod mem;
 pub mod migrate;
 pub mod sqlite;
 
@@ -16,7 +17,6 @@ pub use backup::{
     list_snapshots, parse_snapshot_filename, prune_snapshots, restore_from, snapshot_filename_at,
     snapshot_now, snapshot_to, verify_snapshot,
 };
-pub use mem::InMemoryInventory;
 pub use migrate::{
     BashInventoryEnv, BashSingboxData, BashTuicUser, BashVlessUser, MigrationOutcome,
     MigrationPlan, SkippedUser, apply_migration_plan, build_migration_plan,
