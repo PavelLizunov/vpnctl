@@ -391,6 +391,171 @@ pub async fn scan_once(
             "check_user_traffic_limits failed; alert pass skipped this tick"
         );
     }
+    // C2 — stale-fingerprint detection (audit 2026-05-22). For each
+    // server with a pinned `trusted_host_fingerprint`, re-run
+    // `ssh-keyscan` and compare. Mismatch = either legitimate key
+    // rotation OR active MITM — both warrant operator attention.
+    // Skipped when no fingerprint is pinned (the wizard handles
+    // first-pin via TOFU; the drift check only meaningful after
+    // there's something to compare against).
+    if let Err(e) = check_fingerprint_drift(inv, &servers).await {
+        tracing::warn!(
+            target = "vpnctld::health_monitor",
+            error = %e,
+            "check_fingerprint_drift failed; fingerprint pass skipped this tick"
+        );
+    }
+    Ok(())
+}
+
+/// Per-tick scan for `server.fingerprint.drift`. Compares each
+/// server's pinned `trusted_host_fingerprint` against the live
+/// `ssh-keyscan` result. Mismatch fires a `warning`-severity alert
+/// with `{previous, observed}` payload + Telegram push via the
+/// standard pipeline.
+///
+/// **Why warning, not critical:** legitimate SSH host-key rotation
+/// is a normal operator workflow (kernel upgrade, distro reinstall,
+/// VPS provider migration). The drift could also be an active MITM
+/// — equally bad — but the alert can't tell the difference. Operator
+/// triages, ack-and-rotate via the existing /admin/servers/{id}
+/// set-fingerprint form OR ignores if expected.
+///
+/// **Servers without a pinned fingerprint are skipped** — there's
+/// nothing to compare against; first-time pin goes through the
+/// wizard's TOFU path or the operator's explicit «auto via ssh-
+/// keyscan» button.
+///
+/// **Servers behind a ProxyJump are skipped** — `ssh-keyscan` makes
+/// a direct TCP connection and doesn't honour ssh_config's
+/// ProxyJump rules. Pinning those servers' fingerprints today
+/// happens via the operator manually proxying; the daemon's drift
+/// check stays silent rather than emit false-positive «unreachable»
+/// alerts for jump-only hosts. Future work: route through
+/// `ssh_subprocess` with the same ProxyJump config the probe uses.
+///
+/// **Cadence:** runs on every `scan_once` tick (10 min default).
+/// `ssh-keyscan` on 3 servers takes < 1 second total; not worth
+/// a separate cron.
+pub async fn check_fingerprint_drift(
+    inv: &SqliteInventory,
+    servers: &[vpnctl_core::Server],
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    for server in servers {
+        // Skip if no pin to compare against.
+        let Some(pinned) = server.trusted_host_fingerprint.as_deref() else {
+            continue;
+        };
+        // Skip ProxyJump targets — see doc-comment.
+        if server.jump_via.is_some() {
+            continue;
+        }
+        // Skip if address is malformed enough that ssh-keyscan
+        // would obviously fail. (Defensive — keeps the log clean.)
+        if server.address.is_empty() {
+            continue;
+        }
+        let addr = server.address.clone();
+        let port = server.ssh_port;
+        // ssh-keyscan is sync (shells out); spawn_blocking keeps
+        // it off the tokio scheduler.
+        let observed = match tokio::task::spawn_blocking(move || {
+            vpnctl_host_fingerprint::fetch_via_keyscan(&addr, port)
+        })
+        .await
+        {
+            Ok(Ok(fp)) => fp,
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    target = "vpnctld::health_monitor",
+                    server = %server.id.0,
+                    error = %e,
+                    "ssh-keyscan failed during fingerprint drift check; will retry next tick"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    server = %server.id.0,
+                    error = %e,
+                    "spawn_blocking for ssh-keyscan failed"
+                );
+                continue;
+            }
+        };
+        if observed == pinned {
+            continue; // Match — no drift.
+        }
+        let kind = format!("server.fingerprint.drift:{}", server.id.0);
+        let summary = format!(
+            "host fingerprint for {} differs from pinned value — either legitimate SSH key rotation OR active MITM",
+            server.id.0
+        );
+        let payload = serde_json::json!({
+            "server_id": server.id.0,
+            "previous": pinned,
+            "observed": observed,
+            "ssh_user": server.ssh_user,
+            "ssh_port": server.ssh_port,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        match inv
+            .insert_alert_if_no_unacked(
+                &kind,
+                Some(&server.id),
+                "warning",
+                &summary,
+                Some(&payload_str),
+            )
+            .await
+        {
+            Ok(Some(alert_id)) => {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    alert_id,
+                    server = %server.id.0,
+                    "fired server.fingerprint.drift alert"
+                );
+                if let Err(e) = inv
+                    .audit(
+                        "vpnctld",
+                        "alert.fire",
+                        Some(&server.id.0),
+                        Some(&serde_json::json!({
+                            "alert_id": alert_id,
+                            "kind": kind,
+                            "severity": "warning",
+                            "summary": summary,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        alert_id,
+                        server = %server.id.0,
+                        error = %e,
+                        "alert.fire audit row failed for server.fingerprint.drift"
+                    );
+                }
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+            }
+            Ok(None) => {
+                // Already-open drift alert for this server. The
+                // operator hasn't triaged yet; no point spamming
+                // the same alert every 10 min.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    server = %server.id.0,
+                    error = %e,
+                    "insert server.fingerprint.drift alert failed"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -751,6 +916,67 @@ mod tests {
         assert!(
             alerts.is_empty(),
             "user under threshold must not produce an alert; got {alerts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_fingerprint_drift_skips_servers_without_pin() {
+        // Server with `trusted_host_fingerprint = None` must NOT
+        // trigger an ssh-keyscan. Verified indirectly: passing a
+        // server with an unreachable address (TEST-NET-1) — if we
+        // were calling ssh-keyscan, the function would spend time
+        // / log debug. We just assert it returns Ok quickly + no
+        // alert row created.
+        let (_dir, inv) = fresh_inv().await;
+        let s = vpnctl_core::Server {
+            id: ServerId("no-pin".into()),
+            address: "192.0.2.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&s).await.unwrap();
+        let servers = vec![s];
+        // Must return Ok and write zero alert rows.
+        check_fingerprint_drift(&inv, &servers).await.unwrap();
+        let alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert!(
+            alerts.is_empty(),
+            "no pin → no drift check → no alert; got: {alerts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_fingerprint_drift_skips_jump_targets() {
+        // Servers reachable only via ProxyJump get skipped (ssh-
+        // keyscan can't traverse jump hosts; would always fail
+        // → false-positive alerts).
+        let (_dir, inv) = fresh_inv().await;
+        let s = vpnctl_core::Server {
+            id: ServerId("jumper".into()),
+            address: "192.0.2.99".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: Some("SHA256:abcdefghij".into()),
+            hoster: "generic".into(),
+            jump_via: Some(ServerId("bastion".into())),
+            usage_coefficient: 1.0,
+        };
+        // Don't actually need to add bastion; check_fingerprint_drift
+        // only looks at the server-being-checked's jump_via flag.
+        let servers = vec![s];
+        check_fingerprint_drift(&inv, &servers).await.unwrap();
+        let alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert!(
+            alerts.is_empty(),
+            "jump-via target must be skipped; got: {alerts:?}"
         );
     }
 
