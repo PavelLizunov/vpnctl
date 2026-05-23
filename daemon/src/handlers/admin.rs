@@ -9336,6 +9336,27 @@ pub(crate) async fn server_detail(
     let uptime_7d = state.inv.uptime_for_server(&sid, 24 * 7).await.ok();
     let uptime_30d = state.inv.uptime_for_server(&sid, 24 * 30).await.ok();
 
+    // A3 (audit 2026-05-22, shipped 2026-05-23) — 24h resource-trend
+    // sparklines (disk %, mem-used %, sing-box log MiB). The hero
+    // tile shows «right now»; the sparkline tile shows «is the
+    // right-now value typical or a spike?». Helps the operator
+    // distinguish a slow leak (climbing trendline) from a transient
+    // burst (flat trend with one tall bar). Loaded best-effort —
+    // a probe-fetch failure shouldn't break the rest of the page.
+    let trend_rows = state
+        .inv
+        .recent_node_health_for_server(&sid, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %sid,
+                error = %e,
+                "recent_node_health_for_server (24h sparkline) failed"
+            );
+            Vec::new()
+        });
+
     // Phase 4b — server-wide live activity rollup (active conns
     // now, bytes up/down over the last 24h, last poll ts). Failure
     // → zero-default; the section still renders so the operator
@@ -9553,6 +9574,9 @@ pub(crate) async fn server_detail(
             uptime_30d.as_ref(),
             lang,
         ))
+
+        // A3 — 24h resource trend sparklines (disk, mem, log size).
+        (server_detail_resource_trend_section(&trend_rows, lang))
 
         // Phase 4b — live activity tile (server-wide totals from
         // clash-api; per-user attribution blocked by NM-11 sing-box
@@ -9985,6 +10009,117 @@ fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
 /// bug (TrackerMetadata.MarshalJSON omits the User field). Server-
 /// wide totals work, per-user counts always read 0 until upstream
 /// PR lands or operator adopts a forked sing-box build.
+/// A3 (audit 2026-05-22) — 24h resource-trend sparklines for the
+/// per-server detail page. Three small SVG charts: disk %, mem-used %,
+/// sing-box log MiB. Each uses the existing reusable `sparkline_svg`
+/// helper (so styling stays consistent with the dashboard + monitoring
+/// page; accent-toggle in Tweaks panel recolours everything).
+///
+/// **Renders only when there's at least one node_health row in the
+/// 24h window.** Fresh server (no probes yet) gets nothing — the hero
+/// section already says «no data yet» for that case; we don't need to
+/// repeat it.
+///
+/// Each row in `trend_rows` came from `recent_node_health_for_server`
+/// which sorts DESC (newest first). For the sparkline we reverse so
+/// time flows left-to-right.
+fn server_detail_resource_trend_section(
+    trend_rows: &[vpnctl_inventory::NodeHealthRow],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if trend_rows.is_empty() {
+        return html! {};
+    }
+    // Iterate oldest→newest so the sparkline reads chronologically.
+    let mut chronological: Vec<&vpnctl_inventory::NodeHealthRow> = trend_rows.iter().collect();
+    chronological.reverse();
+
+    // Disk usage % per row. Skip rows missing either side of the
+    // ratio (None → no point added; sparkline tolerates a shorter
+    // series gracefully).
+    let disk_pct_series: Vec<f64> = chronological
+        .iter()
+        .filter_map(|r| {
+            let used = r.disk_used_mib?;
+            let total = r.disk_total_mib?;
+            if total == 0 {
+                return None;
+            }
+            Some(((used as f64) / (total as f64)) * 100.0)
+        })
+        .collect();
+
+    // Memory-used % per row (probe stores AVAILABLE, hence 100 - avail/total).
+    let mem_used_pct_series: Vec<f64> = chronological
+        .iter()
+        .filter_map(|r| {
+            let avail = r.mem_available_mib?;
+            let total = r.mem_total_mib?;
+            if total == 0 {
+                return None;
+            }
+            Some(100.0 - ((avail as f64) / (total as f64)) * 100.0)
+        })
+        .collect();
+
+    // sing-box log size in MiB. The threshold alert
+    // (server.singbox.log.too_big) fires at 500 MiB; sparkline shows
+    // the climb so operator can predict «when will we hit 500».
+    let log_mib_series: Vec<f64> = chronological
+        .iter()
+        .filter_map(|r| r.sing_box_log_bytes.map(|b| (b as f64) / (1024.0 * 1024.0)))
+        .collect();
+
+    let n_samples = chronological.len();
+    html! {
+        section id="resource-trend" style="margin-top: 28px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Resource trend · last 24h", "Тренд ресурсов · последние 24ч"))
+            }
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
+                (tr(
+                    lang,
+                    "10-min probe snapshots over the last 24h. Sparkline reads left-to-right (oldest → newest); the «max» label on each chart is the peak in the window. Use these to tell a slow leak (climbing line) from a transient burst (flat line, one spike).",
+                    "10-минутные снимки probe за последние 24 часа. Sparkline читается слева-направо (старое → новое); метка «max» в каждом графике — пик за окно. Помогает отличить медленную утечку (растущая линия) от кратковременного всплеска (плоская линия с одним пиком).",
+                ))
+            }
+            div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;" {
+                div {
+                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
+                        (tr(lang, "Disk %", "Диск %"))
+                    }
+                    (sparkline_svg(&disk_pct_series, 280, 60))
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                        (disk_pct_series.len()) " " (tr(lang, "samples", "точек"))
+                    }
+                }
+                div {
+                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
+                        (tr(lang, "Mem used %", "Память исп. %"))
+                    }
+                    (sparkline_svg(&mem_used_pct_series, 280, 60))
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                        (mem_used_pct_series.len()) " " (tr(lang, "samples", "точек"))
+                    }
+                }
+                div {
+                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
+                        (tr(lang, "sing-box log MiB", "sing-box лог MiB"))
+                    }
+                    (sparkline_svg(&log_mib_series, 280, 60))
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                        (log_mib_series.len()) " " (tr(lang, "samples · alert at 500 MiB", "точек · алерт на 500 MiB"))
+                    }
+                }
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin-top: 6px;" {
+                "(" (n_samples) " " (tr(lang, "probe ticks in the window", "тиков probe в окне"))  ")"
+            }
+        }
+    }
+}
+
 fn server_detail_live_activity_section(
     activity: &vpnctl_inventory::ServerLiveActivity,
     lang: crate::i18n::Locale,

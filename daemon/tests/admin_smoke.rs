@@ -12408,6 +12408,50 @@ async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
     );
 }
 
+// ── A3 — per-server 24h resource-trend sparklines ───────────────────
+//
+// Renders ONLY when at least one node_health row exists for the
+// server in the last 24h. Fresh server (no probes yet) gets
+// nothing — the hero section already covers the empty-state.
+
+#[tokio::test]
+async fn server_detail_resource_trend_omitted_when_no_probe_data() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("freshly".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/freshly")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("id=\"resource-trend\""),
+        "no probe data → resource-trend section must be omitted"
+    );
+}
+
 // ── B1.user dashboard surface — «N paused» sub-line ─────────────────
 //
 // Disabled-count surfaces in the Users tile sub-line so paused users
