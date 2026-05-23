@@ -5997,6 +5997,13 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     }
 
     // Audit (best-effort; see module convention).
+    // I1 unification (audit 2026-05-22): same payload shape as the
+    // CLI path — `{uuid, wg_pubkey_set, wg_keypair_provenance}`.
+    // Web ALWAYS server-generates the WG pair (the form has no
+    // opt-out — operator preference is one-click). `wg_pubkey_set`
+    // pinned at runtime against the actual mutation result rather
+    // than hardcoded `true`; if a future regression makes wg_pub
+    // None for any reason, the audit row will show it.
     if let Err(e) = state
         .inv
         .audit(
@@ -6005,9 +6012,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             Some(&id_decoded),
             Some(&serde_json::json!({
                 "uuid": user.uuid,
-                // Web creation always server-generates the WG pair;
-                // pinned so a future regression to optional flag
-                // surfaces here. Key VALUES never enter audit_log.
+                "wg_pubkey_set": user.wireguard_pubkey.is_some(),
                 "wg_keypair_provenance": "server-generated",
             })),
         )

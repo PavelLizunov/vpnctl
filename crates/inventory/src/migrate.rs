@@ -642,6 +642,30 @@ pub async fn apply_migration_plan(
             None => {
                 inv.add_user(user).await?;
                 outcome.users_created += 1;
+                // I1 unification (audit 2026-05-22): emit a
+                // per-user `user.add` row alongside the summary
+                // `migrate.from_bash` row below. Without these,
+                // audit-driven dashboards undercount imported
+                // users — `WHERE action = 'user.add'` would miss
+                // every bash-import. Same payload shape the CLI
+                // and web paths emit. `actor = "migrate"` keeps
+                // the source filterable.
+                let _ = inv
+                    .audit(
+                        "migrate",
+                        "user.add",
+                        Some(&user.id.0),
+                        Some(&serde_json::json!({
+                            "uuid": user.uuid,
+                            "wg_pubkey_set": user.wireguard_pubkey.is_some(),
+                            "wg_keypair_provenance": if user.wireguard_pubkey.is_some() {
+                                "operator-provided"
+                            } else {
+                                "absent"
+                            },
+                        })),
+                    )
+                    .await;
             }
         }
     }

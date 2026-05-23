@@ -12409,6 +12409,53 @@ async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
 }
 
 #[tokio::test]
+async fn user_create_audit_payload_includes_wg_keypair_provenance_and_pubkey_set() {
+    // I1 unification (audit 2026-05-22): every «add user» path
+    // (CLI / web / migrate) emits the same audit payload shape:
+    //   { uuid, wg_pubkey_set, wg_keypair_provenance }
+    // This test pins the WEB path; CLI + migrate pinned in their
+    // own crates.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let app = router(st.clone());
+    let _ = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("id=alice"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let audit = st.inv.recent_audit(20).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|e| e.action == "user.add" && e.target.as_deref() == Some("alice"))
+        .expect("user.add audit row must exist for alice");
+    let payload = row.payload.as_ref().expect("payload required");
+    assert!(
+        payload.get("uuid").is_some(),
+        "audit payload must include uuid; got: {payload}"
+    );
+    assert_eq!(
+        payload.get("wg_pubkey_set").and_then(|v| v.as_bool()),
+        Some(true),
+        "web-create must report wg_pubkey_set=true (always generates a pair)"
+    );
+    assert_eq!(
+        payload
+            .get("wg_keypair_provenance")
+            .and_then(|v| v.as_str()),
+        Some("server-generated"),
+        "web-create must report wg_keypair_provenance=server-generated"
+    );
+}
+
+#[tokio::test]
 async fn user_disable_unknown_user_returns_404() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
