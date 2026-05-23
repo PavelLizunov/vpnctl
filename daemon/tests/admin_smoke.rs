@@ -12038,3 +12038,142 @@ async fn internal_error_body_does_not_leak_anyhow_chain() {
         );
     }
 }
+
+// ── D1 — default-grant-all-servers on user create ───────────────────
+//
+// Pre-2026-05-22 POST /admin/users created a user with ZERO grants,
+// then operator had to drill into each server. New default: a
+// `grant_all=1` checkbox (checked by default in the form) triggers
+// a bulk grant immediately after add_user. Two tests pin the contract:
+//   1. grant_all=1 (default) → user is granted on every registered server.
+//   2. grant_all omitted → user is granted on ZERO servers (pre-D1
+//      behavior preserved for explicit opt-out).
+
+#[tokio::test]
+async fn user_create_with_grant_all_grants_every_registered_server() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Seed 2 servers so we can assert the grant count is 2 (not 0, not 1).
+    for sid_s in ["alpha", "bravo"] {
+        st.inv
+            .add_server(&Server {
+                id: ServerId(sid_s.into()),
+                address: format!("203.0.113.{}", if sid_s == "alpha" { 1 } else { 2 }),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernels: vec![KernelId("sing-box".into())],
+                enabled_protocols: vec![],
+                trusted_host_fingerprint: None,
+                hoster: "generic".into(),
+                jump_via: None,
+                usage_coefficient: 1.0,
+            })
+            .await
+            .unwrap();
+    }
+    let app = router(st.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("id=newbie&grant_all=1"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Both servers must now have a grant for `newbie`.
+    let granted_servers = st
+        .inv
+        .servers_for_user(&vpnctl_core::UserId("newbie".into()))
+        .await
+        .unwrap();
+    let mut granted_ids: Vec<String> = granted_servers.iter().map(|s| s.id.0.clone()).collect();
+    granted_ids.sort();
+    assert_eq!(
+        granted_ids,
+        vec!["alpha".to_string(), "bravo".to_string()],
+        "grant_all=1 must grant access on EVERY registered server"
+    );
+}
+
+#[tokio::test]
+async fn user_create_without_grant_all_grants_zero_servers() {
+    // Explicit opt-out: form posts WITHOUT grant_all field at all.
+    // Old behaviour preserved — user created with zero grants.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("solo".into()),
+            address: "203.0.113.5".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("id=optout"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let granted = st
+        .inv
+        .servers_for_user(&vpnctl_core::UserId("optout".into()))
+        .await
+        .unwrap();
+    assert!(
+        granted.is_empty(),
+        "user created without grant_all checkbox must have zero grants; got: {granted:?}"
+    );
+}
+
+#[tokio::test]
+async fn user_create_with_grant_all_renders_checked_checkbox_in_form() {
+    // The form on /admin/users must render the checkbox CHECKED by
+    // default so the operator's «one click» path produces a granted
+    // user.
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // The form must include the checkbox + it must be checked.
+    assert!(
+        html.contains(r#"name="grant_all""#),
+        "user form must include grant_all checkbox"
+    );
+    assert!(
+        html.contains(r#"checked="checked""#) || html.contains("checked=\"checked\""),
+        "checkbox must default to CHECKED — found no checked attribute in the form"
+    );
+}

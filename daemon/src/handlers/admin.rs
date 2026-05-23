@@ -2020,7 +2020,7 @@ pub(crate) async fn users(
                 ))
             }
             form method="post" action="/admin/users"
-                 style="display: flex; gap: 10px; align-items: baseline;" {
+                 style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" {
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "new id", "новый id"))
                 }
@@ -2035,11 +2035,28 @@ pub(crate) async fn users(
                           "2-32 символа: a-z 0-9 . _ - только. Пробелы превращаются в дефисы; верхний регистр в нижний; остальные символы отбрасываются по мере набора.",
                       ))
                       style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+                // D1 audit catch — pre-2026-05-22 user-create
+                // produced a user with ZERO grants, then operator
+                // clicked through every server to grant access
+                // (3 servers × every user × manual). Default ON
+                // means «one click = ready to use»; uncheck to
+                // create a deliberately-ungranted user (e.g. test
+                // account, future-server placeholder, paused user).
+                label style="font-family: var(--mono); font-size: 11px; color: var(--ink); display: flex; align-items: center; gap: 4px;"
+                      title=(crate::i18n::tr(
+                          lang,
+                          "Grant access to EVERY currently-registered server (default ON). Uncheck to create a user with zero grants — useful for test accounts or paused users.",
+                          "Дать доступ КО ВСЕМ зарегистрированным сейчас серверам (по-умолчанию вкл). Сними галку, чтобы создать пользователя без грантов — полезно для тестового или приостановленного аккаунта.",
+                      )) {
+                    input type="checkbox" name="grant_all" value="1" checked="checked"
+                          style="margin: 0;";
+                    (crate::i18n::tr(lang, "grant all servers", "выдать все серверы"))
+                }
                 button type="submit"
                        title=(crate::i18n::tr(
                            lang,
-                           "Mint UUID + tuic_password + sub_token + WG keypair; redirect to /admin/users/<id> where keys are visible",
-                           "Сгенерирует UUID + tuic_password + sub_token + WG-пару; редирект на /admin/users/<id> где ключи видны",
+                           "Mint UUID + tuic_password + sub_token + WG keypair, optionally grant all servers; redirect to /admin/users/<id> where keys are visible",
+                           "Сгенерирует UUID + tuic_password + sub_token + WG-пару, по-желанию выдаст все серверы; редирект на /admin/users/<id> где ключи видны",
                        ))
                        style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     (crate::i18n::tr(lang, "create user", "создать пользователя"))
@@ -5854,6 +5871,81 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             error = %e,
             "audit write failed for user.add — mutation already committed"
         );
+    }
+
+    // D1: grant access to every registered server, if the «grant
+    // all servers» checkbox stays checked (default ON). Pre-
+    // 2026-05-22 the user-create handler produced a user with ZERO
+    // grants, then the operator had to drill into each server to
+    // grant access. The form checkbox + this loop close the «one
+    // click should produce a usable user» gap. Loop is sequential
+    // (≤100 servers in homelab → ≤100ms total via the same indexed
+    // grant path the per-server route uses); audit row per grant
+    // matches `user_grant_server` semantics so the timeline can
+    // still distinguish bulk-grant from individual grants by the
+    // burst pattern.
+    let grant_all = form_field(&body, "grant_all").as_deref() == Some("1");
+    if grant_all {
+        match state.inv.list_servers().await {
+            Ok(servers) => {
+                let mut granted: u32 = 0;
+                for s in &servers {
+                    if let Err(e) = state.inv.grant(&user.id, &s.id).await {
+                        tracing::warn!(
+                            target = "vpnctld::admin",
+                            user = %id_decoded,
+                            server = %s.id.0,
+                            error = %e,
+                            "grant-all: per-server grant failed; continuing"
+                        );
+                        continue;
+                    }
+                    granted += 1;
+                    // Audit each grant individually so the per-
+                    // server timeline filter still surfaces the
+                    // event. (Filtering by `action=user.grant` will
+                    // include these rows alongside hand-grants.)
+                    if let Err(e) = state
+                        .inv
+                        .audit(
+                            "admin",
+                            "user.grant",
+                            Some(&id_decoded),
+                            Some(&serde_json::json!({
+                                "server": s.id.0,
+                                "source": "user.create.grant_all",
+                            })),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            target = "vpnctld::admin",
+                            user = %id_decoded,
+                            server = %s.id.0,
+                            error = %e,
+                            "audit write failed for user.grant — mutation already committed"
+                        );
+                    }
+                }
+                if granted > 0 {
+                    tracing::info!(
+                        target = "vpnctld::admin",
+                        user = %id_decoded,
+                        granted = granted,
+                        total = servers.len(),
+                        "user-create grant-all complete"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %id_decoded,
+                    error = %e,
+                    "grant-all: list_servers failed; user created without grants"
+                );
+            }
+        }
     }
 
     Redirect::to(&format!(
