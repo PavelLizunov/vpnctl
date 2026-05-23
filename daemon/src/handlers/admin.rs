@@ -2858,9 +2858,19 @@ pub(crate) async fn user_detail(
                         div { span style="color: var(--mute);" { "url        " } (ninitux) }
                         div { span style="color: var(--mute);" { "device_id  " } (device_id) }
                         div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
-                            "Production URL served via nginx on " span.ed-mono { "ninitux.com" } " → vpnctld. "
-                            "The user's mobile app polls this URL on a fixed schedule (3600s). "
-                            "Share the QR or the URL — both encode the same thing."
+                            (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
+                            span.ed-mono { "ninitux.com" }
+                            (crate::i18n::tr(lang, " → vpnctld. ", " → vpnctld. "))
+                            (crate::i18n::tr(
+                                lang,
+                                "The user's mobile app polls this URL on a fixed schedule (3600s). ",
+                                "Мобильное приложение опрашивает этот URL по таймеру (3600 сек). ",
+                            ))
+                            (crate::i18n::tr(
+                                lang,
+                                "Share the QR or the URL — both encode the same thing.",
+                                "Отдай QR или URL — кодируют одно и то же.",
+                            ))
                         }
                     }
                 }
@@ -2876,9 +2886,13 @@ pub(crate) async fn user_detail(
                                  action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
                                  style="margin-top: 10px;" {
                                 button type="submit"
-                                       title="Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable."
+                                       title=(crate::i18n::tr(
+                                           lang,
+                                           "Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable.",
+                                           "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
+                                       ))
                                        style="padding: 4px 10px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                    "rotate sub-token"
+                                    (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                 }
                             }
                         }
@@ -3010,28 +3024,35 @@ pub(crate) async fn user_detail(
                         // distribution panel as the WG-native link.
                         div {
                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                "Flow A — Hiddify / Sing-box"
+                                (crate::i18n::tr(lang, "Flow A — Hiddify / Sing-box", "Поток A — Hiddify / Sing-box"))
                             }
                             @match (&sub_token, &sub_url_str) {
                                 (Some(_), Some(url)) => {
-                                    // Sub-header parallel to Flow B/C's
-                                    // «server X · .conf» line — keeps the
-                                    // three columns vertically aligned
-                                    // (Pavel 2026-05-19: «высота разная у
-                                    // A отличается от B и C»).
                                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                        "all granted servers · refreshes on its own"
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "all granted servers · refreshes on its own",
+                                            "все выданные серверы · обновляется само",
+                                        ))
                                     }
                                     (share_link_card(url, &html! {
-                                        "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. "
-                                        b { "Recommended default — one URL covers everything." }
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. ",
+                                            "Sing-box / Hiddify тянет полный конфиг (все протоколы на всех выданных серверах, включая WireGuard с приватным ключом) и обновляет сам по расписанию. ",
+                                        ))
+                                        b { (crate::i18n::tr(
+                                            lang,
+                                            "Recommended default — one URL covers everything.",
+                                            "Рекомендованный default — один URL покрывает всё.",
+                                        )) }
                                     }))
                                 }
                                 _ => {
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "Mint a sub-token in the "
-                                        b { "Subscription" }
-                                        " block above to populate this card."
+                                        (crate::i18n::tr(lang, "Mint a sub-token in the ", "Сгенерируй sub-token в блоке "))
+                                        b { (crate::i18n::tr(lang, "Subscription", "Подписка")) }
+                                        (crate::i18n::tr(lang, " block above to populate this card.", " выше, чтобы заполнить эту карточку.", ))
                                     }
                                 }
                             }
@@ -3043,21 +3064,26 @@ pub(crate) async fn user_detail(
                         // C below covers that).
                         div {
                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                "Flow B — official WireGuard app / Hiddify"
+                                (crate::i18n::tr(lang, "Flow B — official WireGuard app / Hiddify", "Поток B — официальное WireGuard / Hiddify"))
                             }
                             @let wg_links: Vec<_> = share_links
                                 .iter()
                                 .filter(|(_, pid, _)| pid.0 == "wireguard")
                                 .collect();
                             @if wg_links.is_empty() {
-                                // Three-way classifier so the operator's
-                                // next action is unambiguous.
                                 @if servers.is_empty() {
-                                    // Case A — user has zero grants.
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "No servers granted to this user yet. Grant a server in the "
-                                        b { "Server access" }
-                                        " section below — if it runs WireGuard, the QR appears here."
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "No servers granted to this user yet. Grant a server in the ",
+                                            "У пользователя пока нет грантов. Выдай сервер в секции ",
+                                        ))
+                                        b { (crate::i18n::tr(lang, "Server access", "Доступ к серверам")) }
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " section below — if it runs WireGuard, the QR appears here.",
+                                            " ниже — если сервер крутит WireGuard, QR появится здесь.",
+                                        ))
                                     }
                                 } @else if wg_capable_granted.is_empty() {
                                     // Case B — granted servers exist but
@@ -3066,26 +3092,46 @@ pub(crate) async fn user_detail(
                                     // users (vps-is-01 et al. run
                                     // VLESS/TUIC/Hy2, not WG).
                                     p style="font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink); margin: 0 0 8px;" {
-                                        b { "Keys exist, but no granted server runs WireGuard." }
-                                        " The user has a WG keypair (see pubkey above), so the moment a WG-capable server is granted — or "
+                                        b { (crate::i18n::tr(
+                                            lang,
+                                            "Keys exist, but no granted server runs WireGuard.",
+                                            "Ключи есть, но ни на одном выданном сервере не крутится WireGuard.",
+                                        )) }
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " The user has a WG keypair (see pubkey above), so the moment a WG-capable server is granted — or ",
+                                            " У пользователя есть WG-пара ключей (см. pubkey выше), так что в момент когда WG-сервер будет выдан — либо ",
+                                        ))
                                         span.ed-mono { "wireguard" }
-                                        " is added to an existing server's "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " is added to an existing server's ",
+                                            " добавится в ",
+                                        ))
                                         span.ed-mono { "enabled_protocols" }
-                                        " — the QR will appear here."
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " — the QR will appear here.",
+                                            " существующего сервера — QR появится здесь.",
+                                        ))
                                     }
                                     p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 6px;" {
-                                        "Currently granted: "
+                                        (crate::i18n::tr(lang, "Currently granted: ", "Текущие гранты: "))
                                         @for (i, s) in servers.iter().enumerate() {
                                             @if i > 0 { ", " }
                                             span.ed-mono { (s.id.0) }
                                         }
-                                        " — none have "
+                                        (crate::i18n::tr(lang, " — none have ", " — ни у одного нет "))
                                         span.ed-mono { "wireguard" }
-                                        " in their protocol list."
+                                        (crate::i18n::tr(lang, " in their protocol list.", " в списке протоколов."))
                                     }
                                     @if !wg_capable_inventory.is_empty() {
                                         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
-                                            "WG-capable servers in the inventory you could grant: "
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "WG-capable servers in the inventory you could grant: ",
+                                                "WG-серверы в инвентаре, которые можно выдать: ",
+                                            ))
                                             @for (i, sid) in wg_capable_inventory.iter().enumerate() {
                                                 @if i > 0 { ", " }
                                                 span.ed-mono { (sid.0) }
@@ -3094,11 +3140,19 @@ pub(crate) async fn user_detail(
                                         }
                                     } @else {
                                         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
-                                            "No WG-capable server in the entire inventory. The "
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "No WG-capable server in the entire inventory. The ",
+                                                "В инвентаре нет ни одного WG-сервера. ",
+                                            ))
                                             span.ed-mono { "amneziawg" }
-                                            " kernel + "
+                                            (crate::i18n::tr(lang, " kernel + ", " kernel + "))
                                             span.ed-mono { "wireguard" }
-                                            " protocol need to be enabled on a node first (CLI: "
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " protocol need to be enabled on a node first (CLI: ",
+                                                " протокол должны быть сначала включены на ноде (CLI: ",
+                                            ))
                                             span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
                                             ")."
                                         }
@@ -3111,16 +3165,20 @@ pub(crate) async fn user_detail(
                                     // secret). Existing journalctl
                                     // pointer remains the right action.
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "Granted servers "
+                                        (crate::i18n::tr(lang, "Granted servers ", "Выданные серверы "))
                                         @for (i, sid) in wg_capable_granted.iter().enumerate() {
                                             @if i > 0 { ", " }
                                             span.ed-mono { (sid.0) }
                                         }
-                                        " declare wireguard but the share-link render failed. Likely missing "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " declare wireguard but the share-link render failed. Likely missing ",
+                                            " объявляют wireguard, но рендер share-link провалился. Скорее всего нет ",
+                                        ))
                                         span.ed-mono { "wireguard.server_public_key" }
                                         " / "
                                         span.ed-mono { "wireguard.server_private_key" }
-                                        " server secret — check "
+                                        (crate::i18n::tr(lang, " server secret — check ", " серверного секрета — проверь "))
                                         span.ed-mono { "journalctl -u vpnctld" }
                                         "."
                                     }
@@ -3129,7 +3187,7 @@ pub(crate) async fn user_detail(
                                 @for (sid, _pid, link) in &wg_links {
                                     div style="margin-bottom: 18px;" {
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                            "server " (sid.0)
+                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
                                             " · "
                                             a href=(format!("/admin/users/{}/wireguard/conf/{}",
                                                             path_segment_encode(&user.id.0),
@@ -3140,7 +3198,17 @@ pub(crate) async fn user_detail(
                                             }
                                         }
                                         (share_link_card(link, &html! {
-                                            "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is " (link.len()) " chars (the private key is base64-embedded inside). Click the box above to select-all + copy."
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is ",
+                                                "Открывается в официальном WireGuard (mobile + desktop) и Hiddify. Длина ссылки ",
+                                            ))
+                                            (link.len())
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " chars (the private key is base64-embedded inside). Click the box above to select-all + copy.",
+                                                " символов (приватный ключ закодирован base64 внутри). Кликни на блок выше, чтобы выделить и скопировать.",
+                                            ))
                                         }))
                                     }
                                 }
@@ -3154,31 +3222,46 @@ pub(crate) async fn user_detail(
                         // ErrorCode 900 («нет контейнеров»).
                         div {
                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                "Flow C — AmneziaVPN"
+                                (crate::i18n::tr(lang, "Flow C — AmneziaVPN", "Поток C — AmneziaVPN"))
                             }
                             @let amnezia_links: Vec<_> = amnezia_links
                                 .iter()
                                 .collect();
                             @if amnezia_links.is_empty() {
-                                // Same empty-state classifier as Flow B.
                                 @if servers.is_empty() {
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "Grant a WireGuard-capable server to populate this card."
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "Grant a WireGuard-capable server to populate this card.",
+                                            "Выдай сервер с WireGuard, чтобы заполнить эту карточку.",
+                                        ))
                                     }
                                 } @else if wg_capable_granted.is_empty() {
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "No granted server runs WireGuard yet — add "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "No granted server runs WireGuard yet — add ",
+                                            "Ни на одном выданном сервере не крутится WireGuard — добавь ",
+                                        ))
                                         span.ed-mono { "wireguard" }
-                                        " to an existing server's protocols on its detail page."
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " to an existing server's protocols on its detail page.",
+                                            " в протоколы существующего сервера на странице деталей.",
+                                        ))
                                     }
                                 } @else {
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "Granted WG servers "
+                                        (crate::i18n::tr(lang, "Granted WG servers ", "Выданные WG-серверы "))
                                         @for (i, sid) in wg_capable_granted.iter().enumerate() {
                                             @if i > 0 { ", " }
                                             span.ed-mono { (sid.0) }
                                         }
-                                        " — but AmneziaVPN link rendering failed (check "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " — but AmneziaVPN link rendering failed (check ",
+                                            " — но рендер AmneziaVPN-ссылки провалился (проверь ",
+                                        ))
                                         span.ed-mono { "journalctl -u vpnctld" }
                                         ")."
                                     }
@@ -3186,18 +3269,8 @@ pub(crate) async fn user_detail(
                             } @else {
                                 @for (sid, link) in &amnezia_links {
                                     div style="margin-bottom: 18px;" {
-                                        // Pavel 2026-05-19: «почему гдя B
-                                        // можно скачать конфиг а для C
-                                        // нельзя» — the `.conf` file is
-                                        // universal (any WG client incl
-                                        // AmneziaVPN's «File with settings»
-                                        // imports it). Mirror Flow B's
-                                        // sub-header layout with the same
-                                        // download link so the operator
-                                        // doesn't have to scroll back to
-                                        // Flow B to grab the same file.
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                            "server " (sid.0)
+                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
                                             " · "
                                             a href=(format!("/admin/users/{}/wireguard/conf/{}",
                                                             path_segment_encode(&user.id.0),
@@ -3208,11 +3281,25 @@ pub(crate) async fn user_detail(
                                             }
                                         }
                                         (share_link_card(link, &html! {
-                                            "QR / paste opens in AmneziaVPN; the deep link is " (link.len()) " chars (zlib-compressed JSON-container inside). The "
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "QR / paste opens in AmneziaVPN; the deep link is ",
+                                                "QR или вставка открывается в AmneziaVPN; deep-link ",
+                                            ))
+                                            (link.len())
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " chars (zlib-compressed JSON-container inside). The ",
+                                                " символов (внутри zlib-сжатый JSON-контейнер). Ссылка ",
+                                            ))
                                             span.ed-mono { ".conf" }
-                                            " link above is a fallback for AmneziaVPN's "
-                                            em { "File with settings" }
-                                            " import path."
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " link above is a fallback for AmneziaVPN's ",
+                                                " выше — резерв через ",
+                                            ))
+                                            em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
+                                            (crate::i18n::tr(lang, " import path.", " import-путь AmneziaVPN."))
                                         }))
                                     }
                                 }
@@ -3235,7 +3322,7 @@ pub(crate) async fn user_detail(
                         @if !wgturn_capable_granted.is_empty() {
                             div {
                                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                    "Flow D — wgturn-cli (VK-TURN relay)"
+                                    (crate::i18n::tr(lang, "Flow D — wgturn-cli (VK-TURN relay)", "Поток D — wgturn-cli (VK-TURN relay)"))
                                 }
                                 @let wgt_links: Vec<_> = share_links
                                     .iter()
@@ -3243,16 +3330,28 @@ pub(crate) async fn user_detail(
                                     .collect();
                                 @if wgt_links.is_empty() {
                                     p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        "Granted wgturn servers "
+                                        (crate::i18n::tr(lang, "Granted wgturn servers ", "Выданные wgturn-серверы "))
                                         @for (i, sid) in wgturn_capable_granted.iter().enumerate() {
                                             @if i > 0 { ", " }
                                             span.ed-mono { (sid.0) }
                                         }
-                                        " — but the share-link render failed. Most likely missing "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " — but the share-link render failed. Most likely missing ",
+                                            " — но рендер share-link провалился. Скорее всего нет ",
+                                        ))
                                         span.ed-mono { "wgturn:server_wg_public" }
-                                        " server secret or the user has no "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " server secret or the user has no ",
+                                            " серверного секрета или у пользователя отсутствует ",
+                                        ))
                                         span.ed-mono { "wireguard_private" }
-                                        " (create the user with "
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " (create the user with ",
+                                            " (создай пользователя с ",
+                                        ))
                                         span.ed-mono { "--gen-wireguard" }
                                         ")."
                                     }
@@ -3368,7 +3467,10 @@ pub(crate) async fn user_detail(
                                 a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
                                   target="_blank"
                                   rel="noopener"
-                                  title=(format!("Open /admin/servers/{} in a new tab", s.id.0))
+                                  title=(match lang {
+                                      crate::i18n::Locale::En => format!("Open /admin/servers/{} in a new tab", s.id.0),
+                                      crate::i18n::Locale::Ru => format!("Открыть /admin/servers/{} в новой вкладке", s.id.0),
+                                  })
                                   style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
                                     b { (s.id.0) }
                                 }
@@ -9337,17 +9439,30 @@ pub(crate) async fn wizard_step2_stub(
     // ships it automatically because the cookie Path is
     // `/admin/servers/new` (which covers the SSE endpoint too).
     let body = html! {
-        div.ed-art-eyebrow { "Add server · step 2 of 3" }
+        div.ed-art-eyebrow {
+            (crate::i18n::tr(lang, "Add server · step 2 of 3", "Добавить сервер · шаг 2 из 3"))
+        }
         h1.ed-art-h1 {
-            "Bootstrapping " span.ed-mono { (session.address) }
+            (crate::i18n::tr(lang, "Bootstrapping ", "Bootstrap ")) span.ed-mono { (session.address) }
         }
         p.ed-art-deck {
-            "The daemon is SSHing in as " span.ed-mono { "root" }
-            " (one-time password use), pushing its deploy key, locking down "
-            "the host, installing " span.ed-mono { "sing-box" }
-            " and pushing the rendered config. Every step shows up below "
-            "as it happens. Don't close this tab — refresh is fine, the "
-            "bootstrap runs server-side and you'll re-attach."
+            (crate::i18n::tr(
+                lang,
+                "The daemon is SSHing in as ",
+                "Демон заходит по SSH под ",
+            ))
+            span.ed-mono { "root" }
+            (crate::i18n::tr(
+                lang,
+                " (one-time password use), pushing its deploy key, locking down the host, installing ",
+                " (одноразовое использование пароля), закидывает deploy-ключ, hardening хоста, ставит ",
+            ))
+            span.ed-mono { "sing-box" }
+            (crate::i18n::tr(
+                lang,
+                " and pushing the rendered config. Every step shows up below as it happens. Don't close this tab — refresh is fine, the bootstrap runs server-side and you'll re-attach.",
+                " и пушит готовый конфиг. Каждый шаг появится ниже по мере выполнения. Не закрывай вкладку — refresh нормально, bootstrap идёт серверно и переподключишься.",
+            ))
         }
         div id="wizard-status" role="status"
             style="margin: 18px 0 6px 0; padding: 8px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--mute);" {
