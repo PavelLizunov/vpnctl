@@ -2602,6 +2602,11 @@ pub(crate) struct UserDetailQuery {
     /// IPs (the genuine abuse-signal).
     #[serde(default)]
     show_egress: Option<String>,
+    /// 2026-05-23 — VPN-traffic sparkline window. One of «24h»,
+    /// «7d», «30d», «all». Defaults to 24h. Backed by
+    /// `pick_vpn_sparkline_window`.
+    #[serde(default)]
+    vpn_window: Option<String>,
 }
 
 impl UserDetailQuery {
@@ -3885,7 +3890,7 @@ pub(crate) async fn user_detail(
         (ua_clusters_section(&state, &uid, lang).await)
 
         // ── Live VPN stats (Track-3 chunk 3) ────────────────────
-        (live_vpn_stats_section(&state, &uid, lang).await)
+        (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
         (user_top_destinations_section(&state, &uid, lang).await)
         (user_sessions_section(&state, &uid, lang).await)
 
@@ -4112,89 +4117,256 @@ fn ua_verdict(distinct_ips: u64, distinct_slash16: u64) -> UaVerdict {
 ///
 /// Returns empty Markup if the input is empty — caller already
 /// has a "no live stats yet" empty-state above.
-fn vpn_sparkline_24h(rows: &[vpnctl_inventory::VpnStatsRow]) -> Markup {
+/// Window spec for `vpn_sparkline` — fixed grid of cells, each
+/// `bucket_hours` long, ending at «now». 24h × 1h = 24 cells. 7d
+/// × 24h = 7 cells. 30d × 24h = 30 cells. all-time uses a stretch
+/// bucket so the operator always sees ≤30 bars even when the
+/// daemon has been running for months.
+#[derive(Clone, Copy, Debug)]
+struct VpnSparklineWindow {
+    /// Tab id used in the URL (`?window=24h`).
+    slug: &'static str,
+    /// Human label rendered in the tab + caption.
+    label_en: &'static str,
+    label_ru: &'static str,
+    /// Cells in the grid.
+    cells: u32,
+    /// Hours covered by each cell.
+    bucket_hours: u32,
+    /// Optional caption-suffix override (else «per <bucket>»).
+    per_bucket_en: &'static str,
+    per_bucket_ru: &'static str,
+}
+
+const VPN_SPARKLINE_WINDOWS: &[VpnSparklineWindow] = &[
+    VpnSparklineWindow {
+        slug: "24h",
+        label_en: "24h",
+        label_ru: "24ч",
+        cells: 24,
+        bucket_hours: 1,
+        per_bucket_en: "per hour",
+        per_bucket_ru: "в час",
+    },
+    VpnSparklineWindow {
+        slug: "7d",
+        label_en: "7 days",
+        label_ru: "7 дней",
+        cells: 7,
+        bucket_hours: 24,
+        per_bucket_en: "per day",
+        per_bucket_ru: "в сутки",
+    },
+    VpnSparklineWindow {
+        slug: "30d",
+        label_en: "30 days",
+        label_ru: "30 дней",
+        cells: 30,
+        bucket_hours: 24,
+        per_bucket_en: "per day",
+        per_bucket_ru: "в сутки",
+    },
+    VpnSparklineWindow {
+        slug: "all",
+        label_en: "all",
+        label_ru: "всё",
+        cells: 30,
+        bucket_hours: 24 * 30,
+        per_bucket_en: "per month",
+        per_bucket_ru: "в месяц",
+    },
+];
+
+fn pick_vpn_sparkline_window(slug: Option<&str>) -> VpnSparklineWindow {
+    let s = slug.unwrap_or("24h");
+    VPN_SPARKLINE_WINDOWS
+        .iter()
+        .find(|w| w.slug == s)
+        .copied()
+        .unwrap_or(VPN_SPARKLINE_WINDOWS[0])
+}
+
+/// Multi-window VPN traffic sparkline (24h / 7d / 30d / all).
+///
+/// 2026-05-23 redesign — Pavel's feedback «график активности
+/// непонятный»: the previous 24h-only chart packed 24 bars into
+/// 384 px so each cell was 14 px wide, and a single hour of
+/// activity surrounded by 23 empty hours looked like a noise
+/// spike rather than a usable signal. Operator also wanted
+/// «больше чем за 24 часа а еще и за все время». The redesign:
+/// (a) supports four window slugs picked via `?window=...` query
+/// param, (b) widens cells for smaller cell counts (7d → 50 px
+/// bars instead of 14 px), (c) draws a 50%-of-max horizontal
+/// rule so the operator can gauge «is this typical or a spike»,
+/// (d) inline SVG `<title>` tooltips on each bar so hover shows
+/// the absolute byte count for that bucket.
+fn vpn_sparkline(
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    window: VpnSparklineWindow,
+    lang: crate::i18n::Locale,
+) -> Markup {
     use chrono::{DurationRound, TimeDelta, Utc};
-    if rows.is_empty() {
-        return html! {};
-    }
-    // Bucket by hour-of-day. Key = (day-of-month, hour) so two
-    // 17:00 buckets on different days don't collapse. Anchor the
-    // last bucket on the current hour so the rightmost bar is
-    // "right now."
-    let now = Utc::now().duration_trunc(TimeDelta::hours(1)).ok();
-    let Some(now_h) = now else {
-        return html! {};
+    let label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
     };
-    // 24 cells: index 0 = 23h ago, index 23 = current hour.
-    let mut up_per_hour: [u64; 24] = [0; 24];
-    let mut dn_per_hour: [u64; 24] = [0; 24];
+    let per_bucket = match lang {
+        crate::i18n::Locale::En => window.per_bucket_en,
+        crate::i18n::Locale::Ru => window.per_bucket_ru,
+    };
+    let cells = window.cells as usize;
+    let bucket_seconds = window.bucket_hours as i64 * 3600;
+    let now = match Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) {
+        Ok(t) => t,
+        Err(_) => return html! {},
+    };
+    let mut up_per_cell: Vec<u64> = vec![0; cells];
+    let mut dn_per_cell: Vec<u64> = vec![0; cells];
     for r in rows {
-        let row_h = match r.ts.duration_trunc(TimeDelta::hours(1)) {
+        let row_t = match r.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) {
             Ok(t) => t,
             Err(_) => continue,
         };
-        // Hours-ago, clamped to the 24-cell window.
-        let diff = now_h.signed_duration_since(row_h);
-        let hours_ago = diff.num_hours();
-        if !(0..24).contains(&hours_ago) {
+        let diff = now.signed_duration_since(row_t);
+        let buckets_ago = diff.num_seconds() / bucket_seconds;
+        if !(0..cells as i64).contains(&buckets_ago) {
             continue;
         }
-        let idx = (23 - hours_ago) as usize;
-        up_per_hour[idx] = up_per_hour[idx].saturating_add(r.upload_bytes);
-        dn_per_hour[idx] = dn_per_hour[idx].saturating_add(r.download_bytes);
+        let idx = (cells as i64 - 1 - buckets_ago) as usize;
+        up_per_cell[idx] = up_per_cell[idx].saturating_add(r.upload_bytes);
+        dn_per_cell[idx] = dn_per_cell[idx].saturating_add(r.download_bytes);
     }
-    // Max-axis = max of (up+dn) across all 24 cells; bars scale to
-    // 32 px max height. Zero-max corner case: render empty cells.
-    let max_total = up_per_hour
+    let max_total = up_per_cell
         .iter()
-        .zip(dn_per_hour.iter())
+        .zip(dn_per_cell.iter())
         .map(|(u, d)| u.saturating_add(*d))
         .max()
         .unwrap_or(0);
-    let cell_w: u32 = 14;
-    let cell_gap: u32 = 2;
-    let max_h: u32 = 32;
-    let width = 24 * (cell_w + cell_gap);
+    // Bar geometry: wider bars when fewer cells (one-day-bucket
+    // 7-cell view looks pathetic at 14 px; 50 px feels right).
+    // Computed so the chart always fills the same overall width
+    // regardless of cell count.
+    let target_width: u32 = 480;
+    let cell_gap: u32 = if cells > 14 { 2 } else { 4 };
+    let cell_w: u32 =
+        ((target_width.saturating_sub(cell_gap * (cells as u32 - 1))) / cells as u32).max(6);
+    let max_h: u32 = 48;
+    let width = cells as u32 * cell_w + (cells as u32 - 1) * cell_gap;
     let height = max_h + 4;
-    let bar = |idx: usize, base: u64, color: &str, y_offset: f64| -> String {
-        if max_total == 0 || base == 0 {
-            return String::new();
-        }
-        // Bar height as fraction of max, min 1px so a tiny value
-        // is still visible.
-        let h_px = ((base as f64 / max_total as f64) * (max_h as f64)).max(1.0);
-        let x = (idx as u32) * (cell_w + cell_gap);
-        let y = max_h as f64 - h_px - y_offset;
-        format!(r#"<rect x="{x}" y="{y:.1}" width="{cell_w}" height="{h_px:.1}" fill="{color}"/>"#,)
-    };
     let mut svg_inner = String::new();
-    for i in 0..24 {
-        let up = up_per_hour[i];
-        let dn = dn_per_hour[i];
-        // Stack download on top of upload — total bar fills the same
-        // proportion either way; download usually dominates, so it's
-        // the visually-driving slab.
-        let up_h = if max_total == 0 {
-            0.0
-        } else {
-            (up as f64 / max_total as f64) * (max_h as f64)
-        };
-        svg_inner.push_str(&bar(i, up, "var(--soft)", 0.0));
-        svg_inner.push_str(&bar(i, dn, "var(--acc)", up_h));
+    // 50%-of-max horizontal rule for visual gauging.
+    if max_total > 0 {
+        let mid_y = (max_h as f64) / 2.0 + 2.0;
+        svg_inner.push_str(&format!(
+            r#"<line x1="0" y1="{mid_y:.1}" x2="{width}" y2="{mid_y:.1}" stroke="var(--rule)" stroke-dasharray="2,2" stroke-width="0.5"/>"#
+        ));
+    }
+    for i in 0..cells {
+        let up = up_per_cell[i];
+        let dn = dn_per_cell[i];
+        let total = up.saturating_add(dn);
+        if max_total == 0 || total == 0 {
+            continue;
+        }
+        let up_h = (up as f64 / max_total as f64) * (max_h as f64);
+        let dn_h = (dn as f64 / max_total as f64) * (max_h as f64);
+        let x = (i as u32) * (cell_w + cell_gap);
+        let tooltip = format!(
+            "{}: ↓{} ↑{}",
+            i as i64 - cells as i64 + 1,
+            humanize_bytes(dn),
+            humanize_bytes(up),
+        );
+        // Upload sits at the bottom (var(--soft) muted), download
+        // stacks on top (var(--acc)). Each bar wrapped in a <g>
+        // with a <title> for native browser tooltip.
+        svg_inner.push_str(&format!("<g><title>{tooltip}</title>"));
+        let up_y = max_h as f64 - up_h + 2.0;
+        let dn_y = up_y - dn_h;
+        if up_h > 0.5 {
+            svg_inner.push_str(&format!(
+                r#"<rect x="{x}" y="{up_y:.1}" width="{cell_w}" height="{up_h:.1}" fill="var(--soft)"/>"#
+            ));
+        }
+        if dn_h > 0.5 {
+            svg_inner.push_str(&format!(
+                r#"<rect x="{x}" y="{dn_y:.1}" width="{cell_w}" height="{dn_h:.1}" fill="var(--acc)"/>"#
+            ));
+        }
+        svg_inner.push_str("</g>");
     }
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" aria-label="24-hour upload+download sparkline" style="display: block;">{svg_inner}</svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" aria-label="upload+download sparkline" style="display: block;">{svg_inner}</svg>"#,
+    );
+    // Compute total over the whole window so operator sees an
+    // absolute «traffic this 30d» number alongside the per-bucket
+    // chart.
+    let total_window: u64 = up_per_cell
+        .iter()
+        .zip(dn_per_cell.iter())
+        .map(|(u, d)| u.saturating_add(*d))
+        .sum();
+    let leftmost_label = format!(
+        "-{n}{unit}",
+        n = cells - 1,
+        unit = if window.bucket_hours == 1 {
+            "h"
+        } else if window.bucket_hours == 24 {
+            "d"
+        } else {
+            "mo"
+        }
     );
     html! {
-        div style="margin: 16px 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
-            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline;" {
-                span { "24h sparkline · download " span style="display: inline-block; width: 8px; height: 8px; background: var(--acc); vertical-align: middle;" {} " · upload " span style="display: inline-block; width: 8px; height: 8px; background: var(--soft); vertical-align: middle;" {} }
-                span { "max " (humanize_bytes(max_total)) " / hour" }
+        div style="margin: 12px 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px;" {
+                span {
+                    (label) " "
+                    (crate::i18n::tr(lang, "· download ", "· загрузка "))
+                    span style="display: inline-block; width: 8px; height: 8px; background: var(--acc); vertical-align: middle;" {}
+                    (crate::i18n::tr(lang, " · upload ", " · отправка "))
+                    span style="display: inline-block; width: 8px; height: 8px; background: var(--soft); vertical-align: middle;" {}
+                }
+                span {
+                    (crate::i18n::tr(lang, "max ", "макс "))
+                    (humanize_bytes(max_total)) " " (per_bucket)
+                    " · "
+                    (crate::i18n::tr(lang, "total ", "всего "))
+                    (humanize_bytes(total_window))
+                }
             }
             (maud::PreEscaped(svg))
             div style="font-family: var(--mono); font-size: 9px; color: var(--mute); display: flex; justify-content: space-between; margin-top: 4px;" {
-                span { "-23h" }
-                span { "now" }
+                span { (leftmost_label) }
+                span { (crate::i18n::tr(lang, "now", "сейчас")) }
+            }
+        }
+    }
+}
+
+/// Tab nav for the multi-window sparkline. Selected window
+/// renders as bold-no-link; others as `<a href="?window=X">`. The
+/// `base_url` should be the absolute path WITHOUT query string —
+/// the tab links append `?window=...`.
+fn vpn_sparkline_tabs(base_url: &str, active_slug: &str, lang: crate::i18n::Locale) -> Markup {
+    html! {
+        div style="display: flex; gap: 16px; font-family: var(--mono); font-size: 11px; margin: 6px 0 2px; padding-left: 12px;" {
+            span style="color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
+                (crate::i18n::tr(lang, "window:", "окно:"))
+            }
+            @for w in VPN_SPARKLINE_WINDOWS {
+                @let label = match lang {
+                    crate::i18n::Locale::En => w.label_en,
+                    crate::i18n::Locale::Ru => w.label_ru,
+                };
+                @if w.slug == active_slug {
+                    span style="font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--ink);" { (label) }
+                } @else {
+                    a href=(format!("{base_url}?vpn_window={}", w.slug))
+                      style="color: var(--mute); text-decoration: none; border-bottom: 1px dotted var(--mute);" {
+                        (label)
+                    }
+                }
             }
         }
     }
@@ -4515,10 +4687,13 @@ async fn user_top_destinations_section(
 async fn live_vpn_stats_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
+    window_slug: Option<&str>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::{K, t, tr};
-    let rows = match state.inv.recent_vpn_stats_for_user(uid, 24).await {
+    let window = pick_vpn_sparkline_window(window_slug);
+    let since_hours = window.cells * window.bucket_hours;
+    let rows = match state.inv.recent_vpn_stats_for_user(uid, since_hours).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_vpn_stats_for_user failed");
@@ -4572,13 +4747,23 @@ async fn live_vpn_stats_section(
         }
     }
 
+    let window_label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
+    };
+    let base_url = format!("/admin/users/{}", path_segment_encode(&uid.0));
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { "Live VPN stats · last 24h" }
+        div.ed-art-eyebrow {
+            (tr(lang, "Live VPN stats · ", "Живая VPN-статистика · "))
+            (window_label)
+        }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            "Pulled from each node's clash-api by the daemon. "
-            "Numbers reflect actual VPN traffic (delta-vs-prior-snapshot per tick), "
-            "not subscription-config fetches."
+            (tr(
+                lang,
+                "Pulled from each node's clash-api by the daemon. Numbers reflect actual VPN traffic (delta-vs-prior-snapshot per tick), not subscription-config fetches.",
+                "Снимается с clash-api каждой ноды демоном. Числа — реальный VPN-трафик (дельта-к-прошлому-снэпшоту на каждом тике), не запросы конфига подписки.",
+            ))
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
             (status_tile("uploaded", &humanize_bytes(total_up), "var(--ink)"))
@@ -4610,13 +4795,14 @@ async fn live_vpn_stats_section(
                 }
             }
         }
-        // Hourly sparkline of upload + download (Pavel iter D.7).
-        // 24-cell bar chart, height ∝ bytes/hour, sketched in inline
-        // SVG so no JS, no external assets, no fonts beyond what the
-        // editorial shell already loads. Bars use `var(--acc)` for
-        // download (the user's "fetch volume") and a faded ink for
-        // upload — both legible on every theme.
-        (vpn_sparkline_24h(&rows))
+        // 2026-05-23 redesign — multi-window sparkline (24h / 7d /
+        // 30d / all). Tabs above let the operator switch windows
+        // without leaving the page. Bars are wider when fewer cells
+        // and stack download-above-upload with a 50%-max dashed
+        // rule so a single hour of activity surrounded by quiet
+        // hours no longer reads as «system broken».
+        (vpn_sparkline_tabs(&base_url, window.slug, lang))
+        (vpn_sparkline(&rows, window, lang))
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
             (crate::i18n::tr(lang, "Aggregated from ", "Агрегировано из ")) (rows.len())
             @if rows.len() == 1 {
