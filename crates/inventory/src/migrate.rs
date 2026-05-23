@@ -464,6 +464,8 @@ pub fn build_migration_plan<F: FnMut(&str) -> String>(
             // device_id (operator pins one later via the Phase 3
             // import script or web UI).
             vpn_router_device_id: None,
+            // Migration 0026 default — imported users start enabled.
+            disabled: false,
         };
         users_to_import.push(user);
         grants.push((UserId(name.clone()), server_id.clone()));
@@ -1175,6 +1177,7 @@ mod tests {
             wireguard_private: None,
             sub_token: Some("stale".into()),
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -1233,6 +1236,7 @@ mod tests {
             wireguard_private: None,
             sub_token: Some("stale".into()),
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();

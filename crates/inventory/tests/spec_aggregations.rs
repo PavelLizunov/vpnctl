@@ -44,6 +44,7 @@ fn user(id: &str) -> User {
         wireguard_private: None,
         sub_token: None, // inventory may backfill on add
         vpn_router_device_id: None,
+        disabled: false,
     }
 }
 

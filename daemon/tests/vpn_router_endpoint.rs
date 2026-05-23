@@ -102,6 +102,7 @@ async fn seed_state(dir: &TempDir) -> AppState {
         wireguard_private: None,
         sub_token: None,
         vpn_router_device_id: None,
+        disabled: false,
     };
     inv.add_user(&user).await.unwrap();
     inv.set_vpn_router_device_id(&user.id, TEST_DEVICE_ID)

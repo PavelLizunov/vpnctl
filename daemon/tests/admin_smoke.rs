@@ -562,6 +562,7 @@ async fn seed(
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -1119,6 +1120,7 @@ async fn admin_users_href_url_encodes_special_chars() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -4153,6 +4155,7 @@ async fn admin_users_renders_search_form_before_add_user_form() {
             wireguard_private: None,
             sub_token: Some("seed-token".into()),
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -6839,6 +6842,7 @@ async fn admin_server_detail_lists_all_users_with_grant_buttons() {
                 wireguard_private: None,
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .await
             .unwrap();
@@ -6894,6 +6898,7 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -6940,6 +6945,7 @@ async fn admin_users_search_filters_by_id_substring() {
                 wireguard_private: None,
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .await
             .unwrap();
@@ -6986,6 +6992,7 @@ async fn admin_users_sort_servers_orders_by_grants_count_desc() {
                 wireguard_private: None,
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .await
             .unwrap();
@@ -7273,6 +7280,7 @@ async fn admin_user_detail_shows_traffic_limit_section() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -7309,6 +7317,7 @@ async fn admin_user_set_traffic_limit_persists_and_audits() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -7364,6 +7373,7 @@ async fn admin_user_set_traffic_limit_zero_clears_cap() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -7408,6 +7418,7 @@ async fn admin_dashboard_shows_limit_alerts_when_user_over_threshold() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -7513,6 +7524,7 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
         wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
         sub_token: Some("subtok-flowtest-abc123".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -7607,6 +7619,7 @@ async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea(
         wireguard_private: Some("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into()),
         sub_token: Some("subtok-flowtest2".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -7684,6 +7697,7 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-amztest".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -7756,6 +7770,7 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-dltest".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -7841,6 +7856,7 @@ async fn admin_user_wireguard_conf_download_404_on_unknown_server_when_user_exis
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: Some("st".into()),
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -7902,6 +7918,7 @@ async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -7982,6 +7999,7 @@ async fn admin_user_wg_conf_peer_octet_differs_per_user_index() {
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: Some(format!("st-{uid}")),
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8057,6 +8075,7 @@ async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() 
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-u1".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -8125,6 +8144,7 @@ async fn admin_user_detail_flow_b_links_to_conf_download() {
         wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
         sub_token: Some("st-conf".into()),
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -8552,6 +8572,7 @@ async fn nm10_user_detail_per_protocol_grid_renders_for_granted_server() {
             wireguard_private: None,
             tuic_password: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8613,6 +8634,7 @@ async fn nm10_user_detail_grid_hides_when_server_not_granted() {
             wireguard_private: None,
             tuic_password: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8652,6 +8674,7 @@ async fn nm10_user_detail_grid_marks_server_hidden_readonly() {
             wireguard_private: None,
             tuic_password: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8707,6 +8730,7 @@ async fn nm10_user_detail_grid_shows_user_blocked_marker_and_unblock_form() {
             wireguard_private: None,
             tuic_password: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8767,6 +8791,7 @@ async fn nm10_user_detail_post_block_persists_and_redirects() {
             wireguard_private: None,
             tuic_password: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8856,6 +8881,7 @@ async fn nm10_user_detail_grid_renders_both_axes_branch() {
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -8930,6 +8956,7 @@ async fn nm10_user_detail_grid_iterates_table_not_in_memory_enabled_protocols() 
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -9244,6 +9271,7 @@ async fn nm12_user_detail_grid_renders_dpi_chip_and_weak_shrinks_to_10px() {
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -9344,6 +9372,7 @@ async fn nm12_followup_user_detail_section_carries_server_access_anchor() {
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -9425,6 +9454,7 @@ async fn nm12_followup_grant_protocol_enable_redirects_with_fragment() {
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -9969,6 +9999,7 @@ async fn tooltips_user_detail_traffic_limit_fields_explain_units() {
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -10059,6 +10090,7 @@ async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10122,6 +10154,7 @@ async fn track_1_2_subscription_access_legacy_row_renders_bare_ip() {
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10325,6 +10358,7 @@ async fn track_1_4_subscription_access_renders_ja3_ja4_chips_when_set() {
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10391,6 +10425,7 @@ async fn track_1_4_subscription_access_omits_ja_chips_when_null() {
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10646,6 +10681,7 @@ async fn phase4a_user_detail_renders_30d_aggregates_above_table() {
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10708,6 +10744,7 @@ async fn phase4a_user_detail_default_hides_vpn_egress_rows_and_shows_counter_tog
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10765,6 +10802,7 @@ async fn phase4a_user_detail_show_egress_param_includes_vpn_egress_rows_and_flip
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10811,6 +10849,7 @@ async fn phase4a_user_detail_counter_uses_plural_rows_when_more_than_one_hidden(
         wireguard_pubkey: None,
         wireguard_private: None,
         vpn_router_device_id: None,
+        disabled: false,
     })
     .await
     .unwrap();
@@ -10917,6 +10956,7 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -11044,6 +11084,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -11165,6 +11206,7 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -11243,6 +11285,7 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
             wireguard_pubkey: None,
             wireguard_private: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -12189,6 +12232,7 @@ async fn dashboard_idle_users_panel_renders_never_seen_user() {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -12253,5 +12297,177 @@ async fn user_create_with_grant_all_renders_checked_checkbox_in_form() {
     assert!(
         html.contains(r#"checked="checked""#) || html.contains("checked=\"checked\""),
         "checkbox must default to CHECKED — found no checked attribute in the form"
+    );
+}
+
+// ── B1.user — disable/enable workflow ───────────────────────────────
+//
+// Soft-suspend without rotating secrets. POST /admin/users/{id}/disable
+// flips flag → /sub returns empty config; POST .../enable restores.
+// Idempotent on both directions (audit-on-actual-mutation).
+
+#[tokio::test]
+async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_user(&User {
+            id: UserId("toggleable".into()),
+            uuid: "00000000-0000-0000-0000-000000000061".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    let app = router(st.clone());
+
+    // Disable: 303 + flag flipped + audit row written.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/toggleable/disable")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = st
+        .inv
+        .get_user(&UserId("toggleable".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        u.disabled,
+        "disabled flag must be true after POST .../disable"
+    );
+    let audit = st.inv.recent_audit(10).await.unwrap();
+    assert!(
+        audit.iter().any(|e| e.action == "user.disable"),
+        "audit must contain user.disable row"
+    );
+
+    // Re-disable: idempotent — NO new audit row.
+    let pre = st.inv.recent_audit(10).await.unwrap().len();
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/toggleable/disable")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let post = st.inv.recent_audit(10).await.unwrap().len();
+    assert_eq!(
+        pre, post,
+        "no-op re-disable must NOT write audit (audit-on-actual-mutation contract)"
+    );
+
+    // Enable: flag flips back + a NEW audit row (user.enable).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/toggleable/enable")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = st
+        .inv
+        .get_user(&UserId("toggleable".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !u.disabled,
+        "disabled flag must be false after POST .../enable"
+    );
+    let audit = st.inv.recent_audit(20).await.unwrap();
+    assert!(
+        audit.iter().any(|e| e.action == "user.enable"),
+        "audit must contain user.enable row after the flip"
+    );
+}
+
+#[tokio::test]
+async fn user_disable_unknown_user_returns_404() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/no-such/disable")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn user_detail_page_shows_amber_banner_when_disabled() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_user(&User {
+            id: UserId("paused".into()),
+            uuid: "00000000-0000-0000-0000-000000000062".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: true,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/paused")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("user is DISABLED") || html.contains("пользователь ОТКЛЮЧЁН"),
+        "amber banner must announce disabled state on user-detail"
+    );
+    // Must show the enable button (the inverse action), NOT the disable one.
+    assert!(
+        html.contains(r#"action="/admin/users/paused/enable""#),
+        "must offer enable button for a disabled user"
+    );
+    assert!(
+        !html.contains(r#"action="/admin/users/paused/disable""#),
+        "must NOT also show disable button (already disabled)"
     );
 }

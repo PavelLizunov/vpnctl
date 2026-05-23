@@ -678,6 +678,7 @@ mod tests {
             wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         }
     }
 

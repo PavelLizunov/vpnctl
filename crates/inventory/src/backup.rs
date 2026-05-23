@@ -1122,6 +1122,7 @@ mod tests {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();
@@ -1190,6 +1191,7 @@ mod tests {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();

@@ -352,6 +352,24 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
         .ok_or(SubError::NotFound)?;
     let user_id = user.id.clone();
 
+    // B1.user — disabled-user soft mute (audit 2026-05-22, migration
+    // 0026). Render an EMPTY config (no outbounds, no servers) so
+    // the operator's «pause this user» action is visible to the
+    // client on next refresh WITHOUT rotating secrets or revoking
+    // grants. The /sub URL stays reachable (no 404 — that would
+    // break the client's polling assumption and surface as a
+    // confusing error); the response is just an empty sing-box
+    // config with the standard route structure. Re-enabling flips
+    // bytes back to identical-to-before.
+    if user.disabled {
+        tracing::info!(
+            target = "vpnctld::sub",
+            user = %user_id.0,
+            "user is disabled — returning empty config"
+        );
+        return Ok((user_id, empty_singbox_config()));
+    }
+
     let servers = state
         .inv
         .servers_for_user(&user.id)
@@ -520,6 +538,36 @@ fn build_client_envelope(_user: &User, mut outbounds: Vec<Value>, tags: &[String
                 { "protocol": "dns", "outbound": "direct" }
             ],
             "final": "proxy",
+            "auto_detect_interface": true
+        }
+    })
+}
+
+/// Build the byte-stable «no-proxy» sing-box config returned to
+/// disabled users (B1.user, audit 2026-05-22). Same envelope shape
+/// as a normal config but with NO proxy outbounds — only `direct`
+/// and `block`, with `final: direct`. The client parses successfully
+/// (no error toast), every route falls through to `direct` (which
+/// for a VPN client means «no VPN»), and re-enabling the user
+/// restores the full config on next refresh.
+///
+/// **Deliberately matches the normal-config envelope keys** so a
+/// future log-scraper / linter can't tell the difference between
+/// «empty config because disabled» and «empty config because zero
+/// grants» — both represent «this user has no servers to use right
+/// now», and operator distinguishes via the user-detail page.
+fn empty_singbox_config() -> Value {
+    json!({
+        "log": { "level": "info", "timestamp": true },
+        "outbounds": [
+            { "type": "direct", "tag": "direct" },
+            { "type": "block",  "tag": "block"  },
+        ],
+        "route": {
+            "rules": [
+                { "protocol": "dns", "outbound": "direct" }
+            ],
+            "final": "direct",
             "auto_detect_interface": true
         }
     })

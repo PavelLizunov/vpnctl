@@ -174,6 +174,21 @@ pub struct User {
     /// payloads) — pinned by `user_debug_redacts_all_secret_fields`.
     #[serde(skip_serializing, default)]
     pub vpn_router_device_id: Option<String>,
+    /// Soft-suspend flag (audit B1.user, migration 0026). When
+    /// `true`, the subscription pipeline (`/sub/<token>` and
+    /// `/api/v1/app/config/<device_id>`) renders an EMPTY config
+    /// for this user — no protocols visible, no URIs emitted —
+    /// while every secret (UUID, sub_token, WG keypair, TUIC pw)
+    /// and every grant stays intact. Flipping back to `false`
+    /// restores access byte-for-byte; flipping to `true` again
+    /// is a one-click pause.
+    ///
+    /// **Default false** on every existing row (migration default).
+    /// Serializable (no security reason to hide it — the operator
+    /// who can see the user already knows). Web UI surfaces it as
+    /// the «disable / enable user» button on the user-detail page.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl User {
@@ -245,6 +260,7 @@ mod user_secret_redaction {
             // logging path. Distinctive byte sequence so any future
             // refactor that bypasses the redaction surfaces here.
             vpn_router_device_id: Some("DEVICE_ID_MUST_NOT_LEAK_a92b915".into()),
+            disabled: false,
         }
     }
 

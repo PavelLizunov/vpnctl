@@ -1123,9 +1123,14 @@ impl SqliteInventory {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
         };
+        // Migration 0026 — honour the caller's `disabled` field on
+        // INSERT. Default in the schema is 0, but callers may want
+        // to import a pre-disabled user (snapshot restore, future
+        // bulk-disable workflow). i64 mirror of the bool.
+        let disabled_i: i64 = if u.disabled { 1 } else { 0 };
         let res = sqlx::query(
-            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, disabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(&u.id.0)
         .bind(&u.uuid)
@@ -1133,6 +1138,7 @@ impl SqliteInventory {
         .bind(&u.wireguard_pubkey)
         .bind(&u.wireguard_private)
         .bind(&token)
+        .bind(disabled_i)
         .execute(&self.pool)
         .await;
         map_unique(res, format!("user {}", u.id.0))?;
@@ -1155,7 +1161,7 @@ impl SqliteInventory {
     /// invariant by exposing the daemon publicly without Track-2.
     pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
              FROM users WHERE sub_token = ?1",
         )
         .bind(token)
@@ -1219,7 +1225,7 @@ impl SqliteInventory {
 
     pub async fn get_user(&self, id: &UserId) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
              FROM users WHERE id = ?1",
         )
         .bind(&id.0)
@@ -1230,7 +1236,7 @@ impl SqliteInventory {
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
         let rows = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
              FROM users ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -1463,7 +1469,7 @@ impl SqliteInventory {
     /// uniform regardless of garbage input.
     pub async fn find_user_by_vpn_router_device_id(&self, device_id: &str) -> Result<Option<User>> {
         let row = sqlx::query(
-            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
              FROM users WHERE vpn_router_device_id = ?1",
         )
         .bind(device_id)
@@ -2398,6 +2404,42 @@ impl SqliteInventory {
     ///
     /// Returns `Invalid` if no such user — matches the existing
     /// `regenerate_sub_token` shape.
+    /// Flip the `disabled` flag on a user (audit B1.user, migration
+    /// 0026). Returns `Ok(true)` when the row was changed (operator
+    /// actually flipped state), `Ok(false)` when the row already
+    /// matched the requested state (idempotent no-op), or `Err` if
+    /// the user doesn't exist.
+    ///
+    /// Caller is responsible for the audit row — this helper does
+    /// only the SQL flip so the handler can decide whether the
+    /// audit entry is `user.disable` or `user.enable` (mirrors the
+    /// per-protocol `set_hidden` + `set_grant_protocol_override`
+    /// convention from NM-10).
+    pub async fn set_user_disabled(&self, id: &UserId, disabled: bool) -> Result<bool> {
+        let new_val: i64 = if disabled { 1 } else { 0 };
+        let res = sqlx::query("UPDATE users SET disabled = ?1 WHERE id = ?2 AND disabled != ?1")
+            .bind(new_val)
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() > 0 {
+            return Ok(true);
+        }
+        // Either user doesn't exist OR already at target state.
+        // Disambiguate with a presence check.
+        let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = ?1")
+            .bind(&id.0)
+            .fetch_one(&self.pool)
+            .await?;
+        if exists.0 == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}",
+                id.0
+            )));
+        }
+        Ok(false)
+    }
+
     pub async fn set_user_traffic_limit(
         &self,
         id: &UserId,
@@ -3884,6 +3926,12 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
         // detail page render the ninitux URL with an empty
         // device_id).
         vpn_router_device_id: r.try_get("vpn_router_device_id")?,
+        // Migration 0026 (audit B1.user, 2026-05-22). SQLite stores
+        // BOOLEAN as INTEGER; we read i64 and map non-zero → true.
+        disabled: {
+            let v: i64 = r.try_get("disabled").unwrap_or(0);
+            v != 0
+        },
     })
 }
 
@@ -4119,6 +4167,7 @@ mod tests {
             wireguard_private: None,
             sub_token: None, // inventory will generate one
             vpn_router_device_id: None,
+            disabled: false,
         }
     }
 

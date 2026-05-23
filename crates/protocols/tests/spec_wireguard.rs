@@ -41,6 +41,7 @@ fn user(name: &str, pubkey: Option<&str>) -> User {
         wireguard_private: None,
         sub_token: None,
         vpn_router_device_id: None,
+        disabled: false,
     }
 }
 
@@ -57,6 +58,7 @@ fn user_with_keypair(name: &str, pubkey: &str, privkey: &str) -> User {
         wireguard_private: Some(privkey.into()),
         sub_token: None,
         vpn_router_device_id: None,
+        disabled: false,
     }
 }
 

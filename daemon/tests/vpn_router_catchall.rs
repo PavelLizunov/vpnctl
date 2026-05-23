@@ -129,6 +129,7 @@ async fn seed_state_with_user(dir: &TempDir) -> AppState {
             wireguard_private: None,
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         })
         .await
         .unwrap();

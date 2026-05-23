@@ -47,6 +47,7 @@ fn user(id: &str) -> User {
         wireguard_private: None,
         sub_token: None, // inventory generates
         vpn_router_device_id: None,
+        disabled: false,
     }
 }
 
@@ -381,6 +382,7 @@ async fn wireguard_private_roundtrips_through_inventory_verbatim() {
         wireguard_private: Some(priv_b64.clone()),
         sub_token: None,
         vpn_router_device_id: None,
+        disabled: false,
     };
     inv.add_user(&u).await.unwrap();
 

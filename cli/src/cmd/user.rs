@@ -110,6 +110,8 @@ pub(crate) async fn run(
                 // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
                 vpn_router_device_id: None,
+                // Migration 0026 default — CLI-created users start enabled.
+                disabled: false,
             };
             inv.add_user(&user).await?;
             inv.audit(

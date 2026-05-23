@@ -494,6 +494,21 @@ pub(crate) async fn get_config(
         }
     };
 
+    // B1.user (audit 2026-05-22, migration 0026). Disabled users
+    // get the same empty-response envelope as «no such device_id»
+    // — the ninitux endpoint's existing empty path renders the
+    // standard «no servers» config so the client parses
+    // successfully + falls back to direct routing. Re-enabling
+    // restores access without rotating device_id/sub_token.
+    if user.disabled {
+        tracing::info!(
+            target = "vpnctld::vpn_router",
+            user = %user.id,
+            "user is disabled — returning empty config"
+        );
+        return empty_response(want_raw, now);
+    }
+
     let uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0).await {
         Ok(u) => u,
         Err(e) => {

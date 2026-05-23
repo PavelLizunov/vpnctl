@@ -301,6 +301,7 @@ mod tests {
             wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
             sub_token: Some("st".into()),
             vpn_router_device_id: None,
+            disabled: false,
         }
     }
 
@@ -485,6 +486,7 @@ mod tests {
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .collect();
 
@@ -623,6 +625,7 @@ mod tests {
             wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
             sub_token: None,
             vpn_router_device_id: None,
+            disabled: false,
         };
         let peers = vec![other];
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
@@ -663,6 +666,7 @@ mod tests {
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .collect();
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
@@ -689,6 +693,7 @@ mod tests {
                 wireguard_private: Some(FAKE_CLIENT_PRIV.into()),
                 sub_token: None,
                 vpn_router_device_id: None,
+                disabled: false,
             })
             .collect();
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);

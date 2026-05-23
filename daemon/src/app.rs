@@ -900,6 +900,18 @@ fn admin_router(state: AppState) -> Router {
             get(admin::user_delete_confirm),
         )
         .route("/admin/users/{id}/delete", post(admin::user_delete))
+        // B1.user — soft suspend / restore.  Disabled users get an
+        // empty sub config (see sub.rs / vpn_router.rs) until
+        // re-enabled. Idempotent: re-POSTing same target state is
+        // a no-op redirect.
+        .route(
+            "/admin/users/{id}/disable",
+            post(admin::user_set_disabled_true),
+        )
+        .route(
+            "/admin/users/{id}/enable",
+            post(admin::user_set_disabled_false),
+        )
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         // Phase D — CSV export uses the same filter query string as

@@ -3693,6 +3693,61 @@ pub(crate) async fn user_detail(
         // reflects new limits.
         (user_traffic_limit_section(&state, &uid, lang).await)
 
+        // B1.user (audit 2026-05-22) — soft suspend. Banner +
+        // toggle button. When user.disabled = true, an amber banner
+        // says «this user is paused»; button reads «enable». When
+        // false, just the «disable» button as part of the normal
+        // user-detail card flow. No double-submit confirm because
+        // the action is fully reversible (one click in either
+        // direction, no secrets rotated, no grants lost).
+        div.ed-rule {}
+        div.ed-art-eyebrow style="margin-top: 24px;" {
+            (crate::i18n::tr(lang, "Access state", "Состояние доступа"))
+        }
+        @if user.disabled {
+            div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 8px 0;" {
+                div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px;" {
+                    (crate::i18n::tr(lang, "user is DISABLED", "пользователь ОТКЛЮЧЁН"))
+                }
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "Subscription endpoints return an empty config. Secrets, sub-token, WG keypair and grants are unchanged — re-enable to restore access byte-for-byte.",
+                        "Endpoints подписки возвращают пустой config. Секреты, sub-token, WG-пара и гранты не тронуты — включи обратно, чтобы вернуть доступ байт-в-байт.",
+                    ))
+                }
+                form method="post"
+                     action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0)))
+                     style="display: inline; margin-top: 8px;" {
+                    button type="submit"
+                           style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        (crate::i18n::tr(lang, "enable user", "включить пользователя"))
+                    }
+                }
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+                (crate::i18n::tr(
+                    lang,
+                    "Pause a user's subscription without rotating secrets or revoking grants. Re-enable later restores access byte-for-byte. Useful for: forgotten phone, paused billing, temporary access freeze.",
+                    "Поставь подписку на паузу без ротации секретов и без отзыва грантов. Повторное включение вернёт доступ байт-в-байт. Полезно для: забытого телефона, паузы в оплате, временной заморозки доступа.",
+                ))
+            }
+            form method="post"
+                 action=(format!("/admin/users/{}/disable", path_segment_encode(&user.id.0)))
+                 style="display: inline;" {
+                button type="submit"
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
+                           "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
+                       ))
+                       style="padding: 4px 12px; border: 1px solid var(--mute); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
+                }
+            }
+        }
+
         div.ed-rule {}
         div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" {
             (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
@@ -5925,6 +5980,8 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         wireguard_private: Some(wg_priv),
         sub_token: None,
         vpn_router_device_id: None,
+        // Migration 0026 default — newly-created users start enabled.
+        disabled: false,
     };
 
     // Mutation. `AlreadyExists` (UNIQUE violation) gets a 400 with
@@ -6262,6 +6319,74 @@ pub(crate) async fn user_delete(
         );
     }
     Redirect::to("/admin/users").into_response()
+}
+
+/// `POST /admin/users/{id}/disable` — set the disabled flag to
+/// true (B1.user, migration 0026). Idempotent: re-POSTing on an
+/// already-disabled user is a no-op redirect, no audit row written.
+/// Returns 303 to the user-detail page so the operator sees the
+/// «disabled» banner immediately.
+pub(crate) async fn user_set_disabled_true(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    user_set_disabled_inner(state, user_id_str, true).await
+}
+
+/// `POST /admin/users/{id}/enable` — restore access by clearing the
+/// disabled flag. Same idempotency + audit shape as `disable`.
+pub(crate) async fn user_set_disabled_false(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    user_set_disabled_inner(state, user_id_str, false).await
+}
+
+async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: bool) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let changed = match state.inv.set_user_disabled(&uid, target).await {
+        Ok(b) => b,
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg))
+            if msg.starts_with("no such user") =>
+        {
+            return user_not_found(&user_id_str);
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // Audit-on-actual-mutation (NM-10 review-agent rule). No-op
+    // re-POST writes nothing — timeline stays clean.
+    if changed {
+        let action = if target {
+            "user.disable"
+        } else {
+            "user.enable"
+        };
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                action,
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "disabled": target,
+                })),
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id_str,
+                action = action,
+                error = %e,
+                "audit row failed for user disable/enable; mutation already committed"
+            );
+        }
+    }
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
 }
 
 /// Phase D — paginated, filterable audit timeline. Replaces the
