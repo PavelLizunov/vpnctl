@@ -1005,6 +1005,49 @@ get oriented without reading the whole methodology block.
     unless upstream accepts, per-user clash-api attribution stays
     NULL — but the **upstream gate** is now in flight rather than
     sitting as a TODO.
+  - ✅ **Second wave 2026-05-23 (post-audit operator UX).** The
+    audit/polish sprint surfaced a regression-of-itself (I4 broke
+    prod) + a backlog of high-visibility UX gaps. Shipped same-day:
+      * `6448652` **P0 I4 hotfix** — `VPNCTLD_TRUSTED_PROXIES=192.168.0.207`
+        wired into prod `/etc/vpnctl/vpnctld.env` (env-var was empty after
+        the I4 deploy → every legit /sub through nginx fired
+        `suspicious_local_ip` warning). Belt-and-braces: detector
+        side now ALSO suppresses the alert when peer IP is in
+        `trusted_proxies()`, so a future deploy without env-config
+        is self-healing. Doc'd in CLAUDE.md «Грабли». 10 acked
+        backlog alerts cleared via /admin/alerts bulk-ack button.
+      * `b4608d2` **P1 alert auto-recovery** — `check_user_traffic_limits`
+        and `check_fingerprint_drift` now silently ack open warnings
+        when the underlying condition clears (used % drops below
+        threshold, observed fingerprint matches pinned). Removes the
+        monthly «manually-ack-30-stale-warnings» tax.
+      * `07a9fd3` **P1 disabled-user count** on dashboard Users tile
+        («N paused» amber sub-line, hidden when 0). Surfaces B1.user
+        soft-suspended accounts at the top-level glance so paused
+        users don't fall off the operator's radar.
+      * `5e7be3f` **P2 A3 per-server resource sparklines** — disk %
+        / mem-used % / sing-box log MiB over 24h on
+        /admin/servers/<id>, reusing `sparkline_svg`. Quiet contract
+        (omitted on fresh servers with no probes). Live demo on de:
+        log file climbs predictably → operator can preempt the
+        500 MiB alert.
+      * `9620e9b` **P2 B2 bulk grant/revoke** on server-detail.
+        «grant all (N)» (no confirm, idempotent) + «revoke all (N)…»
+        (destructive, double-submit confirm matching the C-3.4
+        delete-user pattern). Single summary audit row per batch
+        instead of N per-user rows.
+      * `85aa251` **P2 A5 fleet-wide search** at `/admin/search?q=`
+        with a compact nav search bar. Substring match across users
+        (id/uuid/sub_token/device_id), servers (id/address), alerts
+        (kind/summary). Audit search stays at /admin/audit (its own
+        filter form is the right surface for that data shape).
+    Tests went 1037 → 1049 (+12). All 7 commits CI-green; no
+    rollbacks. The trusted-proxies regression-of-the-audit-fix
+    became its own «грабли» entry — future operator provisioning
+    a second `vpnctld` behind a reverse proxy gets the explicit
+    «must set env-var» warning instead of finding out via 10
+    false-positive alerts.
+
   - ✅ **Audit & polish sprint 2026-05-22 (7-bundle session).** Three
     parallel audits ran (code-health, reusability, operator-value);
     the safe-fix + top-ROI subset shipped same day:
