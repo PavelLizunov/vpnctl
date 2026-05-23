@@ -1625,6 +1625,90 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
+    /// **Fleet search** (audit A5, shipped 2026-05-23). Substring
+    /// match against `users.id`, `users.uuid`, `users.sub_token`,
+    /// `users.vpn_router_device_id`. Case-insensitive via
+    /// `LOWER(...)`; returns full `User` rows for the hits so the
+    /// search results page can render `id` + secondary identifiers
+    /// without a second roundtrip. Capped at `limit` so a pathological
+    /// `q="a"` doesn't paginate the entire fleet.
+    ///
+    /// Empty `q` returns empty — search is opt-in, the index page
+    /// shouldn't accidentally dump everything.
+    pub async fn search_users(&self, q: &str, limit: i64) -> Result<Vec<User>> {
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pat = format!("%{}%", q.to_lowercase());
+        let rows = sqlx::query(
+            "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
+             FROM users
+             WHERE LOWER(id) LIKE ?1
+                OR LOWER(uuid) LIKE ?1
+                OR LOWER(COALESCE(sub_token, '')) LIKE ?1
+                OR LOWER(COALESCE(vpn_router_device_id, '')) LIKE ?1
+             ORDER BY id
+             LIMIT ?2",
+        )
+        .bind(&pat)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_user).collect()
+    }
+
+    /// Fleet search for servers. Substring match against `servers.id`
+    /// and `servers.address`. See [`search_users`] for design notes.
+    /// Delegates to `get_server` for each hit so the returned rows
+    /// have populated `kernels`/`enabled_protocols` lists (the search
+    /// page only renders id+address, but a future audit-row click
+    /// would expect a fully-populated `Server`).
+    pub async fn search_servers(&self, q: &str, limit: i64) -> Result<Vec<Server>> {
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pat = format!("%{}%", q.to_lowercase());
+        let rows = sqlx::query(
+            "SELECT id FROM servers
+             WHERE LOWER(id) LIKE ?1 OR LOWER(address) LIKE ?1
+             ORDER BY id
+             LIMIT ?2",
+        )
+        .bind(&pat)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: Vec<Server> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let id: String = r.try_get("id")?;
+            if let Some(s) = self.get_server(&ServerId(id)).await? {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fleet search for alerts. Substring match against
+    /// `admin_alerts.kind` and `summary`. Most recent first.
+    pub async fn search_alerts(&self, q: &str, limit: i64) -> Result<Vec<AdminAlert>> {
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pat = format!("%{}%", q.to_lowercase());
+        let rows = sqlx::query(
+            "SELECT id, created_at, kind, server_id, severity, summary, payload_json, acked_at
+             FROM admin_alerts
+             WHERE LOWER(kind) LIKE ?1 OR LOWER(summary) LIKE ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )
+        .bind(&pat)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_admin_alert).collect()
+    }
+
     /// Count of users with `disabled = 1` (B1.user, migration 0026).
     /// Cheap — backed by the partial `idx_users_disabled_partial`
     /// index which only contains the disabled rows, so this is O(N

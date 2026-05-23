@@ -926,6 +926,10 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/enable",
             post(admin::user_set_disabled_false),
         )
+        // A5 (audit 2026-05-22, shipped 2026-05-23) — fleet-wide
+        // search across users / servers / alerts. See handler doc
+        // for why audit isn't part of the same surface.
+        .route("/admin/search", get(admin::search))
         .route("/admin/audit", get(admin::audit))
         .route("/admin/audit/", get(admin::audit))
         // Phase D — CSV export uses the same filter query string as
