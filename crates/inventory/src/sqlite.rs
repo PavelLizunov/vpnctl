@@ -1625,6 +1625,19 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
+    /// Count of users with `disabled = 1` (B1.user, migration 0026).
+    /// Cheap — backed by the partial `idx_users_disabled_partial`
+    /// index which only contains the disabled rows, so this is O(N
+    /// disabled), not O(N total). Used by the dashboard's «N paused»
+    /// sub-line so disabled users don't fall off the operator's
+    /// radar.
+    pub async fn count_disabled_users(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM users WHERE disabled = 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
     /// Cheap row count of (user, server) grant pairs. `0` on empty table.
     pub async fn count_grants(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM grants")

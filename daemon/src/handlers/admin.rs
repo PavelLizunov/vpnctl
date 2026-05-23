@@ -399,6 +399,10 @@ fn theme_accent_lang(headers: &HeaderMap) -> (String, String, crate::i18n::Local
 struct DashboardStats {
     servers: i64,
     users: i64,
+    /// B1.user (audit 2026-05-22) — soft-suspended users. Surfaced
+    /// in the Users tile sub-line so paused accounts stay visible
+    /// even when the operator isn't scrolling through /admin/users.
+    disabled_users: i64,
     grants: i64,
     distinct_protocols: usize,
 }
@@ -410,9 +414,10 @@ struct DashboardStats {
 async fn collect_dashboard_data(
     state: &AppState,
 ) -> anyhow::Result<(DashboardStats, Vec<vpnctl_inventory::AuditEntry>)> {
-    let (servers_count, users_count, grants_count, server_list, audit) = tokio::try_join!(
+    let (servers_count, users_count, disabled_users_count, grants_count, server_list, audit) = tokio::try_join!(
         state.inv.count_servers(),
         state.inv.count_users(),
+        state.inv.count_disabled_users(),
         state.inv.count_grants(),
         state.inv.list_servers(),
         state.inv.recent_audit(10),
@@ -424,6 +429,7 @@ async fn collect_dashboard_data(
     let stats = DashboardStats {
         servers: servers_count,
         users: users_count,
+        disabled_users: disabled_users_count,
         grants: grants_count,
         distinct_protocols: distinct_protocols.len(),
     };
@@ -447,6 +453,28 @@ fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Marku
                     (tr(lang, "across ", "всего ")) b { (stats.grants) }
                     @if stats.grants == 1 { (tr(lang, " grant", " доступ")) }
                     @else { (tr(lang, " grants", " доступов")) }
+                    // B1.user surface — disabled-count appears ONLY when
+                    // non-zero (quiet dashboard contract). Direct link
+                    // to /admin/users so operator can drill in to
+                    // re-enable / triage. Amber styling pulls the eye
+                    // without screaming.
+                    @if stats.disabled_users > 0 {
+                        " · "
+                        a href="/admin/users"
+                          style="color: var(--acc); text-decoration: none;"
+                          title=(tr(
+                              lang,
+                              "Users with disabled=true (B1.user soft-suspend). Click to drill into the user list.",
+                              "Пользователи с disabled=true (B1.user мягкая пауза). Кликни, чтобы открыть список.",
+                          )) {
+                            b { (stats.disabled_users) }
+                            @if stats.disabled_users == 1 {
+                                (tr(lang, " paused", " на паузе"))
+                            } @else {
+                                (tr(lang, " paused", " на паузе"))
+                            }
+                        }
+                    }
                 }
             }
             div.ed-metric {

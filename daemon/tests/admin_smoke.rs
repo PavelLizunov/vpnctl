@@ -12408,6 +12408,102 @@ async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
     );
 }
 
+// ── B1.user dashboard surface — «N paused» sub-line ─────────────────
+//
+// Disabled-count surfaces in the Users tile sub-line so paused users
+// don't fall off the operator's radar. Quiet dashboard contract:
+// rendered ONLY when at least one user is disabled.
+
+#[tokio::test]
+async fn dashboard_users_tile_omits_paused_subline_when_zero() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("paused") && !html.contains("на паузе"),
+        "no users disabled → «paused» sub-line must be hidden"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_users_tile_renders_paused_subline_when_nonzero() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Two disabled users + one normal to verify the count is exact.
+    st.inv
+        .add_user(&User {
+            id: UserId("p1".into()),
+            uuid: "00000000-0000-0000-0000-000000000071".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: true,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .add_user(&User {
+            id: UserId("p2".into()),
+            uuid: "00000000-0000-0000-0000-000000000072".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: true,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .add_user(&User {
+            id: UserId("active".into()),
+            uuid: "00000000-0000-0000-0000-000000000073".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains("paused") || html.contains("на паузе"),
+        "paused sub-line must render when disabled count > 0"
+    );
+    assert!(
+        html.contains(">2<"),
+        "exact disabled count (2) must appear in the rendered <b>; html sample: {}",
+        if html.len() > 600 { &html[..600] } else { html }
+    );
+}
+
 #[tokio::test]
 async fn user_create_audit_payload_includes_wg_keypair_provenance_and_pubkey_set() {
     // I1 unification (audit 2026-05-22): every «add user» path
