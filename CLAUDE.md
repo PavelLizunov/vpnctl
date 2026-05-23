@@ -974,6 +974,51 @@ get oriented without reading the whole methodology block.
     unless upstream accepts, per-user clash-api attribution stays
     NULL — but the **upstream gate** is now in flight rather than
     sitting as a TODO.
+  - ✅ **Audit & polish sprint 2026-05-22 (7-bundle session).** Three
+    parallel audits ran (code-health, reusability, operator-value);
+    the safe-fix + top-ROI subset shipped same day:
+      * `f881ba9` Bundle 1: `internal_error()` leak fix (opaque body)
+        + `vpnctl admin hash-password` real subcommand (closes B2 doc
+        lie) + `assert_auth_safe_for_addr` startup gate (B3 — refuses
+        non-loopback bind without VPNCTLD_ADMIN_USER/PASSWORD) + stale
+        TODO sweep + `0.1.0`→`0.8.0` Cargo bump (I2) + orphan
+        `crates/inventory/src/mem.rs` deletion (I3) + `VPNCTLD_TRUSTED_PROXIES`
+        empty-by-default (I4 — operator-specific `192.168.0.207` no
+        longer baked into the binary).
+      * `e1988d1` Bundle 2 (D1): default «grant all servers» checkbox
+        on user-create. One-click = usable user instead of 3 drill-
+        downs.
+      * `7b69245` Bundle 3 (A2): «Idle users» panel on dashboard with
+        `idle_users(days, limit)` inventory helper. Renders only when
+        ≥1 user is idle (quiet for healthy fleet).
+      * `c7d3ca5` Bundle 4 (C3): Telegram push on user-traffic-limit
+        crossed. Fires `user.traffic_limit:<user_id>` warning alert
+        once per condition via the partial-UNIQUE dedup; reuses
+        Phase G push pipeline (made `node_probe_poller::push_alert`
+        `pub(crate)` for cross-module reuse).
+      * `5f0fe55` Bundle 5 (B1.user): `users.disabled` flag via
+        migration 0026. Soft-suspend without revoking grants or
+        rotating secrets. Subscription pipelines (`/sub/<token>` +
+        `/api/v1/app/config/<device_id>`) return an empty config
+        envelope for disabled users; re-enabling restores byte-for-
+        byte. Web action `POST /admin/users/{id}/{disable,enable}`
+        with amber banner UI on user-detail.
+      * `0b95209` Bundle 6 (I1): unified add-user audit payload across
+        CLI / web / migrate. All three paths now emit `user.add` with
+        `{uuid, wg_pubkey_set, wg_keypair_provenance}`; migrate added
+        the missing per-user rows (was only writing a summary). Actor
+        stays distinct (`cli` / `admin` / `migrate`) for filtering.
+      * `359ae13` Bundle 7 (C2): stale-fingerprint detection alert in
+        `health_monitor::check_fingerprint_drift`. Runs `ssh-keyscan`
+        per server with a pinned fingerprint, fires
+        `server.fingerprint.drift:<id>` warning + Telegram push on
+        mismatch. Skips no-pin and ProxyJump servers; verified zero
+        false-positives on the healthy 3-server prod fleet.
+    Tests went from 1010 → 1037 (+27). All 7 commits CI-green; no
+    rollbacks. Strategic-tension discussion (single-operator vs
+    reusable product) explicitly flagged in Bundle 1 commit — full
+    productisation (release artifacts, mTLS, OAuth) is a separate
+    multi-session decision.
 - **v1.0** far away — defined as "everything in roadmap shipped + months
   of operating experience without rolling back"
 
