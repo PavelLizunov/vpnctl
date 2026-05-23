@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
+use base64::Engine;
 use serde_json::{Value, json};
 use vpnctl_core::{RenderCtx, User, UserId};
 
@@ -195,6 +196,58 @@ pub(crate) async fn get(
         }
     }
 
+    // 2026-05-23 — V2Ray-family UA detection (quickfix per Pavel
+    // «через V2raytun наш QR не работает»). The dispatch mirrors
+    // `vpn_router::is_vpn_client_ua` exactly so a UA that already
+    // worked on the ninitux endpoint now also works on the legacy
+    // `/sub/<token>` LAN fallback. Default (no UA / browser / sing-
+    // box / Hiddify) falls through to the JSON envelope path.
+    let want_v2ray_subscription = ua
+        .as_deref()
+        .map(crate::handlers::vpn_router::is_vpn_client_ua_v2ray_family)
+        .unwrap_or(false);
+    if want_v2ray_subscription {
+        match resolve_v2ray_subscription(&state, &token).await {
+            Ok(Some((user_id, body))) => {
+                let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+                let (tls_ja3, tls_ja4) = peer_ip
+                    .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
+                    .unwrap_or((None, None));
+                let _ = crate::access_log::try_enqueue(
+                    &state.access_log_tx,
+                    crate::access_log::AccessLogRecord {
+                        user_id,
+                        ip: ip.clone(),
+                        ua: ua.clone(),
+                        status: 200,
+                        bytes,
+                        accept_language: accept_language.clone(),
+                        http_version: http_version.clone(),
+                        device_class: device_class.clone(),
+                        geo_country: None,
+                        geo_asn: None,
+                        tls_ja3,
+                        tls_ja4,
+                    },
+                );
+                return (
+                    StatusCode::OK,
+                    [("content-type", "text/plain; charset=utf-8")],
+                    body,
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(SubError::NotFound) => {
+                return (StatusCode::NOT_FOUND, "unknown token\n").into_response();
+            }
+            Err(SubError::Internal(msg)) => {
+                tracing::error!(target = "vpnctld::sub", error = %msg, "v2ray sub render failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response();
+            }
+        }
+    }
+
     match resolve(&state, &token).await {
         Ok((user_id, cfg)) => {
             // Per-token ban check (mirror of the per-IP path above).
@@ -341,6 +394,109 @@ fn rate_limited(retry_after_secs: u64, gate: &'static str) -> axum::response::Re
 enum SubError {
     NotFound,
     Internal(String),
+}
+
+/// 2026-05-23 quickfix (Pavel: «через V2raytun наш QR не работает»).
+/// V2Ray-family clients (v2rayN, v2rayNG, v2rayTun, Shadowrocket,
+/// Streisand, Quantumult, …) expect the classic «base64-encoded
+/// line-separated raw URIs» subscription format. They CAN'T parse
+/// sing-box JSON. The ninitux endpoint already does this via
+/// `vpn_router::is_vpn_client_ua` content-negotiation; mirroring
+/// the same dispatch here means the legacy `/sub/<token>` URL
+/// works for both V2Ray-family clients AND sing-box/Hiddify.
+///
+/// **Returns:** `Some(base64_body)` for v2ray-family UAs, `None`
+/// for everyone else (the caller then falls through to the sing-box
+/// JSON envelope path).
+async fn resolve_v2ray_subscription(
+    state: &AppState,
+    token: &str,
+) -> Result<Option<(UserId, String)>, SubError> {
+    let user = state
+        .inv
+        .find_user_by_sub_token(token)
+        .await
+        .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
+        .ok_or(SubError::NotFound)?;
+    let user_id = user.id.clone();
+    // Disabled-user check — same semantics as the JSON path: empty
+    // body. V2Ray clients tolerate an empty subscription as
+    // «nothing to import», which is the right surface.
+    if user.disabled {
+        tracing::info!(
+            target = "vpnctld::sub",
+            user = %user_id.0,
+            "user is disabled — returning empty v2ray sub"
+        );
+        return Ok(Some((user_id, String::new())));
+    }
+    let servers = state
+        .inv
+        .servers_for_user(&user.id)
+        .await
+        .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+    let mut links: Vec<String> = Vec::new();
+    for server in &servers {
+        let secrets = state
+            .inv
+            .list_server_secrets(&server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        let ctx = RenderCtx::new(server, &secrets);
+        let per_server_user = state
+            .inv
+            .user_with_per_server_uuid(&user, &server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        let visible_protocols = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        let visible_set: std::collections::HashSet<&vpnctl_core::ProtocolId> =
+            visible_protocols.iter().collect();
+        for pid in &server.enabled_protocols {
+            if !visible_set.contains(pid) {
+                continue;
+            }
+            let Some(proto) = state.registry.protocol(pid) else {
+                continue;
+            };
+            match proto.share_link(&ctx, &per_server_user) {
+                Ok(link) => {
+                    // V2Ray-family clients only understand a subset
+                    // of share-link schemes. WireGuard's
+                    // `wireguard://?conf=…` and wgturn's
+                    // `wgturn://…` would be silently dropped at
+                    // best, crash the parser at worst.
+                    if link.starts_with("vless://")
+                        || link.starts_with("vmess://")
+                        || link.starts_with("trojan://")
+                        || link.starts_with("ss://")
+                        || link.starts_with("ssr://")
+                        || link.starts_with("tuic://")
+                        || link.starts_with("hysteria2://")
+                        || link.starts_with("hy2://")
+                        || link.starts_with("anytls://")
+                    {
+                        links.push(link);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::sub",
+                        server = %server.id,
+                        protocol = %pid,
+                        error = %e,
+                        "share_link failed for v2ray sub; skipping"
+                    );
+                }
+            }
+        }
+    }
+    let joined = links.join("\n");
+    let body = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+    Ok(Some((user_id, body)))
 }
 
 async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubError> {

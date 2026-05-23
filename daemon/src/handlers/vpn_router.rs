@@ -119,6 +119,12 @@ const VPN_CLIENT_KEYWORDS: &[&str] = &[
     "streisand",
     "v2rayn",
     "v2rayng",
+    // 2026-05-23 quickfix (Pavel: «через V2raytun наш QR не
+    // работает»). V2rayTun is the iOS V2Ray successor; its UA
+    // («V2rayTun/2.x CFNetwork/x Darwin/x») lowercases to
+    // `v2raytun` — NOT a substring of `v2rayn` (which lacks the
+    // `tu`), so we need an explicit entry.
+    "v2raytun",
     "shadowrocket",
     "quantumult",
     "surge",
@@ -135,6 +141,15 @@ const VPN_CLIENT_KEYWORDS: &[&str] = &[
 ];
 
 fn is_vpn_client_ua(ua: &str) -> bool {
+    is_vpn_client_ua_v2ray_family(ua)
+}
+
+/// Re-export of [`is_vpn_client_ua`] for cross-module use (sub.rs
+/// quickfix 2026-05-23 — V2Ray-family UA dispatch on the legacy
+/// `/sub/<token>` endpoint). Keeping a single keyword list +
+/// classifier so the two endpoints can't drift on which UAs
+/// trigger the raw base64 path.
+pub(crate) fn is_vpn_client_ua_v2ray_family(ua: &str) -> bool {
     let lower = ua.to_ascii_lowercase();
     VPN_CLIENT_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
@@ -629,6 +644,11 @@ mod tests {
             "Quantumult/1.0.27",
             "NekoBox/1.3.7",
             "Karing/1.0.0",
+            // 2026-05-23 — V2rayTun (iOS) added to the keyword
+            // list. Verifies the substring match doesn't depend on
+            // the v2rayN-shaped prefix.
+            "V2rayTun/2.3.1 CFNetwork/1568 Darwin/24.1.0",
+            "v2raytun/2.3.1 (linux probe)",
         ] {
             assert!(is_vpn_client_ua(ua), "expected VPN client: {ua}");
         }
