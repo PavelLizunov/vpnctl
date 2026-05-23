@@ -900,6 +900,20 @@ fn admin_router(state: AppState) -> Router {
             get(admin::user_delete_confirm),
         )
         .route("/admin/users/{id}/delete", post(admin::user_delete))
+        // B2 (audit 2026-05-22, shipped 2026-05-23) — bulk
+        // grant / revoke on a server detail page. Grant-all
+        // is safe (idempotent, reversible per user) → no
+        // confirm. Revoke-all is destructive (operator might
+        // mass-disable access by mistake) → double-submit
+        // confirm via the same shape as user delete.
+        .route(
+            "/admin/servers/{id}/grants/_grant-all",
+            post(admin::server_grant_all_users),
+        )
+        .route(
+            "/admin/servers/{id}/grants/_revoke-all",
+            post(admin::server_revoke_all_users),
+        )
         // B1.user — soft suspend / restore.  Disabled users get an
         // empty sub config (see sub.rs / vpn_router.rs) until
         // re-enabled. Idempotent: re-POSTing same target state is

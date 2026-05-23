@@ -6248,6 +6248,183 @@ pub(crate) async fn user_revoke_server(
     .into_response()
 }
 
+/// `POST /admin/servers/{id}/grants/_grant-all` (B2, audit 2026-05-22,
+/// shipped 2026-05-23) — grant access to **every existing user** on
+/// this server. Common after deploying a new server: instead of
+/// clicking «grant» for each user, click one button. Per-user grant
+/// is idempotent at the SQL layer (`ON CONFLICT DO NOTHING`), so
+/// re-running this on a fully-granted server is a no-op.
+///
+/// Writes ONE summary audit row (`server.grants.bulk_grant` with
+/// `{granted, already_granted, failed, total_users}`) rather than
+/// N individual rows — avoids audit timeline flood for the common
+/// «50 users × 1 click» case. Per-user grant failures (rare —
+/// inventory-layer DB error) are counted in `failed` and logged at
+/// warn but DO NOT abort the batch — partial success is operator-
+/// recoverable via the per-row UI.
+///
+/// No confirm gate (safe + reversible — operator can revoke
+/// per-user OR use the bulk revoke flow).
+pub(crate) async fn server_grant_all_users(
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    if let Ok(None) = state.inv.get_server(&sid).await {
+        return not_found(&format!("no such server '{server_id_str}'"));
+    }
+    let users = match state.inv.list_users().await {
+        Ok(u) => u,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let already_granted: std::collections::HashSet<vpnctl_core::UserId> =
+        match state.inv.users_for_server(&sid).await {
+            Ok(v) => v.into_iter().map(|u| u.id).collect(),
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
+    let mut granted: u32 = 0;
+    let mut already: u32 = 0;
+    let mut failed: u32 = 0;
+    for u in &users {
+        if already_granted.contains(&u.id) {
+            already += 1;
+            continue;
+        }
+        match state.inv.grant(&u.id, &sid).await {
+            Ok(()) => granted += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    server = %server_id_str,
+                    user = %u.id,
+                    error = %e,
+                    "bulk-grant: per-user grant failed; continuing"
+                );
+            }
+        }
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.grants.bulk_grant",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "granted": granted,
+                "already_granted": already,
+                "failed": failed,
+                "total_users": users.len(),
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.grants.bulk_grant — mutations already committed"
+        );
+    }
+    tracing::info!(
+        target = "vpnctld::admin",
+        server = %server_id_str,
+        granted = granted,
+        already = already,
+        failed = failed,
+        total = users.len(),
+        "bulk-grant complete"
+    );
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/grants/_revoke-all` (B2, audit 2026-05-22,
+/// shipped 2026-05-23) — revoke access for **every currently-granted
+/// user** on this server. Destructive — operator must confirm by
+/// re-typing the server id in the `confirm=<id>` form field (same
+/// double-submit shape as user delete in C-3.4). Mismatch → 400.
+///
+/// Writes ONE summary audit row (`server.grants.bulk_revoke` with
+/// `{revoked, failed, total_was}`) rather than N per-user rows.
+/// Per-user revoke is idempotent at the SQL layer; failures are
+/// counted + logged but don't abort the batch.
+pub(crate) async fn server_revoke_all_users(
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let confirm = form_field(&body, "confirm").unwrap_or_default();
+    if confirm != server_id_str {
+        return bad_request(&format!(
+            "bulk-revoke confirm mismatch: form sent '{confirm}', URL targets '{server_id_str}' — type the server id exactly to confirm"
+        ));
+    }
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    if let Ok(None) = state.inv.get_server(&sid).await {
+        return not_found(&format!("no such server '{server_id_str}'"));
+    }
+    let granted = match state.inv.users_for_server(&sid).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let total_was = granted.len();
+    let mut revoked: u32 = 0;
+    let mut failed: u32 = 0;
+    for u in &granted {
+        match state.inv.revoke(&u.id, &sid).await {
+            Ok(()) => revoked += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    server = %server_id_str,
+                    user = %u.id,
+                    error = %e,
+                    "bulk-revoke: per-user revoke failed; continuing"
+                );
+            }
+        }
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.grants.bulk_revoke",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "revoked": revoked,
+                "failed": failed,
+                "total_was": total_was,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.grants.bulk_revoke — mutations already committed"
+        );
+    }
+    tracing::info!(
+        target = "vpnctld::admin",
+        server = %server_id_str,
+        revoked = revoked,
+        failed = failed,
+        total_was = total_was,
+        "bulk-revoke complete"
+    );
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id_str)
+    ))
+    .into_response()
+}
+
 /// `GET /admin/users/{id}/delete-confirm` — destructive-action
 /// double-submit confirm page (C-3.4). Renders a form that requires
 /// the operator to retype the user-id; only a matching POST to
@@ -9658,6 +9835,74 @@ pub(crate) async fn server_detail(
                 (crate::i18n::tr(lang, " — then come back to grant access.", " — затем вернись сюда чтобы выдать доступ."))
             }
         } @else {
+            // B2 (audit 2026-05-22) — bulk grant/revoke row above
+            // the per-user list. Grant-all is safe (idempotent,
+            // reversible per-row); revoke-all uses a JS confirm()
+            // since destructive. Rendered ONLY when at least one
+            // bulk action would be meaningful: grant-all visible
+            // when there's at least one un-granted user, revoke-all
+            // when at least one granted.
+            @let ungranted_count = all_users.iter().filter(|u| !granted_user_ids.contains(&u.id)).count();
+            @let granted_count = granted_user_ids.len();
+            @if ungranted_count > 0 || granted_count > 0 {
+                div style="display: flex; gap: 12px; padding: 8px 0; margin-bottom: 8px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);" {
+                    @let sid_enc_b = path_segment_encode(&server.id.0);
+                    @if ungranted_count > 0 {
+                        form method="post"
+                             action=(format!("/admin/servers/{sid_enc_b}/grants/_grant-all"))
+                             style="margin: 0; padding: 0;" {
+                            button type="submit"
+                                   title=(crate::i18n::tr(
+                                       lang,
+                                       "Grant access to every user currently in the inventory who doesn't have it yet. Idempotent — re-running this on a fully-granted server is a no-op.",
+                                       "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно — повторный запуск на сервере с уже выданными грантами ничего не сломает.",
+                                   ))
+                                   style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                (crate::i18n::tr(lang, "grant all ", "выдать всем "))
+                                "(" (ungranted_count) ")"
+                            }
+                        }
+                    }
+                    @if granted_count > 0 {
+                        // JS confirm() — destructive but reversible
+                        // (operator can re-grant individually). For
+                        // a fully-server-wipe flow use the danger-
+                        // zone delete-server action. Hidden input
+                        // confirm=<server-id> matches handler's
+                        // double-submit gate; JS prompt() returns
+                        // the typed value which we POST as-is.
+                        @let sid_clean = server.id.0.clone();
+                        @let confirm_msg = match lang {
+                            crate::i18n::Locale::En => format!(
+                                "Revoke access for all {granted_count} granted users on server '{sid_clean}'?\\nType the server id to confirm:"
+                            ),
+                            crate::i18n::Locale::Ru => format!(
+                                "Отозвать доступ у всех {granted_count} юзеров с грантом на сервере '{sid_clean}'?\\nВведи id сервера для подтверждения:"
+                            ),
+                        };
+                        form method="post"
+                             action=(format!("/admin/servers/{sid_enc_b}/grants/_revoke-all"))
+                             onsubmit=(format!(
+                                 "var v = prompt('{}'); if (v !== '{}') {{ alert('confirm did not match server id; nothing revoked'); return false; }} this.confirm.value = v;",
+                                 js_single_quote_escape(&confirm_msg),
+                                 js_single_quote_escape(&sid_clean),
+                             ))
+                             style="margin: 0; padding: 0;" {
+                            input type="hidden" name="confirm" value="";
+                            button type="submit"
+                                   title=(crate::i18n::tr(
+                                       lang,
+                                       "Revoke access for every currently-granted user on this server. Destructive — requires confirm. Re-granting per-user remains available.",
+                                       "Отозвать доступ у всех юзеров с текущим грантом на сервере. Деструктивно — нужно подтверждение. Перевыдать поштучно потом можно.",
+                                   ))
+                                   style="padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
+                                "(" (granted_count) ")…"
+                            }
+                        }
+                    }
+                }
+            }
             ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
                 @for u in &all_users {
                     @let sid_enc = path_segment_encode(&server.id.0);
