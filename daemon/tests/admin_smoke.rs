@@ -12614,6 +12614,88 @@ async fn server_grant_all_users_grants_every_ungranted() {
     assert_eq!(payload["granted"].as_u64(), Some(3));
     assert_eq!(payload["already_granted"].as_u64(), Some(0));
     assert_eq!(payload["failed"].as_u64(), Some(0));
+    // Audit-finding follow-up (2026-05-23): disabled users skipped.
+    // None of the 3 seeded users are disabled → counter is 0.
+    assert_eq!(payload["skipped_disabled"].as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn server_grant_all_skips_disabled_users() {
+    // Audit-finding follow-up (2026-05-23, b4608d2 review): bulk
+    // grant must NOT silently grant access to soft-paused users
+    // (B1.user mental-model preservation).
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("srv".into()),
+            address: "203.0.113.30".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .add_user(&User {
+            id: UserId("alive".into()),
+            uuid: "00000000-0000-0000-0000-000000000201".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .add_user(&User {
+            id: UserId("paused".into()),
+            uuid: "00000000-0000-0000-0000-000000000202".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: true,
+        })
+        .await
+        .unwrap();
+    let app = router(st.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/srv/grants/_grant-all")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let granted = st
+        .inv
+        .users_for_server(&ServerId("srv".into()))
+        .await
+        .unwrap();
+    let ids: Vec<String> = granted.iter().map(|u| u.id.0.clone()).collect();
+    assert_eq!(ids, vec!["alive"], "paused user must NOT be granted");
+    let audit = st.inv.recent_audit(20).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|e| e.action == "server.grants.bulk_grant")
+        .expect("audit row required");
+    let payload = row.payload.as_ref().unwrap();
+    assert_eq!(payload["granted"].as_u64(), Some(1));
+    assert_eq!(payload["skipped_disabled"].as_u64(), Some(1));
 }
 
 #[tokio::test]

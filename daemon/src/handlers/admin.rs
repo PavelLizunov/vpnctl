@@ -489,11 +489,11 @@ fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Marku
                               "Пользователи с disabled=true (B1.user мягкая пауза). Кликни, чтобы открыть список.",
                           )) {
                             b { (stats.disabled_users) }
-                            @if stats.disabled_users == 1 {
-                                (tr(lang, " paused", " на паузе"))
-                            } @else {
-                                (tr(lang, " paused", " на паузе"))
-                            }
+                            // «paused» / «на паузе» are invariant
+                            // across plural counts in both languages
+                            // (adjective stays the same). No-op
+                            // @if/@else removed per 2026-05-23 audit.
+                            (tr(lang, " paused", " на паузе"))
                         }
                     }
                 }
@@ -6306,7 +6306,22 @@ pub(crate) async fn server_grant_all_users(
     let mut granted: u32 = 0;
     let mut already: u32 = 0;
     let mut failed: u32 = 0;
+    let mut skipped_disabled: u32 = 0;
     for u in &users {
+        // Don't bulk-grant to soft-paused users (B1.user, audit
+        // finding 2026-05-23). The grant would be functionally
+        // harmless — disabled users' /sub renders an empty
+        // config regardless — but silently un-paused-by-side-
+        // effect violates the operator's «paused means out of
+        // sight» mental model. Disabled users get caught here +
+        // counted; operator can grant them individually after
+        // enabling. Symmetric handling on revoke-all isn't
+        // needed (revoking a disabled user is consistent with
+        // them already being out-of-rotation).
+        if u.disabled {
+            skipped_disabled += 1;
+            continue;
+        }
         if already_granted.contains(&u.id) {
             already += 1;
             continue;
@@ -6335,6 +6350,7 @@ pub(crate) async fn server_grant_all_users(
                 "granted": granted,
                 "already_granted": already,
                 "failed": failed,
+                "skipped_disabled": skipped_disabled,
                 "total_users": users.len(),
             })),
         )
@@ -6719,7 +6735,13 @@ pub(crate) async fn search(
                         "No matches. Audit-log searches still live on the ",
                         "Ничего не найдено. Поиск по audit-логу всё ещё на ",
                     ))
-                    a href=(format!("/admin/audit?action={query}")) style="color: var(--ink);" {
+                    // Percent-encode the operator's q so a query
+                    // like `foo&actor=admin` doesn't smuggle a
+                    // second parameter into the fallback URL —
+                    // `path_segment_encode` over-encodes (encodes
+                    // `:` etc) but URLs still parse correctly.
+                    a href=(format!("/admin/audit?action={}", path_segment_encode(query)))
+                      style="color: var(--ink);" {
                         "/admin/audit"
                     }
                     (crate::i18n::tr(lang, " page (action filter accepts substrings).", " (фильтр action поддерживает подстроки)."))
@@ -10080,10 +10102,15 @@ pub(crate) async fn server_detail(
                         @let sid_clean = server.id.0.clone();
                         @let confirm_msg = match lang {
                             crate::i18n::Locale::En => format!(
-                                "Revoke access for all {granted_count} granted users on server '{sid_clean}'?\\nType the server id to confirm:"
+                                // Single-line — the double-escape path through
+                                // `js_single_quote_escape` turns `\n` into a
+                                // literal backslash-n in prompt(). Period-space
+                                // reads cleanly in the prompt dialog and avoids
+                                // the escape-gymnastics rabbit hole.
+                                "Revoke access for all {granted_count} granted users on server '{sid_clean}'? Type the server id to confirm:"
                             ),
                             crate::i18n::Locale::Ru => format!(
-                                "Отозвать доступ у всех {granted_count} юзеров с грантом на сервере '{sid_clean}'?\\nВведи id сервера для подтверждения:"
+                                "Отозвать доступ у всех {granted_count} юзеров с грантом на сервере '{sid_clean}'? Введи id сервера для подтверждения:"
                             ),
                         };
                         form method="post"

@@ -595,11 +595,14 @@ pub async fn check_fingerprint_drift(
 /// `(kind, COALESCE(server_id, '__GLOBAL__')) WHERE acked_at IS NULL`
 /// deduplicates per-user: one open alert at a time, not one per tick.
 ///
-/// **Not in scope for this fn:** auto-ack on drop-below-threshold.
-/// Once Telegram fires, the operator acks via the web button OR the
-/// alert ages off after manual ack. If the user crosses again next
-/// month, a fresh alert fires (since the previous one is acked, the
-/// partial unique no longer blocks).
+/// **Auto-recovery (shipped 2026-05-23, commit b4608d2):** when a
+/// user drops back below `threshold_pct` (e.g. month rolls over,
+/// operator raised the limit, traffic stopped), the open warning is
+/// silently acked via `ack_open_alerts(kind, None)`. Matches the
+/// existing `ack_open_alerts` doc-comment policy: «a self-clearing
+/// alert doesn't need operator attention; the audit_log row from
+/// the original fire keeps the timeline complete». If we ever want
+/// explicit `*.recovered` info-alerts, that's a separate change.
 pub async fn check_user_traffic_limits(
     inv: &SqliteInventory,
 ) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
@@ -1099,6 +1102,61 @@ mod tests {
             alerts.is_empty(),
             "jump-via target must be skipped; got: {alerts:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fingerprint_drift_recovery_acks_open_alert_for_same_kind_and_server() {
+        // Audit finding 2026-05-23 (commit b4608d2): the original
+        // commit message claimed the auto-recovery branch was
+        // «exercised implicitly» by the skip tests. It wasn't — the
+        // skip tests return BEFORE reaching the `observed == pinned`
+        // branch. This test pins the SQL primitive that the recovery
+        // path calls (`ack_open_alerts`) for the exact kind shape +
+        // server_id binding used by `check_fingerprint_drift`. The
+        // full ssh-keyscan round-trip can't be unit-tested without
+        // a real SSH daemon — but the SQL contract here is the only
+        // piece that could regress silently.
+        let (_dir, inv) = fresh_inv().await;
+        inv.add_server(&vpnctl_core::Server {
+            id: ServerId("srv".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: Some("SHA256:original".into()),
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        // Seed an open drift alert exactly as the fire path would.
+        let kind = "server.fingerprint.drift:srv";
+        let opened = inv
+            .insert_alert_if_no_unacked(
+                kind,
+                Some(&ServerId("srv".into())),
+                "warning",
+                "drift",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(opened.is_some(), "seed must insert one open alert");
+        // Now ack it via the SAME helper the recovery branch calls.
+        let acked = inv
+            .ack_open_alerts(kind, Some(&ServerId("srv".into())))
+            .await
+            .unwrap();
+        assert_eq!(acked, 1, "recovery must ack exactly the one open alert");
+        // Idempotency: re-running on a healthy server with no open
+        // alert is a 0-rows-affected no-op.
+        let acked_again = inv
+            .ack_open_alerts(kind, Some(&ServerId("srv".into())))
+            .await
+            .unwrap();
+        assert_eq!(acked_again, 0, "second ack must be no-op");
     }
 
     #[tokio::test]
