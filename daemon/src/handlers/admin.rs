@@ -168,7 +168,15 @@ fn nav(active: &str, lang: crate::i18n::Locale) -> Markup {
 /// per-render — caches would be more code than it's worth, and the
 /// page is uncached anyway (every GET hits the admin handler).
 fn masthead_date() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    // 2026-05-23 — render the masthead date in MSK so the
+    // operator's «today» matches alerts / audit / chart labels.
+    // UTC would tick over at 03:00 MSK and the masthead would
+    // briefly disagree with everything else on the page.
+    let now = chrono::Utc::now();
+    match chrono::FixedOffset::east_opt(3 * 3600) {
+        Some(tz) => now.with_timezone(&tz).format("%Y-%m-%d").to_string(),
+        None => now.format("%Y-%m-%d").to_string(),
+    }
 }
 
 fn masthead(date: &str, vol: &str, lang: crate::i18n::Locale) -> Markup {
@@ -534,7 +542,7 @@ fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry], lang: crate::i18n::Lo
                 @for e in audit {
                     div.ed-time-row {
                         // 16-char ISO clip — drops fractional seconds and Z.
-                        span.ed-time-row__t { (clip_ts(&e.ts.to_rfc3339())) }
+                        span.ed-time-row__t { (format_msk_iso(e.ts)) }
                         span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
                             (e.action)
                         }
@@ -637,18 +645,15 @@ fn action_kind(action: &str) -> &'static str {
     }
 }
 
-/// Trim an RFC3339 timestamp like "2026-05-14T11:55:32.819+00:00" to
-/// "2026-05-14 11:55" — the timeline column is narrow and we don't
-/// want fractional seconds eating it.
-fn clip_ts(ts: &str) -> String {
-    // Be defensive: short strings (shouldn't happen) just round-trip.
-    if ts.len() < 16 {
-        return ts.to_string();
-    }
-    // Replace 'T' with a space and drop everything past minutes.
-    let head = &ts[..16];
-    head.replacen('T', " ", 1)
-}
+// `clip_ts` helper removed 2026-05-23 — all UI timestamp callers
+// now use `format_msk_iso` to render in operator-friendly MSK
+// timezone with explicit «MSK» marker. The previous helper trimmed
+// an RFC3339 UTC string without any timezone conversion, which
+// surfaced as UTC times in: dashboard recent activity, idle-users
+// panel, /admin/audit timeline, /admin/alerts feed, user-detail
+// sub-access log. CSV export (audit.csv) keeps `to_rfc3339()`
+// directly — ISO format is the correct interchange for external
+// tools.
 
 /// Classify an IP address from `sub_access_log.ip` into one of four
 /// buckets so the admin UI can flag rows that aren't real external
@@ -1266,7 +1271,7 @@ fn dashboard_idle_users(
                         }
                         span.ed-time-row__pl style="color: var(--mute);" {
                             @match last_seen {
-                                Some(ts) => (clip_ts(&ts.to_rfc3339())),
+                                Some(ts) => (format_msk_iso(*ts)),
                                 None => "—",
                             }
                         }
@@ -3859,7 +3864,7 @@ pub(crate) async fn user_detail(
                             .or_else(|| crate::ua::parse_ua_short(row.ua.as_deref()));
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
-                                (clip_ts(&row.ts.to_rfc3339()))
+                                (format_msk_iso(row.ts))
                             }
                             td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind_tooltip(ip_kind, lang)) {
                                 (row.ip)
@@ -4329,13 +4334,27 @@ fn nice_byte_ceiling(n: u64) -> u64 {
 /// Format an X-axis tick label for the given bucket-start instant.
 /// 1h buckets → `HH:MM` (e.g. «14:00»). 24h buckets → `MMM DD`
 /// (e.g. «May 17»). 30d buckets → `MMM YYYY` (e.g. «May 2026»).
+///
+/// 2026-05-23 — converts to MSK (+03:00) before formatting. The
+/// hourly bucket label especially matters: a peak at «14:00 UTC»
+/// shown as «14:00» reads as 14:00 MSK, which is 11:00 UTC actually
+/// — operator's intuition («it's 5pm Moscow time») gets the wrong
+/// bar. Daily and monthly labels also shift, but the visual delta
+/// is tiny (one day at most).
 fn x_axis_tick_label(t: chrono::DateTime<chrono::Utc>, bucket_hours: u32) -> String {
-    if bucket_hours == 1 {
-        t.format("%H:%M").to_string()
+    let fmt = if bucket_hours == 1 {
+        "%H:%M"
     } else if bucket_hours == 24 {
-        t.format("%b %d").to_string()
+        "%b %d"
     } else {
-        t.format("%b %Y").to_string()
+        "%b %Y"
+    };
+    // east_opt for `3 * 3600` is infallible; the None arm is
+    // defensive (workspace `unsafe_code = "forbid"` blocks
+    // `.expect()`, hence the fallthrough to raw UTC).
+    match chrono::FixedOffset::east_opt(3 * 3600) {
+        Some(tz) => t.with_timezone(&tz).format(fmt).to_string(),
+        None => t.format(fmt).to_string(),
     }
 }
 
@@ -7642,14 +7661,30 @@ fn audit_timeline_grouped(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    use chrono::{Duration, Utc};
-    let today = Utc::now().date_naive();
+    use chrono::{Duration, FixedOffset, Utc};
+    // 2026-05-23 — group day-by-day in MSK, not UTC. Otherwise an
+    // event at 23:30 UTC (= 02:30 MSK next day) falls into the
+    // wrong day-header relative to the ts shown beside it (which
+    // is rendered via format_msk_iso = MSK).
+    //
+    // east_opt for `3 * 3600` is infallible; the None arm is
+    // defensive (workspace `unsafe_code = "forbid"` blocks
+    // `.expect()`, so we fall back to UTC date grouping if the
+    // impossible None ever materialises).
+    let msk_opt = FixedOffset::east_opt(3 * 3600);
+    let today = match msk_opt {
+        Some(tz) => Utc::now().with_timezone(&tz).date_naive(),
+        None => Utc::now().date_naive(),
+    };
     let yesterday = today - Duration::days(1);
     let mut current_label: Option<String> = None;
     html! {
         div.ed-time {
             @for e in entries {
-                @let day = e.ts.date_naive();
+                @let day = match msk_opt {
+                    Some(tz) => e.ts.with_timezone(&tz).date_naive(),
+                    None => e.ts.date_naive(),
+                };
                 @let label = if day == today {
                     tr(lang, "Today", "Сегодня").to_string()
                 } else if day == yesterday {
@@ -7663,7 +7698,7 @@ fn audit_timeline_grouped(
                     }
                 }
                 div.ed-time-row {
-                    span.ed-time-row__t { (clip_ts(&e.ts.to_rfc3339())) }
+                    span.ed-time-row__t { (format_msk_iso(e.ts)) }
                     span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
                         (e.action)
                     }
@@ -8025,7 +8060,7 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale
         div.ed-time {
             @for a in rows {
                 div.ed-time-row {
-                    span.ed-time-row__t { (clip_ts(&a.created_at.to_rfc3339())) }
+                    span.ed-time-row__t { (format_msk_iso(a.created_at)) }
                     span class=(format!("ed-time-row__a ed-time-row__a--{}", severity_class(&a.severity))) {
                         (a.severity)
                     }
@@ -8047,7 +8082,7 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale
                             Some(when) => {
                                 " · " span style="color: var(--mute);" {
                                     (tr(lang, "acked ", "принято "))
-                                    (clip_ts(&when.to_rfc3339()))
+                                    (format_msk_iso(*when))
                                 }
                             }
                             None => {
@@ -8277,7 +8312,7 @@ fn settings_disaster_recovery_section(
                 div style="display: flex; gap: 16px; align-items: center; margin: 8px 0 14px; padding: 10px 14px; border: 1px solid var(--rule); background: var(--paper);" {
                     span style=(format!("font-family: var(--serif); font-weight: 500; color: {color}; font-size: 14px;")) { (label) }
                     span style="color: var(--mute); font-family: var(--mono); font-size: 11.5px;" {
-                        (ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                        (format_msk_iso(*ts))
                         " · "
                         @match duration_ms {
                             Some(ms) => { (ms) " ms" }
@@ -8371,8 +8406,10 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| {
+                // GeoIP file mtime — render in MSK to match the
+                // rest of the operator-facing UI.
                 chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .map(format_msk_iso)
                     .unwrap_or_else(|| "?".to_string())
             })
             .unwrap_or_else(|| "?".to_string());
@@ -10943,7 +10980,7 @@ fn server_detail_uptime_section(
                         @let mins = chrono::Utc::now().signed_duration_since(ts).num_minutes().max(0);
                         div {
                             (tr(lang, "Last outage observed: ", "Последнее падение: "))
-                            span style="color: var(--ink);" { (ts.format("%Y-%m-%d %H:%M UTC").to_string()) }
+                            span style="color: var(--ink);" { (format_msk_iso(ts)) }
                             " ("
                             @if mins < 60 {
                                 (mins) " " (tr(lang, "min ago", "мин назад"))
@@ -11060,7 +11097,7 @@ fn server_detail_hero(
         div.ed-art-eyebrow {
             (tr(lang, "Live status · last probe ", "Живой статус · последний probe "))
             span style="color: var(--mute);" {
-                (h.ts.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                (format_msk_iso(h.ts))
             }
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
@@ -11212,7 +11249,7 @@ fn server_detail_live_activity_section(
     use crate::i18n::tr;
     let last_seen_str = activity
         .last_sample_ts
-        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .map(format_msk_iso)
         .unwrap_or_else(|| tr(lang, "never", "никогда").to_string());
     let total_bytes = activity
         .bytes_up_window
