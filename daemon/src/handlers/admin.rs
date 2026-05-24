@@ -168,15 +168,12 @@ fn nav(active: &str, lang: crate::i18n::Locale) -> Markup {
 /// per-render — caches would be more code than it's worth, and the
 /// page is uncached anyway (every GET hits the admin handler).
 fn masthead_date() -> String {
-    // 2026-05-23 — render the masthead date in MSK so the
-    // operator's «today» matches alerts / audit / chart labels.
-    // UTC would tick over at 03:00 MSK and the masthead would
-    // briefly disagree with everything else on the page.
-    let now = chrono::Utc::now();
-    match chrono::FixedOffset::east_opt(3 * 3600) {
-        Some(tz) => now.with_timezone(&tz).format("%Y-%m-%d").to_string(),
-        None => now.format("%Y-%m-%d").to_string(),
-    }
+    // 2026-05-23 — render in the operator-configured display TZ
+    // so «today» matches alerts / audit / chart labels.
+    chrono::Utc::now()
+        .with_timezone(&display_tz())
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 fn masthead(date: &str, vol: &str, lang: crate::i18n::Locale) -> Markup {
@@ -4349,13 +4346,7 @@ fn x_axis_tick_label(t: chrono::DateTime<chrono::Utc>, bucket_hours: u32) -> Str
     } else {
         "%b %Y"
     };
-    // east_opt for `3 * 3600` is infallible; the None arm is
-    // defensive (workspace `unsafe_code = "forbid"` blocks
-    // `.expect()`, hence the fallthrough to raw UTC).
-    match chrono::FixedOffset::east_opt(3 * 3600) {
-        Some(tz) => t.with_timezone(&tz).format(fmt).to_string(),
-        None => t.format(fmt).to_string(),
-    }
+    t.with_timezone(&display_tz()).format(fmt).to_string()
 }
 
 /// PowerBI / Tableau-style stacked bar chart for VPN traffic.
@@ -5106,35 +5097,85 @@ fn humanize_bytes(n: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// Format a UTC timestamp in Moscow time (MSK, UTC+3, no DST since
-/// 2014). Used on user-detail dense tables (Top destinations,
-/// Sessions) where the operator scans for «когда последний раз ходил»
-/// — UTC made the time column unreadable for the sole operator in
-/// MSK. The trailing `MSK` literal makes the timezone explicit so
-/// nobody mistakes the column for UTC after Phase 5d.
+/// Format a UTC timestamp in the operator-configured display
+/// timezone (set via /admin/settings, persisted in
+/// `display_settings.timezone`, default «Europe/Moscow»). The
+/// trailing UPPERCASE abbreviation (e.g. «MSK», «EST», «UTC»)
+/// makes the zone explicit so nobody mistakes the column for UTC.
 ///
-/// Fallback to `%m-%d %H:%M UTC` if `FixedOffset::east_opt` rejects
-/// the offset — defensive, in practice `3 * 3600` always fits in
-/// the documented `-86_399..=86_399` range.
+/// Renamed from `format_msk` 2026-05-23 when the timezone became
+/// operator-configurable. Both this short variant (`%m-%d %H:%M
+/// <ZONE>`) and the year-bearing [`format_local_iso`] read from
+/// the same global TZ cache initialised at startup +
+/// hot-reloaded by the Settings POST handler.
 fn format_msk(dt: chrono::DateTime<chrono::Utc>) -> String {
-    match chrono::FixedOffset::east_opt(3 * 3600) {
-        Some(tz) => dt.with_timezone(&tz).format("%m-%d %H:%M MSK").to_string(),
-        None => dt.format("%m-%d %H:%M UTC").to_string(),
-    }
+    format_local_with_pattern(dt, "%m-%d %H:%M")
 }
 
-/// Same as [`format_msk`] but emits the year too (`%Y-%m-%d %H:%M MSK`).
+/// Same as [`format_msk`] but emits the year too (`%Y-%m-%d %H:%M <ZONE>`).
 /// Used for «last fetch / last sample» tile timestamps where the
 /// operator needs the absolute date — those values can be days/weeks
 /// old, so dropping the year would be ambiguous.
 fn format_msk_iso(dt: chrono::DateTime<chrono::Utc>) -> String {
-    match chrono::FixedOffset::east_opt(3 * 3600) {
-        Some(tz) => dt
-            .with_timezone(&tz)
-            .format("%Y-%m-%d %H:%M MSK")
-            .to_string(),
-        None => dt.format("%Y-%m-%d %H:%M UTC").to_string(),
+    format_local_with_pattern(dt, "%Y-%m-%d %H:%M")
+}
+
+/// Inner helper: format `dt` with `pattern` followed by a space and
+/// the chosen zone's abbreviation (e.g. «MSK», «UTC», «EST»). On
+/// any failure to read the configured tz, fall back to UTC.
+fn format_local_with_pattern(dt: chrono::DateTime<chrono::Utc>, pattern: &str) -> String {
+    let tz = display_tz();
+    let local = dt.with_timezone(&tz);
+    // chrono-tz's `Tz::name()` gives the IANA name (`Europe/Moscow`);
+    // the operator wants a short abbreviation (`MSK`). chrono's
+    // `format("%Z")` resolves the abbreviation per-instant
+    // (respects DST: «EST» vs «EDT» depending on date).
+    local.format(&format!("{pattern} %Z")).to_string()
+}
+
+/// Process-global cache of the operator-configured display
+/// timezone. Initialised on startup by `init_display_tz` (called
+/// from `app::make_app_state*`); hot-reloaded by the
+/// `POST /admin/settings/timezone` handler via
+/// `set_display_tz_cache`.
+///
+/// Read on every UI timestamp render — `format_msk_iso` /
+/// `format_msk` / `x_axis_tick_label` / audit day-grouping. The
+/// `RwLock` is read-mostly (writes happen only when the operator
+/// flips the Settings dropdown); reads are cheap and non-blocking.
+static DISPLAY_TZ: std::sync::OnceLock<std::sync::RwLock<chrono_tz::Tz>> =
+    std::sync::OnceLock::new();
+
+/// Initialise the global timezone cache from the inventory's
+/// `display_settings.timezone`. Called once from `make_app_state*`
+/// at daemon startup. Idempotent — second call is a no-op (the
+/// `OnceLock` is set once).
+pub(crate) fn init_display_tz(tz: chrono_tz::Tz) {
+    let _ = DISPLAY_TZ.set(std::sync::RwLock::new(tz));
+}
+
+/// Update the cached display timezone after the operator changes
+/// the Settings page value. Subsequent timestamp renders see the
+/// new zone immediately — no restart needed.
+pub(crate) fn set_display_tz_cache(tz: chrono_tz::Tz) {
+    if let Some(lock) = DISPLAY_TZ.get() {
+        if let Ok(mut guard) = lock.write() {
+            *guard = tz;
+        }
+    } else {
+        // Cache not yet initialised (shouldn't happen in production
+        // but defensive). Set it now.
+        let _ = DISPLAY_TZ.set(std::sync::RwLock::new(tz));
     }
+}
+
+/// Read the current display timezone. Defaults to `Europe/Moscow`
+/// if the cache hasn't been initialised yet (tests, early startup).
+pub(crate) fn display_tz() -> chrono_tz::Tz {
+    DISPLAY_TZ
+        .get()
+        .and_then(|lock| lock.read().ok().map(|g| *g))
+        .unwrap_or(chrono_tz::Europe::Moscow)
 }
 
 /// Phase 5d — pull a bare IPv4 candidate out of a `vpn_user_destinations`
@@ -7661,30 +7702,20 @@ fn audit_timeline_grouped(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    use chrono::{Duration, FixedOffset, Utc};
-    // 2026-05-23 — group day-by-day in MSK, not UTC. Otherwise an
-    // event at 23:30 UTC (= 02:30 MSK next day) falls into the
-    // wrong day-header relative to the ts shown beside it (which
-    // is rendered via format_msk_iso = MSK).
-    //
-    // east_opt for `3 * 3600` is infallible; the None arm is
-    // defensive (workspace `unsafe_code = "forbid"` blocks
-    // `.expect()`, so we fall back to UTC date grouping if the
-    // impossible None ever materialises).
-    let msk_opt = FixedOffset::east_opt(3 * 3600);
-    let today = match msk_opt {
-        Some(tz) => Utc::now().with_timezone(&tz).date_naive(),
-        None => Utc::now().date_naive(),
-    };
+    use chrono::{Duration, Utc};
+    // 2026-05-23 — group day-by-day in the operator-configured
+    // display TZ. Otherwise an event at 23:30 UTC (= 02:30 MSK
+    // next day) falls into the wrong day-header relative to the
+    // ts shown beside it (which is rendered via format_msk_iso =
+    // local TZ).
+    let tz = display_tz();
+    let today = Utc::now().with_timezone(&tz).date_naive();
     let yesterday = today - Duration::days(1);
     let mut current_label: Option<String> = None;
     html! {
         div.ed-time {
             @for e in entries {
-                @let day = match msk_opt {
-                    Some(tz) => e.ts.with_timezone(&tz).date_naive(),
-                    None => e.ts.date_naive(),
-                };
+                @let day = e.ts.with_timezone(&tz).date_naive();
                 @let label = if day == today {
                     tr(lang, "Today", "Сегодня").to_string()
                 } else if day == yesterday {
@@ -8569,6 +8600,50 @@ function vpnctlGeoipUpdateNow() {{
     }
 }
 
+/// `POST /admin/settings/timezone` — operator picks an IANA TZ
+/// name from the Settings dropdown (2026-05-23). Validates the
+/// name parses as `chrono_tz::Tz`, writes to inventory + updates
+/// the global cache so subsequent renders see the new zone
+/// without a daemon restart.
+pub(crate) async fn settings_timezone_set(State(state): State<AppState>, body: String) -> Response {
+    let tz_name = form_field(&body, "tz").unwrap_or_default();
+    if tz_name.is_empty() {
+        return bad_request("missing `tz` field");
+    }
+    let tz: chrono_tz::Tz = match tz_name.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            return bad_request(&format!(
+                "'{tz_name}' is not a valid IANA timezone name (e.g. 'Europe/Moscow', 'UTC', 'America/New_York')"
+            ));
+        }
+    };
+    // Persist to DB FIRST — then update cache. If the write fails
+    // we want the cache to still reflect the actually-stored value.
+    if let Err(e) = state.inv.set_display_timezone(&tz_name).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    set_display_tz_cache(tz);
+    // Audit row for the timeline.
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "settings.timezone.set",
+            Some("display"),
+            Some(&serde_json::json!({ "timezone": tz_name })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            error = %e,
+            "audit row for settings.timezone.set failed; mutation already committed"
+        );
+    }
+    Redirect::to("/admin/settings#timezone-section").into_response()
+}
+
 pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) -> Markup {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     // Auto-generated by vpnctld on startup (see
@@ -8600,6 +8675,15 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
         .await
         .ok()
         .and_then(|rows| rows.into_iter().find(|e| e.action == "backup.self_test"));
+
+    // 2026-05-23 — display timezone (migration 0027). Render the
+    // current setting in the dropdown's selected state. Failure to
+    // read = use the default; doesn't break the rest of Settings.
+    let display_tz_current = state
+        .inv
+        .get_display_timezone()
+        .await
+        .unwrap_or_else(|_| "Europe/Moscow".into());
 
     // Phase G chunk 3 — push notification transport config (Telegram
     // bot). Failure to read = render «(failed: …)» inline; don't
@@ -8639,6 +8723,77 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
             ))
         }
         (tweaks_inline(&theme, &accent))
+
+        div.ed-rule {}
+        div id="timezone-section" {
+            div.ed-art-eyebrow {
+                (crate::i18n::tr(lang, "Display timezone", "Часовой пояс отображения"))
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (crate::i18n::tr(
+                    lang,
+                    "Every operator-visible timestamp (alerts feed, audit timeline, sub-access log, chart axis labels, …) is rendered in this timezone with its UPPERCASE abbreviation suffix (e.g. ",
+                    "Каждая видимая оператору метка времени (лента alerts, audit, sub-access лог, подписи осей графиков, …) рендерится в этом часовом поясе с прописной аббревиатурой (например ",
+                ))
+                span.ed-mono { "MSK" } ", " span.ed-mono { "UTC" } ", " span.ed-mono { "EST" }
+                (crate::i18n::tr(
+                    lang,
+                    "). Pick an IANA timezone name; full database (incl. DST rules) is bundled.",
+                    "). Выбери IANA-имя часового пояса; полная база (включая DST) встроена.",
+                ))
+            }
+            form method="post"
+                 action="/admin/settings/timezone"
+                 style="display: flex; gap: 8px; align-items: baseline;" {
+                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
+                    (crate::i18n::tr(lang, "timezone", "часовой пояс"))
+                }
+                @let common_tzs: &[&str] = &[
+                    "UTC",
+                    "Europe/Moscow",
+                    "Europe/London",
+                    "Europe/Berlin",
+                    "Europe/Helsinki",
+                    "Europe/Istanbul",
+                    "Asia/Dubai",
+                    "Asia/Tbilisi",
+                    "Asia/Bangkok",
+                    "Asia/Shanghai",
+                    "Asia/Tokyo",
+                    "America/New_York",
+                    "America/Los_Angeles",
+                ];
+                select name="tz"
+                       style="padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 220px;" {
+                    @for tz in common_tzs {
+                        @if *tz == display_tz_current.as_str() {
+                            option value=(tz) selected="selected" { (tz) }
+                        } @else {
+                            option value=(tz) { (tz) }
+                        }
+                    }
+                    // If current value isn't in the common list,
+                    // surface it as a selected option at the end so
+                    // the operator can keep it without retyping.
+                    @if !common_tzs.contains(&display_tz_current.as_str()) {
+                        option value=(display_tz_current) selected="selected" {
+                            (display_tz_current) " (custom)"
+                        }
+                    }
+                }
+                button type="submit"
+                       style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (crate::i18n::tr(lang, "save", "сохранить"))
+                }
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                    (crate::i18n::tr(
+                        lang,
+                        "→ takes effect on the next page render (no restart needed)",
+                        "→ применится при следующем рендере страницы (рестарт не нужен)",
+                    ))
+                }
+            }
+        }
 
         div.ed-rule {}
         div #backups-section.ed-art-eyebrow {

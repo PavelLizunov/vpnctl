@@ -74,6 +74,13 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Phase D audit timeline: date-grouping (Today/Yesterday/<date>) +
 # CSV export filename stamp.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 2026-05-23 — operator-configurable display timezone (Pavel:
+# «правильнее было чтоб часовой пояс можно было менять через
+# настройки»). Replaces the hardcoded `FixedOffset::east_opt(3*3600)`
+# used since the MSK sweep. Default = «Europe/Moscow»; operator
+# picks their own via /admin/settings. `chrono-tz` ships the full
+# IANA timezone database with DST rules.
+chrono-tz = { version = "0.10", default-features = false }
 # Phase E sub-iter 4b — wizard SSE bootstrap. Spawns a tokio task
 # that pushes `BootstrapEvent`s into a bounded mpsc channel; the
 # `ReceiverStream` adapter turns the channel into a `Stream` for

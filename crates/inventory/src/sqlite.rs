@@ -3900,6 +3900,39 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
+    // ── Display settings (migration 0027) ──────────────────────────
+
+    /// Read the operator-configured display timezone (IANA name like
+    /// «Europe/Moscow», «America/New_York», «UTC»). Defaults to
+    /// «Europe/Moscow» — migration 0027 seeds the row.
+    ///
+    /// Returns `Err` only on storage-layer failures; missing-row
+    /// returns the default («Europe/Moscow») since a corrupted DB
+    /// shouldn't crash-loop the daemon's render path.
+    pub async fn get_display_timezone(&self) -> Result<String> {
+        let row =
+            sqlx::query_as::<_, (String,)>("SELECT timezone FROM display_settings WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .map(|(tz,)| tz)
+            .unwrap_or_else(|| "Europe/Moscow".into()))
+    }
+
+    /// Update the display timezone. Caller is responsible for
+    /// validating the value is a valid IANA name BEFORE calling
+    /// (the daemon's handler parses via `chrono_tz::Tz::from_str`
+    /// and rejects invalid input with 400; this layer just writes
+    /// whatever string the caller hands it). Also responsible for
+    /// updating any in-memory cache.
+    pub async fn set_display_timezone(&self, tz: &str) -> Result<()> {
+        sqlx::query("UPDATE display_settings SET timezone = ?1 WHERE id = 1")
+            .bind(tz)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ── Phase G chunk 3 notification_settings ──────────────────────
 
     /// Read the singleton notification-transport config. All three

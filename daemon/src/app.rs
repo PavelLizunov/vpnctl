@@ -191,6 +191,27 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         std::path::PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR),
     ));
 
+    // 2026-05-23 — initialise the global display-TZ cache from
+    // `display_settings.timezone` (migration 0027). Parse failure
+    // → log + fall back to Europe/Moscow (the seed default).
+    match inv.get_display_timezone().await {
+        Ok(name) => {
+            let tz: chrono_tz::Tz = name.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    target = "vpnctld::startup",
+                    saved_name = %name,
+                    "display_settings.timezone is not a valid IANA name; falling back to Europe/Moscow"
+                );
+                chrono_tz::Europe::Moscow
+            });
+            crate::handlers::admin::init_display_tz(tz);
+        }
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::startup", error = %e, "get_display_timezone failed; using Europe/Moscow default");
+            crate::handlers::admin::init_display_tz(chrono_tz::Europe::Moscow);
+        }
+    }
+
     let state = AppState {
         inv,
         registry,
@@ -944,6 +965,13 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts/ack-all", post(admin::alert_ack_all))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
+        // 2026-05-23 — operator-configurable display TZ. POST writes
+        // inventory + invalidates the global cache so subsequent
+        // page renders use the new zone immediately.
+        .route(
+            "/admin/settings/timezone",
+            post(admin::settings_timezone_set),
+        )
         // Phase 3c — Settings GeoIP «update now» SSE source. Streams
         // the live stdout/stderr of `vpnctl geoip-update` as named
         // SSE events (step / ok / error). GET because EventSource
