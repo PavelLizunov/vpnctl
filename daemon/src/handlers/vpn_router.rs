@@ -335,10 +335,23 @@ async fn collect_vless_uris_for_user(
             None => continue,
         };
 
+        // Per-server VLESS listen-port override (post-2026-05-26).
+        // Mirrors the Protocol::share_link logic in
+        // crates/protocols/src/vless_reality.rs — when a co-tenant
+        // service owns :443 on the host (e.g. legacy 3x-ui Docker on
+        // 194.87.222.111), the operator sets `vless.listen_port`
+        // server-secret to e.g. 8443. The ninitux endpoint must
+        // emit the same alternate port, else clients hit one port
+        // and the server binds another → handshake never starts.
+        let port: u16 = secrets
+            .get("vless.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(443);
+
         let server_display = country_display_name(&server.id.0);
         uris.push(render_vless_uri(
             &server.address,
-            443,
+            port,
             sni,
             pbk,
             sid,
