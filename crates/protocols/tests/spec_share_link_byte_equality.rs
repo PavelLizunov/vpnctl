@@ -153,6 +153,94 @@ fn vless_client_outbound_carries_xtls_vision_flow() {
 }
 
 #[test]
+fn vless_listen_port_secret_override_propagates_to_inbound_outbound_and_share_link() {
+    // Per-server port override (post-2026-05-26) — operator sets
+    // `vless.listen_port` server-secret on a co-tenant host where
+    // :443 is owned by a legacy 3x-ui. All three render surfaces
+    // (server inbound, client outbound, share-link) must agree on
+    // the alternate port, else clients hit one port + server binds
+    // another → handshake never starts.
+    let s = srv();
+    let mut secrets = vless_secrets();
+    secrets.insert("vless.listen_port".into(), "8443".into());
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+
+    let inbound = VlessReality::new()
+        .server_inbound(&ctx, std::slice::from_ref(&u))
+        .unwrap();
+    assert_eq!(
+        inbound.pointer("/listen_port").and_then(|v| v.as_u64()),
+        Some(8443),
+        "server inbound must bind the overridden port"
+    );
+
+    let outbound = VlessReality::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(
+        outbound.pointer("/server_port").and_then(|v| v.as_u64()),
+        Some(8443),
+        "client outbound must target the overridden port"
+    );
+
+    let link = VlessReality::new().share_link(&ctx, &u).unwrap();
+    assert!(
+        link.contains(":8443?"),
+        "share-link must encode the overridden port; got: {link}"
+    );
+    assert!(
+        !link.contains(":443?"),
+        "share-link must NOT carry the default 443 when override is set; got: {link}"
+    );
+}
+
+#[test]
+fn vless_listen_port_default_443_when_secret_unset() {
+    // Symmetric guard: no override → default 443 in all three
+    // surfaces. Pins the «backward-compat for fleet servers»
+    // contract — every existing de/fi/is rendering stays byte-
+    // identical post-feature.
+    let s = srv();
+    let secrets = vless_secrets();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+
+    let inbound = VlessReality::new()
+        .server_inbound(&ctx, std::slice::from_ref(&u))
+        .unwrap();
+    assert_eq!(
+        inbound.pointer("/listen_port").and_then(|v| v.as_u64()),
+        Some(443)
+    );
+    let outbound = VlessReality::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(
+        outbound.pointer("/server_port").and_then(|v| v.as_u64()),
+        Some(443)
+    );
+    let link = VlessReality::new().share_link(&ctx, &u).unwrap();
+    assert!(link.contains(":443?"), "default share-link must use :443");
+}
+
+#[test]
+fn vless_listen_port_garbage_falls_back_to_443() {
+    // Defensive: typo in the operator-pasted port (`"abc"`) must
+    // NOT silently drop the inbound to port 0 — the renderer falls
+    // back to the safe 443 default. Combined with the reserved-
+    // ports guard, a typo on a co-tenant host fails-closed at
+    // deploy time (443 collides with the reservation).
+    let s = srv();
+    let mut secrets = vless_secrets();
+    secrets.insert("vless.listen_port".into(), "abc".into());
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+    let inbound = VlessReality::new().server_inbound(&ctx, &[u]).unwrap();
+    assert_eq!(
+        inbound.pointer("/listen_port").and_then(|v| v.as_u64()),
+        Some(443),
+        "garbage port secret must fall back to 443"
+    );
+}
+
+#[test]
 fn vless_missing_public_key_is_error() {
     let s = srv();
     let mut secrets = HashMap::new();

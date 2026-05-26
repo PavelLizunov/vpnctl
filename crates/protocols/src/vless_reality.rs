@@ -61,6 +61,18 @@ impl Protocol for VlessReality {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        // Per-server listen port override (post-2026-05-26). Default
+        // 443 is the gold-standard cover (looks like real HTTPS),
+        // but on a co-tenant host where :443 is owned by a legacy
+        // 3x-ui Docker container, vpnctl needs to bind elsewhere.
+        // Operator sets `vless.listen_port` server-secret to e.g.
+        // `8443`; invalid values fall through to 443 so a typo
+        // never silently drops the inbound to port 0.
+        let listen_port: u16 = ctx
+            .secrets
+            .get("vless.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(443);
 
         // XTLS-Vision sub-protocol is the **required** flow for VLESS +
         // REALITY in modern sing-box (≥ 1.4): without it the client
@@ -86,7 +98,7 @@ impl Protocol for VlessReality {
             "type": "vless",
             "tag": "vless-in",
             "listen": "::",
-            "listen_port": 443,
+            "listen_port": listen_port,
             "users": users_json,
             "tls": {
                 "enabled": true,
@@ -105,6 +117,11 @@ impl Protocol for VlessReality {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        let server_port: u16 = ctx
+            .secrets
+            .get("vless.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(443);
 
         // Mirror the server's `xtls-rprx-vision` flow — server REJECTS
         // sessions whose flow doesn't match the user-record's flow.
@@ -114,7 +131,7 @@ impl Protocol for VlessReality {
             "type": "vless",
             "tag": "vless-out",
             "server": ctx.server.address,
-            "server_port": 443,
+            "server_port": server_port,
             "uuid": user.uuid,
             "flow": "xtls-rprx-vision",
             "tls": {
@@ -134,6 +151,11 @@ impl Protocol for VlessReality {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        let port: u16 = ctx
+            .secrets
+            .get("vless.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(443);
         // user.id.0 lands in the URL fragment (`#name`) where chars like
         // `#`, ` `, `/` would corrupt the link or open a new component.
         // Percent-encode defensively even though server/CLI validate ids.
@@ -147,8 +169,13 @@ impl Protocol for VlessReality {
         // breaking the "Migration from bash — seamless preservation"
         // requirement in CLAUDE.md). The seven query params are pinned
         // verbatim in `vless_happy_path_byte_equal`.
+        //
+        // The `:443` in the link is the default — when `vless.listen_port`
+        // is set on the server-secrets (3x-ui-coexistence case), the
+        // alternate port substitutes in. Byte-equality test stays green
+        // because it uses the default secrets (no listen_port override).
         Ok(format!(
-            "vless://{uuid}@{addr}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp#{name}",
+            "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp#{name}",
             uuid = user.uuid,
             addr = ctx.server.address,
             pbk = public_key,
