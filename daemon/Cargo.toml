@@ -63,6 +63,15 @@ base64 = "0.22"
 # byte-identical to subscription-server's output.
 percent-encoding = "2"
 subtle = "2"
+# HMAC-SHA256 for signed admin session cookies. Operator types the
+# basic-auth password ONCE → daemon issues a 30-day cookie → browser
+# stops re-prompting on tab close / suspend (the root cause of the
+# «постоянно приходится пароль вводить» Pavel complaint 2026-05-26).
+# Cookie payload + signature derive from the configured admin
+# password — rotating the password atomically invalidates every live
+# session without any extra storage / revocation list.
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"

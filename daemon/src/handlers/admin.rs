@@ -229,6 +229,28 @@ fn masthead(date: &str, vol: &str, lang: crate::i18n::Locale) -> Markup {
                 }
                 " | "
                 (toggle_form)
+                // Logout chip. Visible exit from the persistent
+                // session cookie (introduced 2026-05-26 to fix the
+                // «постоянно ввожу пароль» loop). Without this, the
+                // 30-day cookie has no operator-visible kill switch
+                // and rotating identity requires clearing browser
+                // cookies by hand.
+                " · "
+                form method="post"
+                     action="/admin/logout"
+                     style="display: inline; margin: 0; padding: 0;" {
+                    button type="submit"
+                           title=(match lang {
+                               Locale::En => "Sign out of the admin UI on this device",
+                               Locale::Ru => "Выйти из админки на этом устройстве",
+                           })
+                           style="background: transparent; border: none; cursor: pointer; padding: 0 4px; font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: underline;" {
+                        (match lang {
+                            Locale::En => "logout",
+                            Locale::Ru => "выйти",
+                        })
+                    }
+                }
             }
         }
     }
@@ -9870,6 +9892,21 @@ pub(crate) async fn set_tweak(
             "unknown tweak kind '{unknown}' (known: theme, accent, lang)"
         )),
     }
+}
+
+/// `POST /admin/logout` — clear the persistent session cookie and
+/// redirect the operator back to `/admin/`. The follow-up request
+/// will then have no cookie + no basic-auth header → middleware
+/// returns 401 → browser surfaces the prompt again. Use this when
+/// switching identity or after rotating the password from another
+/// device. CSRF-safe because the cookie is `SameSite=Lax` and the
+/// route is POST-only.
+pub(crate) async fn logout() -> Response {
+    let mut resp = Redirect::to("/admin/").into_response();
+    if let Ok(hv) = HeaderValue::from_str(&crate::handlers::auth::build_logout_cookie()) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    resp
 }
 
 // ────────────────────────────────────────────────────────────────────────

@@ -1030,6 +1030,11 @@ fn admin_router(state: AppState) -> Router {
             post(admin::backup_self_test),
         )
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
+        // Pavel 2026-05-26: ends the «постоянно пароль ввожу» loop.
+        // Session cookie is HttpOnly so JS can't clear it directly;
+        // a server-side POST that emits `Max-Age=0` is the only way
+        // to log out without nuking the entire browser profile.
+        .route("/admin/logout", post(admin::logout))
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);
 
