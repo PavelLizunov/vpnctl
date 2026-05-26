@@ -750,6 +750,16 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/set-fingerprint",
             post(admin::server_set_fingerprint),
         )
+        // Reserved-ports list (migration 0028). Operator pins ports
+        // the daemon must never touch via sing-box — a sing-box
+        // pre-apply guard refuses any rendered inbound on a
+        // reserved port. Used for co-tenant scenarios (legacy
+        // 3x-ui Docker on :443 sharing the host with vpnctl's
+        // sing-box on :8443).
+        .route(
+            "/admin/servers/{id}/reserved-ports",
+            post(admin::server_set_reserved_ports),
+        )
         // (route `/admin/servers/{id}/wgturn/vk-link` removed
         // 2026-05-19 — VK link is now end-user-supplied at connect
         // time, not a per-server admin input. See

@@ -86,6 +86,25 @@ pub(crate) enum ServerCmd {
         #[arg(long, conflicts_with = "fingerprint")]
         from_keyscan: bool,
     },
+
+    /// Set the per-server reserved-ports list (migration 0028).
+    ///
+    /// Any port in this list will be REFUSED by the sing-box pre-
+    /// apply guard, so `vpnctl deploy <id>` (and the equivalent
+    /// web button) cannot accidentally overwrite a co-tenant
+    /// service. Typical use: a host running both vpnctl-managed
+    /// sing-box AND a legacy 3x-ui Docker container on :443 — pin
+    /// `set-reserved-ports <id> 443,2053,2096` so vpnctl can never
+    /// bind those ports.
+    ///
+    /// Pass an empty list (`set-reserved-ports <id> ""`) to clear.
+    SetReservedPorts {
+        /// Server id (e.g. `ru`).
+        id: String,
+        /// Comma-separated list of u16 port numbers
+        /// (e.g. `443,2053,2096`). Empty string clears the list.
+        ports: String,
+    },
 }
 
 pub(crate) async fn run(
@@ -323,7 +342,54 @@ pub(crate) async fn run(
             println!("set trusted_host_fingerprint on server '{id}' to {fp}");
             Ok(())
         }
+
+        ServerCmd::SetReservedPorts { id, ports } => {
+            let sid = ServerId(id.clone());
+            // Confirm the server exists — clearer error than the
+            // inventory's "no such server" which only fires inside
+            // set_reserved_ports.
+            inv.get_server(&sid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such server: {id}"))?;
+            let parsed = parse_reserved_ports(&ports)?;
+            inv.set_reserved_ports(&sid, &parsed).await?;
+            if parsed.is_empty() {
+                println!("cleared reserved_ports on server '{id}'");
+            } else {
+                println!("set reserved_ports on server '{id}' to {parsed:?}");
+            }
+            Ok(())
+        }
     }
+}
+
+/// Parse a comma-separated port list into a sorted-dedup Vec<u16>.
+/// Empty string → empty vec (used to CLEAR a reservation). Caller
+/// gets a friendly anyhow::Error on any malformed token, including
+/// the offending value spelled out so the operator doesn't have to
+/// guess which slot failed.
+fn parse_reserved_ports(raw: &str) -> anyhow::Result<Vec<u16>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for tok in trimmed.split(',') {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let port: u16 = t
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid port '{t}': {e}"))?;
+        if port == 0 {
+            anyhow::bail!("port 0 is not valid; allowed range 1..=65535");
+        }
+        out.push(port);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 // SHA256 shape validation + ssh-keyscan/-keygen fingerprint fetching live

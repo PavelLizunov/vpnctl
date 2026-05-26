@@ -6348,6 +6348,25 @@ pub(crate) async fn server_deploy(
                     continue;
                 }
             };
+            // Reserved-ports pre-apply guard (post-2026-05-26).
+            // Refuses configs that would bind a co-tenant's port.
+            if kid.0 == "sing-box" {
+                match state.inv.get_reserved_ports(&server.id).await {
+                    Ok(reserved) => {
+                        if let Err(e) =
+                            vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)
+                        {
+                            ssh_errors
+                                .push(format!("{}: reserved-ports guard refused: {e}", kid.0));
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        ssh_errors.push(format!("{}: reserved-ports lookup failed: {e}", kid.0));
+                        continue;
+                    }
+                }
+            }
             total_config_bytes += config.len();
             if let Err(e) = kernel.apply_config(&ssh, &config).await {
                 ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
@@ -10690,6 +10709,16 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Per-server reserved-ports list (migration 0028). Empty for
+    // every server in the fleet by default; this load is one
+    // indexed SELECT so the section helper always has data without
+    // a conditional fetch.
+    let reserved_ports = state
+        .inv
+        .get_reserved_ports(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -10860,6 +10889,15 @@ pub(crate) async fn server_detail(
         // operator never needs to drop to shell + raw SQL just to pin
         // a host key. (Stale «TODO for vpnctl» note cleaned 2026-05-22.)
         (server_detail_fingerprint_section(&server, lang))
+
+        // Reserved ports — operator-pinned port allowlist that the
+        // sing-box pre-apply guard refuses to bind. Use when this
+        // node has a co-tenant service (legacy 3x-ui Docker on :443,
+        // a separate xray on :2053, etc.) that vpnctl must NEVER
+        // overwrite. The chip + form render even when empty so the
+        // operator has a place to add ports for newly-discovered
+        // co-tenants without hunting through the CLI.
+        (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
 
         // wgturn-specific settings — only renders when the server has
         // the wgturn kernel enabled. The VK Calls invite URL is
@@ -12068,6 +12106,83 @@ fn server_detail_fingerprint_section(
     }
 }
 
+/// Reserved-ports section on the server-detail page (migration 0028).
+/// Renders ALWAYS (even when the list is empty) so the operator has
+/// a discoverable place to add port pins for a newly-detected co-
+/// tenant service without having to remember the CLI invocation. The
+/// list semantics are: any port here will be REFUSED by the sing-
+/// box pre-apply guard, fail-closed.
+fn server_detail_reserved_ports_section(
+    server: &vpnctl_core::Server,
+    reserved: &[u16],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid_enc = path_segment_encode(&server.id.0);
+    let prefill: String = reserved
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(
+                lang,
+                "Per-server allowlist of ports the daemon must NEVER bind via sing-box. Use when a co-tenant service (legacy 3x-ui Docker container, separate xray, another VPN stack) owns one of the standard ports — vpnctl deploys are refused fail-closed if any rendered inbound would collide.",
+                "Список портов на этом сервере, которые демону ЗАПРЕЩЕНО занимать через sing-box. Используется когда на хосте уже крутится сторонний сервис (legacy 3x-ui Docker, отдельный xray, другой VPN-стек) на стандартном порту — vpnctl deploy отказывается, если какой-то рендеренный inbound попытается их занять, fail-closed.",
+            )) {
+                (tr(lang, "RESERVED PORTS", "ЗАРЕЗЕРВИРОВАННЫЕ ПОРТЫ"))
+            }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Ports the daemon refuses to bind on this node. The sing-box pre-apply guard fails closed when any rendered inbound collides — so a co-tenant 3x-ui (or any other service vpnctl doesn't manage) can never get overwritten by a forgetful deploy.",
+                "Порты, которые демон отказывается занимать на этой ноде. Пре-apply-guard sing-box падает fail-closed, если любой рендеренный inbound пересечётся — сторонний 3x-ui (или любой другой сервис, которым vpnctl не управляет) никогда не будет перезаписан забывчивым деплоем.",
+            ))
+        }
+        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
+            @if reserved.is_empty() {
+                em style="color: var(--mute);" {
+                    (tr(
+                        lang,
+                        "(no ports reserved — deploys are free to use every port the renderer picks)",
+                        "(ничего не зарезервировано — деплои свободно используют любые порты, которые выбирает рендерер)",
+                    ))
+                }
+            } @else {
+                (tr(lang, "current: ", "сейчас: "))
+                @for (i, port) in reserved.iter().enumerate() {
+                    @if i > 0 { ", " }
+                    b { (port) }
+                }
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/reserved-ports"))
+             style="display: flex; gap: 8px; align-items: center;" {
+            input type="text" name="ports" value=(prefill)
+                  placeholder="443,2053,2096"
+                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);"
+                  pattern="[0-9, ]*"
+                  title=(tr(
+                      lang,
+                      "Comma-separated port numbers (1..=65535). Empty value clears the list.",
+                      "Номера портов через запятую (1..=65535). Пустое поле очищает список.",
+                  ));
+            button type="submit"
+                   title=(tr(
+                       lang,
+                       "Replace the reserved-ports list with the values above. Future sing-box deploys refuse to bind any port in the list.",
+                       "Заменить список зарезервированных портов значениями выше. Будущие деплои sing-box откажутся занимать любой порт из списка.",
+                   ))
+                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (tr(lang, "save", "сохранить"))
+            }
+        }
+    }
+}
+
 /// `POST /admin/servers/{id}/set-fingerprint` — operator pins the
 /// trusted SHA-256. Two modes (selected by hidden form field `mode`):
 ///   * `keyscan` — daemon shells out to `ssh-keyscan -t ed25519 -p
@@ -12181,6 +12296,64 @@ pub(crate) async fn server_set_fingerprint(
             error = %e,
             "set_fingerprint succeeded but audit row failed; timeline will be missing this entry"
         );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/reserved-ports` — set the per-server
+/// reserved-ports list (migration 0028). Form field `ports` is a
+/// comma-separated u16 list; empty string clears. Mirrors the CLI
+/// `vpnctl server set-reserved-ports` semantics one-for-one.
+///
+/// Per the operator-action policy in CLAUDE.md, every CLI command
+/// needs a web equivalent — this handler is that equivalent for
+/// the reservation contract added in commit 0028.
+pub(crate) async fn server_set_reserved_ports(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    if let Ok(None) = state.inv.get_server(&sid).await {
+        return not_found(&format!("no such server '{server_id}'"));
+    }
+
+    let raw = form_field(&body, "ports").unwrap_or_default();
+    let trimmed = raw.trim();
+    let parsed: Vec<u16> = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        let mut acc: Vec<u16> = Vec::new();
+        for tok in trimmed.split(',') {
+            let t = tok.trim();
+            if t.is_empty() {
+                continue;
+            }
+            match t.parse::<u16>() {
+                Ok(0) => {
+                    return bad_request("port 0 is not valid; allowed range 1..=65535");
+                }
+                Ok(p) => acc.push(p),
+                Err(_) => {
+                    return bad_request(&format!(
+                        "invalid port '{t}'; expected comma-separated u16 (e.g. \
+                         443,2053,2096) or empty to clear"
+                    ));
+                }
+            }
+        }
+        acc.sort_unstable();
+        acc.dedup();
+        acc
+    };
+
+    if let Err(e) = state.inv.set_reserved_ports(&sid, &parsed).await {
+        return internal_error(anyhow::Error::new(e));
     }
 
     Redirect::to(&format!(

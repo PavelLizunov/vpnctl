@@ -448,6 +448,26 @@ async fn bootstrap_pipeline(
             Ok(c) => c,
             Err(e) => fail!("apply", "{}: render_config: {e}", kid.0),
         };
+        // Reserved-ports pre-apply guard (post-2026-05-26). A fresh
+        // wizard bootstrap is unlikely to have a reserved list set
+        // yet (the operator typically reserves AFTER importing the
+        // co-tenant ports), but defending here keeps the contract
+        // honest for any future flow that pre-seeds reservations
+        // before the first bootstrap.
+        if kid.0 == "sing-box" {
+            match inv.get_reserved_ports(&server.id).await {
+                Ok(reserved) => {
+                    if let Err(e) =
+                        vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)
+                    {
+                        fail!("apply", "{}: reserved-ports guard refused: {e}", kid.0);
+                    }
+                }
+                Err(e) => {
+                    fail!("apply", "{}: reserved-ports lookup failed: {e}", kid.0);
+                }
+            }
+        }
         send_step!(
             "apply",
             "{}: pushing {} bytes + systemctl restart…",

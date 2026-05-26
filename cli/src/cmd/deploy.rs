@@ -210,6 +210,15 @@ pub(crate) async fn run(
             protocols_for_k.len()
         );
         let config = k.render_config(&ctx, &users, &protocols_for_k)?;
+        // Reserved-ports pre-apply guard (post-2026-05-26). Refuses
+        // to push a config that would bind a port the operator has
+        // marked reserved on this server (typically a co-tenant
+        // service like a legacy 3x-ui panel on :443). The guard is
+        // sing-box-specific today; other kernels are no-ops here.
+        if k.id().0 == "sing-box" {
+            let reserved = inv.get_reserved_ports(&server.id).await?;
+            vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)?;
+        }
         println!(
             "→ uploading and restarting {} ({} bytes)",
             k.id(),

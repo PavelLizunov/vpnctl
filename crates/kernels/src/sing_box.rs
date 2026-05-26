@@ -318,6 +318,74 @@ fn user_uuid_diff(old: &[u8], new: &[u8]) -> Result<std::collections::HashSet<St
     Ok(old_uuids.difference(&new_uuids).cloned().collect())
 }
 
+/// Reserved-ports pre-apply guard (post-2026-05-26, Pavel:
+/// «важно конкретно для этого сервера заблокировать часть
+/// функционала, чтоб через админку нельзя было что-то перетереть»).
+///
+/// Returns `Err` with the offending port(s) if `config_bytes` (a
+/// rendered sing-box JSON) declares any `inbounds[].listen_port`
+/// that intersects `reserved`. Empty `reserved` is a no-op — most
+/// servers in the fleet stay byte-equivalent to pre-0028.
+///
+/// The fence is **fail-CLOSED**: parse failures of `config_bytes`
+/// also return Err. This is the opposite policy from
+/// `user_uuid_diff` — there we fail-OPEN because the OLD config
+/// might be hand-edited; here the NEW config is what *we* render,
+/// so a parse failure means our own renderer produced malformed
+/// JSON and the safest move is to refuse to upload it.
+///
+/// Called from every `apply_config` site (CLI deploy, daemon
+/// deploy, wizard bootstrap). The trait signature itself is not
+/// changed — the validator is a free function so kernels other
+/// than sing-box don't have to opt in.
+pub fn validate_config_excludes_ports(config_bytes: &[u8], reserved: &[u16]) -> Result<()> {
+    if reserved.is_empty() {
+        return Ok(());
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(config_bytes).map_err(|e| {
+        CoreError::Render(format!(
+            "sing-box config: reserved-ports guard could not parse rendered JSON ({e}); \
+             refusing to apply"
+        ))
+    })?;
+    let Some(inbounds) = parsed.get("inbounds").and_then(|v| v.as_array()) else {
+        // No inbounds[] at all — vacuously safe (the renderer may
+        // produce a config with only outbounds for some future
+        // route-only role). Don't false-flag.
+        return Ok(());
+    };
+    let reserved_set: std::collections::HashSet<u16> = reserved.iter().copied().collect();
+    let mut collisions: Vec<u16> = Vec::new();
+    for inbound in inbounds {
+        let Some(port_value) = inbound.get("listen_port") else {
+            continue;
+        };
+        let Some(port_u64) = port_value.as_u64() else {
+            continue;
+        };
+        let Ok(port) = u16::try_from(port_u64) else {
+            continue;
+        };
+        if reserved_set.contains(&port) {
+            collisions.push(port);
+        }
+    }
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    collisions.sort_unstable();
+    collisions.dedup();
+    Err(CoreError::Render(format!(
+        "sing-box config: refusing to apply — rendered inbounds[] bind reserved port(s) {:?} \
+         on this server (full reserved list: {:?}). These ports are protected by the operator \
+         (typically a co-tenant service like a legacy 3x-ui panel on :443). Reconfigure the \
+         offending protocol to a non-reserved port via /admin/servers/<id> → Enabled protocols, \
+         or drop the reservation via the Reserved-ports section if you truly want to overwrite \
+         the co-tenant.",
+        collisions, reserved
+    )))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -483,5 +551,104 @@ mod tests {
         let old = b"{\"inbounds\":[]}".to_vec();
         let new = make_config(&["a", "b"]);
         assert!(user_uuid_diff(&old, &new).unwrap().is_empty());
+    }
+
+    // ── reserved-ports guard (migration 0028, 2026-05-26) ───────────
+
+    fn cfg_with_inbound_ports(ports: &[u16]) -> Vec<u8> {
+        let inbounds: Vec<serde_json::Value> = ports
+            .iter()
+            .map(|p| serde_json::json!({"type": "vless", "listen_port": p}))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({"inbounds": inbounds})).unwrap()
+    }
+
+    #[test]
+    fn reserved_ports_empty_list_is_noop() {
+        // Most servers in the fleet have no reserved ports — the
+        // guard must short-circuit, never parse, never allocate.
+        let cfg = cfg_with_inbound_ports(&[443, 8443]);
+        assert!(validate_config_excludes_ports(&cfg, &[]).is_ok());
+    }
+
+    #[test]
+    fn reserved_ports_disjoint_passes() {
+        // Reserved [443], rendered uses [8443] — no collision.
+        let cfg = cfg_with_inbound_ports(&[8443, 2083]);
+        assert!(validate_config_excludes_ports(&cfg, &[443]).is_ok());
+    }
+
+    #[test]
+    fn reserved_ports_intersection_blocks() {
+        // The 3x-ui scenario: 443 is reserved, the renderer (mistake
+        // or accident) wants to bind 443. Guard must refuse, the
+        // error must name the offending port.
+        let cfg = cfg_with_inbound_ports(&[443, 8443]);
+        let err = validate_config_excludes_ports(&cfg, &[443])
+            .expect_err("reserved-port collision must error");
+        let msg = err.to_string();
+        assert!(msg.contains("443"), "error must mention port 443: {msg}");
+    }
+
+    #[test]
+    fn reserved_ports_multiple_collisions_listed() {
+        // Renderer somehow tries TWO reserved ports — error must list
+        // both so operator doesn't have to retry to discover the
+        // second one. Order is sorted-ascending; dedup applied.
+        let cfg = cfg_with_inbound_ports(&[443, 2053, 2096, 8443]);
+        let err = validate_config_excludes_ports(&cfg, &[443, 2053, 2096])
+            .expect_err("multi-port collision must error");
+        let msg = err.to_string();
+        // The error renders the offending list as `{:?}` — sorted +
+        // dedup'd by the validator.
+        assert!(msg.contains("[443, 2053, 2096]"), "msg = {msg}");
+    }
+
+    #[test]
+    fn reserved_ports_malformed_config_fails_closed() {
+        // FAIL-CLOSED policy: the NEW config is what *we* render, so
+        // bad JSON means our renderer is broken; refusing to upload
+        // is the safest move. (Contrast with user_uuid_diff which
+        // fail-OPENs on the OLD config because that may be hand-
+        // edited.)
+        let err = validate_config_excludes_ports(b"not-json", &[443])
+            .expect_err("malformed config with non-empty reserved list must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("parse"), "msg = {msg}");
+    }
+
+    #[test]
+    fn reserved_ports_no_inbounds_array_is_safe() {
+        // Future renderer might produce a config with only outbounds
+        // (some route-only role). Treat as vacuously safe — no
+        // listen_port to collide.
+        let cfg = serde_json::to_vec(&serde_json::json!({"outbounds": []})).unwrap();
+        assert!(validate_config_excludes_ports(&cfg, &[443]).is_ok());
+    }
+
+    #[test]
+    fn reserved_ports_listen_port_missing_is_safe() {
+        // Inbound without listen_port (e.g. a transport-only inbound
+        // sharing a parent inbound's port) is skipped — only explicit
+        // listen_port matches are checked.
+        let cfg = serde_json::to_vec(&serde_json::json!({
+            "inbounds": [{"type": "vless"}, {"type": "tuic", "listen_port": 8443}]
+        }))
+        .unwrap();
+        assert!(validate_config_excludes_ports(&cfg, &[443]).is_ok());
+    }
+
+    #[test]
+    fn reserved_ports_listen_port_non_u16_skipped() {
+        // Defensive: a JSON value like `99999` or a float that doesn't
+        // fit u16 must NOT crash the guard. Skip silently — the
+        // sing-box `check -c` step downstream rejects bad ports anyway.
+        let cfg = serde_json::to_vec(&serde_json::json!({
+            "inbounds": [{"listen_port": 999_999}, {"listen_port": 443}]
+        }))
+        .unwrap();
+        // 443 still flagged; 999_999 silently skipped.
+        let err = validate_config_excludes_ports(&cfg, &[443]).expect_err("443 collides");
+        assert!(err.to_string().contains("443"));
     }
 }

@@ -868,6 +868,105 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Read the per-server reserved-ports list (migration 0028).
+    /// Returns an empty Vec for servers that haven't had any ports
+    /// reserved — most installs are byte-equivalent to pre-0028
+    /// behaviour. Returns `Ok(vec![])` if the server doesn't exist
+    /// (caller already passed an unknown id — no need to double-
+    /// report; the deploy path will fail later with a useful
+    /// «unknown server» error).
+    ///
+    /// Stored as a JSON array of u16. Parse failures (corrupted DB)
+    /// degrade to empty — fail-OPEN on read because a wrong empty is
+    /// safer than crash-looping the deploy path; the write side
+    /// (`set_reserved_ports`) is the authoritative validator.
+    pub async fn get_reserved_ports(&self, sid: &ServerId) -> Result<Vec<u16>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT reserved_ports FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        let json = match row {
+            Some((s,)) => s,
+            None => return Ok(Vec::new()),
+        };
+        // Lenient parse — operator could have hand-edited the row in
+        // sqlite3, or a future schema migration could change shape.
+        // Either way, the deploy guard fails open on parse error.
+        let parsed: Vec<u16> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(parsed)
+    }
+
+    /// Replace the per-server reserved-ports list. `ports` is
+    /// caller-validated to fit u16 (the parsing layer in admin /
+    /// CLI rejects values outside 1..=65535 before calling). The
+    /// stored format is a JSON array; duplicates are de-duped and
+    /// the array is sorted ascending so `audit_log` payloads diff
+    /// cleanly across calls.
+    ///
+    /// Writes one `server.reserved_ports.set` audit row whenever the
+    /// stored value would change (NM-10 audit-on-actual-mutation
+    /// contract). Idempotent re-saves of the same list are silent.
+    /// Errors with `Invalid` if `sid` doesn't exist (matches the
+    /// behaviour of `set_server_fingerprint` — caller passing an
+    /// unknown id is a logic bug, not an expected condition).
+    pub async fn set_reserved_ports(&self, sid: &ServerId, ports: &[u16]) -> Result<()> {
+        let mut sorted: Vec<u16> = ports.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let new_json = serde_json::to_string(&sorted)?;
+
+        let mut tx = self.pool.begin().await?;
+
+        let prior: Option<(String,)> =
+            sqlx::query_as("SELECT reserved_ports FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prior_json = match prior {
+            Some((s,)) => s,
+            None => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such server '{}'; cannot set reserved_ports",
+                    sid.0
+                )));
+            }
+        };
+
+        if prior_json == new_json {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        sqlx::query("UPDATE servers SET reserved_ports = ?1 WHERE id = ?2")
+            .bind(&new_json)
+            .bind(&sid.0)
+            .execute(&mut *tx)
+            .await?;
+
+        // Audit payload carries both old + new sorted lists so
+        // operator can diff at a glance from the audit timeline.
+        let payload = serde_json::json!({
+            "server_id": sid.0,
+            "old": serde_json::from_str::<serde_json::Value>(&prior_json).unwrap_or(serde_json::json!([])),
+            "new": sorted,
+        });
+        let payload_str = serde_json::to_string(&payload)?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("admin")
+        .bind("server.reserved_ports.set")
+        .bind(&sid.0)
+        .bind(payload_str)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Set or clear the per-(user, server, protocol) deny override.
     /// `disabled = true` inserts (or no-ops if already disabled).
     /// `disabled = false` deletes the override row (back to inherit-
