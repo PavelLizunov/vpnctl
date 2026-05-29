@@ -718,6 +718,25 @@ just ci          # fmt-check + clippy + test + deny — прогон до push
 Решение на уровне инфры: добавить `~/.cargo` и `~/.rustup` в персистентные
 volumes Docker compose (TODO для Pavel).
 
+### Disk hygiene — `target/` забивает диск контейнера (40G)
+Цикл build/zigbuild/test за сессию раздувает `vpnctl/target` до 10–14G;
+диск claude-chat (40G) уходил за 70%, а cron/systemd в контейнере НЕТ,
+так что чистить по таймеру нечем. Решение — в build-пайплайне:
+
+```bash
+just gc          # threshold-guarded: чистит target/ ТОЛЬКО если >8G
+just gc 4        # свой порог в GB
+just clean       # безусловный cargo clean
+```
+
+`just gc` — это prerequisite recipe для `just ci`, поэтому самый частый
+pre-push прогон сам триммит раздутый target (тёплый кэш нормального
+билда <8G не трогается). Логика в `scripts/clean-target.sh`; работает и
+без cargo на PATH (fallback `rm -rf target`, что для места = `cargo
+clean`). **Грабли деплоя:** prod-бинарь собирается через
+`cargo zigbuild` (см. ниже) — это тоже копит артефакты в `target/`, так
+что после серии деплоев гоняй `just gc` (или просто `just ci`).
+
 ### Mirror remote — см. секцию «Где живёт проект» выше
 Один `git push` уходит в оба remote. Fetch — только из GitHub.
 

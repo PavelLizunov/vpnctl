@@ -40,8 +40,21 @@ run *ARGS:
 build-release:
     cargo build --release --target x86_64-unknown-linux-musl
 
-# Full local CI sweep — run before pushing
-ci: fmt-check clippy test deny
+# Disk hygiene — threshold-guarded `cargo clean`. Deletes target/ ONLY
+# when it exceeds THRESHOLD_GB (default 8), so a warm build cache is
+# never thrown away. Wired into `ci` below because the container has no
+# cron/systemd and the dev/deploy loop has filled the 40G disk via a
+# 14G target/ more than once. See scripts/clean-target.sh.
+gc THRESHOLD_GB='8':
+    @scripts/clean-target.sh {{THRESHOLD_GB}}
+
+# Unconditional `cargo clean` — wipe ALL build artifacts right now.
+clean:
+    cargo clean
+
+# Full local CI sweep — run before pushing. `gc` runs first so a
+# bloated target/ is trimmed before the build gates rebuild it.
+ci: gc fmt-check clippy test deny
     @echo "✔ all CI gates passed"
 
 # ─── Tools from 2026-05-18 security audit ──────────────────────────
