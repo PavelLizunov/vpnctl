@@ -2,6 +2,11 @@
 
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
+[![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
+[![Version](https://img.shields.io/badge/version-0.8.0--dev-blue.svg)](#status--v08-in-flight)
+[![Lines of code](https://img.shields.io/badge/Rust-~46k%20LOC-blue.svg)](#project-size)
+[![Tests](https://img.shields.io/badge/tests-1096-brightgreen.svg)](#project-size)
 
 Lightweight, fail-safe, Linux-only **control plane** for self-hosted VPN
 infrastructure. CLI + daemon + admin UI from a single workspace; SSH-first,
@@ -19,9 +24,25 @@ action also has a web button.
 
 ## Status — v0.8 in flight
 
-Operating in production on a 3-node fleet (`de` / `fi` / `is`) with ~33
-users, ~600 daily clash-api probe rows per node, and a bilingual EN/RU
-admin UI.
+Operating in production on a multi-node fleet (`de` / `fi` / `is` / `nl`,
+with `kg` provisioning) serving ~30 users, ~600 daily clash-api probe
+rows per node, and a bilingual EN/RU admin UI.
+
+### Project size
+
+A quick sense of scale (mirrors the badges above):
+
+| Metric | Value |
+|---|---|
+| Rust source | **~46k LOC** across **10 crates** (8 libs + `cli` + `daemon`) |
+| Tests | **1096** functions (`#[test]` + `#[tokio::test]`), ~25k LOC of test code — **~72k LOC** all-in |
+| Protocols × Kernels | **8 protocols** × **3 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Schema | **28** SQLite migrations (`sqlx`, audit-on-mutation) |
+| Toolchain | Rust **1.85+**, edition **2024** · single static Linux x86_64 binary (glibc 2.36+) |
+
+> LOC counted over `*.rs` excluding `target/`; tests counted as
+> `#[test]` + `#[tokio::test]` attributes across the workspace. Both
+> are easy to reproduce: `find crates cli daemon -name '*.rs' | xargs wc -l`.
 
 ### What ships today
 
@@ -45,7 +66,7 @@ admin UI.
 | Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
 | **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
-| 1010 workspace tests, GitHub Actions CI green | ✅ |
+| 1096 workspace tests, GitHub Actions CI green | ✅ |
 
 ### Known gaps (carried into v0.9)
 
@@ -109,7 +130,7 @@ vpnctl/
 
 ```bash
 just check       # cargo check --workspace --all-targets
-just test        # cargo test --workspace (1010 tests)
+just test        # cargo test --workspace (1096 tests)
 just clippy      # cargo clippy --workspace --all-targets -- -D warnings
 just fmt         # rustfmt all crates
 just deny        # cargo deny check (no openssl-sys, no native-tls)
