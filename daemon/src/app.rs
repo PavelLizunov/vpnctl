@@ -1167,8 +1167,10 @@ fn admin_router(state: AppState) -> Router {
 
 /// Same canonical Registry as the CLI uses. Kept in a tiny helper so a
 /// future shared `crate vpnctl-registry` can replace this without changing
-/// callers.
-fn build_registry() -> anyhow::Result<Registry> {
+/// callers. `pub(crate)` so secret-minting tests (and any other in-crate
+/// caller that needs the canonical protocol set) build the real registry
+/// rather than a hand-rolled subset that could drift.
+pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     use vpnctl_kernels::{AmneziaWg, SingBox, WgTurn as WgTurnKernel};
     use vpnctl_protocols::{
         AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WgTurn as WgTurnProtocol,

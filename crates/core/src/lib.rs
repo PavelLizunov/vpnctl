@@ -521,6 +521,76 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     fn dpi_risk(&self) -> DpiRisk {
         DpiRisk::Moderate
     }
+
+    /// Server-side secrets this protocol needs minted before
+    /// `server_inbound` can render. Default empty — protocols whose
+    /// secrets are per-user (Trojan / AnyTLS user passwords) or
+    /// generated node-side at deploy time (TUIC / Hysteria2 self-signed
+    /// cert) need no pre-mint.
+    ///
+    /// **Used by:** `daemon::wizard_bootstrap::bootstrap_server_secrets`,
+    /// which iterates a server's enabled protocols, collects these
+    /// specs, and generates + persists any declared key that's absent —
+    /// idempotently (a present key is never regenerated, so existing
+    /// clients keep working). Adding a secret-bearing protocol is one
+    /// override here; no daemon edits.
+    ///
+    /// Closes the orthogonality TODO that let `shadowsocks-2022` ship
+    /// without its `ss2022.psk` ever getting minted by the wizard — the
+    /// `kg` deploy 2026-05-30 failed at render with
+    /// `MissingSecret { key: "ss2022.psk" }` because the minter
+    /// hardcoded only vless / wireguard / hysteria2.
+    fn server_secret_specs(&self) -> Vec<ServerSecretSpec> {
+        Vec::new()
+    }
+}
+
+/// A server-side secret a [`Protocol`] declares it needs minted before
+/// its inbound can render. The bootstrap secret-minter
+/// (`daemon::wizard_bootstrap::bootstrap_server_secrets`) generates +
+/// persists any declared key that's absent.
+///
+/// Declarative (the protocol says WHAT, the minter does HOW) on
+/// purpose: the crypto primitives stay centralised in the daemon
+/// (which already depends on `vpnctl-crypto`), so the `protocols`
+/// crate needs no crypto dependency and the byte-shape of every
+/// generated secret has one source of truth. Adding a protocol that
+/// needs an EXISTING kind is a one-line spec in its own file with zero
+/// daemon edits (the orthogonality invariant); a genuinely new KIND
+/// (rare) adds one match arm in the minter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerSecretSpec {
+    /// One random URL-safe-base64 password carrying `entropy_bytes` of
+    /// entropy (minted via `vpnctl_crypto::gen_password`). For secrets
+    /// consumed as an OPAQUE STRING (e.g. Hysteria2 Salamander obfs
+    /// password) — NOT base64-decoded by the node daemon.
+    Password {
+        key: &'static str,
+        entropy_bytes: usize,
+    },
+    /// Random raw key of `key_bytes`, encoded as STANDARD (padded)
+    /// base64 (minted via `vpnctl_crypto::gen_base64_key`). For secrets
+    /// the node daemon base64-DECODES back to raw key material — e.g. a
+    /// Shadowsocks-2022 PSK (sing-box uses Go `base64.StdEncoding`, so a
+    /// url-safe / unpadded string would fail to decode and reject the
+    /// whole node config). Distinct from `Password` precisely because
+    /// the encoding contract differs.
+    Base64Key { key: &'static str, key_bytes: usize },
+    /// x25519 keypair (REALITY) persisted as two keys
+    /// (`vpnctl_crypto::gen_x25519_keypair`).
+    X25519Keypair {
+        private_key: &'static str,
+        public_key: &'static str,
+    },
+    /// WireGuard (Curve25519) server keypair persisted as two keys
+    /// (`vpnctl_crypto::gen_wireguard_keypair`).
+    WireguardKeypair {
+        private_key: &'static str,
+        public_key: &'static str,
+    },
+    /// REALITY `short_id` — random 8-byte hex
+    /// (`vpnctl_crypto::gen_short_id`).
+    ShortId { key: &'static str },
 }
 
 /// DPI / active-probing resilience tier. Stored only in the registry

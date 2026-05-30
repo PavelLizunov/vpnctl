@@ -121,6 +121,23 @@ impl Protocol for Shadowsocks2022 {
         vpnctl_core::DpiRisk::Weak
     }
 
+    fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
+        // Server-wide PSK shared by every client on the node. 16 raw
+        // bytes = 128-bit for the default `2022-blake3-aes-128-gcm`
+        // cipher; STANDARD base64 (24 chars, padded) because sing-box
+        // base64-DECODES `password` with Go's `base64.StdEncoding` —
+        // hence `Base64Key`, NOT `Password` (a url-safe/unpadded string
+        // would fail to decode and reject the whole node config).
+        //
+        // THIS is the spec whose absence broke the `kg` deploy
+        // 2026-05-30 (`MissingSecret { key: "ss2022.psk" }`): the
+        // wizard minter hardcoded vless/wireguard/hysteria2 only.
+        vec![vpnctl_core::ServerSecretSpec::Base64Key {
+            key: "ss2022.psk",
+            key_bytes: 16,
+        }]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
         // PSK is REQUIRED — without it the inbound can't decrypt.
         // We refuse rather than render a broken config; the caller

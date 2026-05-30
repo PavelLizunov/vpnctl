@@ -388,7 +388,7 @@ async fn bootstrap_pipeline(
     // server-side secret arrives, that helper is the only place to
     // touch — see the function's own doc-comment for the long-term
     // plan (`Protocol::mint_server_secrets` trait method).
-    let secrets = match bootstrap_server_secrets(&inv, &server).await {
+    let secrets = match bootstrap_server_secrets(&inv, &server, &registry).await {
         Ok((secrets, minted)) => {
             for label in minted {
                 send_step!("secrets", "ok — {label} minted.");
@@ -501,22 +501,31 @@ async fn bootstrap_pipeline(
 /// list of human-readable "what we minted" labels the caller can
 /// surface in progress logs / audit payload.
 ///
-/// # Why a free function (not a `Protocol` trait method)
+/// # Orthogonal secret minting (kg fix, 2026-05-30)
 ///
-/// The orthogonal design would be `Protocol::mint_server_secrets(&inv,
-/// &server) -> Vec<&'static str>` so adding a protocol with new
-/// server-side secret keys requires zero changes here. That refactor
-/// is queued (see PR-TODO: kernel-protocol orthogonality phase 2) —
-/// it cascades through every protocol implementation in
-/// `crates/protocols/`, and we'd rather ship the wizard now and do
-/// the wider refactor in one focused PR. Until then, THIS is the
-/// single place protocol→secret mapping lives, called from both
-/// `wizard_bootstrap::bootstrap_pipeline` AND `server_deploy`
-/// handler — adding a new protocol without server-side secrets
-/// (e.g. Trojan, AnyTLS) needs zero changes here.
+/// Each `Protocol` declares the server-side secrets it needs via
+/// `Protocol::server_secret_specs()`; this function iterates the
+/// server's enabled protocols, resolves each through `registry`, and
+/// mints + persists any declared key that's absent. Adding a
+/// secret-bearing protocol is now a one-line spec in its own file —
+/// ZERO edits here (the kernel/protocol orthogonality invariant; this
+/// closes the long-standing PR-TODO).
+///
+/// Idempotent: a key already present is never regenerated, so
+/// re-deploying an established server never rotates a secret out from
+/// under live clients.
+///
+/// Replaces the previous hardcoded vless/wireguard/hysteria2 block,
+/// which silently omitted `shadowsocks-2022`'s `ss2022.psk` (and any
+/// future protocol's secret) → the `kg` deploy 2026-05-30 failed at
+/// render with `MissingSecret { key: "ss2022.psk" }`. Shared by
+/// `wizard_bootstrap::bootstrap_pipeline` AND the `server_deploy`
+/// handler. The wgturn KERNEL secret stays below the loop — it's keyed
+/// on `server.kernels`, not `enabled_protocols`.
 pub async fn bootstrap_server_secrets(
     inv: &SqliteInventory,
     server: &Server,
+    registry: &Registry,
 ) -> std::result::Result<(std::collections::HashMap<String, String>, Vec<&'static str>), String> {
     let mut secrets = inv
         .list_server_secrets(&server.id)
@@ -524,63 +533,20 @@ pub async fn bootstrap_server_secrets(
         .map_err(|e| format!("list_server_secrets: {e}"))?;
     let mut minted: Vec<&'static str> = Vec::new();
 
-    // VLESS-REALITY: x25519 keypair + 8-byte short_id. Bash
-    // vpn-control bytes that exactly — same crypto primitives.
-    let needs_reality = server
-        .enabled_protocols
-        .iter()
-        .any(|p| p.0 == "vless+reality");
-    if needs_reality
-        && (!secrets.contains_key("vless.private_key")
-            || !secrets.contains_key("vless.public_key")
-            || !secrets.contains_key("vless.short_id"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_x25519_keypair();
-        let short_id = vpnctl_crypto::gen_short_id().map_err(|e| format!("gen_short_id: {e}"))?;
-        for (k, v) in [
-            ("vless.private_key", &priv_key),
-            ("vless.public_key", &pub_key),
-            ("vless.short_id", &short_id),
-        ] {
-            inv.set_server_secret(&server.id, k, v)
-                .await
-                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
-            secrets.insert(k.to_string(), v.clone());
+    // Protocol-declared server secrets (REALITY keypair + short_id,
+    // Hysteria2 obfs password, Shadowsocks-2022 PSK, WireGuard server
+    // keypair). Driven by each Protocol's `server_secret_specs()`, so a
+    // new secret-bearing protocol needs zero edits here — it returns
+    // its spec and gets minted on the next bootstrap / deploy.
+    for pid in &server.enabled_protocols {
+        let Some(proto) = registry.protocol(pid) else {
+            // Unknown id in inventory — `validate_server` rejects
+            // genuine misconfig before deploy; skip defensively.
+            continue;
+        };
+        for spec in proto.server_secret_specs() {
+            mint_secret_spec(inv, &server.id, spec, &mut secrets, &mut minted).await?;
         }
-        minted.push("vless+reality keypair + short_id");
-    }
-
-    // WireGuard: server-side Curve25519 keypair. The per-user pair
-    // lives in the `users` table (`wireguard_pubkey`/`wireguard_private`)
-    // — different bootstrap path, handled in user_create.
-    let needs_wg = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
-    if needs_wg
-        && (!secrets.contains_key("wireguard.server_public_key")
-            || !secrets.contains_key("wireguard.server_private_key"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
-        for (k, v) in [
-            ("wireguard.server_private_key", &priv_key),
-            ("wireguard.server_public_key", &pub_key),
-        ] {
-            inv.set_server_secret(&server.id, k, v)
-                .await
-                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
-            secrets.insert(k.to_string(), v.clone());
-        }
-        minted.push("wireguard server keypair");
-    }
-
-    // Hysteria2: 24-byte salamander obfs password (matches bash
-    // shape — 32 chars URL-safe base64).
-    let needs_hy2 = server.enabled_protocols.iter().any(|p| p.0 == "hysteria2");
-    if needs_hy2 && !secrets.contains_key("hysteria2.obfs.password") {
-        let pw = vpnctl_crypto::gen_password(24).map_err(|e| format!("gen_password: {e}"))?;
-        inv.set_server_secret(&server.id, "hysteria2.obfs.password", &pw)
-            .await
-            .map_err(|e| format!("set_server_secret hysteria2.obfs.password: {e}"))?;
-        secrets.insert("hysteria2.obfs.password".into(), pw);
-        minted.push("hysteria2 salamander obfs password");
     }
 
     // wgturn-core: Curve25519 keypair for the bundled `wgturnsrv`
@@ -616,6 +582,87 @@ pub async fn bootstrap_server_secrets(
     }
 
     Ok((secrets, minted))
+}
+
+/// Persist one secret to inventory + the in-memory map. Helper for
+/// [`mint_secret_spec`]; takes the value by-value to avoid a clone.
+async fn persist_secret(
+    inv: &SqliteInventory,
+    server_id: &ServerId,
+    key: &'static str,
+    value: String,
+    secrets: &mut std::collections::HashMap<String, String>,
+) -> std::result::Result<(), String> {
+    inv.set_server_secret(server_id, key, &value)
+        .await
+        .map_err(|e| format!("set_server_secret {key}: {e}"))?;
+    secrets.insert(key.to_string(), value);
+    Ok(())
+}
+
+/// Mint one [`vpnctl_core::ServerSecretSpec`] if its key(s) are absent:
+/// generate via the matching crypto primitive, persist, and record the
+/// primary key name in `minted`. Idempotent — a present key is skipped,
+/// never rotated (protects live clients on re-deploy). Each match arm
+/// uses the SAME crypto primitive the old hardcoded block did, so the
+/// byte-shape of every generated secret is unchanged.
+async fn mint_secret_spec(
+    inv: &SqliteInventory,
+    server_id: &ServerId,
+    spec: vpnctl_core::ServerSecretSpec,
+    secrets: &mut std::collections::HashMap<String, String>,
+    minted: &mut Vec<&'static str>,
+) -> std::result::Result<(), String> {
+    use vpnctl_core::ServerSecretSpec as S;
+    match spec {
+        S::Password { key, entropy_bytes } => {
+            if !secrets.contains_key(key) {
+                let v = vpnctl_crypto::gen_password(entropy_bytes)
+                    .map_err(|e| format!("gen_password {key}: {e}"))?;
+                persist_secret(inv, server_id, key, v, secrets).await?;
+                minted.push(key);
+            }
+        }
+        S::Base64Key { key, key_bytes } => {
+            if !secrets.contains_key(key) {
+                let v = vpnctl_crypto::gen_base64_key(key_bytes)
+                    .map_err(|e| format!("gen_base64_key {key}: {e}"))?;
+                persist_secret(inv, server_id, key, v, secrets).await?;
+                minted.push(key);
+            }
+        }
+        S::X25519Keypair {
+            private_key,
+            public_key,
+        } => {
+            if !secrets.contains_key(private_key) || !secrets.contains_key(public_key) {
+                let (priv_k, pub_k) = vpnctl_crypto::gen_x25519_keypair();
+                persist_secret(inv, server_id, private_key, priv_k, secrets).await?;
+                persist_secret(inv, server_id, public_key, pub_k, secrets).await?;
+                minted.push(private_key);
+            }
+        }
+        S::WireguardKeypair {
+            private_key,
+            public_key,
+        } => {
+            if !secrets.contains_key(private_key) || !secrets.contains_key(public_key) {
+                let (priv_k, pub_k) = vpnctl_crypto::gen_wireguard_keypair();
+                persist_secret(inv, server_id, private_key, priv_k, secrets).await?;
+                persist_secret(inv, server_id, public_key, pub_k, secrets).await?;
+                minted.push(private_key);
+            }
+        }
+        S::ShortId { key } => {
+            if !secrets.contains_key(key) {
+                let v = vpnctl_crypto::gen_short_id()
+                    .map_err(|e| format!("gen_short_id {key}: {e}"))?;
+                persist_secret(inv, server_id, key, v, secrets).await?;
+                minted.push(key);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Pick a free server id given the set of existing ids and a base
@@ -896,16 +943,18 @@ mod tests {
         assert_eq!(find_available_server_id(&existing, "a").unwrap(), "a-5");
     }
 
-    /// `bootstrap_server_secrets` is now the single source of truth
-    /// for server-side per-protocol secret minting (shared between
-    /// the wizard and `server_deploy`). Spec it against an in-memory
-    /// inventory: mint once → 3 vless keys + 1 hy2 password; mint
-    /// again → no churn (idempotent).
+    /// `bootstrap_server_secrets` is the single source of truth for
+    /// server-side per-protocol secret minting (shared between the
+    /// wizard and `server_deploy`). Spec it against an in-memory
+    /// inventory: mint once → 3 vless keys + 1 hy2 password (3 mint
+    /// labels: REALITY keypair + short_id + hy2 obfs); mint again → no
+    /// churn (idempotent).
     #[tokio::test]
     async fn bootstrap_secrets_mints_then_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("inv.db");
         let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
+        let registry = crate::app::build_registry().unwrap();
         let server = Server {
             id: ServerId("test-server".into()),
             address: "203.0.113.7".into(),
@@ -923,20 +972,128 @@ mod tests {
         };
         inv.add_server(&server).await.unwrap();
 
-        let (secrets1, minted1) = bootstrap_server_secrets(&inv, &server).await.unwrap();
+        let (secrets1, minted1) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
         assert!(secrets1.contains_key("vless.private_key"));
         assert!(secrets1.contains_key("vless.public_key"));
         assert!(secrets1.contains_key("vless.short_id"));
         assert!(secrets1.contains_key("hysteria2.obfs.password"));
         assert!(!secrets1.contains_key("wireguard.server_public_key"));
-        assert_eq!(minted1.len(), 2, "expected 2 mint labels, got {minted1:?}");
+        // REALITY keypair + REALITY short_id + hy2 obfs = 3 spec labels.
+        assert_eq!(minted1.len(), 3, "expected 3 mint labels, got {minted1:?}");
 
         // Second call — nothing new to mint.
-        let (secrets2, minted2) = bootstrap_server_secrets(&inv, &server).await.unwrap();
+        let (secrets2, minted2) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
         assert_eq!(secrets1, secrets2);
         assert!(
             minted2.is_empty(),
             "second call must mint nothing; got {minted2:?}"
+        );
+    }
+
+    /// REGRESSION GUARD for the `kg` deploy bug (2026-05-30): a server
+    /// enabling EVERY sing-box protocol (the quick-add default set)
+    /// must, after `bootstrap_server_secrets`, have minted every secret
+    /// each enabled protocol's `server_inbound` requires — i.e. NO
+    /// protocol renders `MissingSecret`. Before the
+    /// `Protocol::server_secret_specs()` refactor this failed on
+    /// `shadowsocks-2022` (`ss2022.psk` was never minted), which broke
+    /// the whole node deploy at render time.
+    #[tokio::test]
+    async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("inv.db");
+        let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
+        let registry = crate::app::build_registry().unwrap();
+
+        // Every sing-box-rendered protocol (exclude wgturn — it's not a
+        // sing-box inbound; it has its own kernel-keyed secret + cli).
+        let sing_box = registry.kernel(&KernelId("sing-box".into())).unwrap();
+        let enabled = sing_box.supported_protocols();
+        let server = Server {
+            id: ServerId("all-protos".into()),
+            address: "203.0.113.9".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: enabled.clone(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
+
+        // The contract: every enabled protocol renders its server
+        // inbound WITHOUT a MissingSecret after bootstrap.
+        let ctx = RenderCtx::new(&server, &secrets);
+        for pid in &enabled {
+            let proto = registry.protocol(pid).unwrap();
+            if let Err(vpnctl_core::CoreError::MissingSecret { key, .. }) =
+                proto.server_inbound(&ctx, &[])
+            {
+                panic!(
+                    "protocol {pid:?} still missing secret `{key}` after bootstrap — kg-class bug"
+                );
+            }
+        }
+
+        // Stronger contract, independent of how each protocol READS its
+        // secret: every key a protocol DECLARES via server_secret_specs()
+        // must actually be minted. Catches a future protocol that forgets
+        // its spec even when its server_inbound reads via or_default()
+        // (which never raises MissingSecret, so the render loop above
+        // would pass it vacuously).
+        for pid in &enabled {
+            let proto = registry.protocol(pid).unwrap();
+            for spec in proto.server_secret_specs() {
+                use vpnctl_core::ServerSecretSpec as S;
+                let keys: Vec<&'static str> = match spec {
+                    S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+                        vec![key]
+                    }
+                    S::X25519Keypair {
+                        private_key,
+                        public_key,
+                    }
+                    | S::WireguardKeypair {
+                        private_key,
+                        public_key,
+                    } => vec![private_key, public_key],
+                };
+                for k in keys {
+                    assert!(
+                        secrets.contains_key(k),
+                        "{pid:?} declares secret `{k}` but bootstrap didn't mint it"
+                    );
+                }
+            }
+        }
+
+        // Pin the specific regression: ss2022.psk minted AND in the
+        // sing-box-compatible encoding (standard base64 of a 16-byte
+        // aes-128 key = 24 chars, padded, NOT url-safe). A url-safe /
+        // unpadded PSK would be rejected by sing-box's StdEncoding and
+        // crash the node config.
+        let psk = secrets
+            .get("ss2022.psk")
+            .expect("ss2022.psk must be minted for a server with shadowsocks-2022 enabled");
+        assert_eq!(
+            psk.len(),
+            24,
+            "aes-128 PSK = 24-char padded base64, got {psk:?}"
+        );
+        assert!(psk.ends_with("=="), "standard base64 of 16 bytes ends '=='");
+        assert!(
+            !psk.contains('-') && !psk.contains('_'),
+            "PSK must be STANDARD base64 (sing-box StdEncoding), not url-safe"
         );
     }
 

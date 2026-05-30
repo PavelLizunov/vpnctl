@@ -7192,7 +7192,14 @@ async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
         .as_ref()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    assert!(payload.contains("wireguard server keypair"));
+    // Post-refactor (2026-05-30 server_secret_specs): the `bootstrapped`
+    // audit field records the minted secret KEY NAMES (not human labels),
+    // so the WG keypair shows as its primary key. Asserting the key name
+    // is strictly more precise than the old "wireguard server keypair".
+    assert!(
+        payload.contains("wireguard.server_private_key"),
+        "deploy audit payload should record the minted WG key; got {payload}"
+    );
 }
 
 #[tokio::test]

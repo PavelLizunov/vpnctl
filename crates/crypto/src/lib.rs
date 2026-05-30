@@ -81,6 +81,22 @@ pub fn gen_password(entropy_bytes: usize) -> std::io::Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(&buf))
 }
 
+/// Random raw key of `key_bytes`, encoded as **standard** base64 WITH
+/// padding (NOT url-safe). For protocol secrets whose wire format is
+/// base64-DECODED back to raw key material by the node daemon — e.g. a
+/// Shadowsocks-2022 PSK: sing-box parses `password` with Go's
+/// `base64.StdEncoding`, so a `gen_password` (url-safe, no-pad) string
+/// fails to decode and the whole sing-box config is rejected. `16`
+/// bytes = 128-bit key for `2022-blake3-aes-128-gcm` (→ 24 chars
+/// ending `==`); `32` bytes = 256-bit for the `-aes-256-gcm` variant.
+pub fn gen_base64_key(key_bytes: usize) -> std::io::Result<String> {
+    let mut buf = vec![0u8; key_bytes];
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut buf)
+        .map_err(|e| std::io::Error::other(format!("rng: {e}")))?;
+    Ok(STANDARD.encode(&buf))
+}
+
 /// REALITY short_id — 8 hex-символов (4 байта).
 pub fn gen_short_id() -> std::io::Result<String> {
     let mut buf = [0u8; 4];
@@ -183,6 +199,39 @@ mod tests {
             );
         }
         assert_ne!(priv_b64, pub_b64, "private != public");
+    }
+
+    #[test]
+    fn gen_base64_key_is_standard_padded_b64_for_ss2022_psk() {
+        // sing-box parses the Shadowsocks-2022 `password` with Go's
+        // `base64.StdEncoding`, so the key MUST be STANDARD base64 with
+        // padding (NOT the url-safe `gen_password`). 16 bytes (aes-128)
+        // → 24 chars ending `==`; 32 bytes (aes-256) → 44 chars ending
+        // a single `=`. A regression to url-safe / unpadded here would
+        // crash every node config carrying an ss2022 inbound.
+        let k16 = gen_base64_key(16).unwrap();
+        assert_eq!(k16.len(), 24, "16-byte key → 24 chars, got {k16:?}");
+        assert!(k16.ends_with("=="), "16-byte std b64 ends '==', got {k16}");
+
+        let k32 = gen_base64_key(32).unwrap();
+        assert_eq!(k32.len(), 44, "32-byte key → 44 chars, got {k32:?}");
+        assert!(
+            k32.ends_with('=') && !k32.ends_with("=="),
+            "32-byte std b64 ends single '=', got {k32}"
+        );
+
+        for k in [&k16, &k32] {
+            assert!(
+                k.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')),
+                "must be STANDARD alphabet (no - or _): {k}"
+            );
+        }
+        assert_ne!(
+            gen_base64_key(16).unwrap(),
+            k16,
+            "two calls differ (CSPRNG)"
+        );
     }
 
     #[test]

@@ -57,6 +57,21 @@ impl Protocol for VlessReality {
         vpnctl_core::DpiRisk::Strong
     }
 
+    fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
+        use vpnctl_core::ServerSecretSpec::{ShortId, X25519Keypair};
+        // REALITY x25519 keypair + 8-byte short_id — the same crypto
+        // primitives the bash vpn-control minted, byte-for-byte.
+        vec![
+            X25519Keypair {
+                private_key: "vless.private_key",
+                public_key: "vless.public_key",
+            },
+            ShortId {
+                key: "vless.short_id",
+            },
+        ]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;

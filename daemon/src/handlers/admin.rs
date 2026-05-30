@@ -6279,11 +6279,16 @@ pub(crate) async fn server_deploy(
     // server-side secret added for a future protocol is minted
     // identically by deploy + wizard. Idempotent — re-clicking
     // deploy when everything is already minted is a safe no-op.
-    let (secrets, bootstrapped) =
-        match crate::wizard_bootstrap::bootstrap_server_secrets(&state.inv, &server).await {
-            Ok(v) => v,
-            Err(e) => return internal_error(anyhow::anyhow!(e)),
-        };
+    let (secrets, bootstrapped) = match crate::wizard_bootstrap::bootstrap_server_secrets(
+        &state.inv,
+        &server,
+        &state.registry,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::anyhow!(e)),
+    };
 
     // SSH push to the node — Path C via SubprocessSshTransport.
     // For each declared kernel: ensure_installed → render config

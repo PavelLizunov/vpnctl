@@ -104,6 +104,18 @@ impl Protocol for Hysteria2 {
         vpnctl_core::DpiRisk::Weak
     }
 
+    fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
+        // 24-byte Salamander obfs password (→ 32 chars url-safe base64),
+        // matching the bash shape. Consumed as an OPAQUE STRING by
+        // sing-box (not base64-decoded) → `Password`, not `Base64Key`.
+        // The self-signed cert is generated node-side at deploy, not
+        // pre-minted.
+        vec![vpnctl_core::ServerSecretSpec::Password {
+            key: "hysteria2.obfs.password",
+            entropy_bytes: 24,
+        }]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Reuse the TUIC cert paths so we provision ONE self-signed cert
         // per node (the existing deploy command already does that for TUIC).

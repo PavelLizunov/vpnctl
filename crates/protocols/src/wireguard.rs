@@ -151,6 +151,15 @@ impl Protocol for WireGuard {
         vpnctl_core::DpiRisk::Weak
     }
 
+    fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
+        // Server-side Curve25519 keypair. The per-user pair lives in
+        // the `users` table (a different bootstrap path — user_create).
+        vec![vpnctl_core::ServerSecretSpec::WireguardKeypair {
+            private_key: "wireguard.server_private_key",
+            public_key: "wireguard.server_public_key",
+        }]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Server-side material — required.
         let private_key = ctx.require("wireguard.server_private_key")?;
