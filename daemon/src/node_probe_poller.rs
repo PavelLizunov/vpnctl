@@ -118,6 +118,20 @@ pub enum UnreachableTransition {
         consecutive_failures: u32,
         threshold: u32,
     },
+    /// The server is STILL failing on a later tick (counter already ≥
+    /// threshold and we've already fired once). The caller RE-ATTEMPTS
+    /// the idempotent `insert_alert_if_no_unacked`: a no-op while the
+    /// alert is open + unacked, but if the operator ACKED it while the
+    /// server is still down, the insert re-opens a fresh alert. Without
+    /// this, an ack permanently silenced a still-down server until a
+    /// recovery reset the in-memory `fired` flag — the kg 2026-05-31
+    /// incident (acked 21:09 UTC, probes still failing 21:11/21:16, no
+    /// re-fire). The DB's partial-UNIQUE-on-unacked index is what makes
+    /// this safe to emit every tick (dedup while open).
+    StillUnreachable {
+        consecutive_failures: u32,
+        threshold: u32,
+    },
     /// A previously-failed server just succeeded. Caller acks any
     /// open `server.unreachable` alert for this id.
     Recovered,
@@ -191,14 +205,25 @@ impl FailState {
     fn fail(&mut self, server_id: &ServerId) -> UnreachableTransition {
         let counter = self.counters.entry(server_id.clone()).or_insert(0);
         *counter = counter.saturating_add(1);
+        let reached = *counter >= self.threshold;
         let already_fired = self.fired.get(server_id).copied().unwrap_or(false);
-        if *counter >= self.threshold && !already_fired {
+        if reached && !already_fired {
             self.fired.insert(server_id.clone(), true);
             UnreachableTransition::BecameUnreachable {
                 consecutive_failures: *counter,
                 threshold: self.threshold,
             }
+        } else if reached {
+            // Already fired but STILL failing → re-assert so an
+            // acked-but-still-down alert re-opens. The caller's insert
+            // is idempotent (partial-UNIQUE on unacked), so this is a
+            // no-op while the alert is open and a re-fire after an ack.
+            UnreachableTransition::StillUnreachable {
+                consecutive_failures: *counter,
+                threshold: self.threshold,
+            }
         } else {
+            // Below threshold (e.g. failure #2 of 3) — not yet alertable.
             UnreachableTransition::NoChange
         }
     }
@@ -308,7 +333,18 @@ pub async fn dispatch_alerts(
 ) {
     // ─── server.unreachable (state-machine over outcomes) ─────
     match fail_state.observe(&server.id, outcome) {
+        // First fire AND every subsequent still-down tick run the SAME
+        // idempotent insert: while the alert is open + unacked the
+        // partial-UNIQUE index makes it a no-op (Ok(None)); after the
+        // operator acks a still-down server, the next tick's insert
+        // re-opens it (Ok(Some) → audit + push). This is the kg
+        // 2026-05-31 fix — an ack no longer permanently silences a
+        // server that's still failing.
         UnreachableTransition::BecameUnreachable {
+            consecutive_failures,
+            threshold,
+        }
+        | UnreachableTransition::StillUnreachable {
             consecutive_failures,
             threshold,
         } => {
@@ -890,11 +926,17 @@ mod tests {
                 threshold: 3,
             }
         );
-        // Fourth tick still failing — must NOT re-fire.
+        // Fourth tick still failing — must NOT re-emit BecameUnreachable
+        // (that's a one-time edge), but now emits StillUnreachable so the
+        // caller re-asserts the idempotent insert — re-opening the alert
+        // if the operator acked it while the server is still down.
         assert_eq!(
             st.observe(&sid("a"), &ssh_fail()),
-            UnreachableTransition::NoChange,
-            "already-fired state must NOT re-emit BecameUnreachable"
+            UnreachableTransition::StillUnreachable {
+                consecutive_failures: 4,
+                threshold: 3,
+            },
+            "already-fired + still-failing must emit StillUnreachable, not BecameUnreachable"
         );
     }
 

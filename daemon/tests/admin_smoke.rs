@@ -2736,6 +2736,68 @@ async fn dispatch_alerts_recovery_auto_acks_open_unreachable() {
 }
 
 #[tokio::test]
+async fn dispatch_alerts_reopens_after_manual_ack_while_still_down() {
+    // Regression for the kg 2026-05-31 incident: operator acks the
+    // `server.unreachable` alert while the server is STILL down. The
+    // old state machine left FailState.fired=true and emitted NoChange
+    // for every later failing tick, so the acked alert NEVER re-fired
+    // (only a recovery reset `fired`). The StillUnreachable transition
+    // now re-asserts the idempotent insert each down-tick → the next
+    // failing probe after an ack re-opens a fresh alert.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("kg".into()),
+        address: "213.155.9.39".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    let mut fail_state = vpnctld::node_probe_poller::FailState::with_threshold(2);
+    let fail = || vpnctld::node_probe_poller::ProbeOutcome::SshFailed("connect timeout".into());
+
+    // 2 failures (threshold=2) → fire one unacked row.
+    for _ in 0..2 {
+        vpnctld::node_probe_poller::dispatch_alerts(&inv, &server, &fail(), &mut fail_state).await;
+    }
+    let open = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(open.len(), 1, "threshold crossing fires one row");
+
+    // A 3rd still-down tick while the alert is OPEN+unacked must NOT
+    // create a duplicate (partial-UNIQUE dedup).
+    vpnctld::node_probe_poller::dispatch_alerts(&inv, &server, &fail(), &mut fail_state).await;
+    assert_eq!(
+        inv.recent_alerts(10, false).await.unwrap().len(),
+        1,
+        "still-down tick must NOT duplicate an already-open alert"
+    );
+
+    // Operator ACKS the alert (web «ack» button) — but the server is
+    // still down.
+    assert!(inv.ack_alert(open[0].id).await.unwrap());
+    assert_eq!(
+        inv.recent_alerts(10, false).await.unwrap().len(),
+        0,
+        "ack clears it from the unacked feed"
+    );
+
+    // Next still-down probe → MUST re-open (the bug: it stayed silent).
+    vpnctld::node_probe_poller::dispatch_alerts(&inv, &server, &fail(), &mut fail_state).await;
+    assert_eq!(
+        inv.recent_alerts(10, false).await.unwrap().len(),
+        1,
+        "a still-down server must RE-FIRE after a manual ack (kg incident fix)"
+    );
+}
+
+#[tokio::test]
 async fn settings_telegram_section_renders_with_disabled_status_by_default() {
     // Phase G chunk 3 part 1 — fresh DB, Telegram section appears
     // with «disabled» status + the input form.
