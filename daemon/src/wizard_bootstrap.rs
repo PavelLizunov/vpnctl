@@ -172,6 +172,267 @@ pub fn run_bootstrap(
     ReceiverStream::new(rx)
 }
 
+/// Re-deploy an EXISTING server, streaming per-step progress over SSE
+/// (item-1, 2026-05-31). Unlike `run_bootstrap` (a NEW server: probe →
+/// fingerprint → push-key → register), the server already exists and
+/// already trusts the deploy key, so this runs only the tail:
+/// mint-missing-secrets → per-kernel `ensure_installed` → render
+/// (+ reserved-ports guard) → `apply_config`. It writes the SAME
+/// `server.deploy` audit row the synchronous handler did, AND — the
+/// reason this exists — it ends in `BootstrapEvent::Error` (not `Ok`)
+/// whenever ANY kernel's install/render/apply failed. The old
+/// synchronous handler pushed those failures into the audit payload but
+/// still returned a 303 redirect the operator read as success, so a
+/// sing-box that crash-looped (e.g. a missing cert) looked "deployed".
+pub fn run_redeploy(
+    server: Server,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<BootstrapEvent>(64);
+    tokio::spawn(async move {
+        redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
+    });
+    ReceiverStream::new(rx)
+}
+
+async fn redeploy_pipeline(
+    server: Server,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+    tx: mpsc::Sender<BootstrapEvent>,
+) {
+    macro_rules! send_step {
+        ($phase:expr, $($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            let _ = tx.send(BootstrapEvent::Step { phase: $phase, message: msg }).await;
+        }};
+    }
+    macro_rules! fail {
+        ($phase:expr, $($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            let _ = tx.send(BootstrapEvent::Error { phase: $phase, message: msg }).await;
+            return;
+        }};
+    }
+
+    let redirect = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
+    let mut ssh_errors: Vec<String> = Vec::new();
+    let mut ssh_kernels_pushed: Vec<String> = Vec::new();
+    let mut total_config_bytes: usize = 0;
+
+    // ── 0. Pre-flight: kernel/protocol compatibility ─────────────
+    // Same check the synchronous handler runs before anything else
+    // (admin.rs server_deploy). Without it, a protocol enabled on the
+    // server but supported by NO declared kernel is silently filtered
+    // out of every per-kernel render and the deploy still reports Ok —
+    // the operator would never learn it isn't being delivered.
+    if let Err(e) = registry.validate_server(&server) {
+        fail!("validate", "config invalid before deploy: {e}");
+    }
+
+    // ── 1. Mint any missing per-protocol secrets (idempotent) ─────
+    send_step!("secrets", "minting any missing per-protocol secrets…");
+    let (secrets, bootstrapped) = match bootstrap_server_secrets(&inv, &server, &registry).await {
+        Ok((secrets, minted)) => {
+            if minted.is_empty() {
+                send_step!("secrets", "ok — all secrets already present.");
+            } else {
+                for label in &minted {
+                    send_step!("secrets", "ok — minted {label}.");
+                }
+            }
+            (secrets, minted)
+        }
+        Err(e) => fail!("secrets", "secret bootstrap failed: {e}"),
+    };
+
+    // ── 2. SSH skip-reason ────────────────────────────────────────
+    // Mirror the synchronous handler: these two conditions STILL write
+    // a `server.deploy` audit row carrying `ssh_skip_reason` (so the
+    // timeline records the attempt), then end in a terminal Error.
+    let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
+        Some("deploy key absent; see /admin/settings")
+    } else if server.kernels.is_empty() {
+        Some("server has no kernels declared")
+    } else {
+        None
+    };
+    if let Some(reason) = skip_reason {
+        write_deploy_audit(&inv, &server, &bootstrapped, &[], &[], 0, Some(reason)).await;
+        fail!("deploy", "deploy skipped — {reason}.");
+    }
+
+    let ssh = SubprocessSshTransport::new(
+        server.address.clone(),
+        server.ssh_user.clone(),
+        deploy_key_path,
+    )
+    .port(server.ssh_port);
+
+    let users = match inv.users_for_server(&server.id).await {
+        Ok(u) => u,
+        Err(e) => fail!("deploy", "users_for_server failed: {e}"),
+    };
+    let ctx = RenderCtx::new(&server, &secrets);
+
+    // ── 3. Per-kernel install → render → apply ────────────────────
+    // Per-kernel isolation: a failed amneziawg install does NOT abort
+    // the sing-box restart (matches the synchronous handler). Each
+    // failure is collected; the terminal event reflects the aggregate.
+    for kid in &server.kernels {
+        let Some(kernel) = registry.kernel(kid) else {
+            ssh_errors.push(format!("{}: kernel not registered", kid.0));
+            send_step!("apply", "✗ {} — kernel not registered.", kid.0);
+            continue;
+        };
+        send_step!("install", "{}: ensure_installed (apt + systemd)…", kid.0);
+        if let Err(e) = kernel.ensure_installed(&ssh).await {
+            ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
+            send_step!("install", "✗ {} install failed: {e}", kid.0);
+            continue;
+        }
+        let supported = kernel.supported_protocols();
+        let protocols: Vec<&dyn vpnctl_core::Protocol> = server
+            .enabled_protocols
+            .iter()
+            .filter(|p| supported.contains(p))
+            .filter_map(|p| registry.protocol(p))
+            .collect();
+        if protocols.is_empty() {
+            ssh_kernels_pushed.push(format!("{} (installed, no protocols)", kid.0));
+            send_step!(
+                "apply",
+                "{}: installed (no protocols enabled for it).",
+                kid.0
+            );
+            continue;
+        }
+        send_step!(
+            "render",
+            "{}: rendering config for {} protocol(s)…",
+            kid.0,
+            protocols.len()
+        );
+        let config = match kernel.render_config(&ctx, &users, &protocols) {
+            Ok(c) => c,
+            Err(e) => {
+                ssh_errors.push(format!("{}: render failed: {e}", kid.0));
+                send_step!("render", "✗ {} render failed: {e}", kid.0);
+                continue;
+            }
+        };
+        // Reserved-ports pre-apply guard (migration 0028) — refuse a
+        // config that would bind a co-tenant's port. sing-box only.
+        if kid.0 == "sing-box" {
+            match inv.get_reserved_ports(&server.id).await {
+                Ok(reserved) => {
+                    if let Err(e) =
+                        vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)
+                    {
+                        ssh_errors.push(format!("{}: reserved-ports guard refused: {e}", kid.0));
+                        send_step!("render", "✗ {} reserved-ports guard refused: {e}", kid.0);
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    ssh_errors.push(format!("{}: reserved-ports lookup failed: {e}", kid.0));
+                    send_step!("render", "✗ {} reserved-ports lookup failed: {e}", kid.0);
+                    continue;
+                }
+            }
+        }
+        total_config_bytes += config.len();
+        send_step!("apply", "{}: applying config + restart…", kid.0);
+        if let Err(e) = kernel.apply_config(&ssh, &config).await {
+            ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
+            send_step!("apply", "✗ {} apply failed: {e}", kid.0);
+            continue;
+        }
+        ssh_kernels_pushed.push(kid.0.clone());
+        send_step!("apply", "✓ {} — config applied, service active.", kid.0);
+    }
+
+    // ── 4. Audit (same shape + action as the synchronous handler) ──
+    write_deploy_audit(
+        &inv,
+        &server,
+        &bootstrapped,
+        &ssh_kernels_pushed,
+        &ssh_errors,
+        total_config_bytes,
+        None,
+    )
+    .await;
+
+    // ── 5. Terminal event — Ok ONLY when every kernel succeeded ───
+    if ssh_errors.is_empty() {
+        let _ = tx
+            .send(BootstrapEvent::Ok {
+                server_id: server.id.0.clone(),
+                redirect,
+            })
+            .await;
+    } else {
+        let _ = tx
+            .send(BootstrapEvent::Error {
+                phase: "apply",
+                message: format!(
+                    "deploy finished with {} error(s): {}",
+                    ssh_errors.len(),
+                    ssh_errors.join("; ")
+                ),
+            })
+            .await;
+    }
+}
+
+/// Write the `server.deploy` audit row for an SSE re-deploy. Same
+/// action + payload shape as the synchronous `server_deploy` handler
+/// (`bootstrapped`, `kernels`, `protocols`, `ssh_kernels_pushed`,
+/// `ssh_errors`, `ssh_config_bytes_total`, `ssh_skip_reason`) plus
+/// `via:"sse"`. Shared between the skip-reason early-exit and the
+/// normal completion so both paths leave an identical timeline entry.
+/// Audit failure is non-fatal (logged) — the deploy already happened.
+#[allow(clippy::too_many_arguments)]
+async fn write_deploy_audit(
+    inv: &SqliteInventory,
+    server: &Server,
+    bootstrapped: &[&'static str],
+    ssh_kernels_pushed: &[String],
+    ssh_errors: &[String],
+    total_config_bytes: usize,
+    ssh_skip_reason: Option<&'static str>,
+) {
+    if let Err(e) = inv
+        .audit(
+            "admin",
+            "server.deploy",
+            Some(&server.id.0),
+            Some(&serde_json::json!({
+                "bootstrapped": bootstrapped,
+                "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+                "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+                "ssh_kernels_pushed": ssh_kernels_pushed,
+                "ssh_errors": ssh_errors,
+                "ssh_config_bytes_total": total_config_bytes,
+                "ssh_skip_reason": ssh_skip_reason,
+                "via": "sse",
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::redeploy",
+            server = %server.id.0,
+            error = %e,
+            "audit write failed for server.deploy (sse)"
+        );
+    }
+}
+
 /// The 9-phase pipeline itself. Each phase sends one or more `Step`
 /// events; on failure it sends an `Error` and returns early. Helpers
 /// `send_step!` and `fail!` keep the call sites readable; both

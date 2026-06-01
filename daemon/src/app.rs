@@ -789,6 +789,15 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/deploy",
             post(admin::server_deploy),
         )
+        // SSE-streamed re-deploy (item-1, 2026-05-31). EventSource (GET)
+        // endpoint that streams per-step progress + a terminal ok/error
+        // so the operator sees what's happening and how it finished —
+        // unlike the POST above, which 303-redirected as "success" even
+        // when sing-box crash-looped. Same-origin guarded in-handler.
+        .route(
+            "/admin/servers/{id}/deploy/sse",
+            get(admin::server_deploy_sse),
+        )
         // Migration 0018: per-(server, protocol) hide flag + per-(user,
         // server, protocol) deny override. 4 POST handlers — server-
         // level chip is on /admin/servers/{id}; per-user grid is on

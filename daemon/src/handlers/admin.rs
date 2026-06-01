@@ -387,6 +387,11 @@ pub(crate) fn shell(
                 link rel="preconnect" href="https://fonts.gstatic.com" crossorigin {}
                 link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,300;1,6..72,400&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" {}
                 link rel="stylesheet" href="/admin/assets/admin.css" {}
+                // External JS (CSP `script-src 'self'` forbids inline).
+                // Wires `data-sse-url` triggers (SSE-streamed re-deploy)
+                // to a live log pane. `defer` so it runs after the DOM
+                // parses; absent on pages without a trigger it's inert.
+                script src="/admin/assets/admin.js" defer {}
             }
             body {
                 div class=(cls) {
@@ -10422,6 +10427,81 @@ pub(crate) async fn wizard_step2_sse(
         .into_response()
 }
 
+/// `GET /admin/servers/{id}/deploy/sse` — EventSource endpoint that
+/// RE-deploys an existing server, streaming `step` / `ok` / `error`
+/// events so the operator watches each phase live and sees the terminal
+/// status (item-1, 2026-05-31). The heavy lifting is
+/// `wizard_bootstrap::run_redeploy`, which ends in an `error` event when
+/// any kernel step failed — so a crash-looping sing-box never reads as
+/// success (the bug the old synchronous 303-redirect handler had).
+///
+/// EventSource can only issue GET, so this state-changing request can't
+/// ride the POST-only Origin CSRF middleware. Guard explicitly: reject a
+/// browser `Sec-Fetch-Site: cross-site` / `none` (a `<img>`/prefetch CSRF
+/// attempt). Absent header = non-browser tooling (curl) which carries no
+/// ambient admin cookie to forge with, so it's allowed — same posture as
+/// the wizard + geoip SSE endpoints, plus basic-auth on the whole tree.
+pub(crate) async fn server_deploy_sse(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    // Same-origin guard for the state-changing GET.
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if sfs == "cross-site" || sfs == "none" {
+            return error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-site deploy trigger refused (same-origin only)",
+            );
+        }
+    }
+
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let raw = crate::wizard_bootstrap::run_redeploy(
+        server,
+        state.inv.clone(),
+        std::sync::Arc::clone(&state.registry),
+        key_path,
+    );
+    let mapped = raw.map(|ev| {
+        let name = match &ev {
+            crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",
+            crate::wizard_bootstrap::BootstrapEvent::Ok { .. } => "ok",
+            crate::wizard_bootstrap::BootstrapEvent::Error { .. } => "error",
+        };
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::redeploy",
+                event_name = name,
+                error = %e,
+                "redeploy SSE event serialisation failed — emitting placeholder"
+            );
+            format!(
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+            )
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Phase 3c — Settings GeoIP «update now» SSE button.
 //
@@ -10803,19 +10883,39 @@ pub(crate) async fn server_detail(
         // render is deterministic so a redeploy with no changes is a
         // no-op systemctl restart.
         div id="deploy-button" style="margin: 12px 0 18px;" {
-            form method="post"
-                 action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
-                 style="display: inline;" {
-                button type="submit"
-                       title=(crate::i18n::tr(
-                           lang,
-                           "Full deploy: mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Re-clicking is safe — already-present secrets and kernels are skipped.",
-                           "Полный деплой: дораздать недостающие per-protocol секреты, затем SSH в ноду и запустить apt-get install + render-config + systemctl restart для каждого включённого ядра. Повторный клик безопасен — уже существующие секреты и ядра пропускаются.",
-                       ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+            // JS-driven: streams per-step progress + terminal status
+            // into the log pane below via SSE (admin.js wires the
+            // `data-sse-url`). The terminal event is `error` when any
+            // kernel step failed — so the operator sees failure, not a
+            // silent "success" redirect.
+            button type="button"
+                   data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
+                   data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
+                   data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
+                   title=(crate::i18n::tr(
+                       lang,
+                       "Full deploy: streamed live — mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Each step + the final status appears in the log below. Re-clicking is safe — already-present secrets and kernels are skipped.",
+                       "Полный деплой с живым логом: дораздать недостающие per-protocol секреты, затем SSH в ноду и запустить apt-get install + render-config + systemctl restart для каждого включённого ядра. Каждый шаг + финальный статус появятся в логе ниже. Повторный клик безопасен — уже существующие секреты и ядра пропускаются.",
+                   ))
+                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+            }
+            // No-JS fallback: the original synchronous POST still works
+            // (it just lacks the live log — the browser blocks until the
+            // deploy returns, then redirects).
+            noscript {
+                form method="post"
+                     action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
+                     style="display: inline;" {
+                    button type="submit"
+                           style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                    }
                 }
             }
+            // Live log pane — hidden until the operator clicks deploy.
+            pre id="deploy-log" hidden
+                style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
             span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                 (crate::i18n::tr(lang, "Mints missing secrets, SSH-pushes ", "Создаёт недостающие секреты, SSH-пушит "))
                 span.ed-mono

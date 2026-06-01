@@ -7119,9 +7119,27 @@ async fn admin_server_detail_shows_deploy_button() {
     let html = fetch_html(app, "/admin/servers/sb").await;
     assert!(
         html.contains(r#"action="/admin/servers/sb/deploy""#),
-        "deploy form must POST to /admin/servers/<id>/deploy"
+        "deploy form must POST to /admin/servers/<id>/deploy (noscript fallback)"
     );
     assert!(html.contains(">deploy →<"), "submit button label drifted");
+    // Item-1 SSE deploy: JS-driven button streams progress to a log pane.
+    assert!(
+        html.contains(r#"data-sse-url="/admin/servers/sb/deploy/sse""#),
+        "deploy button must carry the SSE trigger URL"
+    );
+    assert!(
+        html.contains(r#"id="deploy-log""#),
+        "live deploy log pane must be present"
+    );
+    assert!(
+        html.contains(r#"src="/admin/assets/admin.js""#),
+        "external admin.js (CSP-safe SSE wiring) must be loaded"
+    );
+    // The POST fallback must be inside <noscript> (JS path is primary).
+    assert!(
+        html.contains("<noscript>"),
+        "synchronous POST deploy must be the <noscript> fallback"
+    );
 }
 
 #[tokio::test]
