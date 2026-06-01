@@ -27,12 +27,17 @@
 //!     under target=`vpnctld::vpn_router` (read via `journalctl -u
 //!     vpnctld`). Wiring this into `admin_alerts` is Phase G work,
 //!     deferred.
-//!   * Path is NOT rate-limited at the handler level (unlike
-//!     `/sub/{token}`). Pre-Phase-5 the endpoint is reachable only
-//!     on the LAN-only daemon port 18402; pre-cutover hardening
-//!     (Phase 4.5) adds an axum rate-limit middleware on
-//!     `/api/v1/app/config/*` before nginx switches external
-//!     traffic onto it.
+//!   * Rate-limited at the handler level (item-3, 2026-06-01) via the
+//!     shared `RateLimiter`, two axes. (1) per-`device_id`, post-resolve
+//!     — THE per-user limit, each device_id its own bucket. (2)
+//!     per-source-IP anti-flood vs random-device_id scraping, BUT only
+//!     for NON-VPN-egress IPs: a VPN-connected client's refresh egresses
+//!     its node so vpnctld sees the SERVER's IP, and N users on one
+//!     server would otherwise share one per-IP bucket and throttle each
+//!     other (Pavel: "33 обновления если все будут на одном конфиге").
+//!     `is_known_server_address` exempts our egress IPs; they rely on
+//!     per-device_id. Throttle-only (429 + Retry-After) — NO persistent
+//!     ban, so a misbehaving app or an egress IP can't lock users out.
 //!   * UA-based content negotiation. Standard VPN clients
 //!     (Streisand, v2rayNG, Shadowrocket, Hiddify, sing-box, …) get
 //!     `text/plain; charset=utf-8` with the raw base64 subscription.
@@ -502,6 +507,25 @@ pub(crate) async fn get_config_root_catchall(headers: HeaderMap) -> Response {
 /// failed due to conflict with previously registered route` when a
 /// single-segment `{name}` and a wildcard `{*name}` share the same
 /// prefix. The unified handler is the workaround.
+/// Which source IP (if any) to apply the per-IP anti-flood bucket to.
+/// Returns `None` (SKIP per-IP throttle) when the IP is unknown /
+/// unspecified (no `ConnectInfo`, e.g. a test rig — can't identify a
+/// source), OR when it's one of our own VPN-egress nodes
+/// (`is_known_server`): connected clients egress the node, so many users
+/// on one server share that IP and per-IP would throttle them as a group
+/// — they're protected by the per-`device_id` bucket instead. Otherwise
+/// `Some(ip)` → apply the per-IP bucket. Pure (no I/O) so the
+/// egress-exemption rule is unit-testable without an HTTP rig.
+fn ip_to_throttle(
+    real_ip: Option<std::net::IpAddr>,
+    is_known_server: bool,
+) -> Option<std::net::IpAddr> {
+    match real_ip {
+        Some(ip) if !ip.is_unspecified() && !is_known_server => Some(ip),
+        _ => None,
+    }
+}
+
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Path(tail): Path<String>,
@@ -547,6 +571,48 @@ pub(crate) async fn get_config(
     let want_raw = is_vpn_client_ua(ua);
     let now = now_unix_secs();
 
+    // ── Rate limit (item-3, 2026-06-01) ───────────────────────────
+    // Two axes like /sub, but tuned for the fact that a VPN-connected
+    // client's config refresh EGRESSES its node — vpnctld sees the
+    // SERVER's IP, so N users on one server share it. So the per-IP
+    // bucket is applied ONLY to NON-egress source IPs (anti-flood vs
+    // random-device_id scraping from an attacker's own IP); the
+    // per-device_id bucket (post-resolve, below) is the real per-user
+    // limit, so e.g. 33 users on one node never throttle each other.
+    // Throttle-only — NO persistent ban here: banning an egress IP or a
+    // legit user's device_id over a misbehaving-app retry-storm would
+    // sever real VPN access.
+    let peer_ip: Option<std::net::IpAddr> = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    // SECURITY decision IP — spoof-proof `X-Real-IP` (nginx overwrites
+    // it with the true peer). NOT the leftmost XFF: nginx APPENDS via
+    // `$proxy_add_x_forwarded_for`, so a client could prepend a fake
+    // VPN-node IP to leftmost-XFF and either dodge the per-IP throttle
+    // OR wrongly claim the egress-exemption. Using X-Real-IP closes
+    // that. (Logging below keeps leftmost-XFF — observability, separate
+    // concern.)
+    let rl_ip: Option<std::net::IpAddr> =
+        peer_ip.map(|p| crate::real_ip::resolve_peer_real_ip(&headers, p));
+    // Logging IP (abuse-detection observability) — established
+    // leftmost-XFF semantics, unchanged. Reused by the access-log below.
+    let real_ip: Option<std::net::IpAddr> =
+        peer_ip.map(|p| crate::real_ip::resolve_real_ip(&headers, p));
+    let is_egress = match rl_ip {
+        Some(ip) if !ip.is_unspecified() => state
+            .inv
+            .is_known_server_address(&ip.to_string())
+            .await
+            .unwrap_or(false), // DB hiccup → treat as non-egress (fail toward throttling)
+        _ => false,
+    };
+    if let Some(ip) = ip_to_throttle(rl_ip, is_egress) {
+        if let Err((retry, _)) = state.rate_limiter.try_acquire_ip(ip) {
+            return crate::handlers::sub::rate_limited(retry, "ip");
+        }
+    }
+
     let user = match state
         .inv
         .find_user_by_vpn_router_device_id(&device_id)
@@ -559,6 +625,14 @@ pub(crate) async fn get_config(
             return empty_response(want_raw, now);
         }
     };
+
+    // Per-device_id throttle — post-resolve so random/unregistered ids
+    // never fill the bucket map. THE per-user limit, independent of the
+    // egress path: each device_id is its own bucket, so many users
+    // behind one VPN node never share a quota.
+    if let Err((retry, _)) = state.rate_limiter.try_acquire_token(&device_id) {
+        return crate::handlers::sub::rate_limited(retry, "device");
+    }
 
     // B1.user (audit 2026-05-22, migration 0026). Disabled users
     // get the same empty-response envelope as «no such device_id»
@@ -602,16 +676,10 @@ pub(crate) async fn get_config(
     // bytes for traffic-distribution histograms. Caught 2026-05-20
     // by Pavel's post-Phase-7 audit: "сколько у него ip, сколько
     // интернета, с каких девайсов".
-    let peer_ip: Option<std::net::IpAddr> = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
-    // Post-Phase-5: nginx peer collapses every external client to
-    // 192.168.0.207. `real_ip::resolve_real_ip` parses XFF when the
-    // peer is in the trusted-proxy allowlist; otherwise returns peer
-    // verbatim (spoof defense). Same call site as sub.rs.
-    let real_ip: Option<std::net::IpAddr> =
-        peer_ip.map(|p| crate::real_ip::resolve_real_ip(&headers, p));
+    // peer_ip + real_ip were already resolved above for the rate-limiter
+    // (item-3) via the same `resolve_real_ip` (XFF parsed only from a
+    // trusted proxy; spoof-safe). Reuse them — both are `Copy` — instead
+    // of a second extensions() read.
     let ip_for_log = real_ip
         .map(|a| a.to_string())
         .unwrap_or_else(|| "0.0.0.0".to_string());
@@ -748,6 +816,28 @@ mod tests {
             server_display_label("kg", Some("  Kyrgyzstan ")),
             "Kyrgyzstan"
         );
+    }
+
+    #[test]
+    fn ip_to_throttle_exempts_egress_and_unspecified() {
+        use std::net::IpAddr;
+        let client: IpAddr = "203.0.113.50".parse().unwrap();
+        let egress: IpAddr = "104.194.156.93".parse().unwrap(); // a VPN node
+        let unspecified: IpAddr = "0.0.0.0".parse().unwrap();
+
+        // Normal client IP, not a known server → throttle it.
+        assert_eq!(ip_to_throttle(Some(client), false), Some(client));
+        // THE constraint: a VPN-egress IP (is_known_server=true) is
+        // EXEMPT — 33 users on one node must not share a per-IP bucket.
+        assert_eq!(ip_to_throttle(Some(egress), true), None);
+        // Unspecified (no ConnectInfo / test rig) → can't identify a
+        // source → skip per-IP (per-device_id still applies).
+        assert_eq!(ip_to_throttle(Some(unspecified), false), None);
+        // No IP at all → skip.
+        assert_eq!(ip_to_throttle(None, false), None);
+        // Even a non-egress client whose IP happens to be flagged known
+        // (shouldn't happen, but defensive) is exempt.
+        assert_eq!(ip_to_throttle(Some(client), true), None);
     }
 
     #[test]

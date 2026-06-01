@@ -118,6 +118,45 @@ pub fn resolve_real_ip_with(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr
         .unwrap_or(peer)
 }
 
+/// Spoof-PROOF source IP for SECURITY decisions (rate-limit keying +
+/// egress-exemption), as opposed to [`resolve_real_ip`] which is for
+/// observability (abuse-detection logging).
+///
+/// The difference matters because nginx forwards
+/// `X-Forwarded-For $proxy_add_x_forwarded_for` — it APPENDS
+/// `$remote_addr` to any client-supplied XFF rather than replacing it.
+/// So the LEFTMOST XFF entry (what `resolve_real_ip` reads) is
+/// client-controlled: an external client can prepend a fake IP — e.g. a
+/// VPN-node address — and dodge a per-IP throttle or wrongly claim the
+/// egress exemption. This function instead reads `X-Real-IP`, which
+/// nginx sets to `$remote_addr` and OVERWRITES (a client-supplied
+/// `X-Real-IP` is discarded), so the value is the true immediate peer
+/// of nginx — the real client, or the VPN node's egress IP for a
+/// connected client. Not forgeable by the client.
+///
+/// Trust-gated identically to `resolve_real_ip`: only honoured when the
+/// immediate TCP peer is a trusted proxy; otherwise the raw peer is
+/// returned. Falls back to peer when `X-Real-IP` is absent/malformed
+/// (e.g. a reverse proxy that doesn't set it — degraded but safe: the
+/// per-IP key collapses to the proxy IP, but the per-device_id axis
+/// still protects each user individually).
+pub fn resolve_peer_real_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
+    resolve_peer_real_ip_with(headers, peer, trusted_proxies())
+}
+
+/// Pure inner helper for [`resolve_peer_real_ip`] — trusted list lifted
+/// to a parameter so tests avoid env mutation (see [`resolve_real_ip_with`]).
+pub fn resolve_peer_real_ip_with(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr]) -> IpAddr {
+    if !trusted.contains(&peer) {
+        return peer;
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .unwrap_or(peer)
+}
+
 /// Same trust-gate as `resolve_real_ip` applied to a different
 /// header. Track-1.4 (migration 0020): if the immediate peer is in
 /// `VPNCTLD_TRUSTED_PROXIES`, return the value of `header_name` —
@@ -258,6 +297,50 @@ mod tests {
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got.to_string(), "2001:db8::42");
+    }
+
+    // ── resolve_peer_real_ip — spoof-proof source IP for rate-limit ──
+
+    #[test]
+    fn peer_real_ip_uses_x_real_ip_and_resists_xff_spoof() {
+        // The attack: a client prepends a fake VPN-node IP to XFF to
+        // claim the egress-exemption. nginx appends $remote_addr →
+        // XFF = "104.194.156.93, <attacker>" AND overwrites
+        // X-Real-IP = <attacker> (the true peer). The leftmost-XFF
+        // resolver is fooled; the X-Real-IP resolver is not.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("104.194.156.93, 203.0.113.9"),
+        );
+        h.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        // Leftmost-XFF resolver returns the SPOOFED server IP …
+        assert_eq!(
+            resolve_real_ip_with(&h, trusted, &[trusted]).to_string(),
+            "104.194.156.93"
+        );
+        // … but the spoof-proof resolver returns the attacker's TRUE IP.
+        assert_eq!(
+            resolve_peer_real_ip_with(&h, trusted, &[trusted]).to_string(),
+            "203.0.113.9"
+        );
+    }
+
+    #[test]
+    fn peer_real_ip_untrusted_peer_ignores_header() {
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("1.2.3.4"));
+        let untrusted = peer(100);
+        // Untrusted peer's X-Real-IP is dropped — return the raw peer.
+        assert_eq!(resolve_peer_real_ip(&h, untrusted), untrusted);
+    }
+
+    #[test]
+    fn peer_real_ip_no_header_falls_back_to_peer() {
+        let h = HeaderMap::new();
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        assert_eq!(resolve_peer_real_ip_with(&h, trusted, &[trusted]), trusted);
     }
 
     // ── Track-1.4 — resolve_trusted_header (JA3 / JA4) ─────────────

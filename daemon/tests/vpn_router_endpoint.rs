@@ -380,3 +380,34 @@ async fn vpn_router_per_server_uuid_override_lands_in_uri() {
         "is-01 should fall back to global uuid: {s}"
     );
 }
+
+/// Item-3 rate-limit: the per-`device_id` bucket throttles a single
+/// device hammering the endpoint. The oneshot rig injects no
+/// ConnectInfo (real_ip = None → per-IP axis skipped via
+/// `ip_to_throttle`), so this isolates the per-device_id axis — THE
+/// per-user limit. Default capacity is 5 → 5×200 then 429.
+#[tokio::test]
+async fn vpn_router_per_device_id_throttles_after_burst() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let path = format!("/api/v1/app/config/{TEST_DEVICE_ID}");
+
+    let mut statuses = Vec::new();
+    for _ in 0..7 {
+        // Fresh router each call (oneshot consumes it) but SAME state →
+        // SAME Arc<RateLimiter>, so the per-device_id bucket persists.
+        let (status, _b, _ct) = get(router(state.clone()), &path, "curl/8.0").await;
+        statuses.push(status);
+    }
+
+    let ok = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    let throttled = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::TOO_MANY_REQUESTS)
+        .count();
+    assert_eq!(ok, 5, "default burst capacity is 5; statuses={statuses:?}");
+    assert!(
+        throttled >= 1,
+        "requests past the burst must 429; statuses={statuses:?}"
+    );
+}

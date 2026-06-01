@@ -374,11 +374,13 @@ pub(crate) async fn get(
 }
 
 /// Build the 429 response with `Retry-After` (seconds). The `gate`
-/// argument identifies which axis (ip / token) tripped — it ends up
-/// in the response body so an operator running curl during incident
-/// response can tell whether they're hitting their own per-IP limit
-/// (legit traffic) or a per-token limit (URL-shared scenario).
-fn rate_limited(retry_after_secs: u64, gate: &'static str) -> axum::response::Response {
+/// argument identifies which axis (ip / token / device) tripped — it
+/// ends up in the response body so an operator running curl during
+/// incident response can tell whether they're hitting their own per-IP
+/// limit (legit traffic) or a per-token limit (URL-shared scenario).
+/// `pub(crate)` so the ninitux endpoint (`vpn_router`) reuses the exact
+/// same 429 shape.
+pub(crate) fn rate_limited(retry_after_secs: u64, gate: &'static str) -> axum::response::Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [

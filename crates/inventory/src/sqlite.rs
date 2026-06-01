@@ -594,6 +594,23 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// `true` if `addr` exactly matches a registered server's `address`.
+    /// Used by the subscription rate-limiter to EXEMPT our own VPN-egress
+    /// IPs: a client connected through a node has its config-refresh
+    /// egress that node, so vpnctld sees the SERVER's IP. Without this
+    /// exemption, N users on one server collapse into a single per-IP
+    /// bucket and throttle each other (Pavel 2026-06-01: "может
+    /// одновременно прийти 33 обновления если все будут на одном
+    /// конфиге"). Cheap — the servers table is a handful of rows. Same
+    /// membership the `sub_access_log.is_vpn_egress` trigger computes.
+    pub async fn is_known_server_address(&self, addr: &str) -> Result<bool> {
+        let row: (i64,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM servers WHERE address = ?1)")
+            .bind(addr)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0 != 0)
+    }
+
     /// Replace a server's `address` + `ssh_port` + `ssh_user` in
     /// place. Used by the `--overwrite-existing` path of
     /// `vpnctl migrate from-bash` when an operator's earlier
