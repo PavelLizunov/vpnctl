@@ -1,0 +1,15 @@
+-- Operator-settable display name for a server. Used as the "{Country}"
+-- part of the subscription URI fragment / sing-box outbound tag the end
+-- user sees, e.g. "Kyrgyzstan VLESS ~alice".
+--
+-- NULL (the default for every existing row) → the render falls back to
+-- the hard-coded ISO-code→country map (`vpn_router::country_display_name`)
+-- and then to the uppercased server id. So this is purely additive: every
+-- current server keeps its existing label until the operator sets one.
+--
+-- Motivation: server ids are short ISO-ish codes (`kg`, `de`); a freshly
+-- added code with no map entry (e.g. `kg`) rendered as the bare upper-
+-- cased id "KG" in the client's server list, while mapped ones showed
+-- full names ("Germany"). This column lets the operator pin a friendly
+-- name per server from the admin UI without a code change.
+ALTER TABLE servers ADD COLUMN display_name TEXT;

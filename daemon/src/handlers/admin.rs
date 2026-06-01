@@ -10724,6 +10724,15 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Operator-set subscription label (servers.display_name, migration
+    // 0029). One indexed SELECT; None → the section shows the auto
+    // (country-map) fallback.
+    let display_name = state
+        .inv
+        .server_display_name(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -10894,6 +10903,11 @@ pub(crate) async fn server_detail(
         // operator never needs to drop to shell + raw SQL just to pin
         // a host key. (Stale «TODO for vpnctl» note cleaned 2026-05-22.)
         (server_detail_fingerprint_section(&server, lang))
+
+        // Display name — operator-friendly subscription label
+        // (migration 0029). The `{Country}` part end users see in their
+        // client's server list; blank → ISO-code→country map → uppercased id.
+        (server_detail_display_name_section(&server, display_name.as_deref(), lang))
 
         // Reserved ports — operator-pinned port allowlist that the
         // sing-box pre-apply guard refuses to bind. Use when this
@@ -12111,6 +12125,59 @@ fn server_detail_fingerprint_section(
     }
 }
 
+/// Display-name section on the server-detail page (migration 0029).
+/// `current` is the operator-set `servers.display_name` (None = unset).
+/// Lets the operator pin the friendly `{Country}` label end users see in
+/// their client's server list — blank clears it back to the built-in
+/// ISO-code→country map, then the uppercased id. Web equivalent of an
+/// otherwise-unsettable field (there's no CLI for it yet).
+fn server_detail_display_name_section(
+    server: &vpnctl_core::Server,
+    current: Option<&str>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid_enc = path_segment_encode(&server.id.0);
+    // What the label resolves to RIGHT NOW (custom → country-map → UPPER),
+    // so the operator sees the effective value, not just the override.
+    let effective = crate::handlers::vpn_router::server_display_label(&server.id.0, current);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(
+                lang,
+                "Friendly name end users see in their client's server list — the '{Country}' part of the subscription label (e.g. 'Kyrgyzstan VLESS ~alice'). Blank = fall back to the built-in country map, then the uppercased server id.",
+                "Понятное имя, которое пользователь видит в списке серверов клиента — часть '{Country}' в метке подписки (напр. 'Kyrgyzstan VLESS ~alice'). Пусто = фолбэк на встроенную карту стран, затем на server id в верхнем регистре.",
+            )) {
+            (tr(lang, "DISPLAY NAME", "ОТОБРАЖАЕМОЕ ИМЯ"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            (tr(lang, "Subscription label clients see: ", "Метка в подписке, которую видят клиенты: "))
+            span.ed-mono { (effective) " VLESS ~<user>" }
+            @if current.is_none() {
+                (tr(lang, " — auto (no custom name set)", " — авто (своё имя не задано)"))
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/display-name"))
+             style="display: flex; gap: 8px; align-items: center;" {
+            input type="text" name="display_name" maxlength="64"
+                  value=(current.unwrap_or(""))
+                  placeholder=(tr(lang, "e.g. Kyrgyzstan  (blank = auto)", "напр. Kyrgyzstan  (пусто = авто)"))
+                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            button type="submit"
+                   title=(tr(
+                       lang,
+                       "Save this server's display label. Takes effect on the next subscription pull by each client; cached URIs are unaffected.",
+                       "Сохранить отображаемую метку этого сервера. Применится при следующем обновлении подписки у каждого клиента; на кэшированные URI не влияет.",
+                   ))
+                   style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (tr(lang, "save name", "сохранить"))
+            }
+        }
+    }
+}
+
 /// Reserved-ports section on the server-detail page (migration 0028).
 /// Renders ALWAYS (even when the list is empty) so the operator has
 /// a discoverable place to add port pins for a newly-detected co-
@@ -12301,6 +12368,45 @@ pub(crate) async fn server_set_fingerprint(
             error = %e,
             "set_fingerprint succeeded but audit row failed; timeline will be missing this entry"
         );
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/display-name` — set (or clear) the
+/// operator-friendly subscription label (migration 0029). Form field
+/// `display_name`; blank/whitespace clears the override (render falls
+/// back to the ISO-code→country map, then the uppercased id). The audit
+/// row (`server.display_name.set`, on actual change only) is written
+/// inside the inventory transaction, so this handler doesn't double-
+/// audit. Redirects to the detail page so the new label is visible.
+pub(crate) async fn server_set_display_name(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    // Clean 404 if the server doesn't exist (set_server_display_name
+    // would reject with Invalid → 500; prefer an explicit not_found).
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let name = form_field(&body, "display_name").unwrap_or_default();
+    // Sanity bound for a mobile client's server-list row. The inventory
+    // layer trims + treats blank as a clear, so no further parsing here.
+    if name.chars().count() > 64 {
+        return bad_request("vpnctl admin: display name too long (max 64 characters)");
+    }
+
+    if let Err(e) = state.inv.set_server_display_name(&sid, Some(&name)).await {
+        return internal_error(anyhow::Error::new(e));
     }
 
     Redirect::to(&format!(

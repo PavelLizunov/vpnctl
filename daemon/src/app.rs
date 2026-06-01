@@ -750,6 +750,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/set-fingerprint",
             post(admin::server_set_fingerprint),
         )
+        // Display name (migration 0029). Operator pins the friendly
+        // subscription label end users see ({Country} VLESS ~user);
+        // blank clears it back to the country-map fallback.
+        .route(
+            "/admin/servers/{id}/display-name",
+            post(admin::server_set_display_name),
+        )
         // Reserved-ports list (migration 0028). Operator pins ports
         // the daemon must never touch via sing-box — a sing-box
         // pre-apply guard refuses any rendered inbound on a

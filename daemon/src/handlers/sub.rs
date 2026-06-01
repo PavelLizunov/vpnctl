@@ -615,8 +615,15 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
                     // `tuic-v5`, `hysteria2`, …) — we transform to the
                     // user-facing label here so the Protocol trait
                     // doesn't need to know about display strings.
-                    let server_display =
-                        crate::handlers::vpn_router::country_display_name(&server.id.0);
+                    let custom_name = state
+                        .inv
+                        .server_display_name(&server.id)
+                        .await
+                        .map_err(|e| SubError::Internal(format!("server_display_name: {e}")))?;
+                    let server_display = crate::handlers::vpn_router::server_display_label(
+                        &server.id.0,
+                        custom_name.as_deref(),
+                    );
                     let proto_display = protocol_display_name(&pid.0);
                     let tag = format!(
                         "{server_display} {proto_display} ~{user_id}",

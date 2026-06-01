@@ -269,6 +269,19 @@ pub(crate) fn country_display_name(server_id: &str) -> String {
     }
 }
 
+/// Resolve the user-facing server label for the subscription URI
+/// fragment / outbound tag. Precedence: operator-set `display_name`
+/// (from `servers.display_name`, passed in as `custom`) → the hard-coded
+/// ISO-code→country map → uppercased id. This is the single source of
+/// truth shared by both the `/sub` and `/api/v1/app/config` render paths
+/// so a server is labelled identically in every client.
+pub(crate) fn server_display_label(server_id: &str, custom: Option<&str>) -> String {
+    match custom.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => c.to_string(),
+        None => country_display_name(server_id),
+    }
+}
+
 /// Look up all server-grant rows for `user_id` and turn each into a
 /// ninitux-format vless URI string. Skips servers that don't carry
 /// the `vless.public_key` / `vless.short_id` secrets (i.e. the
@@ -348,7 +361,12 @@ async fn collect_vless_uris_for_user(
             .and_then(|s| s.parse().ok())
             .unwrap_or(443);
 
-        let server_display = country_display_name(&server.id.0);
+        let custom_name = state
+            .inv
+            .server_display_name(&server.id)
+            .await
+            .map_err(|e| format!("server_display_name: {e}"))?;
+        let server_display = server_display_label(&server.id.0, custom_name.as_deref());
         uris.push(render_vless_uri(
             &server.address,
             port,
@@ -708,6 +726,28 @@ mod tests {
         assert_eq!(country_display_name("stg"), "STG");
         assert_eq!(country_display_name("vps-de-01"), "VPS-DE-01");
         assert_eq!(country_display_name(""), "");
+    }
+
+    #[test]
+    fn server_display_label_precedence() {
+        // 1. Operator custom name wins over the country map.
+        assert_eq!(
+            server_display_label("de", Some("Germany Prod #2")),
+            "Germany Prod #2"
+        );
+        // 2. Blank / whitespace custom → fall back to the country map.
+        assert_eq!(server_display_label("de", Some("   ")), "Germany");
+        assert_eq!(server_display_label("de", None), "Germany");
+        // 3. No custom + unmapped id → uppercased id (the `kg` bug:
+        //    before a custom name it renders "KG", with one it can be
+        //    the friendly "Kyrgyzstan").
+        assert_eq!(server_display_label("kg", None), "KG");
+        assert_eq!(server_display_label("kg", Some("Kyrgyzstan")), "Kyrgyzstan");
+        // 4. Custom is trimmed.
+        assert_eq!(
+            server_display_label("kg", Some("  Kyrgyzstan ")),
+            "Kyrgyzstan"
+        );
     }
 
     #[test]

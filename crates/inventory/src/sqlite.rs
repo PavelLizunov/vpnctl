@@ -967,6 +967,84 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Operator-set display name for a server — the `{Country}` part of
+    /// the subscription URI fragment / sing-box outbound tag. `None`
+    /// when unset (column NULL or blank), in which case the render falls
+    /// back to `vpn_router::country_display_name(id)`. Blank/whitespace
+    /// stored values are normalised to `None` here so a caller never has
+    /// to second-guess them.
+    pub async fn server_display_name(&self, sid: &ServerId) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT display_name FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        // Outer None = no such server; inner None = NULL column. Both → None.
+        Ok(row.and_then(|(v,)| v).filter(|s| !s.trim().is_empty()))
+    }
+
+    /// Set (or clear, when `name` trims to empty / is `None`) a server's
+    /// display name. Audit-on-actual-mutation: writes exactly one
+    /// `server.display_name.set` row, and only when the stored value
+    /// actually changes (idempotent re-saves are silent). Errors
+    /// `Invalid` if the server doesn't exist (matches `set_reserved_ports`
+    /// — an unknown id is a caller logic bug, not an expected state).
+    pub async fn set_server_display_name(&self, sid: &ServerId, name: Option<&str>) -> Result<()> {
+        // Normalise: trim; blank → NULL (clear the override).
+        let new_val: Option<String> = name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let mut tx = self.pool.begin().await?;
+
+        let prior: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT display_name FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prior_val = match prior {
+            Some((v,)) => v.filter(|s| !s.trim().is_empty()),
+            None => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such server '{}'; cannot set display_name",
+                    sid.0
+                )));
+            }
+        };
+
+        if prior_val == new_val {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        sqlx::query("UPDATE servers SET display_name = ?1 WHERE id = ?2")
+            .bind(&new_val)
+            .bind(&sid.0)
+            .execute(&mut *tx)
+            .await?;
+
+        let payload = serde_json::json!({
+            "server_id": sid.0,
+            "old": prior_val,
+            "new": new_val,
+        });
+        let payload_str = serde_json::to_string(&payload)?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("admin")
+        .bind("server.display_name.set")
+        .bind(&sid.0)
+        .bind(payload_str)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Set or clear the per-(user, server, protocol) deny override.
     /// `disabled = true` inserts (or no-ops if already disabled).
     /// `disabled = false` deletes the override row (back to inherit-
