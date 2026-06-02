@@ -10813,6 +10813,13 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Auto-suppress state (migration 0030): (opt-in, suppressed_at).
+    let (auto_suppress_optin, suppressed_at) = state
+        .inv
+        .server_auto_suppress_state(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -11008,6 +11015,10 @@ pub(crate) async fn server_detail(
         // (migration 0029). The `{Country}` part end users see in their
         // client's server list; blank → ISO-code→country map → uppercased id.
         (server_detail_display_name_section(&server, display_name.as_deref(), lang))
+
+        // Auto-suppress from subscription when unreachable (migration
+        // 0030). Per-server opt-in + live "suppressed since X" status.
+        (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
 
         // Reserved ports — operator-pinned port allowlist that the
         // sing-box pre-apply guard refuses to bind. Use when this
@@ -12278,6 +12289,66 @@ fn server_detail_display_name_section(
     }
 }
 
+/// Auto-suppress section on the server-detail page (migration 0030).
+/// Per-server opt-in to drop this server from the subscription render
+/// while it's unreachable: the health monitor sets `suppressed_at` once
+/// it crosses the `server.unreachable` threshold (≈30 min of failed
+/// probes), and clears it on the first successful probe. Separate from
+/// the manual hide (NM-10) so a suppress cycle preserves the operator's
+/// per-protocol visibility. Shows the live state + a toggle.
+fn server_detail_auto_suppress_section(
+    server: &vpnctl_core::Server,
+    opt_in: bool,
+    suppressed_at: Option<&str>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid_enc = path_segment_encode(&server.id.0);
+    let (btn_bg, btn_fg) = if opt_in {
+        ("transparent", "var(--ink)")
+    } else {
+        ("var(--ink)", "var(--paper)")
+    };
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(
+                lang,
+                "When ON, the daemon removes this server from clients' subscriptions after it fails the unreachable threshold (3 consecutive SSH probes ≈ 30 min) and restores it on the first successful probe. OFF (default) = a down server stays in the subscription and clients fall back on their own.",
+                "Когда ВКЛ, демон убирает этот сервер из подписок клиентов после порога недоступности (3 неудачные SSH-пробы подряд ≈ 30 мин) и возвращает при первой успешной пробе. ВЫКЛ (по умолчанию) = упавший сервер остаётся в подписке, клиенты фолбэкаются сами.",
+            )) {
+            (tr(lang, "AUTO-SUPPRESS WHEN DOWN", "АВТО-СКРЫТИЕ ПРИ ПАДЕНИИ"))
+        }
+        @if let Some(ts) = suppressed_at {
+            div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--acc); color: var(--acc); margin: 8px 0 12px;" {
+                (tr(lang, "● currently SUPPRESSED since ", "● сейчас СКРЫТ с ")) (ts)
+                (tr(lang, " — hidden from subscriptions; auto-restores on recovery.", " — скрыт из подписок; вернётся автоматически при восстановлении."))
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                @if opt_in {
+                    (tr(lang, "Armed — server is currently reachable; will auto-hide if it goes down.", "Взведено — сервер сейчас доступен; авто-скроется если упадёт."))
+                } @else {
+                    (tr(lang, "Off — a down server stays in the subscription (clients fall back themselves).", "Выкл — упавший сервер остаётся в подписке (клиенты фолбэкаются сами)."))
+                }
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/auto-suppress"))
+             style="display: inline;" {
+            input type="hidden" name="enabled" value=(if opt_in { "false" } else { "true" });
+            button type="submit"
+                   style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
+                @if opt_in {
+                    (tr(lang, "turn off auto-suppress", "выключить авто-скрытие"))
+                } @else {
+                    (tr(lang, "turn on auto-suppress", "включить авто-скрытие"))
+                }
+            }
+        }
+    }
+}
+
 /// Reserved-ports section on the server-detail page (migration 0028).
 /// Renders ALWAYS (even when the list is empty) so the operator has
 /// a discoverable place to add port pins for a newly-detected co-
@@ -12509,6 +12580,34 @@ pub(crate) async fn server_set_display_name(
         return internal_error(anyhow::Error::new(e));
     }
 
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/auto-suppress` — toggle the per-server
+/// opt-in (migration 0030) to auto-hide the server from subscriptions
+/// while it's unreachable. Form field `enabled` = "true"/"false".
+/// Turning it OFF also lifts any active suppression (handled in the
+/// inventory layer). Audited (`server.auto_suppress.set`); redirects to
+/// the detail page.
+pub(crate) async fn server_set_auto_suppress(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    let enabled = form_field(&body, "enabled").as_deref() == Some("true");
+    if let Err(e) = state.inv.set_server_auto_suppress(&sid, enabled).await {
+        return internal_error(anyhow::Error::new(e));
+    }
     Redirect::to(&format!(
         "/admin/servers/{}",
         path_segment_encode(&server_id)

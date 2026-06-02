@@ -304,6 +304,17 @@ async fn collect_vless_uris_for_user(
 
     let mut uris: Vec<String> = Vec::with_capacity(servers.len());
     for server in &servers {
+        // Auto-suppress (migration 0030): skip a server the health
+        // monitor flagged unreachable (per-server opt-in); auto-restores
+        // on recovery. DB error → don't suppress (keep it in the sub).
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
         // Visibility filter (migration 0018): ninitux endpoint emits
         // VLESS+REALITY only, so skip this server if vless+reality is
         // hidden globally OR per-this-user. Skipping = NO URI for this

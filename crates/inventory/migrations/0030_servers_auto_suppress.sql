@@ -1,0 +1,22 @@
+-- Auto-suppress a server from the subscription render while it is
+-- unreachable, with automatic restore on recovery (Pavel 2026-06-02).
+--
+-- Two columns:
+--   auto_suppress_when_unreachable — per-server OPT-IN (default 0/off).
+--     Operator enables it on nodes where a dead URI should be pulled
+--     from clients' configs automatically; left off (the default), a
+--     down server stays in the subscription and clients fall back — the
+--     historical behaviour, unchanged for every existing row.
+--   suppressed_at — runtime state: ISO-8601 timestamp the health monitor
+--     sets when the server crosses the `server.unreachable` consecutive-
+--     failure threshold (AND the opt-in is on), cleared on recovery.
+--     NULL = not currently suppressed.
+--
+-- The subscription render (`/sub` + `/api/v1/app/config`) skips a server
+-- when auto_suppress_when_unreachable=1 AND suppressed_at IS NOT NULL.
+-- Deliberately SEPARATE from server_protocols.hidden (NM-10) so an
+-- auto-suppress cycle never clobbers the operator's manual hide/show
+-- choices — when the node recovers, the operator's per-protocol
+-- visibility is exactly as they left it.
+ALTER TABLE servers ADD COLUMN auto_suppress_when_unreachable INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE servers ADD COLUMN suppressed_at TEXT;

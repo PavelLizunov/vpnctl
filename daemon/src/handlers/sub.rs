@@ -439,6 +439,17 @@ async fn resolve_v2ray_subscription(
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
     let mut links: Vec<String> = Vec::new();
     for server in &servers {
+        // Auto-suppress (migration 0030): skip a server the health
+        // monitor flagged unreachable (per-server opt-in); auto-restores
+        // on recovery. DB error → don't suppress (keep it in the sub).
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let secrets = state
             .inv
             .list_server_secrets(&server.id)
@@ -538,6 +549,17 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
     let mut tags: Vec<String> = Vec::new();
 
     for server in &servers {
+        // Auto-suppress (migration 0030): skip a server the health
+        // monitor flagged unreachable (per-server opt-in); auto-restores
+        // on recovery. DB error → don't suppress (keep it in the sub).
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let secrets = state
             .inv
             .list_server_secrets(&server.id)

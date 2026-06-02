@@ -397,6 +397,31 @@ pub async fn dispatch_alerts(
                     "insert server.unreachable alert failed"
                 ),
             }
+            // Auto-suppress (migration 0030): if the operator opted this
+            // server in, flag it suppressed so the subscription render
+            // stops handing clients a dead URI. Idempotent — only the
+            // first crossing actually writes + audits; later still-down
+            // ticks are no-ops. Gated on the per-server opt-in (default
+            // off → unchanged behaviour, server stays in the sub).
+            match inv.server_auto_suppress_state(&server.id).await {
+                Ok((true, _)) => {
+                    if let Err(e) = inv.set_server_suppressed(&server.id, true).await {
+                        tracing::warn!(
+                            target = "vpnctld::node_probe",
+                            server = %server.id.0,
+                            error = %e,
+                            "auto-suppress set failed"
+                        );
+                    }
+                }
+                Ok((false, _)) => {} // opt-in off — leave it in the sub.
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::node_probe",
+                    server = %server.id.0,
+                    error = %e,
+                    "auto-suppress state read failed"
+                ),
+            }
         }
         UnreachableTransition::Recovered => {
             auto_ack(
@@ -406,6 +431,18 @@ pub async fn dispatch_alerts(
                 "probe succeeded after consecutive failures",
             )
             .await;
+            // Auto-restore (migration 0030): lift any active suppression
+            // so the server returns to the subscription. Always honoured
+            // (even if the opt-in was toggled off while down); idempotent
+            // no-op when it wasn't suppressed.
+            if let Err(e) = inv.set_server_suppressed(&server.id, false).await {
+                tracing::warn!(
+                    target = "vpnctld::node_probe",
+                    server = %server.id.0,
+                    error = %e,
+                    "auto-restore (clear suppressed) failed"
+                );
+            }
         }
         UnreachableTransition::NoChange => {}
     }

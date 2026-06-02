@@ -611,6 +611,144 @@ impl SqliteInventory {
         Ok(row.0 != 0)
     }
 
+    /// Auto-suppress state for a server (migration 0030): the per-server
+    /// opt-in + the current runtime `suppressed_at` timestamp. Returns
+    /// `(opt_in, suppressed_at)`; `(false, None)` for an unknown id.
+    pub async fn server_auto_suppress_state(
+        &self,
+        sid: &ServerId,
+    ) -> Result<(bool, Option<String>)> {
+        let row: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT auto_suppress_when_unreachable, suppressed_at FROM servers WHERE id = ?1",
+        )
+        .bind(&sid.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(o, s)| (o != 0, s)).unwrap_or((false, None)))
+    }
+
+    /// Subscription-render gate: `true` iff this server should be hidden
+    /// from subscriptions RIGHT NOW — opt-in ON **and** currently flagged
+    /// suppressed. Checked per-server in the `/sub` + `/api/v1/app/config`
+    /// render loops, on TOP of the per-protocol visibility filter.
+    pub async fn is_server_auto_suppressed(&self, sid: &ServerId) -> Result<bool> {
+        let (opt_in, suppressed_at) = self.server_auto_suppress_state(sid).await?;
+        Ok(opt_in && suppressed_at.is_some())
+    }
+
+    /// Set the per-server auto-suppress OPT-IN. Turning it OFF also
+    /// clears any live `suppressed_at` (the server returns to the
+    /// subscription immediately — the operator overrode the automation).
+    /// Audit-on-actual-change (`server.auto_suppress.set`); `Invalid` on
+    /// unknown id.
+    pub async fn set_server_auto_suppress(&self, sid: &ServerId, enabled: bool) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let prior: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT auto_suppress_when_unreachable, suppressed_at FROM servers WHERE id = ?1",
+        )
+        .bind(&sid.0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (prior_opt, prior_suppressed) = match prior {
+            Some((o, s)) => (o != 0, s),
+            None => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such server '{}'; cannot set auto_suppress",
+                    sid.0
+                )));
+            }
+        };
+        // Turning the opt-in off also lifts an active suppression.
+        let new_suppressed: Option<String> = if enabled {
+            prior_suppressed.clone()
+        } else {
+            None
+        };
+        if prior_opt == enabled && prior_suppressed == new_suppressed {
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE servers SET auto_suppress_when_unreachable = ?1, suppressed_at = ?2 WHERE id = ?3",
+        )
+        .bind(i64::from(enabled))
+        .bind(&new_suppressed)
+        .bind(&sid.0)
+        .execute(&mut *tx)
+        .await?;
+        let payload = serde_json::json!({
+            "server_id": sid.0,
+            "enabled": enabled,
+            "cleared_active_suppression": prior_suppressed.is_some() && new_suppressed.is_none(),
+        });
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("admin")
+        .bind("server.auto_suppress.set")
+        .bind(&sid.0)
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Monitor-driven: set or clear the runtime `suppressed_at` flag.
+    /// Idempotent — only writes (and audits) on an actual transition;
+    /// returns `true` when it changed. Audits `server.auto_suppressed`
+    /// (set) or `server.auto_restored` (clear). The CALLER gates on the
+    /// opt-in before setting; clearing is always honoured (so a recovery
+    /// lifts suppression even if the opt-in was toggled off meanwhile).
+    /// `Invalid` on unknown id.
+    pub async fn set_server_suppressed(&self, sid: &ServerId, suppressed: bool) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let prior: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT suppressed_at FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prior_suppressed = match prior {
+            Some((s,)) => s.is_some(),
+            None => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such server '{}'; cannot set suppressed_at",
+                    sid.0
+                )));
+            }
+        };
+        if prior_suppressed == suppressed {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        // Timestamp generated SQL-side to match the rest of the schema's
+        // `strftime` ISO-8601-millis format.
+        sqlx::query(
+            "UPDATE servers SET suppressed_at = CASE WHEN ?1 = 1 \
+                 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END \
+             WHERE id = ?2",
+        )
+        .bind(i64::from(suppressed))
+        .bind(&sid.0)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("vpnctld")
+        .bind(if suppressed {
+            "server.auto_suppressed"
+        } else {
+            "server.auto_restored"
+        })
+        .bind(&sid.0)
+        .bind(serde_json::json!({ "server_id": sid.0 }).to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Replace a server's `address` + `ssh_port` + `ssh_user` in
     /// place. Used by the `--overwrite-existing` path of
     /// `vpnctl migrate from-bash` when an operator's earlier

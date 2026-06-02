@@ -757,6 +757,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/display-name",
             post(admin::server_set_display_name),
         )
+        // Auto-suppress opt-in (migration 0030). Toggle whether the
+        // server is auto-hidden from subscriptions while unreachable
+        // (health monitor sets/clears the runtime suppressed_at flag).
+        .route(
+            "/admin/servers/{id}/auto-suppress",
+            post(admin::server_set_auto_suppress),
+        )
         // Reserved-ports list (migration 0028). Operator pins ports
         // the daemon must never touch via sing-box — a sing-box
         // pre-apply guard refuses any rendered inbound on a

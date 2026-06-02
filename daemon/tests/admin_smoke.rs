@@ -2798,6 +2798,63 @@ async fn dispatch_alerts_reopens_after_manual_ack_while_still_down() {
 }
 
 #[tokio::test]
+async fn dispatch_alerts_auto_suppress_sets_and_clears_with_optin() {
+    // Migration 0030: with the per-server opt-in ON, crossing the
+    // unreachable threshold flags the server suppressed (render skips
+    // it); recovery clears it. With opt-in OFF, failures never suppress.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    let mk = |id: &str| vpnctl_core::Server {
+        id: vpnctl_core::ServerId(id.into()),
+        address: format!("{id}.example.com"),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    let opted = mk("optin");
+    let plain = mk("plain");
+    inv.add_server(&opted).await.unwrap();
+    inv.add_server(&plain).await.unwrap();
+    inv.set_server_auto_suppress(&opted.id, true).await.unwrap();
+
+    let fail = || vpnctld::node_probe_poller::ProbeOutcome::SshFailed("timeout".into());
+    let mut fs = vpnctld::node_probe_poller::FailState::with_threshold(2);
+
+    // 2 failures each → opted crosses threshold.
+    for _ in 0..2 {
+        vpnctld::node_probe_poller::dispatch_alerts(&inv, &opted, &fail(), &mut fs).await;
+        vpnctld::node_probe_poller::dispatch_alerts(&inv, &plain, &fail(), &mut fs).await;
+    }
+    assert!(
+        inv.is_server_auto_suppressed(&opted.id).await.unwrap(),
+        "opted-in server must be suppressed after the threshold"
+    );
+    assert!(
+        !inv.is_server_auto_suppressed(&plain.id).await.unwrap(),
+        "opt-in OFF server must NEVER be auto-suppressed"
+    );
+
+    // Recovery on the opted server → suppression lifted.
+    vpnctld::node_probe_poller::dispatch_alerts(
+        &inv,
+        &opted,
+        &vpnctld::node_probe_poller::ProbeOutcome::Ok(vpnctld::node_probe::Probe::default()),
+        &mut fs,
+    )
+    .await;
+    assert!(
+        !inv.is_server_auto_suppressed(&opted.id).await.unwrap(),
+        "recovery must auto-restore the server to the subscription"
+    );
+}
+
+#[tokio::test]
 async fn settings_telegram_section_renders_with_disabled_status_by_default() {
     // Phase G chunk 3 part 1 — fresh DB, Telegram section appears
     // with «disabled» status + the input form.

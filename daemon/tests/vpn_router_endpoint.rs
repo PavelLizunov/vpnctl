@@ -411,3 +411,54 @@ async fn vpn_router_per_device_id_throttles_after_burst() {
         "requests past the burst must 429; statuses={statuses:?}"
     );
 }
+
+/// Helper: does `de` appear in the rendered subscription (raw base64
+/// / VPN-client UA path)? All inventory mutations MUST happen before
+/// calling this — the per-request access-log writer is a background
+/// task, and interleaving an audited inventory write after a fetch
+/// races it into a WAL read→write-upgrade SQLITE_BUSY.
+async fn de_in_subscription(app: axum::Router) -> bool {
+    let (status, body, _ct) = get(
+        app,
+        &format!("/api/v1/app/config/{TEST_DEVICE_ID}"),
+        "v2rayN/6.62",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let decoded = BASE64_STANDARD.decode(&body).unwrap();
+    let s = String::from_utf8(decoded).unwrap();
+    s.split('\n').any(|l| l.contains("@de.example.com"))
+}
+
+/// Migration 0030: an auto-suppressed server (opt-in ON + suppressed_at
+/// set) is dropped from the rendered subscription.
+#[tokio::test]
+async fn vpn_router_auto_suppressed_server_drops_from_subscription() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let de = ServerId("de".into());
+    // All writes BEFORE the single fetch (no post-fetch write to race
+    // the access-log writer).
+    state.inv.set_server_auto_suppress(&de, true).await.unwrap();
+    state.inv.set_server_suppressed(&de, true).await.unwrap();
+    assert!(
+        !de_in_subscription(router(state.clone())).await,
+        "suppressed de must be absent from the subscription"
+    );
+}
+
+/// Migration 0030: clearing suppression (recovery) returns the server.
+#[tokio::test]
+async fn vpn_router_cleared_suppression_returns_server() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let de = ServerId("de".into());
+    // Suppress then clear — both before the fetch.
+    state.inv.set_server_auto_suppress(&de, true).await.unwrap();
+    state.inv.set_server_suppressed(&de, true).await.unwrap();
+    state.inv.set_server_suppressed(&de, false).await.unwrap();
+    assert!(
+        de_in_subscription(router(state.clone())).await,
+        "cleared suppression returns de to the subscription"
+    );
+}
