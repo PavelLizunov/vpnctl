@@ -431,20 +431,28 @@ pub async fn dispatch_alerts(
                 "probe succeeded after consecutive failures",
             )
             .await;
-            // Auto-restore (migration 0030): lift any active suppression
-            // so the server returns to the subscription. Always honoured
-            // (even if the opt-in was toggled off while down); idempotent
-            // no-op when it wasn't suppressed.
-            if let Err(e) = inv.set_server_suppressed(&server.id, false).await {
-                tracing::warn!(
-                    target = "vpnctld::node_probe",
-                    server = %server.id.0,
-                    error = %e,
-                    "auto-restore (clear suppressed) failed"
-                );
-            }
         }
         UnreachableTransition::NoChange => {}
+    }
+
+    // Auto-restore (migration 0030): clear suppression on ANY successful
+    // probe — NOT only the `Recovered` transition. The in-memory
+    // FailState resets on a daemon restart (routine — every redeploy),
+    // so a server suppressed before the restart would otherwise stay
+    // suppressed forever if it recovered within fewer than `threshold`
+    // failed probes (recover() emits `Recovered` only when it had a
+    // fired state to clear → otherwise NoChange → the clear never ran).
+    // Tying the clear to the Ok OUTCOME — idempotent no-op when not
+    // suppressed — makes restore restart-safe. (review-agent critical.)
+    if matches!(outcome, ProbeOutcome::Ok(_)) {
+        if let Err(e) = inv.set_server_suppressed(&server.id, false).await {
+            tracing::warn!(
+                target = "vpnctld::node_probe",
+                server = %server.id.0,
+                error = %e,
+                "auto-restore (clear suppressed) failed"
+            );
+        }
     }
 
     // ─── server.fail2ban.banned_self (per-probe-snapshot verdict) ─

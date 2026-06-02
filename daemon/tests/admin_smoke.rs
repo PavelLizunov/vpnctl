@@ -2855,6 +2855,54 @@ async fn dispatch_alerts_auto_suppress_sets_and_clears_with_optin() {
 }
 
 #[tokio::test]
+async fn dispatch_alerts_auto_restore_survives_daemon_restart() {
+    // review-agent critical: suppressed_at persists in the DB, but the
+    // in-memory FailState resets on a daemon restart. A server suppressed
+    // before the restart, then recovering, would never hit the
+    // `Recovered` transition (fired=false post-restart) — so the clear
+    // must be tied to the Ok OUTCOME, not the transition. Simulate:
+    // pre-suppressed server + FRESH FailState + one Ok probe → restored.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let inv = st.inv.clone();
+    let server = vpnctl_core::Server {
+        id: vpnctl_core::ServerId("fi".into()),
+        address: "84.19.3.104".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    // Pre-restart state: opted in + already suppressed.
+    inv.set_server_auto_suppress(&server.id, true)
+        .await
+        .unwrap();
+    inv.set_server_suppressed(&server.id, true).await.unwrap();
+    assert!(inv.is_server_auto_suppressed(&server.id).await.unwrap());
+
+    // FRESH FailState = post-restart (fired/counter wiped). A single Ok
+    // probe returns NoChange from observe() (nothing was being tracked),
+    // yet the outcome-based clear must still restore the server.
+    let mut fresh = vpnctld::node_probe_poller::FailState::with_threshold(2);
+    vpnctld::node_probe_poller::dispatch_alerts(
+        &inv,
+        &server,
+        &vpnctld::node_probe_poller::ProbeOutcome::Ok(vpnctld::node_probe::Probe::default()),
+        &mut fresh,
+    )
+    .await;
+    assert!(
+        !inv.is_server_auto_suppressed(&server.id).await.unwrap(),
+        "a successful probe must clear suppression even with no Recovered transition (restart-safe)"
+    );
+}
+
+#[tokio::test]
 async fn settings_telegram_section_renders_with_disabled_status_by_default() {
     // Phase G chunk 3 part 1 — fresh DB, Telegram section appears
     // with «disabled» status + the input form.
