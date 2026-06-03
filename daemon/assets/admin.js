@@ -59,8 +59,13 @@
         line("✓ complete.", "var(--acc-good, #2c5f2d)");
         es.close();
         btn.textContent = "✓ done — reloading…";
+        // `data-reload-self` reloads the CURRENT page (ignoring the
+        // server-provided redirect) — used by the deploy-all button on a
+        // user page so its "pending deploy" banner re-computes + clears,
+        // rather than bouncing to /admin/servers.
+        var reloadSelf = btn.getAttribute("data-reload-self");
         setTimeout(function () {
-          window.location = redirect || window.location.href;
+          window.location = reloadSelf ? window.location.href : redirect || window.location.href;
         }, 1200);
       });
 

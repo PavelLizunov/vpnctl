@@ -2996,9 +2996,33 @@ pub(crate) async fn user_detail(
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0; font-size: 12px;" {
                     (crate::i18n::tr(
                         lang,
-                        "Until you click «deploy» on each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss.",
-                        "Пока не нажмёшь «deploy» на каждом сервере выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23.",
+                        "Until you deploy each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss. Or just hit the one-click button below.",
+                        "Пока не задеплоишь каждый сервер выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23. Либо просто нажми кнопку ниже.",
                     ))
+                }
+                // One-click fix right here in the user view: deploy every
+                // server (pushes THIS user's UUID onto each granted node).
+                // Reuses the fleet-wide SSE deploy; `data-reload-self`
+                // reloads this user page on done so the banner re-computes
+                // and clears. A down node (fi etc.) is reported ✗ in the
+                // log; the rest still deploy.
+                div style="margin-top: 10px;" {
+                    button type="button"
+                           data-sse-url="/admin/servers/deploy-all/sse"
+                           data-log="user-deploy-log"
+                           data-reload-self="true"
+                           data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
+                           data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
+                               "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
+                           ))
+                           style="padding: 6px 14px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
+                    }
+                    pre id="user-deploy-log" hidden
+                        style="margin-top: 10px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
                 }
             }
         }

@@ -1225,6 +1225,48 @@ async fn admin_users_href_url_encodes_special_chars() {
 /// `backfill_sub_tokens` which mints a token for every NULL row. So
 /// after `seed()` every user has `Some(token)`.
 ///
+/// The user-detail "pending deploy" banner (multiviruss incident) now
+/// carries an in-view one-click "deploy all servers now" button so the
+/// operator doesn't have to bounce to /admin/servers. It reuses the
+/// fleet deploy-all SSE + `data-reload-self` (reload THIS page on done so
+/// the banner re-computes/clears).
+#[tokio::test]
+async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // u0 granted s0+s1, NO server.deploy after → pending-deploy banner.
+    seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
+    // The banner keys off the user's latest audit mutation vs each
+    // server's last deploy. The low-level `seed()` helper doesn't write
+    // audit rows (the real add_user/grant handlers do — that's why
+    // satta_blud's banner showed in prod), so stamp a user.grant row to
+    // mirror the real flow. With no server.deploy on s0/s1, both are
+    // pending → banner renders.
+    s.inv
+        .audit("admin", "user.grant", Some("u0"), None)
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    // Banner is present.
+    assert!(
+        html.contains("Config not yet deployed to") || html.contains("ещё не задеплоен"),
+        "pending-deploy banner must render when grants aren't deployed"
+    );
+    // In-view deploy-all button wired to the fleet SSE endpoint.
+    assert!(
+        html.contains(r#"data-sse-url="/admin/servers/deploy-all/sse""#),
+        "in-view deploy-all button must target the fleet SSE endpoint"
+    );
+    assert!(
+        html.contains(r#"data-reload-self="true""#),
+        "user-page deploy-all must reload this page (not bounce to /admin/servers)"
+    );
+    assert!(
+        html.contains(r#"id="user-deploy-log""#),
+        "in-view deploy needs its own log pane"
+    );
+}
+
 /// Phase C-2 (writes) will add a `clear_sub_token` / `regenerate_sub_token`
 /// pair that lets us write a real assertion here. For now this test
 /// just confirms the present-token branch keeps working — see also the
