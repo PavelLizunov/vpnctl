@@ -197,6 +197,119 @@ pub fn run_redeploy(
     ReceiverStream::new(rx)
 }
 
+/// Re-deploy EVERY server in one streamed pass — the "Deploy all" button
+/// (2026-06-03). Run after adding a user / granting servers so the new
+/// UUID lands on every node (a grant only updates inv.db; the node's
+/// sing-box isn't touched until a deploy). Sequentially runs
+/// [`run_redeploy`] per server, flattening each server's events into
+/// this single stream as `Step`s (so one server's terminal Ok/Error
+/// isn't mistaken for the whole-run terminal), then emits ONE terminal
+/// `Ok` with a summary. Best-effort: a down node is reported as a `✗`
+/// line and the rest still deploy.
+pub fn run_deploy_all(
+    servers: Vec<Server>,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<BootstrapEvent>(128);
+    tokio::spawn(async move {
+        deploy_all_pipeline(servers, inv, registry, deploy_key_path, tx).await;
+    });
+    ReceiverStream::new(rx)
+}
+
+async fn deploy_all_pipeline(
+    servers: Vec<Server>,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+    tx: mpsc::Sender<BootstrapEvent>,
+) {
+    use tokio_stream::StreamExt;
+    let total = servers.len();
+    let mut ok_count = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+
+    for server in servers {
+        let sid = server.id.0.clone();
+        let _ = tx
+            .send(BootstrapEvent::Step {
+                phase: "server",
+                message: format!("── deploying {sid} ──"),
+            })
+            .await;
+        // Drive this server's re-deploy to completion, forwarding its
+        // events as Step lines (prefixed with the server id). A per-server
+        // Ok/Error becomes a ✓/✗ summary line — NOT a stream terminal.
+        let mut stream = Box::pin(run_redeploy(
+            server,
+            inv.clone(),
+            Arc::clone(&registry),
+            deploy_key_path.clone(),
+        ));
+        let mut had_error = false;
+        while let Some(ev) = stream.next().await {
+            match ev {
+                BootstrapEvent::Step { phase, message } => {
+                    let _ = tx
+                        .send(BootstrapEvent::Step {
+                            phase,
+                            message: format!("{sid}: {message}"),
+                        })
+                        .await;
+                }
+                BootstrapEvent::Ok { .. } => {
+                    let _ = tx
+                        .send(BootstrapEvent::Step {
+                            phase: "apply",
+                            message: format!("✓ {sid} deployed"),
+                        })
+                        .await;
+                }
+                BootstrapEvent::Error { message, .. } => {
+                    had_error = true;
+                    let _ = tx
+                        .send(BootstrapEvent::Step {
+                            phase: "apply",
+                            message: format!("✗ {sid}: {message}"),
+                        })
+                        .await;
+                }
+            }
+        }
+        if had_error {
+            failed.push(sid);
+        } else {
+            ok_count += 1;
+        }
+    }
+
+    let summary = if failed.is_empty() {
+        format!("done — deployed all {total} server(s).")
+    } else {
+        format!(
+            "done — {ok_count}/{total} deployed; failed: {}",
+            failed.join(", ")
+        )
+    };
+    let _ = tx
+        .send(BootstrapEvent::Step {
+            phase: "done",
+            message: summary,
+        })
+        .await;
+    // Terminal Ok — deploy-all is best-effort across the fleet; per-server
+    // failures are surfaced as ✗ lines above. The frontend reloads
+    // /admin/servers to reflect the new state.
+    let _ = tx
+        .send(BootstrapEvent::Ok {
+            server_id: "all".into(),
+            redirect: "/admin/servers".into(),
+        })
+        .await;
+}
+
 async fn redeploy_pipeline(
     server: Server,
     inv: SqliteInventory,

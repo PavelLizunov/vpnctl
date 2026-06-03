@@ -1929,6 +1929,32 @@ pub(crate) async fn servers(
             }
         }
 
+        // Deploy-all — push EVERY server's sing-box config in one click.
+        // Run this after adding a user / granting servers so the new
+        // UUID lands on every node (grants alone only update inv.db; the
+        // node's sing-box isn't touched until a deploy). SSE-streamed via
+        // admin.js [data-sse-url]; per-server progress + a summary land in
+        // the log. Best-effort — a down node is reported, rest still go.
+        @if !server_list.is_empty() {
+            div id="deploy-button" style="margin: 0 0 24px;" {
+                button type="button"
+                       data-sse-url="/admin/servers/deploy-all/sse"
+                       data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
+                       data-retry-label=(crate::i18n::tr(lang, "retry deploy all", "повторить деплой всех"))
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Re-deploy EVERY server: pushes each node's sing-box config so newly-added users' UUIDs land on all of them. Run once after adding a user or granting servers. Best-effort — a down node is reported, the rest still deploy.",
+                           "Передеплоить ВСЕ серверы: пушит конфиг sing-box на каждую ноду, чтобы UUID новых юзеров попали на все. Нажми один раз после добавления юзера или выдачи грантов. Best-effort — упавшая нода отмечается, остальные деплоятся.",
+                       ))
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
+                    " (" (server_list.len()) ")"
+                }
+                pre id="deploy-log" hidden
+                    style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
+            }
+        }
+
         @if server_list.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No servers yet. Click ", "Серверов ещё нет. Кликни "))
@@ -10487,6 +10513,70 @@ pub(crate) async fn server_deploy_sse(
                 event_name = name,
                 error = %e,
                 "redeploy SSE event serialisation failed — emitting placeholder"
+            );
+            format!(
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+            )
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
+/// `GET /admin/servers/deploy-all/sse` — EventSource that re-deploys
+/// EVERY server in one streamed pass (the "Deploy all" button, 2026-06-03).
+/// Run after adding a user / granting servers so the new UUID reaches all
+/// nodes (a grant only updates inv.db; the node's sing-box isn't touched
+/// until a deploy). Same Sec-Fetch-Site same-origin guard + basic-auth as
+/// the single-server SSE deploy. Best-effort across the fleet — heavy
+/// lifting in `wizard_bootstrap::run_deploy_all`.
+pub(crate) async fn servers_deploy_all_sse(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if sfs == "cross-site" || sfs == "none" {
+            return error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-site deploy trigger refused (same-origin only)",
+            );
+        }
+    }
+
+    let servers = match state.inv.list_servers().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let raw = crate::wizard_bootstrap::run_deploy_all(
+        servers,
+        state.inv.clone(),
+        std::sync::Arc::clone(&state.registry),
+        key_path,
+    );
+    let mapped = raw.map(|ev| {
+        let name = match &ev {
+            crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",
+            crate::wizard_bootstrap::BootstrapEvent::Ok { .. } => "ok",
+            crate::wizard_bootstrap::BootstrapEvent::Error { .. } => "error",
+        };
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::deploy_all",
+                event_name = name,
+                error = %e,
+                "deploy-all SSE event serialisation failed — emitting placeholder"
             );
             format!(
                 "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"

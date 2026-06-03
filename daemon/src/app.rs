@@ -805,6 +805,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/deploy/sse",
             get(admin::server_deploy_sse),
         )
+        // "Deploy all" (2026-06-03) — SSE-streamed re-deploy of EVERY
+        // server in one click, so a newly-added user's UUID reaches all
+        // nodes without per-server clicks. 3-segment path — no clash with
+        // the {id} routes above. Same-origin guarded in-handler.
+        .route(
+            "/admin/servers/deploy-all/sse",
+            get(admin::servers_deploy_all_sse),
+        )
         // Migration 0018: per-(server, protocol) hide flag + per-(user,
         // server, protocol) deny override. 4 POST handlers — server-
         // level chip is on /admin/servers/{id}; per-user grid is on

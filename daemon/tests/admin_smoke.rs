@@ -742,6 +742,83 @@ async fn admin_servers_renders_one_card_per_server_with_user_counts() {
     );
 }
 
+/// "Deploy all" button (2026-06-03): the servers page shows the
+/// SSE-driven deploy-all trigger + the live log pane when ≥1 server.
+#[tokio::test]
+async fn admin_servers_renders_deploy_all_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers").await;
+    assert!(
+        html.contains(r#"data-sse-url="/admin/servers/deploy-all/sse""#),
+        "deploy-all button must carry the SSE trigger URL"
+    );
+    assert!(
+        html.contains("deploy all servers"),
+        "deploy-all button label drifted"
+    );
+    assert!(
+        html.contains(r#"id="deploy-log""#),
+        "deploy-all needs a live log pane"
+    );
+}
+
+/// `run_deploy_all` flattens each server's re-deploy into one stream and
+/// ends in a single terminal Ok with a summary — even when servers fail
+/// (here: no deploy key on disk → every server errors, but the run still
+/// completes and reports the failures rather than aborting).
+#[tokio::test]
+async fn run_deploy_all_streams_terminal_ok_with_per_server_failures() {
+    use tokio_stream::StreamExt;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 0, &[]).await;
+    let servers = s.inv.list_servers().await.unwrap();
+    // A deploy-key path that does NOT exist → run_redeploy fails each
+    // server at the pre-flight; deploy_all forwards the failures and
+    // still reaches its terminal Ok.
+    let key = dir.path().join("nope-id_ed25519");
+    let stream = vpnctld::wizard_bootstrap::run_deploy_all(
+        servers,
+        s.inv.clone(),
+        std::sync::Arc::clone(&s.registry),
+        key,
+    );
+    tokio::pin!(stream);
+    let mut events = Vec::new();
+    while let Some(ev) = stream.next().await {
+        events.push(ev);
+    }
+    // Exactly one terminal Ok, and it's the LAST event.
+    match events.last() {
+        Some(vpnctld::wizard_bootstrap::BootstrapEvent::Ok { server_id, .. }) => {
+            assert_eq!(server_id, "all");
+        }
+        other => panic!("expected terminal Ok{{server_id:\"all\"}}, got {other:?}"),
+    }
+    // Per-server failures surfaced as ✗ step lines, and a summary that
+    // names them (both seeded servers failed → "failed: …").
+    let joined: String = events
+        .iter()
+        .filter_map(|e| match e {
+            vpnctld::wizard_bootstrap::BootstrapEvent::Step { message, .. } => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("✗ s0"),
+        "s0 failure must be reported: {joined}"
+    );
+    assert!(
+        joined.contains("failed:"),
+        "summary must report failures: {joined}"
+    );
+}
+
 /// Pluralisation guard for the dashboard "across N grants" subtitle:
 /// 1 grant must read "1 grant" (singular), >1 must read "N grants".
 #[tokio::test]
