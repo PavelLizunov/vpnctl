@@ -32,8 +32,8 @@ use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_kernels::SingBox;
-use vpnctl_protocols::VlessReality;
+use vpnctl_kernels::{Caddy, SingBox};
+use vpnctl_protocols::{Naive, VlessReality};
 use vpnctld::{AppState, router};
 
 const TEST_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
@@ -460,5 +460,257 @@ async fn vpn_router_cleared_suppression_returns_server() {
     assert!(
         de_in_subscription(router(state.clone())).await,
         "cleared suppression returns de to the subscription"
+    );
+}
+
+// ── Part B: naive delivery into the ninitux endpoint ────────────────────
+
+const NAIVE_DEVICE_ID: &str = "b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6";
+
+/// Seed a state where naive is a first-class citizen: SingBox+Caddy kernels
+/// and Vless+Naive protocols registered, a vless server `de`, a naive
+/// server `cdn` (Caddy kernel, `naive` enabled, `naive.domain` provisioned),
+/// and a user granted on BOTH. The user carries a `tuic_password` because
+/// the pre-Part-A naive `share_link` reads it (Part A swaps this to a
+/// dedicated `naive_password`; this test moves with that change).
+async fn seed_state_with_naive(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(Caddy::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(Naive::new())).unwrap();
+
+    // vless server
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    // naive server — Caddy kernel, naive protocol, ACME domain provisioned.
+    let cdn = Server {
+        id: ServerId("cdn".into()),
+        address: "cdn.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("caddy".into())],
+        enabled_protocols: vec![ProtocolId("naive".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&cdn).await.unwrap();
+    inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: Some("NAIVE_TEST_PW".into()),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, NAIVE_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("cdn".into())).await.unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+/// Decode the raw-base64 (VPN-client UA) subscription into its lines.
+async fn subscription_lines(app: axum::Router, device_id: &str) -> Vec<String> {
+    let (status, body, _ct) = get(
+        app,
+        &format!("/api/v1/app/config/{device_id}"),
+        "v2rayN/6.62",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let decoded = BASE64_STANDARD.decode(&body).unwrap();
+    let s = String::from_utf8(decoded).unwrap();
+    s.split('\n').map(str::to_owned).collect()
+}
+
+/// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
+/// every vless line (two-pass render). The userinfo carries the user id +
+/// credential and the host is the ACME domain.
+#[tokio::test]
+async fn vpn_router_naive_uri_appended_after_all_vless() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_naive(&dir).await;
+    let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
+
+    assert_eq!(lines.len(), 2, "expected 1 vless + 1 naive: {lines:?}");
+    assert!(
+        lines[0].starts_with("vless://") && lines[0].contains("@de.example.com"),
+        "vless must be first: {lines:?}"
+    );
+    let naive = lines.last().unwrap();
+    assert!(
+        naive.starts_with("naive+https://"),
+        "naive must be last: {lines:?}"
+    );
+    assert!(
+        naive.contains("tester-1:NAIVE_TEST_PW@cdn.example.com"),
+        "naive userinfo + ACME host: {naive}"
+    );
+    // The naive line never precedes a vless line — guards the two-pass order.
+    let first_naive = lines
+        .iter()
+        .position(|l| l.starts_with("naive+https://"))
+        .unwrap();
+    let last_vless = lines
+        .iter()
+        .rposition(|l| l.starts_with("vless://"))
+        .unwrap();
+    assert!(
+        first_naive > last_vless,
+        "every vless precedes every naive: {lines:?}"
+    );
+}
+
+/// Kill-switch: hiding naive on the server (NM-10) drops it from the
+/// subscription on the very next request — and the vless lines are
+/// untouched. This is the instant, redeploy-free abort path.
+#[tokio::test]
+async fn vpn_router_hidden_naive_excluded_vless_intact() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_naive(&dir).await;
+    // All mutations BEFORE the fetch (access-log writer race, see above).
+    state
+        .inv
+        .set_server_protocol_hidden(&ServerId("cdn".into()), &ProtocolId("naive".into()), true)
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
+
+    assert!(
+        !lines.iter().any(|l| l.starts_with("naive+https://")),
+        "hidden naive must be absent: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("@de.example.com")),
+        "vless must remain after hiding naive: {lines:?}"
+    );
+}
+
+/// Opt-in by grant: a user NOT granted on the naive server gets a
+/// vless-only blob — byte-identical to the pre-Part-B output. Proves naive
+/// cannot break vless for the fleet default (un-opted users).
+#[tokio::test]
+async fn vpn_router_user_without_naive_grant_gets_no_naive() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_naive(&dir).await;
+    // Revoke the naive grant BEFORE the fetch → user granted only on de.
+    state
+        .inv
+        .revoke(&UserId("tester-1".into()), &ServerId("cdn".into()))
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
+
+    // Byte-integrity: EXACTLY the de vless line, unchanged shape (uuid,
+    // host:port, fragment). Proves the naive append path didn't perturb a
+    // single byte of the vless output for an un-opted user — the operator's
+    // hard requirement.
+    assert_eq!(lines.len(), 1, "exactly the de vless line: {lines:?}");
+    assert!(
+        !lines[0].starts_with("naive+https://"),
+        "ungranted user must get no naive line: {lines:?}"
+    );
+    assert!(
+        lines[0].starts_with("vless://11111111-2222-3333-4444-555555555555@de.example.com:443"),
+        "de vless uuid/host/port intact: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("#Germany%20VLESS%20~tester-1"),
+        "de vless fragment intact: {}",
+        lines[0]
+    );
+}
+
+/// A user granted ONLY on the naive server (no vless grant) gets a
+/// single-line naive-only blob — `make_config_blob` doesn't choke on the
+/// vless-empty case and naive renders standalone.
+#[tokio::test]
+async fn vpn_router_naive_only_user_gets_naive_line() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_naive(&dir).await;
+    // Revoke the vless grant → user granted only on cdn (naive).
+    state
+        .inv
+        .revoke(&UserId("tester-1".into()), &ServerId("de".into()))
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
+
+    assert_eq!(lines.len(), 1, "exactly the naive line: {lines:?}");
+    assert!(
+        lines[0].starts_with("naive+https://") && lines[0].contains("@cdn.example.com"),
+        "naive-only blob: {lines:?}"
+    );
+}
+
+/// Injection defence end-to-end: a `naive.domain` carrying a newline +
+/// forged `vless://` line is REJECTED by the share_link guard → the naive
+/// render errors → the handler logs + serves vless-only. The forged line
+/// NEVER reaches the blob, and the legitimate vless line is untouched.
+#[tokio::test]
+async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_naive(&dir).await;
+    // Overwrite the cdn domain with an injection payload BEFORE the fetch.
+    state
+        .inv
+        .set_server_secret(
+            &ServerId("cdn".into()),
+            "naive.domain",
+            "evil.com\nvless://forged@9.9.9.9:443?inject=1",
+        )
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
+
+    assert!(
+        !lines.iter().any(|l| l.contains("forged")),
+        "no forged line may reach the blob: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("naive+https://")),
+        "the rejected naive server emits no link: {lines:?}"
+    );
+    // The legitimate de vless line is served unchanged.
+    assert_eq!(lines.len(), 1, "vless-only after naive rejected: {lines:?}");
+    assert!(
+        lines[0].contains("@de.example.com:443"),
+        "vless intact: {lines:?}"
     );
 }
