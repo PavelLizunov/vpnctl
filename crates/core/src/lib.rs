@@ -784,6 +784,164 @@ impl Registry {
                 });
             }
         }
+
+        // Cross-protocol port-conflict guard: two enabled protocols that
+        // bind the same (transport, port) on one host collide at runtime
+        // — e.g. naive's Caddy on tcp/443 vs VLESS+REALITY's sing-box on
+        // tcp/443. Catch it here, before any SSH session, instead of
+        // discovering it as a crash-looping second daemon. Protocols
+        // whose port is runtime-configurable declare none (the
+        // `listen_ports()` default) and are skipped.
+        let mut bound: HashMap<(&str, u16), &ProtocolId> = HashMap::new();
+        for pid in &server.enabled_protocols {
+            let Some(proto) = self.protocol(pid) else {
+                continue;
+            };
+            for &(transport, port) in proto.listen_ports() {
+                if let Some(prev) = bound.insert((transport, port), pid) {
+                    return Err(CoreError::Render(format!(
+                        "port conflict on {transport}/{port}: protocols '{prev}' and \
+                         '{pid}' both bind it on server '{}'. Move one to a different \
+                         port or a dedicated node (naive needs a host with no 443/TCP \
+                         sing-box protocol).",
+                        server.id
+                    )));
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod validate_server_port_conflict {
+    use super::*;
+    use async_trait::async_trait;
+
+    #[derive(Debug)]
+    struct FakeProto {
+        id: &'static str,
+        ports: &'static [(&'static str, u16)],
+    }
+    impl Protocol for FakeProto {
+        fn id(&self) -> ProtocolId {
+            ProtocolId(self.id.to_string())
+        }
+        fn server_inbound(&self, _: &RenderCtx<'_>, _: &[User]) -> Result<serde_json::Value> {
+            Ok(serde_json::Value::Null)
+        }
+        fn client_config(&self, _: &RenderCtx<'_>, _: &User) -> Result<serde_json::Value> {
+            Ok(serde_json::Value::Null)
+        }
+        fn share_link(&self, _: &RenderCtx<'_>, _: &User) -> Result<String> {
+            Ok(String::new())
+        }
+        fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+            self.ports
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeKernel {
+        supports: Vec<&'static str>,
+    }
+    #[async_trait]
+    impl Kernel for FakeKernel {
+        fn id(&self) -> KernelId {
+            KernelId("fake".to_string())
+        }
+        fn supported_protocols(&self) -> Vec<ProtocolId> {
+            self.supports
+                .iter()
+                .map(|s| ProtocolId(s.to_string()))
+                .collect()
+        }
+        async fn ensure_installed(&self, _: &dyn SshTransport) -> Result<()> {
+            Ok(())
+        }
+        fn render_config(
+            &self,
+            _: &RenderCtx<'_>,
+            _: &[User],
+            _: &[&dyn Protocol],
+        ) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        async fn apply_config(&self, _: &dyn SshTransport, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn restart(&self, _: &dyn SshTransport) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _: &dyn SshTransport) -> Result<KernelStatus> {
+            Ok(KernelStatus {
+                active: false,
+                version: None,
+                uptime_seconds: None,
+            })
+        }
+    }
+
+    fn registry(protos: Vec<(&'static str, &'static [(&'static str, u16)])>) -> Registry {
+        let mut r = Registry::new();
+        let supports: Vec<&'static str> = protos.iter().map(|(id, _)| *id).collect();
+        r.register_kernel(Box::new(FakeKernel { supports }))
+            .unwrap();
+        for (id, ports) in protos {
+            r.register_protocol(Box::new(FakeProto { id, ports }))
+                .unwrap();
+        }
+        r
+    }
+
+    fn server(protos: &[&'static str]) -> Server {
+        Server {
+            id: ServerId("s1".into()),
+            address: "1.2.3.4".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("fake".into())],
+            enabled_protocols: protos.iter().map(|p| ProtocolId(p.to_string())).collect(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    #[test]
+    fn same_transport_and_port_conflicts() {
+        let reg = registry(vec![("vless", &[("tcp", 443)]), ("naive", &[("tcp", 443)])]);
+        let err = reg
+            .validate_server(&server(&["vless", "naive"]))
+            .unwrap_err();
+        match err {
+            CoreError::Render(m) => {
+                assert!(m.contains("port conflict"), "msg: {m}");
+                assert!(m.contains("443"), "msg: {m}");
+                assert!(m.contains("vless") && m.contains("naive"), "msg: {m}");
+            }
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_ports_ok() {
+        let reg = registry(vec![("vless", &[("tcp", 443)]), ("tuic", &[("udp", 8443)])]);
+        assert!(reg.validate_server(&server(&["vless", "tuic"])).is_ok());
+    }
+
+    #[test]
+    fn same_port_different_transport_ok() {
+        // tcp/443 and udp/443 are distinct sockets — not a conflict.
+        let reg = registry(vec![("a", &[("tcp", 443)]), ("b", &[("udp", 443)])]);
+        assert!(reg.validate_server(&server(&["a", "b"])).is_ok());
+    }
+
+    #[test]
+    fn protocol_without_declared_ports_never_conflicts() {
+        let reg = registry(vec![("vless", &[("tcp", 443)]), ("portless", &[])]);
+        assert!(reg.validate_server(&server(&["vless", "portless"])).is_ok());
     }
 }
