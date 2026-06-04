@@ -76,7 +76,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
-use vpnctl_core::UserId;
+use vpnctl_core::{RenderCtx, User, UserId};
 
 use crate::app::AppState;
 
@@ -397,6 +397,91 @@ async fn collect_vless_uris_for_user(
     Ok(uris)
 }
 
+/// Collect ninitux-format naive URIs for `user` — one per granted server
+/// that has the `naive` protocol enabled + visible (NM-10) + provisioned
+/// (`naive.domain` server secret present). Mirrors the skip rules of
+/// `collect_vless_uris_for_user` (auto-suppress + the SAME
+/// `visible_protocols_for_subscription` filter), but renders through the
+/// protocol registry's `share_link` so the `naive+https://…` format has
+/// ONE source of truth (`crates/protocols/src/naive.rs`) rather than a
+/// second hand-rolled renderer.
+///
+/// **Opt-in by grant + visibility.** Returns an empty Vec — never an
+/// error — when naive isn't registered or the user isn't granted naive on
+/// any naive-enabled server. The caller appends this AFTER all vless URIs,
+/// so a user not opted into naive gets a byte-identical vless-only blob:
+/// their vless cannot break. Hiding naive on the server (NM-10) drops it
+/// here on the very next request → instant per-request kill-switch, no
+/// redeploy.
+///
+/// **Failure-isolated.** A single server's render error is logged and
+/// skipped (the other servers — and every vless line — still render). Only
+/// a top-level inventory error propagates, and the caller treats even that
+/// as "serve vless-only", so naive is strictly additive and can never
+/// drop a user's vless.
+async fn collect_naive_uris_for_user(state: &AppState, user: &User) -> Result<Vec<String>, String> {
+    let naive_id = vpnctl_core::ProtocolId("naive".to_string());
+    // Naive not registered in this daemon's registry → nothing to add.
+    let Some(proto) = state.registry.protocol(&naive_id) else {
+        return Ok(Vec::new());
+    };
+
+    let servers = state
+        .inv
+        .servers_for_user(&user.id)
+        .await
+        .map_err(|e| format!("servers_for_user: {e}"))?;
+
+    let mut uris: Vec<String> = Vec::new();
+    for server in &servers {
+        // Same auto-suppress (migration 0030) skip as the vless path.
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        // OR-semantics visibility (NM-10): server-hidden OR per-user-denied
+        // → naive absent for this (user, server). This is the kill-switch.
+        let visible = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .map_err(|e| format!("visible_protocols_for_subscription: {e}"))?;
+        if !visible.contains(&naive_id) {
+            continue;
+        }
+        let secrets = state
+            .inv
+            .list_server_secrets(&server.id)
+            .await
+            .map_err(|e| format!("list_server_secrets: {e}"))?;
+        // naive needs an ACME domain to dial; skip an un-provisioned server
+        // the same way the vless path skips a missing public_key / short_id.
+        if !secrets.contains_key("naive.domain") {
+            continue;
+        }
+        let ctx = RenderCtx::new(server, &secrets);
+        match proto.share_link(&ctx, user) {
+            Ok(link) => uris.push(link),
+            Err(e) => {
+                // One server's failure must not abort the others or the
+                // vless lines — log + skip, never propagate.
+                tracing::warn!(
+                    target = "vpnctld::vpn_router",
+                    user = %user.id,
+                    server = %server.id,
+                    error = %e,
+                    "naive share_link failed; skipping this server"
+                );
+            }
+        }
+    }
+    Ok(uris)
+}
+
 /// Encode the joined URIs as base64. Empty input → empty output.
 fn make_config_blob(uris: &[String]) -> Option<String> {
     if uris.is_empty() {
@@ -660,13 +745,29 @@ pub(crate) async fn get_config(
         return empty_response(want_raw, now);
     }
 
-    let uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0).await {
+    let mut uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0).await {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "uri collection failed");
             return empty_response(want_raw, now);
         }
     };
+
+    // Part B (naive delivery) — append naive URIs STRICTLY AFTER all vless.
+    // Opt-in by grant + visibility: a user not granted naive on any
+    // naive-enabled server gets an empty Vec here, so `uris` (and the blob
+    // below) stays byte-identical to the pre-B vless-only output — their
+    // vless cannot break. Naive is purely ADDITIVE and failure-isolated:
+    // any error collecting it is logged and we serve vless-only, never
+    // dropping the user's vless. Trailing position keeps every vless line
+    // intact for a line-by-line tolerant client parser even if it can't
+    // parse the naive line.
+    match collect_naive_uris_for_user(&state, &user).await {
+        Ok(naive_uris) => uris.extend(naive_uris),
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "naive uri collection failed; serving vless-only");
+        }
+    }
 
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);

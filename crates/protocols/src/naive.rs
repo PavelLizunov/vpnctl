@@ -84,6 +84,35 @@ const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'?');
 
+/// Characters that must never appear in a `naive.domain` when it is woven
+/// into a CLIENT artefact. `\n`/`\r`/tab would forge extra lines into the
+/// newline-joined `/api/v1/app/config` base64 blob (see
+/// `daemon/src/handlers/vpn_router.rs::collect_naive_uris_for_user`) —
+/// turning a bad domain into an arbitrary-`vless://`-line injection — and
+/// the URI-structural chars (` /?#@\`) would corrupt the `naive+https://…`
+/// link itself. A real hostname contains none of these.
+///
+/// `naive.domain` is operator-set and NOT validated at the inventory layer
+/// (only the Caddy KERNEL guards the SERVER side — `crates/kernels/src/
+/// caddy.rs`); this is the matching guard for the CLIENT side. Fail-closed:
+/// a bad domain makes `share_link`/`client_config` return `Err`, which the
+/// ninitux handler logs + skips → the user keeps their vless, naive is just
+/// absent. Mirrors the kernel's `ILLEGAL` set, widened for URI context.
+const DOMAIN_ILLEGAL: &[char] = &['\n', '\r', '\t', ' ', '/', '?', '#', '@', '\\', '{', '}'];
+
+/// `RenderCtx::require("naive.domain")` + reject [`DOMAIN_ILLEGAL`].
+/// Single source of truth for "a domain safe to put in a client artefact",
+/// shared by `share_link` and `client_config`.
+fn checked_domain<'a>(ctx: &'a RenderCtx<'_>) -> Result<&'a str> {
+    let domain = ctx.require("naive.domain")?;
+    if domain.contains(DOMAIN_ILLEGAL) {
+        return Err(CoreError::Render(format!(
+            "naive.domain contains illegal characters: {domain:?}"
+        )));
+    }
+    Ok(domain)
+}
+
 impl Protocol for Naive {
     fn id(&self) -> ProtocolId {
         ProtocolId("naive".to_string())
@@ -144,7 +173,7 @@ impl Protocol for Naive {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
-        let domain = ctx.require("naive.domain")?;
+        let domain = checked_domain(ctx)?;
         let pw = user.tuic_password.as_deref().ok_or_else(|| {
             CoreError::Render(format!(
                 "user '{}' has no tuic_password — cannot mint a naive client config",
@@ -172,7 +201,7 @@ impl Protocol for Naive {
     }
 
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
-        let domain = ctx.require("naive.domain")?;
+        let domain = checked_domain(ctx)?;
         let raw_pw = user.tuic_password.as_deref().ok_or_else(|| {
             CoreError::Render(format!(
                 "user '{}' has no tuic_password — cannot mint a naive link",
@@ -350,5 +379,45 @@ mod tests {
             .share_link(&ctx, &user("alice", None))
             .unwrap_err();
         assert!(matches!(err, CoreError::Render(_)));
+    }
+
+    #[test]
+    fn client_artefacts_reject_newline_injection_domain() {
+        // A `naive.domain` carrying a newline + a forged `vless://` line
+        // must be REJECTED fail-closed, not interpolated raw — otherwise it
+        // would forge an extra line into the newline-joined
+        // `/api/v1/app/config` base64 blob and defeat the "naive can never
+        // break vless" guarantee. Both client-facing renderers guard it.
+        let s = server();
+        let mut sec = HashMap::new();
+        sec.insert(
+            "naive.domain".into(),
+            "evil.com\nvless://forged@1.2.3.4:443?x".into(),
+        );
+        let ctx = RenderCtx::new(&s, &sec);
+        let n = Naive::new();
+        assert!(
+            n.share_link(&ctx, &user("alice", Some("pw"))).is_err(),
+            "share_link must reject an injection domain"
+        );
+        assert!(
+            n.client_config(&ctx, &user("alice", Some("pw"))).is_err(),
+            "client_config must reject the same domain"
+        );
+    }
+
+    #[test]
+    fn client_artefacts_reject_space_and_uri_structural_domains() {
+        let s = server();
+        let n = Naive::new();
+        for bad in ["a b.com", "x.com/path", "x.com@evil", "x.com?q", "x.com#f"] {
+            let mut sec = HashMap::new();
+            sec.insert("naive.domain".into(), bad.to_string());
+            let ctx = RenderCtx::new(&s, &sec);
+            assert!(
+                n.share_link(&ctx, &user("alice", Some("pw"))).is_err(),
+                "share_link must reject domain {bad:?}"
+            );
+        }
     }
 }
