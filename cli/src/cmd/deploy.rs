@@ -17,7 +17,6 @@ use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{Protocol, RenderCtx, ServerId, SshTransport};
-use vpnctl_crypto::{gen_short_id, gen_wireguard_keypair, gen_x25519_keypair};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_ssh::RusshTransportBuilder;
 
@@ -90,55 +89,28 @@ pub(crate) async fn run(
     }
 
     // ─── 3. Bootstrap missing secrets ────────────────────────────────────
-    let mut secrets = inv.list_server_secrets(&sid).await?;
-
-    let needs_reality = server
-        .enabled_protocols
-        .iter()
-        .any(|p| p.0 == "vless+reality");
-    if needs_reality
-        && (!secrets.contains_key("vless.private_key")
-            || !secrets.contains_key("vless.public_key")
-            || !secrets.contains_key("vless.short_id"))
-    {
-        println!("→ generating REALITY keypair + short_id (first deploy)");
-        let (priv_key, pub_key) = gen_x25519_keypair();
-        let short_id = gen_short_id()?;
-        inv.set_server_secret(&sid, "vless.private_key", &priv_key)
-            .await?;
-        inv.set_server_secret(&sid, "vless.public_key", &pub_key)
-            .await?;
-        inv.set_server_secret(&sid, "vless.short_id", &short_id)
-            .await?;
-        secrets.insert("vless.private_key".into(), priv_key);
-        secrets.insert("vless.public_key".into(), pub_key);
-        secrets.insert("vless.short_id".into(), short_id);
+    // Declarative + shared with the daemon's wizard/web deploy
+    // (`vpnctl_inventory::bootstrap_server_secrets`): walk each enabled
+    // protocol's `server_secret_specs()` and mint+persist any missing
+    // server-side secret (REALITY keypair + short_id, WireGuard server
+    // keypair, Hysteria2 obfs password, Shadowsocks-2022 PSK, …).
+    // Idempotent — established keys are never rotated. Previously the CLI
+    // hand-rolled vless/wireguard minting only, so a server with
+    // shadowsocks-2022 hard-failed at render with `MissingSecret {
+    // ss2022.psk }` and hysteria2's Salamander obfs silently degraded.
+    println!("→ bootstrapping per-protocol server secrets (idempotent)");
+    let (secrets, minted) = vpnctl_inventory::bootstrap_server_secrets(&inv, &server, &registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("secret bootstrap failed: {e}"))?;
+    for label in &minted {
+        println!("  minted {label}");
     }
 
-    // WireGuard / AmneziaWG SERVER keypair (NOT per-user — those are
-    // user.wireguard_pubkey / user.wireguard_private already). The
-    // server's keypair is what each client's [Peer] block references
-    // as `PublicKey =`; without these the `WireGuard::share_link`
-    // fails with `MissingSecret(wireguard.server_public_key)` and
-    // Flow B on user-detail shows "share-link render failed".
-    // (Caught 2026-05-16 when Pavel enabled wireguard on stg and
-    // main-brat's Flow B kept showing the missing-secret error
-    // despite the protocol being enabled.)
-    let needs_wireguard = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
-    if needs_wireguard
-        && (!secrets.contains_key("wireguard.server_public_key")
-            || !secrets.contains_key("wireguard.server_private_key"))
-    {
-        println!("→ generating WireGuard server keypair (first wireguard deploy)");
-        let (priv_key, pub_key) = gen_wireguard_keypair();
-        inv.set_server_secret(&sid, "wireguard.server_private_key", &priv_key)
-            .await?;
-        inv.set_server_secret(&sid, "wireguard.server_public_key", &pub_key)
-            .await?;
-        secrets.insert("wireguard.server_private_key".into(), priv_key);
-        secrets.insert("wireguard.server_public_key".into(), pub_key);
-    }
-
+    // TUIC / Hysteria2 / Trojan / AnyTLS share ONE node-side self-signed
+    // cert. This is NOT a `server_secret_specs` secret — it's an
+    // openssl-generated file pair on the node (`tuic.cert_present` is just
+    // a marker), so the declarative bootstrap above never provisions it.
+    // Generate it here on first deploy.
     let needs_tuic = server.enabled_protocols.iter().any(|p| p.0 == "tuic-v5");
     if needs_tuic {
         let probe = ssh
@@ -253,4 +225,113 @@ pub(crate) fn resolve_key_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf>
     }
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve $HOME"))?;
     Ok(home.join(".ssh/id_ed25519"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! Regression net for the secret-bootstrap drift: `vpnctl deploy` must
+    //! mint EVERY enabled protocol's server-side secret via the shared
+    //! declarative `bootstrap_server_secrets` (built over each protocol's
+    //! `server_secret_specs()`), NOT the old hardcoded vless/wireguard
+    //! set. The bug: shadowsocks-2022's `ss2022.psk` was never minted →
+    //! the whole node deploy hard-failed at render with `MissingSecret {
+    //! ss2022.psk }`; hysteria2's `hysteria2.obfs.password` was omitted →
+    //! Salamander obfs silently degraded. We exercise the SAME shared
+    //! function the deploy path now calls (the deploy `run` itself needs a
+    //! live node over SSH, so we test the secret-bootstrap seam directly).
+
+    use tempfile::TempDir;
+    use vpnctl_core::{KernelId, ProtocolId, RenderCtx, Server, ServerId};
+    use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
+
+    fn server_with(protocols: &[&str]) -> Server {
+        Server {
+            id: ServerId("ss-node".into()),
+            address: "203.0.113.50".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: protocols.iter().map(|p| ProtocolId((*p).into())).collect(),
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    async fn open(dir: &TempDir) -> SqliteInventory {
+        SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .expect("open")
+    }
+
+    #[tokio::test]
+    async fn cli_deploy_bootstrap_mints_ss2022_and_hy2_secrets() {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        let registry = crate::registry::build().unwrap();
+        let server = server_with(&["vless+reality", "shadowsocks-2022", "hysteria2"]);
+        inv.add_server(&server).await.unwrap();
+
+        let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
+
+        // Headline fix: ss2022 PSK minted (was silently omitted), in the
+        // sing-box-compatible STANDARD base64 (24 chars, padded — a
+        // url-safe/unpadded PSK would crash the node config).
+        let psk = secrets
+            .get("ss2022.psk")
+            .expect("ss2022.psk must be minted by the CLI deploy bootstrap");
+        assert_eq!(psk.len(), 24, "aes-128 PSK = 24-char padded base64");
+        assert!(psk.ends_with("=="), "standard base64 of 16 bytes ends '=='");
+        assert!(
+            !psk.contains('-') && !psk.contains('_'),
+            "PSK must be STANDARD base64, not url-safe"
+        );
+        // hysteria2 Salamander obfs password minted.
+        assert!(secrets.contains_key("hysteria2.obfs.password"));
+        // REALITY still minted (no regression for the protocols the old
+        // hardcoded path already covered).
+        assert!(secrets.contains_key("vless.private_key"));
+        assert!(secrets.contains_key("vless.public_key"));
+        assert!(secrets.contains_key("vless.short_id"));
+
+        // The contract: every enabled protocol renders its server inbound
+        // WITHOUT a MissingSecret after bootstrap — the exact failure mode
+        // the bug produced at deploy time.
+        let ctx = RenderCtx::new(&server, &secrets);
+        for pid in &server.enabled_protocols {
+            let proto = registry.protocol(pid).unwrap();
+            if let Err(vpnctl_core::CoreError::MissingSecret { key, .. }) =
+                proto.server_inbound(&ctx, &[])
+            {
+                panic!("protocol {pid:?} still missing `{key}` after CLI bootstrap");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_deploy_bootstrap_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        let registry = crate::registry::build().unwrap();
+        let server = server_with(&["shadowsocks-2022"]);
+        inv.add_server(&server).await.unwrap();
+
+        let (secrets1, minted1) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
+        assert!(!minted1.is_empty(), "first bootstrap must mint ss2022.psk");
+
+        let (secrets2, minted2) = bootstrap_server_secrets(&inv, &server, &registry)
+            .await
+            .unwrap();
+        assert!(
+            minted2.is_empty(),
+            "second bootstrap must mint nothing; got {minted2:?}"
+        );
+        assert_eq!(secrets1, secrets2, "idempotent — never rotates a key");
+    }
 }

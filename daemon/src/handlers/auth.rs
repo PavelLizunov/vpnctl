@@ -154,6 +154,91 @@ enum PasswordSecret {
     PlainBytes(Arc<Vec<u8>>),
 }
 
+/// Fatal misconfiguration of the admin-auth env vars. Distinct from
+/// "auth unset" (`Ok(None)`): an operator who set a `$argon2…` password
+/// that does NOT parse INTENDED authentication — silently disabling it
+/// (the pre-2026-06-04 behaviour) is a fail-open footgun. Surfacing this
+/// as an error lets the startup gate refuse to boot instead of running
+/// the admin UI with no auth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthConfigError {
+    /// `VPNCTLD_ADMIN_PASSWORD` starts with `$argon2` but is not a valid
+    /// PHC string.
+    MalformedArgon2Hash,
+}
+
+impl std::fmt::Display for AuthConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedArgon2Hash => f.write_str(
+                "VPNCTLD_ADMIN_PASSWORD starts with $argon2 but is not a valid PHC hash",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AuthConfigError {}
+
+/// Effective admin-auth state derived from the env vars. Lifted to an
+/// enum so the startup gate in `crate::config` can apply the SAME
+/// malformed-hash verdict the request-time builder uses — closing the
+/// divergence where the gate only checked the strings were non-empty
+/// while `BasicAuth::from_env()` silently disabled auth on a bad hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdminAuthConfig {
+    /// Both creds present and the password is usable.
+    Configured,
+    /// Auth intentionally unset (a cred is missing or empty).
+    Absent,
+    /// Password present but malformed — fatal.
+    Malformed,
+}
+
+/// Parse a non-empty `VPNCTLD_ADMIN_PASSWORD` value into a stored
+/// [`PasswordSecret`]. `$argon2…` is verified to be a well-formed PHC
+/// string up front (so the per-request hot path never slow-fails on a
+/// malformed hash); anything else is a plaintext secret. Single source
+/// of truth for the "is this password usable?" verdict — shared by
+/// [`BasicAuth::from_parts`] (which builds on it) and
+/// [`classify_admin_auth`] (which only needs the verdict).
+fn parse_password_secret(pw: String) -> Result<PasswordSecret, AuthConfigError> {
+    if pw.starts_with("$argon2") {
+        if PasswordHash::new(&pw).is_err() {
+            return Err(AuthConfigError::MalformedArgon2Hash);
+        }
+        Ok(PasswordSecret::Argon2Phc(Arc::new(pw)))
+    } else {
+        Ok(PasswordSecret::PlainBytes(Arc::new(pw.into_bytes())))
+    }
+}
+
+/// Pure classification of admin-auth credentials (no `BasicAuth` built,
+/// no session-key derivation, no plaintext warn). Mirrors
+/// [`BasicAuth::from_parts`]'s tri-state exactly so the startup gate and
+/// the request-time builder can never disagree about whether auth is
+/// present / absent / malformed.
+pub(crate) fn classify_admin_auth(user: Option<String>, pw: Option<String>) -> AdminAuthConfig {
+    let (Some(user), Some(pw)) = (user, pw) else {
+        return AdminAuthConfig::Absent;
+    };
+    if user.is_empty() || pw.is_empty() {
+        return AdminAuthConfig::Absent;
+    }
+    match parse_password_secret(pw) {
+        Ok(_) => AdminAuthConfig::Configured,
+        Err(AuthConfigError::MalformedArgon2Hash) => AdminAuthConfig::Malformed,
+    }
+}
+
+/// Read-from-env wrapper for [`classify_admin_auth`], used by the
+/// startup gate (`crate::config::assert_auth_safe_for_addr`).
+pub(crate) fn classify_admin_auth_env() -> AdminAuthConfig {
+    classify_admin_auth(
+        std::env::var("VPNCTLD_ADMIN_USER").ok(),
+        std::env::var("VPNCTLD_ADMIN_PASSWORD").ok(),
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct BasicAuth {
     pub user: Arc<String>,
@@ -179,31 +264,48 @@ fn derive_session_key(secret: &PasswordSecret) -> [u8; 32] {
 }
 
 impl BasicAuth {
-    /// Construct from env. Returns `None` if either var is missing —
-    /// caller decides whether to enforce or skip the layer.
+    /// Construct from env. Thin wrapper over [`BasicAuth::from_parts`]
+    /// reading `VPNCTLD_ADMIN_USER` / `VPNCTLD_ADMIN_PASSWORD`.
+    pub(crate) fn from_env() -> Result<Option<Self>, AuthConfigError> {
+        Self::from_parts(
+            std::env::var("VPNCTLD_ADMIN_USER").ok(),
+            std::env::var("VPNCTLD_ADMIN_PASSWORD").ok(),
+        )
+    }
+
+    /// Pure constructor — env reads lifted to params so the malformed-
+    /// hash verdict is unit-testable without touching the process
+    /// environment (Rust 2024 + workspace `unsafe_code = "forbid"` makes
+    /// `std::env::set_var` unavailable in tests).
     ///
-    /// Detects `$argon2` prefix → Argon2Phc; otherwise → PlainBytes
-    /// with a one-shot warn-log on the startup logger.
-    pub(crate) fn from_env() -> Option<Self> {
-        let user = std::env::var("VPNCTLD_ADMIN_USER").ok()?;
-        let pw = std::env::var("VPNCTLD_ADMIN_PASSWORD").ok()?;
+    /// Tri-state result — the distinction is the whole point of the
+    /// fail-open fix (B3 follow-up, 2026-06-04):
+    ///
+    ///   * `Ok(None)` — auth intentionally UNSET (a var is missing or
+    ///     empty). Caller may skip the layer (local-smoke path).
+    ///   * `Ok(Some(_))` — auth configured and usable (valid `$argon2`
+    ///     PHC, or a plaintext backward-compat secret).
+    ///   * `Err(MalformedArgon2Hash)` — the operator set a `$argon2…`
+    ///     password that does NOT parse. FATAL, never `None`: returning
+    ///     `None` here is exactly what let `admin_router` drop its auth
+    ///     layer and fall open while the startup gate (which only saw a
+    ///     non-empty string) waved the boot through.
+    ///
+    /// Detects `$argon2` prefix → Argon2Phc; otherwise → PlainBytes with
+    /// a one-shot warn-log on the startup logger.
+    pub(crate) fn from_parts(
+        user: Option<String>,
+        pw: Option<String>,
+    ) -> Result<Option<Self>, AuthConfigError> {
+        let (Some(user), Some(pw)) = (user, pw) else {
+            return Ok(None);
+        };
         if user.is_empty() || pw.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let secret = if pw.starts_with("$argon2") {
-            // Validate the hash parses at construction time, so a
-            // malformed env doesn't slow-fail on first request.
-            if PasswordHash::new(&pw).is_err() {
-                tracing::error!(
-                    target = "vpnctld::auth",
-                    "VPNCTLD_ADMIN_PASSWORD starts with $argon2 but doesn't parse \
-                     as a PHC string — basic-auth DISABLED. Re-generate via \
-                     `vpnctl admin hash-password <plain>`."
-                );
-                return None;
-            }
-            PasswordSecret::Argon2Phc(Arc::new(pw))
-        } else {
+        let is_plaintext = !pw.starts_with("$argon2");
+        let secret = parse_password_secret(pw)?;
+        if is_plaintext {
             tracing::warn!(
                 target = "vpnctld::auth",
                 "VPNCTLD_ADMIN_PASSWORD is plaintext — backward-compat path. \
@@ -212,14 +314,13 @@ impl BasicAuth {
                  Plaintext is verified at request time via constant-time \
                  compare but offers zero defense if the env file leaks."
             );
-            PasswordSecret::PlainBytes(Arc::new(pw.into_bytes()))
-        };
+        }
         let session_key = Arc::new(derive_session_key(&secret));
-        Some(Self {
+        Ok(Some(Self {
             user: Arc::new(user),
             secret,
             session_key,
-        })
+        }))
     }
 
     /// Build the cookie value `<exp>.<sig>` for the configured user
@@ -342,6 +443,22 @@ pub(crate) async fn require_basic_auth(
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, hv);
     }
     resp
+}
+
+/// Fail-closed admin layer for the case where [`BasicAuth::from_env`]
+/// reports a malformed credential config (e.g. a `$argon2…` password
+/// that doesn't parse). In production the startup gate
+/// (`crate::config::assert_auth_safe_for_addr`) refuses to boot on this
+/// verdict, so this layer is never wired on a live daemon — it exists so
+/// `admin_router` can NEVER be constructed in a fail-open state. A
+/// malformed hash LOCKS the admin tree (503) instead of opening it.
+/// Mirrors the `vpnctl admin:` copy contract.
+pub(crate) async fn deny_all_misconfigured(_req: Request, _next: Next) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "vpnctl admin: auth misconfigured\n",
+    )
+        .into_response()
 }
 
 fn check_basic(req: &Request, auth: &BasicAuth) -> bool {
@@ -490,6 +607,97 @@ mod tests {
         let auth = auth_argon2("slovn", "$argon2id$bogus");
         let req = req_with_basic("slovn", "anything");
         assert!(!check_basic(&req, &auth));
+    }
+
+    // ─── from_parts / classify tri-state (fail-open fix 2026-06-04) ──
+
+    /// A `$argon2`-prefixed value that `PasswordHash::new` rejects: `!`
+    /// is outside the PHC base64 salt alphabet. This is the class of
+    /// value that triggered the fail-open — the old `from_env` returned
+    /// `None` for it, silently disabling admin auth.
+    const MALFORMED_ARGON2: &str = "$argon2id$!!!";
+
+    #[test]
+    fn from_parts_absent_when_a_var_is_missing() {
+        assert!(matches!(BasicAuth::from_parts(None, None), Ok(None)));
+        assert!(matches!(
+            BasicAuth::from_parts(Some("slovn".into()), None),
+            Ok(None)
+        ));
+        assert!(matches!(
+            BasicAuth::from_parts(None, Some("hunter2".into())),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn from_parts_absent_when_a_var_is_empty() {
+        assert!(matches!(
+            BasicAuth::from_parts(Some(String::new()), Some("hunter2".into())),
+            Ok(None)
+        ));
+        assert!(matches!(
+            BasicAuth::from_parts(Some("slovn".into()), Some(String::new())),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn from_parts_configured_for_plaintext_password() {
+        let got = BasicAuth::from_parts(Some("slovn".into()), Some("hunter2".into()));
+        assert!(
+            matches!(got, Ok(Some(_))),
+            "plaintext creds must yield a usable BasicAuth"
+        );
+    }
+
+    #[test]
+    fn from_parts_configured_for_valid_argon2() {
+        let phc = make_phc("hunter2");
+        let got = BasicAuth::from_parts(Some("slovn".into()), Some(phc));
+        assert!(
+            matches!(got, Ok(Some(_))),
+            "valid argon2 PHC must yield a usable BasicAuth"
+        );
+    }
+
+    #[test]
+    fn from_parts_malformed_argon2_is_error_not_none() {
+        // THE fail-open regression guard: a `$argon2…` password that does
+        // NOT parse must be a hard error, NEVER `Ok(None)`. `Ok(None)` is
+        // the value `admin_router` treats as "skip the auth layer" —
+        // returning it here is what disabled admin auth while the startup
+        // gate (which only saw a non-empty string) let the daemon boot.
+        //
+        // `!` is outside the PHC base64 salt alphabet, so `PasswordHash::new`
+        // rejects this — unlike `$argon2id$nope`, whose trailing token is a
+        // valid (if useless) b64 salt that parses fine.
+        let got = BasicAuth::from_parts(Some("slovn".into()), Some(MALFORMED_ARGON2.into()));
+        assert!(
+            matches!(got, Err(AuthConfigError::MalformedArgon2Hash)),
+            "malformed argon2 must be a hard error, not Ok(None)"
+        );
+    }
+
+    #[test]
+    fn classify_admin_auth_mirrors_from_parts_tristate() {
+        assert_eq!(classify_admin_auth(None, None), AdminAuthConfig::Absent);
+        assert_eq!(
+            classify_admin_auth(Some("slovn".into()), Some(String::new())),
+            AdminAuthConfig::Absent
+        );
+        assert_eq!(
+            classify_admin_auth(Some("slovn".into()), Some("plain".into())),
+            AdminAuthConfig::Configured
+        );
+        assert_eq!(
+            classify_admin_auth(Some("slovn".into()), Some(make_phc("x"))),
+            AdminAuthConfig::Configured
+        );
+        assert_eq!(
+            classify_admin_auth(Some("slovn".into()), Some(MALFORMED_ARGON2.into())),
+            AdminAuthConfig::Malformed
+        );
     }
 
     #[test]

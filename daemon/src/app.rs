@@ -1180,26 +1180,47 @@ fn admin_router(state: AppState) -> Router {
             ),
         ));
 
-    if let Some(auth) = BasicAuth::from_env() {
-        // `route_layer` (NOT `layer`) so the auth challenge fires ONLY
-        // on matched admin routes. With `.layer()` the middleware
-        // wrapped axum's fallback too: every unrelated path (e.g.
-        // `/etc/passwd`, `/`, `/foo`) reaching this router returned
-        // `401 WWW-Authenticate: Basic realm="vpnctl admin"` —
-        // identifying the backend as vpnctld to any probe. Caught by
-        // pre-monitoring vuln scan 2026-05-20 (`curl
-        // http://192.168.0.236:18402/etc/passwd` → 401 admin realm).
-        //
-        // `route_layer` leaves unmatched paths with axum's default
-        // 404 (no body, no admin realm). Matched `/admin/*` routes
-        // still get the auth check — same UX for legitimate operators,
-        // no fingerprint leak for probes hitting random paths.
-        with_security_headers.route_layer(axum::middleware::from_fn_with_state(
-            auth,
-            crate::handlers::auth::require_basic_auth,
-        ))
-    } else {
-        with_security_headers
+    match BasicAuth::from_env() {
+        Ok(Some(auth)) => {
+            // `route_layer` (NOT `layer`) so the auth challenge fires ONLY
+            // on matched admin routes. With `.layer()` the middleware
+            // wrapped axum's fallback too: every unrelated path (e.g.
+            // `/etc/passwd`, `/`, `/foo`) reaching this router returned
+            // `401 WWW-Authenticate: Basic realm="vpnctl admin"` —
+            // identifying the backend as vpnctld to any probe. Caught by
+            // pre-monitoring vuln scan 2026-05-20 (`curl
+            // http://192.168.0.236:18402/etc/passwd` → 401 admin realm).
+            //
+            // `route_layer` leaves unmatched paths with axum's default
+            // 404 (no body, no admin realm). Matched `/admin/*` routes
+            // still get the auth check — same UX for legitimate operators,
+            // no fingerprint leak for probes hitting random paths.
+            with_security_headers.route_layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::handlers::auth::require_basic_auth,
+            ))
+        }
+        // Auth intentionally unset (env vars missing/empty) — local-smoke
+        // path. The startup gate (`assert_auth_safe_for_addr`) already
+        // refused a non-loopback bind in this state, so reaching here
+        // means a loopback bind where open admin is acceptable.
+        Ok(None) => with_security_headers,
+        // Malformed credential config (a `$argon2…` password that doesn't
+        // parse). FAIL CLOSED — lock the admin tree behind a 503 rather
+        // than fall through to an unauthenticated router. Unreachable on a
+        // live daemon: the startup gate refuses to boot on this verdict.
+        // Kept as a belt-and-braces guarantee that the router can NEVER be
+        // built in a fail-open state (the pre-2026-06-04 bug).
+        Err(e) => {
+            tracing::error!(
+                target = "vpnctld::auth",
+                error = %e,
+                "admin auth config malformed — locking admin tree (fail closed)"
+            );
+            with_security_headers.route_layer(axum::middleware::from_fn(
+                crate::handlers::auth::deny_all_misconfigured,
+            ))
+        }
     }
 }
 

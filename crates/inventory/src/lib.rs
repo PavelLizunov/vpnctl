@@ -9,6 +9,11 @@
 //! used it in 9 months (audit I3 catch).
 
 pub mod backup;
+// Declarative per-server secret bootstrap, shared by the daemon's
+// wizard/web deploy AND the CLI `vpnctl deploy` so the two paths can't
+// drift (the CLI used to hand-roll vless/wireguard minting and miss
+// shadowsocks-2022's `ss2022.psk` + hysteria2's obfs password).
+pub mod bootstrap;
 pub mod migrate;
 pub mod sqlite;
 
@@ -17,6 +22,7 @@ pub use backup::{
     list_snapshots, parse_snapshot_filename, prune_snapshots, restore_from, snapshot_filename_at,
     snapshot_now, snapshot_to, verify_snapshot,
 };
+pub use bootstrap::bootstrap_server_secrets;
 pub use migrate::{
     BashInventoryEnv, BashSingboxData, BashTuicUser, BashVlessUser, MigrationOutcome,
     MigrationPlan, SkippedUser, apply_migration_plan, build_migration_plan,

@@ -4708,6 +4708,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "vpnctl-core",
  "vpnctl-crypto",

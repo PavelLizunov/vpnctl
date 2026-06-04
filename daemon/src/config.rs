@@ -67,15 +67,16 @@ fn dirs_data_dir() -> Option<PathBuf> {
 /// an mTLS reverse proxy that handles auth) but the doc-comment is
 /// explicit: this is the only knob, no half-measures.
 pub fn assert_auth_safe_for_addr(addr: SocketAddr) -> anyhow::Result<()> {
-    let user_present = std::env::var("VPNCTLD_ADMIN_USER")
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let pw_present = std::env::var("VPNCTLD_ADMIN_PASSWORD")
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
     let insecure_override = std::env::var_os("VPNCTLD_ALLOW_INSECURE_NONLOCAL")
         .is_some_and(|v| v == "1" || v == "true");
-    assert_auth_safe_for_addr_with(addr, user_present, pw_present, insecure_override)
+    // Classify the EFFECTIVE auth config with the SAME parser the
+    // request-time builder (`BasicAuth::from_env`) uses. Pre-2026-06-04
+    // this gate only checked the env strings were non-empty, so a
+    // malformed `$argon2…` password sailed through here while
+    // `BasicAuth::from_env()` returned `None` and the admin router
+    // dropped its auth layer → admin UI served with NO auth (fail-open).
+    let auth = crate::handlers::auth::classify_admin_auth_env();
+    assert_auth_safe_for_addr_inner(addr, auth, insecure_override)
 }
 
 /// Pure inner helper — same logic as [`assert_auth_safe_for_addr`] but
@@ -83,12 +84,53 @@ pub fn assert_auth_safe_for_addr(addr: SocketAddr) -> anyhow::Result<()> {
 /// branch without touching the process environment (which under Rust
 /// 2024 + workspace `unsafe_code = "forbid"` would require unsafe
 /// blocks that aren't allowed in this crate).
+///
+/// The presence-bool form can only express Configured vs Absent — it
+/// carries no malformed-hash signal, so it routes through
+/// [`assert_auth_safe_for_addr_inner`] with the corresponding verdict.
 pub fn assert_auth_safe_for_addr_with(
     addr: SocketAddr,
     user_present: bool,
     pw_present: bool,
     insecure_override: bool,
 ) -> anyhow::Result<()> {
+    use crate::handlers::auth::AdminAuthConfig;
+    let auth = if user_present && pw_present {
+        AdminAuthConfig::Configured
+    } else {
+        AdminAuthConfig::Absent
+    };
+    assert_auth_safe_for_addr_inner(addr, auth, insecure_override)
+}
+
+/// Core gate over the already-classified auth verdict. Composes the
+/// bind-safety check (B3) with auth-validity:
+///
+///   * `Malformed` — ALWAYS fatal, regardless of bind address and NOT
+///     rescued by the insecure override. The operator set a `$argon2…`
+///     password that doesn't parse: they intended auth, so we refuse to
+///     boot rather than silently run with none. This is the core of the
+///     fail-open fix.
+///   * loopback bind — proceed regardless of auth state (local smoke).
+///   * insecure override — proceed (upstream handles auth).
+///   * `Configured` — proceed.
+///   * `Absent` on a non-loopback bind — refuse with a remediation
+///     message naming both env vars.
+pub(crate) fn assert_auth_safe_for_addr_inner(
+    addr: SocketAddr,
+    auth: crate::handlers::auth::AdminAuthConfig,
+    insecure_override: bool,
+) -> anyhow::Result<()> {
+    use crate::handlers::auth::AdminAuthConfig;
+    if matches!(auth, AdminAuthConfig::Malformed) {
+        return Err(anyhow::anyhow!(
+            "vpnctld refuses to start: VPNCTLD_ADMIN_PASSWORD begins with $argon2 \
+             but is not a valid PHC hash. Admin auth would be DISABLED (fail-open). \
+             Re-generate the hash via `vpnctl admin hash-password` and paste the \
+             full $argon2id$… line into /etc/vpnctl/vpnctld.env, or set a plaintext \
+             password."
+        ));
+    }
     if addr.ip().is_loopback() {
         return Ok(());
     }
@@ -101,7 +143,7 @@ pub fn assert_auth_safe_for_addr_with(
         );
         return Ok(());
     }
-    if user_present && pw_present {
+    if matches!(auth, AdminAuthConfig::Configured) {
         return Ok(());
     }
     Err(anyhow::anyhow!(
@@ -157,5 +199,57 @@ mod tests {
         let addr: SocketAddr = "0.0.0.0:18402".parse().unwrap();
         let res = assert_auth_safe_for_addr_with(addr, false, false, true);
         assert!(res.is_ok(), "override must bypass the check");
+    }
+
+    // ─── malformed-argon2 fail-open fix (2026-06-04) ─────────────────
+    //
+    // Regression net for the bug where the startup gate trusted the raw
+    // env strings (non-empty → "auth present") while `BasicAuth::from_env`
+    // returned `None` on a malformed `$argon2…` hash → admin router served
+    // with no auth. The gate now classifies via the SAME parser; a
+    // `Malformed` verdict is fatal everywhere.
+
+    #[test]
+    fn nonlocal_bind_with_malformed_argon2_is_rejected() {
+        use crate::handlers::auth::AdminAuthConfig;
+        let addr: SocketAddr = "0.0.0.0:18402".parse().unwrap();
+        let err = assert_auth_safe_for_addr_inner(addr, AdminAuthConfig::Malformed, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("$argon2") && err.contains("fail-open"),
+            "malformed-argon2 startup error must name the cause; got: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_argon2_is_fatal_even_on_loopback() {
+        // A configured-but-broken password is an operator mistake worth
+        // surfacing everywhere — loopback smoke does NOT excuse it (the
+        // operator clearly intended auth). Otherwise a fat-fingered hash
+        // on 127.0.0.1 would still serve the admin UI with no auth.
+        use crate::handlers::auth::AdminAuthConfig;
+        let addr: SocketAddr = "127.0.0.1:18402".parse().unwrap();
+        assert!(assert_auth_safe_for_addr_inner(addr, AdminAuthConfig::Malformed, false).is_err());
+        let addr6: SocketAddr = "[::1]:18402".parse().unwrap();
+        assert!(assert_auth_safe_for_addr_inner(addr6, AdminAuthConfig::Malformed, false).is_err());
+    }
+
+    #[test]
+    fn malformed_argon2_not_rescued_by_insecure_override() {
+        // The override is an escape hatch for "upstream handles auth",
+        // NOT for "my hash is broken". Malformed stays fatal.
+        use crate::handlers::auth::AdminAuthConfig;
+        let addr: SocketAddr = "0.0.0.0:18402".parse().unwrap();
+        assert!(assert_auth_safe_for_addr_inner(addr, AdminAuthConfig::Malformed, true).is_err());
+    }
+
+    #[test]
+    fn configured_auth_via_inner_allows_nonlocal_bind() {
+        // Sanity: the enum surface still permits a properly-configured
+        // non-loopback bind (mirrors `nonlocal_bind_with_both_creds_is_allowed`).
+        use crate::handlers::auth::AdminAuthConfig;
+        let addr: SocketAddr = "192.0.2.1:18402".parse().unwrap();
+        assert!(assert_auth_safe_for_addr_inner(addr, AdminAuthConfig::Configured, false).is_ok());
     }
 }

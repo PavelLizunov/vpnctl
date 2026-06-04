@@ -64,12 +64,21 @@ enum Cmd {
         key: Option<PathBuf>,
     },
     /// Print share links (vless://, tuic://, ...) for every server×protocol
-    /// the user has been granted access to.
+    /// the user has been granted access to. Applies the same subscription
+    /// policy as the live `/sub` endpoint (disabled user → empty;
+    /// auto-suppressed servers + hidden / per-user-denied protocols
+    /// filtered).
     Sub {
         user: String,
         /// Render an ASCII QR code under each link (for phone scanning).
         #[arg(long)]
         qr: bool,
+        /// Bypass subscription policy and print every raw link, including
+        /// those the live `/sub` endpoint would suppress (disabled user,
+        /// hidden / per-user-denied protocols, auto-suppressed servers).
+        /// For debugging only.
+        #[arg(long)]
+        ignore_policy: bool,
     },
     /// Provision a brand-new node: install our SSH key (using root password
     /// once), record the host fingerprint, and add the server to inventory.
@@ -168,7 +177,11 @@ async fn main() -> std::process::ExitCode {
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
-        Cmd::Sub { user, qr } => cmd::sub::run(&user, qr, cli.db, cli.output).await,
+        Cmd::Sub {
+            user,
+            qr,
+            ignore_policy,
+        } => cmd::sub::run(&user, qr, ignore_policy, cli.db, cli.output).await,
         Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
         Cmd::Render { server } => cmd::render::run(&server, cli.db).await,
         Cmd::Backup { cmd } => cmd::backup::run(cmd, cli.db, cli.output).await,

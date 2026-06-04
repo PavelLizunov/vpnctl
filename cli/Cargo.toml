@@ -49,5 +49,10 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc", "pass
 # `password_hash::SaltString::generate(&mut OsRng)`.
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
+[dev-dependencies]
+# Temp inv.db for the `vpnctl sub` subscription-policy regression tests
+# (same crate + major version the inventory spec tests use).
+tempfile = "3"
+
 [lints]
 workspace = true

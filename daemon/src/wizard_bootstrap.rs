@@ -98,6 +98,12 @@ use crate::ssh_subprocess::{SubprocessSshTransport, ssh_safety_opts};
 use vpnctl_core::shell::single_quote as shell_single_quote;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
 use vpnctl_inventory::SqliteInventory;
+// Per-server secret minting moved to `vpnctl_inventory::bootstrap` so the
+// CLI `vpnctl deploy` shares the SAME declarative `server_secret_specs()`
+// walk (was daemon-only → CLI drifted, missing ss2022.psk + hy2 obfs).
+// Re-exported here so this module's callers (+ `handlers::admin`) keep
+// referring to `wizard_bootstrap::bootstrap_server_secrets`.
+pub use vpnctl_inventory::bootstrap_server_secrets;
 
 /// All the inputs the bootstrap needs. Built by the SSE handler from
 /// the wizard session + the daemon's deploy key path.
@@ -864,180 +870,13 @@ async fn bootstrap_pipeline(
         .await;
 }
 
-/// Mint the per-protocol server-side secrets a Server needs to
-/// render configs (VLESS-REALITY keypair + short_id, WireGuard
-/// server keypair, Hysteria2 obfs password). Idempotent: only mints
-/// what's missing from `inv.list_server_secrets`, so re-running
-/// against a partially-bootstrapped server picks up where the last
-/// run left off.
-///
-/// Returns the full (existing + freshly minted) secret map plus a
-/// list of human-readable "what we minted" labels the caller can
-/// surface in progress logs / audit payload.
-///
-/// # Orthogonal secret minting (kg fix, 2026-05-30)
-///
-/// Each `Protocol` declares the server-side secrets it needs via
-/// `Protocol::server_secret_specs()`; this function iterates the
-/// server's enabled protocols, resolves each through `registry`, and
-/// mints + persists any declared key that's absent. Adding a
-/// secret-bearing protocol is now a one-line spec in its own file —
-/// ZERO edits here (the kernel/protocol orthogonality invariant; this
-/// closes the long-standing PR-TODO).
-///
-/// Idempotent: a key already present is never regenerated, so
-/// re-deploying an established server never rotates a secret out from
-/// under live clients.
-///
-/// Replaces the previous hardcoded vless/wireguard/hysteria2 block,
-/// which silently omitted `shadowsocks-2022`'s `ss2022.psk` (and any
-/// future protocol's secret) → the `kg` deploy 2026-05-30 failed at
-/// render with `MissingSecret { key: "ss2022.psk" }`. Shared by
-/// `wizard_bootstrap::bootstrap_pipeline` AND the `server_deploy`
-/// handler. The wgturn KERNEL secret stays below the loop — it's keyed
-/// on `server.kernels`, not `enabled_protocols`.
-pub async fn bootstrap_server_secrets(
-    inv: &SqliteInventory,
-    server: &Server,
-    registry: &Registry,
-) -> std::result::Result<(std::collections::HashMap<String, String>, Vec<&'static str>), String> {
-    let mut secrets = inv
-        .list_server_secrets(&server.id)
-        .await
-        .map_err(|e| format!("list_server_secrets: {e}"))?;
-    let mut minted: Vec<&'static str> = Vec::new();
-
-    // Protocol-declared server secrets (REALITY keypair + short_id,
-    // Hysteria2 obfs password, Shadowsocks-2022 PSK, WireGuard server
-    // keypair). Driven by each Protocol's `server_secret_specs()`, so a
-    // new secret-bearing protocol needs zero edits here — it returns
-    // its spec and gets minted on the next bootstrap / deploy.
-    for pid in &server.enabled_protocols {
-        let Some(proto) = registry.protocol(pid) else {
-            // Unknown id in inventory — `validate_server` rejects
-            // genuine misconfig before deploy; skip defensively.
-            continue;
-        };
-        for spec in proto.server_secret_specs() {
-            mint_secret_spec(inv, &server.id, spec, &mut secrets, &mut minted).await?;
-        }
-    }
-
-    // wgturn-core: Curve25519 keypair for the bundled `wgturnsrv`
-    // WireGuard backend. **VK link is NOT minted here** — per Pavel
-    // 2026-05-19 + upstream `pkg/wgshare/doc.go`, the VK invite is a
-    // CLIENT-SIDE parameter the end user supplies when running
-    // `wgturn-cli connect-url … --vk-link <url>`. Each VK call has
-    // limited concurrent streams so a shared per-server link would
-    // saturate; per-user end-user-supplied is the correct model.
-    //
-    // Key naming uses `wgturn:` (colon) to match the kernel's
-    // `render_config` look-ups — that's intentional kernel-namespace
-    // separation from the protocol-namespaced dot keys (`vless.*`,
-    // `wireguard.*`, `tuic.*`). A future refactor unifying to dots
-    // touches both call sites — flag this in the comment so it's
-    // greppable.
-    let needs_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
-    if needs_wgturn
-        && (!secrets.contains_key("wgturn:server_wg_private")
-            || !secrets.contains_key("wgturn:server_wg_public"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
-        for (k, v) in [
-            ("wgturn:server_wg_private", &priv_key),
-            ("wgturn:server_wg_public", &pub_key),
-        ] {
-            inv.set_server_secret(&server.id, k, v)
-                .await
-                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
-            secrets.insert(k.to_string(), v.clone());
-        }
-        minted.push("wgturn server wireguard keypair");
-    }
-
-    Ok((secrets, minted))
-}
-
-/// Persist one secret to inventory + the in-memory map. Helper for
-/// [`mint_secret_spec`]; takes the value by-value to avoid a clone.
-async fn persist_secret(
-    inv: &SqliteInventory,
-    server_id: &ServerId,
-    key: &'static str,
-    value: String,
-    secrets: &mut std::collections::HashMap<String, String>,
-) -> std::result::Result<(), String> {
-    inv.set_server_secret(server_id, key, &value)
-        .await
-        .map_err(|e| format!("set_server_secret {key}: {e}"))?;
-    secrets.insert(key.to_string(), value);
-    Ok(())
-}
-
-/// Mint one [`vpnctl_core::ServerSecretSpec`] if its key(s) are absent:
-/// generate via the matching crypto primitive, persist, and record the
-/// primary key name in `minted`. Idempotent — a present key is skipped,
-/// never rotated (protects live clients on re-deploy). Each match arm
-/// uses the SAME crypto primitive the old hardcoded block did, so the
-/// byte-shape of every generated secret is unchanged.
-async fn mint_secret_spec(
-    inv: &SqliteInventory,
-    server_id: &ServerId,
-    spec: vpnctl_core::ServerSecretSpec,
-    secrets: &mut std::collections::HashMap<String, String>,
-    minted: &mut Vec<&'static str>,
-) -> std::result::Result<(), String> {
-    use vpnctl_core::ServerSecretSpec as S;
-    match spec {
-        S::Password { key, entropy_bytes } => {
-            if !secrets.contains_key(key) {
-                let v = vpnctl_crypto::gen_password(entropy_bytes)
-                    .map_err(|e| format!("gen_password {key}: {e}"))?;
-                persist_secret(inv, server_id, key, v, secrets).await?;
-                minted.push(key);
-            }
-        }
-        S::Base64Key { key, key_bytes } => {
-            if !secrets.contains_key(key) {
-                let v = vpnctl_crypto::gen_base64_key(key_bytes)
-                    .map_err(|e| format!("gen_base64_key {key}: {e}"))?;
-                persist_secret(inv, server_id, key, v, secrets).await?;
-                minted.push(key);
-            }
-        }
-        S::X25519Keypair {
-            private_key,
-            public_key,
-        } => {
-            if !secrets.contains_key(private_key) || !secrets.contains_key(public_key) {
-                let (priv_k, pub_k) = vpnctl_crypto::gen_x25519_keypair();
-                persist_secret(inv, server_id, private_key, priv_k, secrets).await?;
-                persist_secret(inv, server_id, public_key, pub_k, secrets).await?;
-                minted.push(private_key);
-            }
-        }
-        S::WireguardKeypair {
-            private_key,
-            public_key,
-        } => {
-            if !secrets.contains_key(private_key) || !secrets.contains_key(public_key) {
-                let (priv_k, pub_k) = vpnctl_crypto::gen_wireguard_keypair();
-                persist_secret(inv, server_id, private_key, priv_k, secrets).await?;
-                persist_secret(inv, server_id, public_key, pub_k, secrets).await?;
-                minted.push(private_key);
-            }
-        }
-        S::ShortId { key } => {
-            if !secrets.contains_key(key) {
-                let v = vpnctl_crypto::gen_short_id()
-                    .map_err(|e| format!("gen_short_id {key}: {e}"))?;
-                persist_secret(inv, server_id, key, v, secrets).await?;
-                minted.push(key);
-            }
-        }
-    }
-    Ok(())
-}
+// `bootstrap_server_secrets` (+ its `mint_secret_spec` / `persist_secret`
+// helpers) moved to `vpnctl_inventory::bootstrap` on 2026-06-04 so the CLI
+// `vpnctl deploy` shares the SAME declarative `server_secret_specs()` walk
+// instead of hand-rolling vless/wireguard minting (which dropped
+// shadowsocks-2022's `ss2022.psk` and hysteria2's obfs password). It's
+// re-exported at the top of this module, so every existing reference to
+// `wizard_bootstrap::bootstrap_server_secrets` still resolves unchanged.
 
 /// Pick a free server id given the set of existing ids and a base
 /// name derived from the operator's address input. Returns the base
