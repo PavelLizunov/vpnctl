@@ -542,6 +542,13 @@ async fn redeploy_pipeline(
         }
         ssh_kernels_pushed.push(kid.0.clone());
         send_step!("apply", "✓ {} — config applied, service active.", kid.0);
+        // Open the host firewall for the ports these protocols bind, so a
+        // fresh deploy is reachable without a manual `ufw allow`. Best-effort:
+        // a firewall failure (no ufw / cloud-firewall host) is surfaced but
+        // does NOT fail the deploy — the config is already live.
+        if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+            send_step!("apply", "⚠ {} — firewall step skipped: {e}", kid.0);
+        }
     }
 
     // ── 4. Audit (same shape + action as the synchronous handler) ──
@@ -928,6 +935,11 @@ async fn bootstrap_pipeline(
             fail!("apply", "{}: apply_config: {e}", kid.0);
         }
         send_step!("apply", "{}: ok — service running with new config.", kid.0);
+        // Best-effort firewall open (Kernel::open_firewall) — fresh deploy
+        // reachable without a manual `ufw allow`; non-fatal (config is live).
+        if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+            send_step!("apply", "⚠ {}: firewall step skipped: {e}", kid.0);
+        }
     }
 
     // ── 9. Done ───────────────────────────────────────────────────

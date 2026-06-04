@@ -420,6 +420,29 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     /// Залить новый конфиг + перезагрузить.
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()>;
 
+    /// Открыть хост-фаервол под порты, которые биндят включённые
+    /// `protocols` — источник правды `Protocol::listen_ports()` (тот же
+    /// набор, что у cross-protocol port-conflict guard'а). Чтобы свежий
+    /// `deploy` был доступен СРАЗУ, без ручного `ufw allow` (иначе смысл
+    /// автоматизации теряется).
+    ///
+    /// DEFAULT — no-op: ядра без управляемого хост-фаервола, или
+    /// управляющие им инлайн (amneziawg / wgturn через wg-quick PostUp
+    /// iptables), наследуют пустую реализацию.
+    ///
+    /// Контракт — **best-effort**: невозможность открыть фаервол (нет
+    /// `ufw`; cloud-firewall хост вроде DigitalOcean, где ingress правит
+    /// апстрим-firewall, а не локальный ufw) НЕ должна валить deploy —
+    /// конфиг к этому моменту уже применён. Вызывающий логирует ошибку и
+    /// продолжает.
+    async fn open_firewall(
+        &self,
+        _ssh: &dyn SshTransport,
+        _protocols: &[&dyn Protocol],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()>;
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus>;
 }

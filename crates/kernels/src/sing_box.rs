@@ -331,6 +331,25 @@ impl Kernel for SingBox {
         Ok(())
     }
 
+    async fn open_firewall(
+        &self,
+        ssh: &dyn SshTransport,
+        protocols: &[&dyn Protocol],
+    ) -> Result<()> {
+        // Source of truth = each `Protocol::listen_ports()` (the SAME data
+        // the cross-protocol port-conflict guard reads), so the firewall
+        // opens EXACTLY what sing-box binds — never a stale hardcoded list,
+        // and it grows automatically when a new protocol is enabled.
+        let ports: Vec<(&str, u16)> = protocols
+            .iter()
+            .flat_map(|p| p.listen_ports().iter().copied())
+            .collect();
+        if let Some(script) = firewall_open_script(&ports) {
+            ssh.exec(&script).await?;
+        }
+        Ok(())
+    }
+
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()> {
         ssh.exec("systemctl restart sing-box").await?;
         Ok(())
@@ -349,6 +368,30 @@ impl Kernel for SingBox {
             uptime_seconds: None,
         })
     }
+}
+
+/// Build the idempotent, ufw-guarded shell snippet that opens every
+/// `(transport, port)` in `ports` (deduplicated; sorted for stable output).
+/// Returns `None` when `ports` is empty. Mirrors the Caddy kernel's
+/// best-effort posture: the `command -v ufw` guard makes it a clean no-op on
+/// hosts with no ufw (e.g. DigitalOcean droplets, where an upstream Cloud
+/// Firewall — not local ufw — governs ingress), `ufw allow` is idempotent
+/// (skips an existing rule) and opens both IPv4 + IPv6. `port` is `u16` and
+/// `transport` is a compile-time `"tcp"`/`"udp"` literal from
+/// `listen_ports()`, so the interpolation carries no injection surface.
+fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
+    let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
+    if uniq.is_empty() {
+        return None;
+    }
+    let mut s = String::from("if command -v ufw >/dev/null 2>&1; then\n");
+    for (transport, port) in &uniq {
+        s.push_str(&format!(
+            "  ufw allow {port}/{transport} >/dev/null 2>&1 || true\n"
+        ));
+    }
+    s.push_str("fi\n");
+    Some(s)
 }
 
 /// Extract every `uuid` value found in `inbounds[*].users[*]` of a
@@ -558,6 +601,46 @@ mod tests {
         assert!(
             s.contains("command -v fail2ban-client"),
             "final assertion must verify fail2ban-client present"
+        );
+    }
+
+    #[test]
+    fn firewall_open_script_opens_each_port_idempotently_guarded() {
+        // vless tcp/443 + tuic udp/8443 + hysteria2 udp/8444, with a dup to
+        // prove de-duplication.
+        let script =
+            firewall_open_script(&[("tcp", 443), ("udp", 8443), ("udp", 8444), ("udp", 8444)])
+                .expect("non-empty ports yield a script");
+        // ufw-guarded → clean no-op on a host with no ufw (cloud-firewall).
+        assert!(
+            script.contains("command -v ufw"),
+            "must guard on ufw presence: {script}"
+        );
+        for line in [
+            "ufw allow 443/tcp",
+            "ufw allow 8443/udp",
+            "ufw allow 8444/udp",
+        ] {
+            assert!(script.contains(line), "missing `{line}` in: {script}");
+        }
+        // De-dup: 8444/udp appears exactly once despite being passed twice.
+        assert_eq!(
+            script.matches("ufw allow 8444/udp").count(),
+            1,
+            "duplicate ports must collapse: {script}"
+        );
+        // Idempotent + non-fatal on an already-present rule.
+        assert!(
+            script.contains("|| true"),
+            "must not fail on an existing rule: {script}"
+        );
+    }
+
+    #[test]
+    fn firewall_open_script_empty_ports_is_none() {
+        assert!(
+            firewall_open_script(&[]).is_none(),
+            "no declared ports => no firewall step"
         );
     }
 

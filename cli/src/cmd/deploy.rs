@@ -163,6 +163,11 @@ pub(crate) async fn run(
             config.len()
         );
         k.apply_config(&ssh, &config).await?;
+        // Best-effort firewall open (Kernel::open_firewall) so a fresh
+        // deploy is reachable without a manual `ufw allow`. Non-fatal.
+        if let Err(e) = k.open_firewall(&ssh, &protocols_for_k).await {
+            println!("⚠ firewall step skipped for {}: {e}", k.id());
+        }
         total_config_bytes += config.len();
         rendered_kernels.push(k.id().0);
     }

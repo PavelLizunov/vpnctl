@@ -6452,6 +6452,12 @@ pub(crate) async fn server_deploy(
                 continue;
             }
             ssh_kernels_pushed.push(kid.0.clone());
+            // Best-effort firewall open (Kernel::open_firewall) — a fresh
+            // deploy must be reachable without a manual `ufw allow`; non-fatal
+            // (the config is already applied).
+            if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+                tracing::warn!(target = "vpnctld::deploy", kernel = %kid.0, error = %e, "open_firewall skipped (best-effort)");
+            }
         }
     }
 
