@@ -1230,10 +1230,10 @@ fn admin_router(state: AppState) -> Router {
 /// caller that needs the canonical protocol set) build the real registry
 /// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::{AmneziaWg, SingBox, WgTurn as WgTurnKernel};
+    use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, WgTurn as WgTurnKernel};
     use vpnctl_protocols::{
-        AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WgTurn as WgTurnProtocol,
-        WireGuard,
+        AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality,
+        WgTurn as WgTurnProtocol, WireGuard,
     };
 
     let mut reg = Registry::new();
@@ -1244,6 +1244,9 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // pre-existing (see this function's doc-comment); a future
     // `vpnctl-registry` crate consolidates both sites.
     reg.register_kernel(Box::new(WgTurnKernel::new()))?;
+    // Caddy + forwardproxy@naive — serves the `naive` protocol with a
+    // real masquerade website. MUST stay in lockstep with cli/registry.rs.
+    reg.register_kernel(Box::new(Caddy::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
@@ -1252,5 +1255,54 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(AnyTls::new()))?;
     reg.register_protocol(Box::new(Trojan::new()))?;
     reg.register_protocol(Box::new(WgTurnProtocol::new()))?;
+    // naive — Chromium-fingerprint proxy served by the Caddy kernel.
+    // Without this the daemon's /sub render + admin dpi-chip silently
+    // drop naive (the CLI deploy still worked, hiding the gap).
+    reg.register_protocol(Box::new(Naive::new()))?;
     Ok(reg)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod registry_drift_guard {
+    use super::build_registry;
+
+    /// The daemon's registry MUST stay in lockstep with
+    /// `cli/src/registry.rs::build` — the `/sub` render and the admin
+    /// dpi-chip resolve protocols through THIS registry, so anything
+    /// registered in the CLI but not here is silently dropped from every
+    /// subscription (exactly what happened to `naive` until 2026-06-04).
+    /// Full-set pin: adding/removing a protocol or kernel at one site
+    /// without the other (or this list) trips the assert.
+    #[test]
+    fn build_registry_matches_canonical_set() {
+        let reg = build_registry().unwrap();
+        let mut protos: Vec<String> = reg.protocol_ids().into_iter().map(|p| p.0).collect();
+        let mut kernels: Vec<String> = reg.kernel_ids().into_iter().map(|k| k.0).collect();
+        protos.sort();
+        kernels.sort();
+
+        let mut want_protos = [
+            "anytls",
+            "hysteria2",
+            "naive",
+            "shadowsocks-2022",
+            "trojan",
+            "tuic-v5",
+            "vless+reality",
+            "wgturn",
+            "wireguard",
+        ]
+        .map(String::from)
+        .to_vec();
+        want_protos.sort();
+
+        let mut want_kernels = ["amneziawg", "caddy", "sing-box", "wgturn"]
+            .map(String::from)
+            .to_vec();
+        want_kernels.sort();
+
+        assert_eq!(protos, want_protos, "daemon protocol registry drifted");
+        assert_eq!(kernels, want_kernels, "daemon kernel registry drifted");
+    }
 }
