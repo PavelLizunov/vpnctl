@@ -98,8 +98,61 @@ LR
     # Verify the fragment parses — logrotate's parser is strict and a
     # typo would silently disable rotation for ALL fragments.
     logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1
+    # fail2ban — SSH brute-force protection. The add-server wizard UI
+    # promises it and the Phase-G health monitor alerts on
+    # `server.fail2ban.down`, but NO deploy path actually installed it
+    # (CLAUDE.md Known-gaps). Provisioned HERE so BOTH the CLI and the
+    # web/SSE deploy harden every node idempotently. (Scope: every node
+    # runs the sing-box kernel today; a kernel-independent bootstrap home
+    # for host-hardening is the longer-term fix for amneziawg/caddy-only
+    # nodes — same orthogonality note as the cert provisioning above.)
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        # `apt-get update` here too: the sing-box block above only runs it
+        # when sing-box is ABSENT, so on a re-deploy (sing-box present,
+        # fail2ban absent) the cache could be stale → 'Unable to locate'.
+        apt-get update -qq
+        apt-get install -y --no-install-recommends fail2ban
+    fi
+    # Bind the ban action to the EFFECTIVE sshd listen port (a node may
+    # set a custom Port via a systemd drop-in / -p, not just sshd_config).
+    # `sshd -T` dumps the resolved config; fall back to parsing sshd_config,
+    # then 22. Each step exits 0 on no-match (awk/head) — safe under set -e
+    # without pipefail.
+    SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd)
+    F2B_SSH_PORT=$("$SSHD_BIN" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')
+    [ -n "$F2B_SSH_PORT" ] || F2B_SSH_PORT=$(grep -oiE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    F2B_SSH_PORT=${F2B_SSH_PORT:-22}
+    # backend=systemd is REQUIRED on Debian 12+ (journald only — there's
+    # no /var/log/auth.log for the default `auto` backend to tail).
+    # Unquoted heredoc so ${F2B_SSH_PORT} expands.
+    cat > /etc/fail2ban/jail.local <<F2B
+[DEFAULT]
+bantime  = 86400
+findtime = 600
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+backend  = systemd
+
+[sshd]
+enabled  = true
+port     = ${F2B_SSH_PORT}
+maxretry = 3
+F2B
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    # `|| true` so a synchronous start failure still reaches the
+    # journalctl diagnostic + fail-closed assertion below.
+    systemctl restart fail2ban || true
+    # Don't report success on a crash-loop (staging-deploy lesson #3).
+    for i in 1 2 3 4 5; do
+        state=$(systemctl is-active fail2ban || true)
+        [ "$state" = "active" ] && break
+        sleep 1
+    done
+    [ "$(systemctl is-active fail2ban)" = "active" ] \
+        || { journalctl -u fail2ban -n 20 >&2; exit 1; }
     command -v sing-box  # final assertion — fails the exec on regression
     command -v logrotate
+    command -v fail2ban-client
 "#;
 
 #[async_trait]
@@ -467,6 +520,44 @@ mod tests {
         assert!(
             s.contains("chmod 600 /etc/sing-box/key.pem"),
             "private key must be mode 0600"
+        );
+    }
+
+    #[test]
+    fn setup_script_installs_and_configures_fail2ban() {
+        let s = SING_BOX_SETUP_SCRIPT;
+        assert!(
+            s.contains("--no-install-recommends fail2ban"),
+            "fail2ban package install missing"
+        );
+        assert!(
+            s.contains("/etc/fail2ban/jail.local"),
+            "jail.local provisioning missing"
+        );
+        // Debian 12+ ships journald only (no /var/log/auth.log) — the
+        // default `auto` backend would silently never ban. systemd
+        // backend is mandatory.
+        assert!(
+            s.contains("backend  = systemd"),
+            "fail2ban must use the systemd backend on Debian 12+"
+        );
+        assert!(s.contains("[sshd]"), "sshd jail missing");
+        assert!(s.contains("enabled  = true"), "sshd jail must be enabled");
+        // Pin the jail PORT LINE itself (a nearby comment also carries the
+        // bareword `${F2B_SSH_PORT}`, so assert the full line — deleting it
+        // must fail the test).
+        assert!(
+            s.contains("port     = ${F2B_SSH_PORT}"),
+            "jail must bind the detected sshd port"
+        );
+        // The crash-loop guard must not be silently dropped.
+        assert!(
+            s.contains("systemctl is-active fail2ban") && s.contains("exit 1"),
+            "must fail the deploy on a fail2ban crash-loop"
+        );
+        assert!(
+            s.contains("command -v fail2ban-client"),
+            "final assertion must verify fail2ban-client present"
         );
     }
 
