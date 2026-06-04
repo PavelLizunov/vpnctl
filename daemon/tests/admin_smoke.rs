@@ -1691,6 +1691,180 @@ fn add_same_origin(req: axum::http::request::Builder) -> axum::http::request::Bu
         .header("origin", format!("http://{SAME_ORIGIN_HOST}"))
 }
 
+// ── Phase 3: naive (Caddy) per-server config UI ──────────────────────────
+
+fn naive_server(id: &str) -> vpnctl_core::Server {
+    vpnctl_core::Server {
+        id: vpnctl_core::ServerId(id.into()),
+        address: "203.0.113.5".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("caddy".into())],
+        enabled_protocols: vec![vpnctl_core::ProtocolId("naive".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
+#[tokio::test]
+async fn admin_server_detail_naive_section_renders_when_enabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&naive_server("nv")).await.unwrap();
+    let html = fetch_html(router(s), "/admin/servers/nv").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/nv/naive-config""#),
+        "naive config form must POST to the right route"
+    );
+    assert!(
+        html.contains("NAIVE (CADDY) CONFIG"),
+        "section eyebrow copy contract"
+    );
+    assert!(
+        html.contains("DNS A-record"),
+        "prerequisite reminder must be present"
+    );
+    assert!(
+        html.contains(r#"name="domain""#) && html.contains(r#"name="acme_email""#),
+        "both inputs present"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_detail_naive_section_absent_when_not_enabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // seeded server is vless+reality only
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        !html.contains("/naive-config"),
+        "naive section must not render on a non-naive server"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_set_naive_config_mutates_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&naive_server("nv")).await.unwrap();
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/nv/naive-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "domain=cdn.example.com&acme_email=admin%40example.com",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let sid = vpnctl_core::ServerId("nv".into());
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "naive.domain")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("cdn.example.com")
+    );
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "naive.acme_email")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("admin@example.com")
+    );
+    let audit = s.inv.recent_audit(10).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action == "server.naive.set" && e.target.as_deref() == Some("nv")),
+        "audit row server.naive.set must land"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_set_naive_config_rejects_empty_domain() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&naive_server("nv")).await.unwrap();
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/nv/naive-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("domain=&acme_email=admin%40example.com"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_server_set_naive_config_rejects_injection_in_domain() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&naive_server("nv")).await.unwrap();
+    // `evil{block}` — a `{` would break out of the forward_proxy block
+    // in the rendered Caddyfile. Must be rejected at save-time (400),
+    // and nothing may persist.
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/nv/naive-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("domain=evil%7Bblock%7D&acme_email="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        s.inv
+            .get_server_secret(&vpnctl_core::ServerId("nv".into()), "naive.domain")
+            .await
+            .unwrap()
+            .is_none(),
+        "rejected domain must not persist"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_set_naive_config_404_on_missing_server() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/nope/naive-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("domain=cdn.example.com&acme_email="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 /// Helper for the copy-contract tests — exercises the router and
 /// returns the response body as a UTF-8 String. Sets same-origin
 /// headers on every method so the CSRF middleware passes mutating
