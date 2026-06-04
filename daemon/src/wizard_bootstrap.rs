@@ -84,9 +84,10 @@
 //! tokio task feeding a bounded mpsc channel. The `ReceiverStream`
 //! adapter turns the channel into a `Stream` for axum's `Sse::new`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_core::Stream;
 use serde::Serialize;
@@ -178,6 +179,53 @@ pub fn run_bootstrap(
     ReceiverStream::new(rx)
 }
 
+/// Process-wide set of server-ids with a deploy IN FLIGHT. Guards the
+/// node-touching deploy paths (`run_redeploy` via the single-server SSE
+/// button + the deploy-all pass, AND the synchronous `server_deploy`
+/// POST handler) against running two pipelines that render + restart the
+/// SAME node at once — possible today from two browser tabs, a curl, a
+/// page reload, or a single-deploy overlapping a deploy-all. Per-server
+/// (not daemon-wide) so unrelated nodes still deploy in parallel.
+fn deploy_inflight() -> &'static Mutex<HashSet<String>> {
+    static INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Lock the in-flight set, recovering the guard if a previous holder
+/// panicked (poison) — we never `unwrap()` a poisoned lock.
+fn lock_inflight() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    deploy_inflight()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// RAII permit for deploying one server. Acquired with
+/// [`DeployGuard::try_acquire`]; the server-id is removed from the
+/// in-flight set on drop — so a pipeline that returns early, errors, or
+/// is cancelled never leaks a permanent lock.
+pub(crate) struct DeployGuard(String);
+
+impl DeployGuard {
+    /// Try to claim the per-server deploy permit. Returns `None` if a
+    /// deploy of `server_id` is already in flight (the caller should
+    /// refuse rather than start a second concurrent node restart).
+    pub(crate) fn try_acquire(server_id: &str) -> Option<Self> {
+        let mut set = lock_inflight();
+        if set.contains(server_id) {
+            None
+        } else {
+            set.insert(server_id.to_string());
+            Some(Self(server_id.to_string()))
+        }
+    }
+}
+
+impl Drop for DeployGuard {
+    fn drop(&mut self) {
+        lock_inflight().remove(&self.0);
+    }
+}
+
 /// Re-deploy an EXISTING server, streaming per-step progress over SSE
 /// (item-1, 2026-05-31). Unlike `run_bootstrap` (a NEW server: probe →
 /// fingerprint → push-key → register), the server already exists and
@@ -197,9 +245,31 @@ pub fn run_redeploy(
     deploy_key_path: PathBuf,
 ) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
     let (tx, rx) = mpsc::channel::<BootstrapEvent>(64);
-    tokio::spawn(async move {
-        redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
-    });
+    match DeployGuard::try_acquire(&server.id.0) {
+        Some(guard) => {
+            tokio::spawn(async move {
+                redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
+                // Hold the per-server permit for the whole pipeline; drop
+                // here (also on panic/cancel via RAII) releases it.
+                drop(guard);
+            });
+        }
+        None => {
+            // A deploy of this server is already in flight — refuse rather
+            // than render + restart the same node concurrently. The
+            // deploy-all pass surfaces this as a per-server ✗ line and
+            // moves on; a single-server SSE deploy shows it as the
+            // terminal error.
+            let _ = tx.try_send(BootstrapEvent::Error {
+                phase: "deploy",
+                message: format!(
+                    "deploy already running for server '{}' — wait for it to finish, then retry",
+                    server.id.0
+                ),
+            });
+            // tx drops → ReceiverStream completes after this one event.
+        }
+    }
     ReceiverStream::new(rx)
 }
 
@@ -1352,5 +1422,76 @@ mod tests {
         };
         let json_err = serde_json::to_string(&err).unwrap();
         assert!(json_err.contains("\"kind\":\"error\""), "got: {json_err}");
+    }
+
+    // ─── per-server deploy concurrency gate (DeployGuard) ────────────
+    // Each test uses UNIQUE server-ids: the in-flight set is a
+    // process-wide static shared across the parallel test runner.
+
+    #[test]
+    fn deploy_guard_blocks_second_acquire_of_same_server() {
+        let g1 = DeployGuard::try_acquire("gate-same-server");
+        assert!(g1.is_some(), "first acquire must succeed");
+        assert!(
+            DeployGuard::try_acquire("gate-same-server").is_none(),
+            "a second concurrent acquire of the same server must be refused"
+        );
+        drop(g1);
+        assert!(
+            DeployGuard::try_acquire("gate-same-server").is_some(),
+            "must re-acquire after the holder drops (RAII release)"
+        );
+    }
+
+    #[test]
+    fn deploy_guard_allows_distinct_servers_concurrently() {
+        let a = DeployGuard::try_acquire("gate-distinct-a");
+        let b = DeployGuard::try_acquire("gate-distinct-b");
+        assert!(
+            a.is_some() && b.is_some(),
+            "per-server lock must let unrelated nodes deploy in parallel"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_redeploy_reports_already_running_when_locked() {
+        use tokio_stream::StreamExt;
+        let dir = tempfile::tempdir().unwrap();
+        let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let registry = Arc::new(crate::app::build_registry().unwrap());
+        let server = Server {
+            id: ServerId("gate-run-redeploy".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        // Hold the permit so run_redeploy hits the already-running branch
+        // (and therefore does NOT spawn a real SSH pipeline).
+        let _held = DeployGuard::try_acquire("gate-run-redeploy").expect("hold permit");
+        let mut stream = Box::pin(run_redeploy(
+            server,
+            inv,
+            registry,
+            PathBuf::from("/nonexistent/key"),
+        ));
+        match stream.next().await {
+            Some(BootstrapEvent::Error { message, .. }) => assert!(
+                message.contains("already running"),
+                "expected already-running error, got: {message}"
+            ),
+            other => panic!("expected one Error event, got {other:?}"),
+        }
+        assert!(
+            stream.next().await.is_none(),
+            "stream must close after the single already-running error"
+        );
     }
 }

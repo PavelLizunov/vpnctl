@@ -6329,6 +6329,25 @@ pub(crate) async fn server_deploy(
         return bad_request(&format!("config invalid before deploy: {e}"));
     }
 
+    // Concurrency gate: refuse a second node-touching deploy of THIS
+    // server while one is already in flight (another tab, a curl, the
+    // SSE deploy / deploy-all path). Without it two pipelines render +
+    // restart the same sing-box at once. The permit is released when
+    // this handler returns (RAII) — including every early-return error
+    // path below.
+    let _deploy_guard = match crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0) {
+        Some(g) => g,
+        None => {
+            return error_resp(
+                StatusCode::CONFLICT,
+                &format!(
+                    "deploy already running for server '{}' — wait for it to finish, then retry",
+                    server.id.0
+                ),
+            );
+        }
+    };
+
     // Bootstrap missing secrets. Shared with the Phase-E wizard
     // via `wizard_bootstrap::bootstrap_server_secrets` so any new
     // server-side secret added for a future protocol is minted

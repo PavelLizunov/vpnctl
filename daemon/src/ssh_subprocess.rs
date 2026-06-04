@@ -47,6 +47,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -58,6 +59,34 @@ use vpnctl_core::{CoreError, Result, SshTransport};
 /// connects. Living under the same dir as the deploy key keeps a
 /// single "this is vpnctld's SSH identity" surface.
 const DEFAULT_KNOWN_HOSTS: &str = "/var/lib/vpnctl/.ssh/known_hosts";
+
+/// Hard wall-clock cap on a single SSH invocation (seconds).
+///
+/// `ConnectTimeout` + `ServerAlive*` bound the TCP connect and a
+/// silently-dead link, but a LIVE connection whose REMOTE COMMAND hangs
+/// (apt waiting on a dpkg lock, a wedged `systemctl`, a stuck
+/// `sing-box check`) would otherwise block the `spawn_blocking` thread
+/// until the OS gives up — effectively forever. The HTTP `TimeoutLayer`
+/// doesn't save us: SSE deploys run in a detached task, and even for a
+/// plain request cancelling the future never reaps the child process.
+///
+/// 300 s is generous on purpose: the slowest legitimate op is the
+/// add-server `apt-get install sing-box` step (download + deps, up to
+/// ~a minute on a slow mirror), so the default leaves 3–5× headroom and
+/// only ever fires on a genuine hang. Override per-deployment with
+/// `VPNCTLD_SSH_TIMEOUT_SECS` (clamped to 10..=3600).
+const DEFAULT_SSH_TIMEOUT_SECS: u64 = 300;
+
+/// Resolve the hard SSH timeout from `VPNCTLD_SSH_TIMEOUT_SECS`,
+/// clamped to a sane range, falling back to [`DEFAULT_SSH_TIMEOUT_SECS`].
+fn default_ssh_timeout() -> Duration {
+    let secs = std::env::var("VPNCTLD_SSH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| (10..=3600).contains(s))
+        .unwrap_or(DEFAULT_SSH_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
 
 /// One transport instance per (host, port, user, key_path). Cheap to
 /// clone — every field is a small `String` or `PathBuf`.
@@ -75,6 +104,10 @@ pub struct SubprocessSshTransport {
     key_path: PathBuf,
     /// `known_hosts` file. Defaults to `/var/lib/vpnctl/.ssh/known_hosts`.
     known_hosts: PathBuf,
+    /// Hard wall-clock cap on each invocation; on expiry the child `ssh`
+    /// process is killed and `run` returns `Transport(... timed out ...)`.
+    /// See [`DEFAULT_SSH_TIMEOUT_SECS`].
+    timeout: Duration,
 }
 
 impl SubprocessSshTransport {
@@ -89,6 +122,7 @@ impl SubprocessSshTransport {
             port: 22,
             key_path,
             known_hosts: PathBuf::from(DEFAULT_KNOWN_HOSTS),
+            timeout: default_ssh_timeout(),
         }
     }
 
@@ -102,6 +136,16 @@ impl SubprocessSshTransport {
     /// default — tests use this to point at a tempdir.
     pub fn known_hosts(mut self, path: PathBuf) -> Self {
         self.known_hosts = path;
+        self
+    }
+
+    /// Override the hard wall-clock timeout (default
+    /// [`DEFAULT_SSH_TIMEOUT_SECS`], env-overridable via
+    /// `VPNCTLD_SSH_TIMEOUT_SECS`). A short-lived probe/status caller may
+    /// dial this down so a wedged node fails fast instead of pinning a
+    /// thread for the full default.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -158,45 +202,120 @@ impl SubprocessSshTransport {
 
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let args = self.build_ssh_args(&remote_cmd);
-        let host = self.host.clone();
-        let user = self.user.clone();
-        let port = self.port;
+        let label = format!("{}@{}:{}", self.user, self.host, self.port);
+        let timeout = self.timeout;
         let handle = tokio::task::spawn_blocking(move || {
             let mut cmd = Command::new("ssh");
             cmd.args(&args);
-            if stdin_bytes.is_some() {
-                cmd.stdin(Stdio::piped());
-            } else {
-                cmd.stdin(Stdio::null());
-            }
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            let mut child = cmd.spawn().map_err(|e| {
-                CoreError::Transport(format!("spawning ssh {user}@{host}:{port}: {e}"))
-            })?;
-            if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
-                use std::io::Write;
-                sin.write_all(&bytes).map_err(|e| {
-                    CoreError::Transport(format!("ssh stdin write {user}@{host}: {e}"))
-                })?;
-                drop(sin); // EOF → ssh proceeds
-            }
-            let output = child
-                .wait_with_output()
-                .map_err(|e| CoreError::Transport(format!("ssh wait {user}@{host}: {e}")))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(CoreError::Transport(format!(
-                    "ssh {user}@{host}:{port} exit={:?} stderr={}",
-                    output.status.code(),
-                    stderr.trim()
-                )));
-            }
-            Ok(output.stdout)
+            run_child_with_timeout(cmd, stdin_bytes, timeout, &label)
         });
         handle
             .await
             .map_err(|e| CoreError::Transport(format!("spawn_blocking JoinError: {e}")))?
     }
+}
+
+/// Spawn `cmd`, feed `stdin_bytes` (if any), drain stdout/stderr, and
+/// wait for exit — but no longer than `timeout`. On expiry the child is
+/// **killed and reaped** and a `Transport` timeout error is returned;
+/// this is the hard wall-clock bound that `ConnectTimeout`/`ServerAlive*`
+/// can't provide for a live-connection-but-hung remote command.
+///
+/// Blocking by design (called inside `spawn_blocking`). `label` is the
+/// `user@host:port` shown in error messages. Pulled out of [`Self::run`]
+/// so the deadline/kill logic is unit-testable with cheap local commands
+/// (`sleep`, `cat`, `sh -c …`) instead of a live SSH server.
+///
+/// stdout/stderr are drained on dedicated threads spawned BEFORE stdin is
+/// written, so a chatty remote command can't dead-lock by filling the
+/// ~64 KiB pipe buffer while we poll for the deadline (without readers a
+/// verbose `apt-get` would block on write, never exit, and look like a
+/// hang).
+fn run_child_with_timeout(
+    mut cmd: Command,
+    stdin_bytes: Option<Vec<u8>>,
+    timeout: Duration,
+    label: &str,
+) -> Result<Vec<u8>> {
+    use std::io::{Read, Write};
+
+    if stdin_bytes.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CoreError::Transport(format!("spawning ssh {label}: {e}")))?;
+
+    // Drain pipes on threads spawned up front (before writing stdin) so
+    // neither direction can dead-lock on a full pipe buffer.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
+        sin.write_all(&bytes)
+            .map_err(|e| CoreError::Transport(format!("ssh stdin write {label}: {e}")))?;
+        drop(sin); // EOF → the remote command proceeds
+    }
+
+    // Poll for exit until the deadline. 50 ms cadence: ≤50 ms post-exit
+    // latency, ~20 wakeups/sec while the slow apt step runs — negligible.
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Hard timeout: kill + reap. Reader threads EOF once
+                    // the child's pipe write-ends close after the kill.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    return Err(CoreError::Transport(format!(
+                        "ssh {label} timed out after {timeout:?} (remote command killed)"
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(CoreError::Transport(format!("ssh wait {label}: {e}")));
+            }
+        }
+    };
+
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        return Err(CoreError::Transport(format!(
+            "ssh {label} exit={:?} stderr={}",
+            status.code(),
+            stderr.trim()
+        )));
+    }
+    Ok(stdout)
 }
 
 #[async_trait]
@@ -399,6 +518,72 @@ mod tests {
         ] {
             assert!(joined.contains(needle), "missing {needle:?}: {joined}");
         }
+    }
+
+    // ─── hard wall-clock timeout (run_child_with_timeout) ────────────
+    // Exercised with cheap local commands instead of a live SSH server;
+    // the kill/deadline/drain logic is identical regardless of the binary.
+
+    #[test]
+    fn child_completes_before_timeout_returns_stdout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf hello"]);
+        let out = run_child_with_timeout(cmd, None, Duration::from_secs(10), "test").unwrap();
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn child_nonzero_exit_is_transport_error_with_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf oops >&2; exit 3"]);
+        let err = run_child_with_timeout(cmd, None, Duration::from_secs(10), "test").unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("exit=Some(3)"), "got: {msg}");
+        assert!(msg.contains("oops"), "got: {msg}");
+    }
+
+    #[test]
+    fn child_stdin_is_piped_to_command() {
+        // `cat` echoes stdin to stdout — proves the stdin pipe is wired
+        // and the reader threads collect what the command emits.
+        let cmd = Command::new("cat");
+        let out = run_child_with_timeout(
+            cmd,
+            Some(b"piped-in".to_vec()),
+            Duration::from_secs(10),
+            "t",
+        )
+        .unwrap();
+        assert_eq!(out, b"piped-in");
+    }
+
+    #[test]
+    fn child_timeout_kills_hung_command_promptly() {
+        // `sleep 30` would otherwise block the wait for 30s. The 200 ms
+        // hard timeout must kill it and return an error in well under that
+        // — the core fix: an infinite remote hang becomes a bounded error.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let err = run_child_with_timeout(cmd, None, Duration::from_millis(200), "root@node:22")
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(format!("{err:?}").contains("timed out"), "got: {err:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "child not killed promptly: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn child_large_output_does_not_deadlock() {
+        // 200 KiB > the ~64 KiB pipe buffer. Without draining stdout on a
+        // dedicated thread the child would block on write, never exit, and
+        // trip the timeout. With the reader threads it completes fast.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 200000 /dev/zero"]);
+        let out = run_child_with_timeout(cmd, None, Duration::from_secs(10), "test").unwrap();
+        assert_eq!(out.len(), 200_000);
     }
 
     #[tokio::test]
