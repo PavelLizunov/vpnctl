@@ -270,8 +270,20 @@ fn run_child_with_timeout(
     });
 
     if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
-        sin.write_all(&bytes)
-            .map_err(|e| CoreError::Transport(format!("ssh stdin write {label}: {e}")))?;
+        if let Err(e) = sin.write_all(&bytes) {
+            // Broken pipe (remote closed stdin / ssh died mid-write).
+            // Mirror the other error paths: kill + reap the child and join
+            // the reader threads so we never leak the child or detach the
+            // readers on this early return.
+            drop(sin);
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+            return Err(CoreError::Transport(format!(
+                "ssh stdin write {label}: {e}"
+            )));
+        }
         drop(sin); // EOF → the remote command proceeds
     }
 
@@ -555,6 +567,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, b"piped-in");
+    }
+
+    #[test]
+    fn child_stdin_write_error_kills_and_reaps_the_child() {
+        // Pins the CLEANUP, not just the error surfacing. The child closes
+        // its stdin (`exec 0<&-`) so our 2 MiB write hits a broken pipe,
+        // then sleeps and would `touch` a sentinel. The fix kills + reaps
+        // the child on the stdin-write error, so the sentinel never appears.
+        // A revert to the early-`?` return (no kill) leaves the child
+        // sleeping → it touches the sentinel → this test fails. (Asserting
+        // only "returns an error" couldn't catch the regression: a child
+        // that exits at once returns the same error on the buggy path too.)
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("child-survived");
+        let sentinel_s = sentinel.to_string_lossy().into_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("exec 0<&-; sleep 1; touch '{sentinel_s}'"));
+        let big = vec![b'x'; 2 * 1024 * 1024]; // ≫ pipe buffer → broken pipe
+
+        let res = run_child_with_timeout(cmd, Some(big), Duration::from_secs(10), "t");
+        assert!(
+            res.is_err(),
+            "broken-pipe stdin write must surface an error"
+        );
+        assert!(
+            format!("{:?}", res.unwrap_err()).contains("stdin write"),
+            "error must identify the stdin-write failure"
+        );
+        // A killed child never reaches the touch; give a SURVIVING child
+        // well past its 1 s sleep to prove it was actually reaped.
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !sentinel.exists(),
+            "child must be killed on stdin-write error, not left running to completion"
+        );
     }
 
     #[test]

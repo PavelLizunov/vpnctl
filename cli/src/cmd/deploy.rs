@@ -16,12 +16,9 @@
 use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
-use vpnctl_core::{Protocol, RenderCtx, ServerId, SshTransport};
+use vpnctl_core::{Protocol, RenderCtx, ServerId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_ssh::RusshTransportBuilder;
-
-const TUIC_CERT_PATH: &str = "/etc/sing-box/cert.pem";
-const TUIC_KEY_PATH: &str = "/etc/sing-box/key.pem";
 
 pub(crate) async fn run(
     server_id: &str,
@@ -106,43 +103,12 @@ pub(crate) async fn run(
         println!("  minted {label}");
     }
 
-    // TUIC / Hysteria2 / Trojan / AnyTLS share ONE node-side self-signed
-    // cert. This is NOT a `server_secret_specs` secret — it's an
-    // openssl-generated file pair on the node (`tuic.cert_present` is just
-    // a marker), so the declarative bootstrap above never provisions it.
-    // Generate it here on first deploy.
-    let needs_tuic = server.enabled_protocols.iter().any(|p| p.0 == "tuic-v5");
-    if needs_tuic {
-        let probe = ssh
-            .exec(&format!(
-                "test -f {TUIC_CERT_PATH} && test -f {TUIC_KEY_PATH} && echo OK || echo MISSING"
-            ))
-            .await?;
-        if probe.trim() == "MISSING" {
-            println!("→ generating TUIC self-signed certificate on node");
-            // `set -e` so a chown / chmod failure isn't silently swallowed
-            // mid-script (the original `&&` chain stopped at first error but
-            // didn't propagate exit status reliably across all sing-box
-            // package layouts). Use server.id as CN (deterministic, no
-            // dependency on the node's `hostname` output which may contain
-            // shell-special chars; though we pass it via single-quoted
-            // string anyway).
-            let cn = server.id.0.replace('\'', ""); // safety belt — shell_quote wraps in '..' below
-            let gen_cmd = format!(
-                "set -eu; \
-                 openssl req -x509 -newkey rsa:2048 \
-                   -keyout {TUIC_KEY_PATH} -out {TUIC_CERT_PATH} \
-                   -days 3650 -nodes -subj '/CN={cn}'; \
-                 chown sing-box:sing-box {TUIC_CERT_PATH} {TUIC_KEY_PATH}; \
-                 chmod 600 {TUIC_KEY_PATH}"
-            );
-            ssh.exec(&gen_cmd).await?;
-            // Record presence in inventory so we can later support a
-            // `--rotate-tuic-cert` path that re-generates intentionally.
-            inv.set_server_secret(&sid, "tuic.cert_present", "1")
-                .await?;
-        }
-    }
+    // The shared node-side self-signed TLS cert (/etc/sing-box/{cert,key}.pem)
+    // that tuic-v5 / hysteria2 / trojan / anytls all reference is now
+    // provisioned idempotently by the sing-box kernel's `ensure_installed`
+    // (step 2 above) — in BOTH this CLI path and the daemon web/SSE path.
+    // It used to be minted here, gated on tuic-v5, so a hy2/trojan/anytls-
+    // only node missed it; see `crates/kernels/src/sing_box.rs`.
 
     // ─── 4. Resolve users + per-kernel protocol partition ────────────────
     let users = inv.users_for_server(&sid).await?;

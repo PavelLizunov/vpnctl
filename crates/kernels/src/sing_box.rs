@@ -30,6 +30,78 @@ impl SingBox {
     }
 }
 
+/// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
+/// EVERY deploy — both the CLI (`vpnctl deploy`) and the daemon web/SSE
+/// paths call `ensure_installed` before render/apply. Installs sing-box +
+/// its APT prereqs, pre-creates the sing-box-owned log file, wires
+/// logrotate, and provisions the shared self-signed TLS cert/key. Static
+/// (no interpolation) so it can be asserted directly in tests.
+const SING_BOX_SETUP_SCRIPT: &str = r#"
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    if ! command -v sing-box >/dev/null; then
+        apt-get update -qq
+        apt-get install -y --no-install-recommends \
+            curl gpg ca-certificates
+        install -d -m 0755 /usr/share/keyrings
+        curl -fsSL https://sing-box.app/gpg.key \
+            | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
+        echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
+            > /etc/apt/sources.list.d/sagernet.list
+        apt-get update -qq
+        apt-get install -y sing-box
+    fi
+    # Pre-create log file with sing-box ownership. Otherwise the
+    # service crash-loops with "open /var/log/sing-box.log:
+    # permission denied" — observed live on the staging deploy.
+    install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
+    chown -R sing-box:sing-box /etc/sing-box
+    systemctl enable sing-box >/dev/null
+    # Self-signed TLS cert/key shared by EVERY TLS-bearing inbound
+    # (tuic-v5, hysteria2, trojan, anytls — all render
+    # tls.certificate_path = /etc/sing-box/cert.pem + key.pem).
+    # Provisioned HERE in the kernel so BOTH the CLI deploy and the
+    # web/SSE deploy paths get it idempotently. Previously only the CLI
+    # generated it, and only when tuic-v5 was enabled — so a
+    # hy2/trojan/anytls-only node (or ANY web/SSE-deployed node)
+    # crash-looped sing-box on the missing cert files. Self-signed +
+    # clients use insecure:true, so the CN is irrelevant; the `test -f`
+    # guard never rotates an existing cert out from under live clients.
+    if [ ! -f /etc/sing-box/cert.pem ] || [ ! -f /etc/sing-box/key.pem ]; then
+        apt-get install -y --no-install-recommends openssl
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout /etc/sing-box/key.pem -out /etc/sing-box/cert.pem \
+            -subj '/CN=sing-box'
+    fi
+    chown sing-box:sing-box /etc/sing-box/cert.pem /etc/sing-box/key.pem
+    chmod 600 /etc/sing-box/key.pem
+    chmod 644 /etc/sing-box/cert.pem
+    # logrotate fragment for sing-box's main log file. `daily` check
+    # with size-based trigger at 100 MB. `copytruncate` so sing-box's
+    # open file descriptor stays valid (no SIGHUP needed). Keep 14
+    # rotations = ~14 days at most under idle load.
+    apt-get install -y --no-install-recommends logrotate
+    cat > /etc/logrotate.d/sing-box <<'LR'
+/var/log/sing-box.log {
+    daily
+    rotate 14
+    size 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su sing-box sing-box
+    create 0640 sing-box sing-box
+}
+LR
+    # Verify the fragment parses — logrotate's parser is strict and a
+    # typo would silently disable rotation for ALL fragments.
+    logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1
+    command -v sing-box  # final assertion — fails the exec on regression
+    command -v logrotate
+"#;
+
 #[async_trait]
 impl Kernel for SingBox {
     fn id(&self) -> KernelId {
@@ -53,71 +125,12 @@ impl Kernel for SingBox {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // Идемпотентно: пакет ставится только если не установлен.
-        //
-        // Каноничный минимальный Debian (например, новый VDS) НЕ имеет
-        // curl/gpg/ca-certificates — поэтому ставим их безусловно перед
-        // тем, как тянуть APT-репо SagerNet. Найдено на staging-деплое
-        // 84.19.3.104 (Debian 12 minimal): exec exit=127 «curl: команда
-        // не найдена».
-        //
-        // **Logrotate (added 2026-05-16):** without an explicit rotation
-        // policy, `/var/log/sing-box.log` grows linearly with traffic
-        // (~MB/day on a low-traffic node, GB/day on a busy one). At
-        // 20 GB disk staging boxes that's a death spiral within a
-        // couple months. Install a logrotate fragment that caps log
-        // age at 14 days + size at 100 MB, then `copytruncate` so
-        // sing-box doesn't need a SIGHUP/restart to pick up the new
-        // file. Idempotent: `cat > .../sing-box` replaces any prior
-        // version (including a hand-edited one — operator should know).
-        let script = r#"
-            set -eu
-            export DEBIAN_FRONTEND=noninteractive
-            if ! command -v sing-box >/dev/null; then
-                apt-get update -qq
-                apt-get install -y --no-install-recommends \
-                    curl gpg ca-certificates
-                install -d -m 0755 /usr/share/keyrings
-                curl -fsSL https://sing-box.app/gpg.key \
-                    | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
-                echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
-                    > /etc/apt/sources.list.d/sagernet.list
-                apt-get update -qq
-                apt-get install -y sing-box
-            fi
-            # Pre-create log file with sing-box ownership. Otherwise the
-            # service crash-loops with "open /var/log/sing-box.log:
-            # permission denied" — observed live on the staging deploy.
-            install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
-            chown -R sing-box:sing-box /etc/sing-box
-            systemctl enable sing-box >/dev/null
-            # logrotate fragment for sing-box's main log file. `daily`
-            # check with size-based trigger at 100 MB. `copytruncate`
-            # so sing-box's open file descriptor stays valid (no SIGHUP
-            # needed). Keep 14 rotations = ~14 days at most under
-            # idle load.
-            apt-get install -y --no-install-recommends logrotate
-            cat > /etc/logrotate.d/sing-box <<'LR'
-/var/log/sing-box.log {
-    daily
-    rotate 14
-    size 100M
-    missingok
-    notifempty
-    compress
-    delaycompress
-    copytruncate
-    su sing-box sing-box
-    create 0640 sing-box sing-box
-}
-LR
-            # Verify the fragment parses — logrotate's parser is strict
-            # and a typo would silently disable rotation for ALL fragments.
-            logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1
-            command -v sing-box  # final assertion — fails the exec on regression
-            command -v logrotate
-        "#;
-        ssh.exec(script).await?;
+        // Idempotent node setup — see [`SING_BOX_SETUP_SCRIPT`] for the
+        // full rationale (sing-box install on minimal Debian, log-file
+        // ownership, logrotate, and the shared self-signed TLS cert that
+        // tuic/hy2/trojan/anytls all need). Runs in BOTH the CLI and the
+        // web/SSE deploy paths.
+        ssh.exec(SING_BOX_SETUP_SCRIPT).await?;
         Ok(())
     }
 
@@ -429,6 +442,53 @@ mod tests {
             Value::String("127.0.0.1:9090".into()),
             "clash_api must bind to 127.0.0.1:9090 (loopback only — no external exposure)"
         );
+    }
+
+    /// `ensure_installed` must provision the shared self-signed TLS cert
+    /// that every TLS-bearing inbound (tuic-v5, hysteria2, trojan, anytls)
+    /// references at `/etc/sing-box/{cert,key}.pem`. It runs in BOTH the
+    /// CLI and web/SSE deploy paths, so doing it here closes the gap where
+    /// a hy2/trojan/anytls-only node (or any web-deployed node) crash-
+    /// looped sing-box on the missing files.
+    #[test]
+    fn setup_script_provisions_shared_tls_cert() {
+        let s = SING_BOX_SETUP_SCRIPT;
+        assert!(s.contains("/etc/sing-box/cert.pem"), "cert path missing");
+        assert!(s.contains("/etc/sing-box/key.pem"), "key path missing");
+        assert!(
+            s.contains("openssl req -x509"),
+            "self-signed cert generation missing"
+        );
+        // Idempotent: never regenerate (→ never rotate a live cert out).
+        assert!(
+            s.contains("[ ! -f /etc/sing-box/cert.pem ]"),
+            "cert generation must be guarded on absence (idempotent)"
+        );
+        assert!(
+            s.contains("chmod 600 /etc/sing-box/key.pem"),
+            "private key must be mode 0600"
+        );
+    }
+
+    /// The setup script keeps doing its prior jobs (sing-box install +
+    /// log-file ownership + logrotate) — the cert addition must not have
+    /// dropped any of them.
+    #[test]
+    fn setup_script_retains_install_log_and_logrotate_steps() {
+        let s = SING_BOX_SETUP_SCRIPT;
+        assert!(
+            s.contains("apt-get install -y sing-box"),
+            "sing-box install"
+        );
+        assert!(
+            s.contains("install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log"),
+            "log-file pre-create"
+        );
+        assert!(
+            s.contains("/etc/logrotate.d/sing-box"),
+            "logrotate fragment"
+        );
+        assert!(s.contains("set -eu"), "fail-fast shell flags");
     }
 
     /// Pre-existing keys (log, inbounds, outbounds) must still render
