@@ -2,10 +2,10 @@
 //! `registry` subcommand and (in v0.2 Phase 3b) `deploy` will pull from here.
 
 use vpnctl_core::Registry;
-use vpnctl_kernels::{AmneziaWg, SingBox, WgTurn as WgTurnKernel};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, WgTurn as WgTurnKernel};
 use vpnctl_protocols::{
-    AnyTls, Hysteria2, Shadowsocks2022, Trojan, TuicV5, VlessReality, WgTurn as WgTurnProtocol,
-    WireGuard,
+    AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality,
+    WgTurn as WgTurnProtocol, WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -24,6 +24,12 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // `wgturn:server_wg_private`, `wgturn:vk_link`,
     // `wgturn:listen_port` (opt), `wgturn:mode` (opt).
     reg.register_kernel(Box::new(WgTurnKernel::new()))?;
+    // Caddy + forwardproxy@naive — serves the `naive` protocol with a
+    // real masquerade website (HTTP 200 to probes, tunnel to authed
+    // clients). Built from source on-node (xcaddy); ACME built into
+    // Caddy. Binds 80+443 → a naive node must not also run a 443-TCP
+    // sing-box protocol. Secrets: `naive.domain`, `naive.acme_email`.
+    reg.register_kernel(Box::new(Caddy::new()))?;
 
     // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
     // All stateless — real REALITY keys / TUIC certs / WG private keys
@@ -48,6 +54,11 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // server-side `wgturn-cli provision-url` flow; the URL encoder
     // is pending pkg/wgshare → Rust port (phase 2).
     reg.register_protocol(Box::new(WgTurnProtocol::new()))?;
+    // naive — Chromium-fingerprint proxy served by the Caddy kernel.
+    // Strongest active-probe resistance (real cover website). Reuses
+    // `User.tuic_password` for HTTP Basic; server params
+    // `naive.domain` / `naive.acme_email` in inventory.server_secrets.
+    reg.register_protocol(Box::new(Naive::new()))?;
 
     Ok(reg)
 }
