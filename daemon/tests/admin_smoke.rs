@@ -7683,12 +7683,18 @@ async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
 #[tokio::test]
 async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+    // UNIQUE server-id per deploy-POST test: the per-server deploy gate
+    // (`wizard_bootstrap::DeployGuard`) is a process-wide static, so two
+    // parallel tests deploying the SAME id would race — the loser gets a
+    // 409 "deploy already running" and mints no secrets. Each deploy test
+    // must therefore own its server-id (here `wg-idem`, distinct from the
+    // sibling `wg-node` mint test).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
     s.inv
         .add_server(&Server {
-            id: ServerId("wg-node".into()),
+            id: ServerId("wg-idem".into()),
             address: "198.51.100.5".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
@@ -7709,7 +7715,7 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
             add_same_origin(
                 Request::builder()
                     .method("POST")
-                    .uri("/admin/servers/wg-node/deploy"),
+                    .uri("/admin/servers/wg-idem/deploy"),
             )
             .body(Body::empty())
             .unwrap(),
@@ -7717,7 +7723,7 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
         .await
         .unwrap();
     let first_pub = inv
-        .list_server_secrets(&ServerId("wg-node".into()))
+        .list_server_secrets(&ServerId("wg-idem".into()))
         .await
         .unwrap()
         .get("wireguard.server_public_key")
@@ -7729,7 +7735,7 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
         add_same_origin(
             Request::builder()
                 .method("POST")
-                .uri("/admin/servers/wg-node/deploy"),
+                .uri("/admin/servers/wg-idem/deploy"),
         )
         .body(Body::empty())
         .unwrap(),
@@ -7737,7 +7743,7 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
     .await
     .unwrap();
     let second_pub = inv
-        .list_server_secrets(&ServerId("wg-node".into()))
+        .list_server_secrets(&ServerId("wg-idem".into()))
         .await
         .unwrap()
         .get("wireguard.server_public_key")
