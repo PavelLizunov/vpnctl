@@ -757,6 +757,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/display-name",
             post(admin::server_set_display_name),
         )
+        // Naive (Caddy) per-server config — operator sets naive.domain +
+        // naive.acme_email (server_secrets) consumed by the caddy kernel's
+        // Caddyfile render + Caddy's built-in ACME (Let's Encrypt).
+        .route(
+            "/admin/servers/{id}/naive-config",
+            post(admin::server_set_naive_config),
+        )
         // Auto-suppress opt-in (migration 0030). Toggle whether the
         // server is auto-hidden from subscriptions while unreachable
         // (health monitor sets/clears the runtime suppressed_at flag).

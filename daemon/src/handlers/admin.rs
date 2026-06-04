@@ -11116,6 +11116,13 @@ pub(crate) async fn server_detail(
         // and `/api/v1/app/config/<device_id>`.
         (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
 
+        // Naive (Caddy) per-server config — domain + ACME email for the
+        // caddy kernel's Caddyfile + Caddy's built-in ACME. Renders only
+        // when the `naive` protocol is enabled on this server; carries the
+        // DNS-A-record + open-80/443 prerequisite reminder vpnctl can't
+        // do for the operator.
+        (server_detail_naive_config_section(&server, &server_secrets, lang))
+
         // Trusted host fingerprint — TOFU pin for the daemon's SSH
         // probe + clash-api poller + deploy. Both the web action below
         // and the `vpnctl server set-fingerprint <id>` CLI shipped
@@ -12356,6 +12363,71 @@ fn server_detail_fingerprint_section(
 /// their client's server list — blank clears it back to the built-in
 /// ISO-code→country map, then the uppercased id. Web equivalent of an
 /// otherwise-unsettable field (there's no CLI for it yet).
+/// Naive (Caddy + forwardproxy) per-server config. The operator sets
+/// `naive.domain` + `naive.acme_email` (server_secrets) that the caddy
+/// kernel renders into the Caddyfile and Caddy's built-in ACME uses to
+/// mint the Let's Encrypt cert. Rendered ONLY when the `naive` protocol
+/// is enabled on this server (empty markup otherwise). Carries the
+/// prerequisite reminder vpnctl CANNOT satisfy for the operator: a DNS
+/// A-record pointing here + open TCP 80/443.
+fn server_detail_naive_config_section(
+    server: &vpnctl_core::Server,
+    server_secrets: &std::collections::HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server.enabled_protocols.iter().any(|p| p.0 == "naive") {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let domain = server_secrets
+        .get("naive.domain")
+        .map(String::as_str)
+        .unwrap_or("");
+    let email = server_secrets
+        .get("naive.acme_email")
+        .map(String::as_str)
+        .unwrap_or("");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(lang,
+                "Caddy + forwardproxy serves a real cover website (HTTP 200) to probes and tunnels authenticated clients. Domain + email feed Caddy's built-in ACME (Let's Encrypt).",
+                "Caddy + forwardproxy отдаёт настоящий сайт-прикрытие (HTTP 200) зондам и туннелирует аутентифицированных клиентов. Домен + почта идут во встроенный ACME Caddy (Let's Encrypt).")) {
+            (tr(lang, "NAIVE (CADDY) CONFIG", "КОНФИГ NAIVE (CADDY)"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "Before deploy: point a DNS A-record at this server and open TCP 80+443 — Caddy's ACME needs both. vpnctl can't do DNS for you.",
+                "До деплоя: направь DNS A-запись на этот сервер и открой TCP 80+443 — встроенному ACME Caddy нужны оба. DNS vpnctl за тебя не сделает."))
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/naive-config"))
+             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "domain", "домен"))
+            }
+            input type="text" name="domain" maxlength="253" required
+                  value=(domain)
+                  placeholder="cdn.example.com"
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "ACME email", "ACME почта"))
+            }
+            input type="text" name="acme_email" maxlength="254"
+                  value=(email)
+                  placeholder="admin@example.com"
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            span {}
+            button type="submit"
+                   title=(tr(lang, "Save naive domain + ACME email", "Сохранить домен naive + ACME почту"))
+                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (tr(lang, "save naive config", "сохранить конфиг"))
+            }
+        }
+    }
+}
+
 fn server_detail_display_name_section(
     server: &vpnctl_core::Server,
     current: Option<&str>,
@@ -12654,6 +12726,87 @@ pub(crate) async fn server_set_fingerprint(
             "set_fingerprint succeeded but audit row failed; timeline will be missing this entry"
         );
     }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/naive-config` — set the naive (Caddy)
+/// per-server params `naive.domain` + `naive.acme_email` (server_secrets)
+/// the caddy kernel renders into the Caddyfile and Caddy's built-in ACME
+/// consumes. Domain is required (the deploy render rejects an empty one).
+/// Both fields are fail-closed against whitespace/brace injection — they
+/// land verbatim in a Caddyfile, so the same illegal-char set the kernel
+/// guards with is enforced here too, returning a clean 400 instead of a
+/// node-side `caddy validate` failure. Redirects to the detail page.
+pub(crate) async fn server_set_naive_config(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let domain_raw = form_field(&body, "domain").unwrap_or_default();
+    let domain = domain_raw.trim();
+    let email_raw = form_field(&body, "acme_email").unwrap_or_default();
+    let email = email_raw.trim();
+
+    // These strings land verbatim in a Caddyfile; reject anything that
+    // could break out of its line/block (same guard the caddy kernel
+    // applies at render). Fail with a 400 here rather than at node-side
+    // `caddy validate`.
+    const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
+    if domain.is_empty() {
+        return bad_request("vpnctl admin: naive domain is required");
+    }
+    if domain.chars().count() > 253 || domain.contains(ILLEGAL) {
+        return bad_request("vpnctl admin: invalid naive domain");
+    }
+    if email.chars().count() > 254 || email.contains(ILLEGAL) {
+        return bad_request("vpnctl admin: invalid naive ACME email");
+    }
+
+    // Two separate upserts (the generic KV setter is per-key). Not one
+    // transaction, so a mid-failure could leave domain set but email
+    // stale — acceptable here: single operator, the form is idempotent,
+    // and re-submitting reconciles both keys.
+    if let Err(e) = state
+        .inv
+        .set_server_secret(&sid, "naive.domain", domain)
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .set_server_secret(&sid, "naive.acme_email", email)
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    // set_server_secret is the generic KV setter (no built-in audit), so
+    // emit the audit row here. Best-effort: a failed audit write must not
+    // 500 the operator's save (the secrets already persisted).
+    let _ = state
+        .inv
+        .audit(
+            "admin",
+            "server.naive.set",
+            Some(&server_id),
+            Some(&serde_json::json!({
+                "domain": domain,
+                "acme_email_set": !email.is_empty(),
+            })),
+        )
+        .await;
 
     Redirect::to(&format!(
         "/admin/servers/{}",
