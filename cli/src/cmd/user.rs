@@ -44,7 +44,17 @@ pub(crate) enum UserCmd {
     List,
 
     /// Show user details.
-    Show { id: String },
+    Show {
+        id: String,
+        /// Reveal secret material (tuic_password, sub_token) instead of
+        /// `<redacted>`. Off by default: `user show` is repeatable and
+        /// its output lands in terminals / CI logs / support sessions,
+        /// and sub_token is a bearer credential. Applies to BOTH the text
+        /// and `--output json` forms (JSON omits the secret fields unless
+        /// this flag is set — matching `User`'s skip-on-serialize).
+        #[arg(long)]
+        show_secrets: bool,
+    },
 
     /// Remove a user (FK CASCADE removes their grants).
     Remove {
@@ -60,6 +70,33 @@ pub(crate) enum UserCmd {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// Format a secret field for `user show` text output. Redacts a present
+/// secret to `<redacted>` unless `show_secrets`; a missing secret always
+/// renders as `none_label` (so the operator can still tell "set but
+/// hidden" from "not set").
+fn render_secret_field(value: Option<&str>, show_secrets: bool, none_label: &str) -> String {
+    match value {
+        Some(v) if show_secrets => v.to_string(),
+        Some(_) => "<redacted>".to_string(),
+        None => none_label.to_string(),
+    }
+}
+
+/// Build the `user` JSON object for `user show`. `User`'s `Serialize`
+/// deliberately skips the secret fields (tuic_password, sub_token, …),
+/// so the default (`show_secrets=false`) output is byte-identical to the
+/// historical `json!({"user": user})`. When `show_secrets` is set, the
+/// two operator-relevant secrets are re-inserted so `--show-secrets
+/// --output json` actually carries them.
+fn user_show_json(user: &User, show_secrets: bool) -> anyhow::Result<serde_json::Value> {
+    let mut v = serde_json::to_value(user)?;
+    if show_secrets && let Some(obj) = v.as_object_mut() {
+        obj.insert("tuic_password".to_string(), json!(user.tuic_password));
+        obj.insert("sub_token".to_string(), json!(user.sub_token));
+    }
+    Ok(v)
 }
 
 pub(crate) async fn run(
@@ -176,7 +213,7 @@ pub(crate) async fn run(
             })
         }
 
-        UserCmd::Show { id } => {
+        UserCmd::Show { id, show_secrets } => {
             let user = inv
                 .get_user(&UserId(id.clone()))
                 .await?
@@ -188,7 +225,7 @@ pub(crate) async fn run(
                 .map(|s| s.id.0)
                 .collect();
             let payload = json!({
-                "user": user,
+                "user": user_show_json(&user, show_secrets)?,
                 "granted_servers": servers,
             });
             ui::print(format, &payload, |_| {
@@ -196,11 +233,11 @@ pub(crate) async fn run(
                 println!("uuid          : {}", user.uuid);
                 println!(
                     "tuic_password : {}",
-                    user.tuic_password.as_deref().unwrap_or("(none)")
+                    render_secret_field(user.tuic_password.as_deref(), show_secrets, "(none)")
                 );
                 println!(
                     "sub_token     : {}",
-                    user.sub_token.as_deref().unwrap_or("(missing — bug)")
+                    render_secret_field(user.sub_token.as_deref(), show_secrets, "(missing — bug)")
                 );
                 println!(
                     "granted on    : {}",
@@ -210,6 +247,11 @@ pub(crate) async fn run(
                         servers.join(", ")
                     }
                 );
+                if !show_secrets {
+                    println!(
+                        "(secrets redacted — pass --show-secrets to reveal tuic_password + sub_token)"
+                    );
+                }
                 Ok(())
             })
         }
@@ -241,5 +283,81 @@ pub(crate) async fn run(
             println!("  new token: {new_token}");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! `vpnctl user show` redacts bearer credentials by default (#7).
+    //! `user add` / `regen-sub` keep their one-time secret output — those
+    //! are the moments the operator legitimately needs the value once.
+
+    use super::*;
+
+    fn user_with_secrets() -> User {
+        User {
+            id: UserId("alice".into()),
+            uuid: "uuid-alice".into(),
+            tuic_password: Some("supersecret-tuic".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: Some("bearer-sub-token".into()),
+            vpn_router_device_id: None,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn render_secret_field_redacts_present_secret_by_default() {
+        assert_eq!(
+            render_secret_field(Some("supersecret"), false, "(none)"),
+            "<redacted>"
+        );
+    }
+
+    #[test]
+    fn render_secret_field_reveals_with_show_secrets() {
+        assert_eq!(
+            render_secret_field(Some("supersecret"), true, "(none)"),
+            "supersecret"
+        );
+    }
+
+    #[test]
+    fn render_secret_field_none_uses_label_regardless_of_flag() {
+        assert_eq!(render_secret_field(None, false, "(none)"), "(none)");
+        assert_eq!(
+            render_secret_field(None, true, "(missing — bug)"),
+            "(missing — bug)"
+        );
+    }
+
+    #[test]
+    fn user_show_json_omits_secrets_by_default() {
+        let v = user_show_json(&user_with_secrets(), false).unwrap();
+        assert!(
+            v.get("tuic_password").is_none(),
+            "default JSON must not carry tuic_password"
+        );
+        assert!(
+            v.get("sub_token").is_none(),
+            "default JSON must not carry the sub_token bearer credential"
+        );
+        // Non-secret fields still present (byte-identical to the old path).
+        assert_eq!(v.get("uuid").and_then(|x| x.as_str()), Some("uuid-alice"));
+    }
+
+    #[test]
+    fn user_show_json_includes_secrets_when_requested() {
+        let v = user_show_json(&user_with_secrets(), true).unwrap();
+        assert_eq!(
+            v.get("tuic_password").and_then(|x| x.as_str()),
+            Some("supersecret-tuic")
+        );
+        assert_eq!(
+            v.get("sub_token").and_then(|x| x.as_str()),
+            Some("bearer-sub-token")
+        );
     }
 }
