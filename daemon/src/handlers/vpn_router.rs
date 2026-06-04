@@ -423,6 +423,7 @@ async fn collect_extra_protocol_uris(
     state: &AppState,
     user: &User,
     pid: &vpnctl_core::ProtocolId,
+    label_tag: &str,
     require_secret: Option<&str>,
 ) -> Result<Vec<String>, String> {
     // Protocol not registered in this daemon's registry → nothing to add.
@@ -472,7 +473,25 @@ async fn collect_extra_protocol_uris(
         }
         let ctx = RenderCtx::new(server, &secrets);
         match proto.share_link(&ctx, user) {
-            Ok(link) => uris.push(link),
+            Ok(link) => {
+                // Re-label the URI fragment with the operator's server label
+                // (display_name / country) in the ninitux house style
+                // "{label} {TAG} ~{client}", matching the vless lines — the
+                // protocol's own share_link only knows the username. Only the
+                // cosmetic fragment after '#' is swapped; the URI STRUCTURE
+                // the protocol built is left intact. A display_name lookup
+                // error falls back to the default label (ISO map / id).
+                let custom = state
+                    .inv
+                    .server_display_name(&server.id)
+                    .await
+                    .ok()
+                    .flatten();
+                let label = server_display_label(&server.id.0, custom.as_deref());
+                let fragment = format!("{label} {label_tag} ~{}", user.id.0);
+                let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
+                uris.push(relabel_uri_fragment(&link, &encoded));
+            }
             Err(e) => {
                 // One server's failure must not abort the others or the
                 // vless lines — log + skip, never propagate.
@@ -488,6 +507,19 @@ async fn collect_extra_protocol_uris(
         }
     }
     Ok(uris)
+}
+
+/// Swap the `#fragment` of a share-link URI for `encoded_fragment` (already
+/// percent-encoded). The protocols percent-encode every other `#`, so the
+/// first literal `#` is the fragment separator; a URI with no `#` just gets
+/// one appended. (The one field interpolated raw is `server.address`; a `#`
+/// there would already corrupt the URI upstream of this — not a new failure
+/// mode, and a `#` in an IP/hostname is invalid anyway.)
+fn relabel_uri_fragment(uri: &str, encoded_fragment: &str) -> String {
+    match uri.find('#') {
+        Some(i) => format!("{}#{encoded_fragment}", &uri[..i]),
+        None => format!("{uri}#{encoded_fragment}"),
+    }
 }
 
 /// Encode the joined URIs as base64. Empty input → empty output.
@@ -772,11 +804,13 @@ pub(crate) async fn get_config(
     //   naive     — Caddy kernel; requires the `naive.domain` ACME secret.
     //   hysteria2 — sing-box (UDP/8444); Salamander obfs is auto-applied when
     //               its server secret is minted (the share-link mirrors it).
-    const EXTRA_PROTOCOLS: &[(&str, Option<&str>)] =
-        &[("naive", Some("naive.domain")), ("hysteria2", None)];
-    for (pid_str, require_secret) in EXTRA_PROTOCOLS {
+    const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
+        ("naive", "NAIVE", Some("naive.domain")),
+        ("hysteria2", "HY2", None),
+    ];
+    for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {
         let pid = vpnctl_core::ProtocolId((*pid_str).to_string());
-        match collect_extra_protocol_uris(&state, &user, &pid, *require_secret).await {
+        match collect_extra_protocol_uris(&state, &user, &pid, label_tag, *require_secret).await {
             Ok(extra) => uris.extend(extra),
             Err(e) => {
                 tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, protocol = %pid_str, error = %e, "extra-protocol uri collection failed; skipping");

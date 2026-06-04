@@ -522,6 +522,10 @@ async fn seed_state_with_naive(dir: &TempDir) -> AppState {
     inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
         .await
         .unwrap();
+    // Operator label → must surface in the rendered URI fragment.
+    inv.set_server_display_name(&cdn.id, Some("Latvia"))
+        .await
+        .unwrap();
 
     let user = User {
         id: UserId("tester-1".into()),
@@ -580,6 +584,11 @@ async fn vpn_router_naive_uri_appended_after_all_vless() {
     assert!(
         naive.contains("tester-1:NAIVE_TEST_PW@cdn.example.com"),
         "naive userinfo + ACME host: {naive}"
+    );
+    // Fragment carries the operator's server label, like the vless lines.
+    assert!(
+        naive.ends_with("#Latvia%20NAIVE%20~tester-1"),
+        "naive fragment must carry the server display label: {naive}"
     );
     // The naive line never precedes a vless line — guards the two-pass order.
     let first_naive = lines
@@ -769,6 +778,10 @@ async fn seed_hy2_opts(dir: &TempDir, tuic_password: Option<&str>, obfs: bool) -
         usage_coefficient: 1.0,
     };
     inv.add_server(&hy).await.unwrap();
+    // Operator label → must surface in the rendered URI fragment.
+    inv.set_server_display_name(&hy.id, Some("Latvia"))
+        .await
+        .unwrap();
     // Salamander obfs minted (when requested) → share-link carries obfs params.
     if obfs {
         inv.set_server_secret(&hy.id, "hysteria2.obfs.password", "OBFSPW123")
@@ -820,7 +833,12 @@ async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
         hy2.contains("obfs=salamander") && hy2.contains("obfs-password="),
         "Salamander obfs params present (DPI-resistant): {hy2}"
     );
-    assert!(hy2.ends_with("#tester-1"), "fragment: {hy2}");
+    // Fragment carries the operator's server label "{display} HY2 ~{client}"
+    // (ninitux house style, like the vless lines) — NOT the bare username.
+    assert!(
+        hy2.ends_with("#Latvia%20HY2%20~tester-1"),
+        "fragment must carry the server display label, not the username: {hy2}"
+    );
 }
 
 /// Kill-switch parity with naive: hiding hysteria2 (NM-10) drops it from the
@@ -971,5 +989,44 @@ async fn vpn_router_vless_then_naive_then_hysteria2_order() {
     assert!(
         lines[2].starts_with("hysteria2://"),
         "hysteria2 third: {lines:?}"
+    );
+    // No display_name on cdn/hy → fragment falls back to the uppercased
+    // non-ISO id ("CDN" / "HY"), still in the ninitux house style.
+    assert!(
+        lines[1].ends_with("#CDN%20NAIVE%20~tester-1"),
+        "naive fallback label: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].ends_with("#HY%20HY2%20~tester-1"),
+        "hy2 fallback label: {}",
+        lines[2]
+    );
+}
+
+/// A malicious/sloppy server `display_name` (newline + `#`) must NOT forge an
+/// extra line into the newline-joined base64 blob nor a second fragment — the
+/// whole label is `NINITUX_QUOTE`-encoded before it reaches the URI.
+#[tokio::test]
+async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_hy2_opts(&dir, Some("PW"), true).await;
+    state
+        .inv
+        .set_server_display_name(&ServerId("hy".into()), Some("Evil\nLatvia#x"))
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+
+    // Exactly de-vless + hy2 — the embedded newline did NOT split into a 3rd
+    // blob line (it'd be a forged URI line if left raw).
+    assert_eq!(lines.len(), 2, "no forged blob line: {lines:?}");
+    let hy2 = lines
+        .iter()
+        .find(|l| l.starts_with("hysteria2://"))
+        .expect("hy2 present");
+    assert!(
+        !hy2.contains("Evil\nLatvia"),
+        "raw newline must not survive into the URI: {hy2}"
     );
 }
