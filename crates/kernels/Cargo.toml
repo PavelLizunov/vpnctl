@@ -12,6 +12,10 @@ vpnctl-core = { path = "../core" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+# Integrity-verify the prebuilt caddy binary on the node after upload
+# (catches a corrupted/truncated cache file before it's installed as a
+# root systemd service). Already in the workspace lock transitively.
+sha2 = "0.10"
 
 [dev-dependencies]
 # AmneziaWg kernel tests use the real WireGuard Protocol impl to
