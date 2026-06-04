@@ -33,7 +33,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::{Caddy, SingBox};
-use vpnctl_protocols::{Naive, VlessReality};
+use vpnctl_protocols::{Hysteria2, Naive, VlessReality};
 use vpnctld::{AppState, router};
 
 const TEST_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
@@ -712,5 +712,264 @@ async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
     assert!(
         lines[0].contains("@de.example.com:443"),
         "vless intact: {lines:?}"
+    );
+}
+
+// ── Extra protocols: hysteria2 (UDP/8444 + Salamander obfs) ──────────────
+
+const HY2_DEVICE_ID: &str = "c1c2c3c4c5c6c7c8c9c0c1c2c3c4c5c6";
+
+/// SingBox kernel + Vless & Hysteria2 protocols; a vless server `de` and a
+/// hysteria2 server `hy` with a Salamander obfs password provisioned. User
+/// granted on both, with a `tuic_password` (hy2's per-user auth secret).
+async fn seed_state_with_hy2(dir: &TempDir) -> AppState {
+    seed_hy2_opts(dir, Some("HY2_TEST_PW"), true).await
+}
+
+async fn seed_hy2_opts(dir: &TempDir, tuic_password: Option<&str>, obfs: bool) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
+
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    let hy = Server {
+        id: ServerId("hy".into()),
+        address: "hy.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("hysteria2".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&hy).await.unwrap();
+    // Salamander obfs minted (when requested) → share-link carries obfs params.
+    if obfs {
+        inv.set_server_secret(&hy.id, "hysteria2.obfs.password", "OBFSPW123")
+            .await
+            .unwrap();
+    }
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: tuic_password.map(str::to_string),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, HY2_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("hy".into())).await.unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+/// hysteria2 renders AFTER vless, in the official `hysteria2://` URI form,
+/// and carries the Salamander obfs params when the server secret is minted
+/// (this is what makes it DPI-resistant — the whole point of the protocol).
+#[tokio::test]
+async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_hy2(&dir).await;
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+
+    assert_eq!(lines.len(), 2, "expected 1 vless + 1 hysteria2: {lines:?}");
+    assert!(
+        lines[0].starts_with("vless://") && lines[0].contains("@de.example.com"),
+        "vless must be first: {lines:?}"
+    );
+    let hy2 = lines.last().unwrap();
+    assert!(
+        hy2.starts_with("hysteria2://") && hy2.contains("@hy.example.com:8444/"),
+        "hysteria2 last, official scheme + UDP port: {lines:?}"
+    );
+    assert!(
+        hy2.contains("obfs=salamander") && hy2.contains("obfs-password="),
+        "Salamander obfs params present (DPI-resistant): {hy2}"
+    );
+    assert!(hy2.ends_with("#tester-1"), "fragment: {hy2}");
+}
+
+/// Kill-switch parity with naive: hiding hysteria2 (NM-10) drops it from the
+/// subscription on the next request, vless untouched.
+#[tokio::test]
+async fn vpn_router_hidden_hysteria2_excluded_vless_intact() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_hy2(&dir).await;
+    state
+        .inv
+        .set_server_protocol_hidden(
+            &ServerId("hy".into()),
+            &ProtocolId("hysteria2".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+
+    assert!(
+        !lines.iter().any(|l| l.starts_with("hysteria2://")),
+        "hidden hysteria2 must be absent: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("@de.example.com")),
+        "vless must remain: {lines:?}"
+    );
+}
+
+/// hysteria2's per-user auth is `tuic_password`; a user without one is
+/// SKIPPED (share_link errs → failure-isolated) and their vless stays
+/// byte-intact. This is the fleet-default case (most migrated users have no
+/// tuic_password) — proves an extra protocol can't break their vless.
+#[tokio::test]
+async fn vpn_router_hysteria2_without_tuic_password_skipped_vless_intact() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_hy2_opts(&dir, None, true).await;
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+    assert_eq!(
+        lines.len(),
+        1,
+        "vless-only when the user has no tuic_password: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("hysteria2://")),
+        "no hy2 line for a credential-less user: {lines:?}"
+    );
+    assert!(
+        lines[0].starts_with("vless://") && lines[0].contains("@de.example.com:443"),
+        "vless intact: {lines:?}"
+    );
+}
+
+/// `require_secret = None`: hysteria2 renders even with NO obfs secret — a
+/// bare `hysteria2://` (no `obfs=` params). Pins that the hy2 path does NOT
+/// gate on a server secret the way naive gates on `naive.domain`.
+#[tokio::test]
+async fn vpn_router_hysteria2_without_obfs_secret_emits_bare_uri() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_hy2_opts(&dir, Some("PW"), false).await;
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+    let hy2 = lines
+        .iter()
+        .find(|l| l.starts_with("hysteria2://"))
+        .expect("hy2 must render even without an obfs secret");
+    assert!(
+        !hy2.contains("obfs="),
+        "no obfs params when the secret is absent: {hy2}"
+    );
+    assert!(
+        hy2.contains("@hy.example.com:8444/"),
+        "still a valid hysteria2 endpoint: {hy2}"
+    );
+}
+
+/// Multi-extra ordering: a user granted vless + naive + hysteria2 gets the
+/// blob partitioned as [vless.., naive+https.., hysteria2://] — vless first
+/// (byte-stable), then the extras in EXTRA_PROTOCOLS declaration order. Pins
+/// the order against a future reorder of that const.
+#[tokio::test]
+async fn vpn_router_vless_then_naive_then_hysteria2_order() {
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(Caddy::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(Naive::new())).unwrap();
+    reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
+
+    let mk = |id: &str, proto: &str, kernel: &str| Server {
+        id: ServerId(id.into()),
+        address: format!("{id}.example.com"),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId(kernel.into())],
+        enabled_protocols: vec![ProtocolId(proto.into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    let de = mk("de", "vless+reality", "sing-box");
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    let cdn = mk("cdn", "naive", "caddy");
+    inv.add_server(&cdn).await.unwrap();
+    inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
+        .await
+        .unwrap();
+    let hy = mk("hy", "hysteria2", "sing-box");
+    inv.add_server(&hy).await.unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: Some("PW".into()),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, HY2_DEVICE_ID)
+        .await
+        .unwrap();
+    for s in ["de", "cdn", "hy"] {
+        inv.grant(&user.id, &ServerId(s.into())).await.unwrap();
+    }
+
+    let (state, _w) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
+    assert_eq!(lines.len(), 3, "vless + naive + hy2: {lines:?}");
+    assert!(lines[0].starts_with("vless://"), "vless first: {lines:?}");
+    assert!(
+        lines[1].starts_with("naive+https://"),
+        "naive second: {lines:?}"
+    );
+    assert!(
+        lines[2].starts_with("hysteria2://"),
+        "hysteria2 third: {lines:?}"
     );
 }

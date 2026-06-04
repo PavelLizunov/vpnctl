@@ -397,32 +397,36 @@ async fn collect_vless_uris_for_user(
     Ok(uris)
 }
 
-/// Collect ninitux-format naive URIs for `user` — one per granted server
-/// that has the `naive` protocol enabled + visible (NM-10) + provisioned
-/// (`naive.domain` server secret present). Mirrors the skip rules of
-/// `collect_vless_uris_for_user` (auto-suppress + the SAME
-/// `visible_protocols_for_subscription` filter), but renders through the
-/// protocol registry's `share_link` so the `naive+https://…` format has
-/// ONE source of truth (`crates/protocols/src/naive.rs`) rather than a
-/// second hand-rolled renderer.
+/// Collect ninitux-format share-link URIs for `user` for ONE protocol
+/// `pid` beyond the byte-stable vless render (naive, hysteria2, …) — one URI
+/// per granted server where `pid` is enabled + visible (NM-10) and, when
+/// `require_secret` is `Some`, provisioned with that server secret. Mirrors
+/// the vless path's skip rules (auto-suppress + the SAME
+/// `visible_protocols_for_subscription` filter) but renders through the
+/// registry's `share_link`, so each protocol's URI format has ONE source of
+/// truth (`crates/protocols/src/<proto>.rs`) instead of a hand-rolled
+/// renderer per protocol here.
 ///
-/// **Opt-in by grant + visibility.** Returns an empty Vec — never an
-/// error — when naive isn't registered or the user isn't granted naive on
-/// any naive-enabled server. The caller appends this AFTER all vless URIs,
-/// so a user not opted into naive gets a byte-identical vless-only blob:
-/// their vless cannot break. Hiding naive on the server (NM-10) drops it
-/// here on the very next request → instant per-request kill-switch, no
-/// redeploy.
+/// **Opt-in by grant + visibility.** Returns an empty Vec — never an error —
+/// when `pid` isn't registered or the user isn't entitled to it on any
+/// server. The caller appends the result AFTER all vless URIs, so a user not
+/// opted into `pid` keeps a byte-identical vless blob: their vless cannot
+/// break. Hiding `pid` on a server (NM-10) drops it here on the very next
+/// request → instant per-request kill-switch, no redeploy.
 ///
 /// **Failure-isolated.** A single server's render error is logged and
-/// skipped (the other servers — and every vless line — still render). Only
-/// a top-level inventory error propagates, and the caller treats even that
-/// as "serve vless-only", so naive is strictly additive and can never
-/// drop a user's vless.
-async fn collect_naive_uris_for_user(state: &AppState, user: &User) -> Result<Vec<String>, String> {
-    let naive_id = vpnctl_core::ProtocolId("naive".to_string());
-    // Naive not registered in this daemon's registry → nothing to add.
-    let Some(proto) = state.registry.protocol(&naive_id) else {
+/// skipped (every other server — and every vless line — still renders). Only
+/// a top-level inventory error propagates, and the caller treats even that as
+/// "serve what we have", so an extra protocol is strictly additive and can
+/// never drop a user's vless.
+async fn collect_extra_protocol_uris(
+    state: &AppState,
+    user: &User,
+    pid: &vpnctl_core::ProtocolId,
+    require_secret: Option<&str>,
+) -> Result<Vec<String>, String> {
+    // Protocol not registered in this daemon's registry → nothing to add.
+    let Some(proto) = state.registry.protocol(pid) else {
         return Ok(Vec::new());
     };
 
@@ -444,13 +448,13 @@ async fn collect_naive_uris_for_user(state: &AppState, user: &User) -> Result<Ve
             continue;
         }
         // OR-semantics visibility (NM-10): server-hidden OR per-user-denied
-        // → naive absent for this (user, server). This is the kill-switch.
+        // → protocol absent for this (user, server). This is the kill-switch.
         let visible = state
             .inv
             .visible_protocols_for_subscription(&user.id, &server.id)
             .await
             .map_err(|e| format!("visible_protocols_for_subscription: {e}"))?;
-        if !visible.contains(&naive_id) {
+        if !visible.contains(pid) {
             continue;
         }
         let secrets = state
@@ -458,10 +462,13 @@ async fn collect_naive_uris_for_user(state: &AppState, user: &User) -> Result<Ve
             .list_server_secrets(&server.id)
             .await
             .map_err(|e| format!("list_server_secrets: {e}"))?;
-        // naive needs an ACME domain to dial; skip an un-provisioned server
-        // the same way the vless path skips a missing public_key / short_id.
-        if !secrets.contains_key("naive.domain") {
-            continue;
+        // Skip a server not provisioned with the protocol's required server
+        // secret (e.g. naive needs `naive.domain`) — the same way the vless
+        // path skips a missing public_key / short_id.
+        if let Some(req) = require_secret {
+            if !secrets.contains_key(req) {
+                continue;
+            }
         }
         let ctx = RenderCtx::new(server, &secrets);
         match proto.share_link(&ctx, user) {
@@ -473,8 +480,9 @@ async fn collect_naive_uris_for_user(state: &AppState, user: &User) -> Result<Ve
                     target = "vpnctld::vpn_router",
                     user = %user.id,
                     server = %server.id,
+                    protocol = %pid.0,
                     error = %e,
-                    "naive share_link failed; skipping this server"
+                    "extra-protocol share_link failed; skipping this server"
                 );
             }
         }
@@ -753,19 +761,26 @@ pub(crate) async fn get_config(
         }
     };
 
-    // Part B (naive delivery) — append naive URIs STRICTLY AFTER all vless.
-    // Opt-in by grant + visibility: a user not granted naive on any
-    // naive-enabled server gets an empty Vec here, so `uris` (and the blob
-    // below) stays byte-identical to the pre-B vless-only output — their
-    // vless cannot break. Naive is purely ADDITIVE and failure-isolated:
-    // any error collecting it is logged and we serve vless-only, never
-    // dropping the user's vless. Trailing position keeps every vless line
-    // intact for a line-by-line tolerant client parser even if it can't
-    // parse the naive line.
-    match collect_naive_uris_for_user(&state, &user).await {
-        Ok(naive_uris) => uris.extend(naive_uris),
-        Err(e) => {
-            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "naive uri collection failed; serving vless-only");
+    // Extra protocols beyond the byte-stable vless render, appended STRICTLY
+    // AFTER all vless (two-pass) so a tolerant line-by-line client parser
+    // keeps every vless even if it can't parse a trailing extra line. Each is
+    // opt-in by grant + NM-10 visibility (hide = instant request-time
+    // kill-switch) and failure-isolated: a collection error logs + serves
+    // what we already have, never dropping a user's vless. Order is stable
+    // (declaration order), so the blob stays deterministic.
+    //
+    //   naive     — Caddy kernel; requires the `naive.domain` ACME secret.
+    //   hysteria2 — sing-box (UDP/8444); Salamander obfs is auto-applied when
+    //               its server secret is minted (the share-link mirrors it).
+    const EXTRA_PROTOCOLS: &[(&str, Option<&str>)] =
+        &[("naive", Some("naive.domain")), ("hysteria2", None)];
+    for (pid_str, require_secret) in EXTRA_PROTOCOLS {
+        let pid = vpnctl_core::ProtocolId((*pid_str).to_string());
+        match collect_extra_protocol_uris(&state, &user, &pid, *require_secret).await {
+            Ok(extra) => uris.extend(extra),
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, protocol = %pid_str, error = %e, "extra-protocol uri collection failed; skipping");
+            }
         }
     }
 
