@@ -47,6 +47,7 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use vpnctl_core::{
     CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
     SshTransport, User,
@@ -123,84 +124,111 @@ struct NaiveAuth {
     password: String,
 }
 
-#[async_trait]
-impl Kernel for Caddy {
-    fn id(&self) -> KernelId {
-        KernelId("caddy".to_string())
-    }
+/// Path on the CONTROL node where a prebuilt **static** (CGO-free) amd64
+/// `caddy` (with the naive forwardproxy) is cached. When present,
+/// `ensure_installed` uploads it to the target node — seconds, with no
+/// Go toolchain / build swap / RAM pressure on the node. The SAME static
+/// binary runs on any Linux amd64 host (Go static binaries have no libc
+/// dependency), so one build serves the whole fleet. Populate it once
+/// (CI artifact or `scp` from any already-built node). Override the path
+/// via the `VPNCTL_CADDY_CACHE` env var.
+pub(crate) fn caddy_cache_path() -> std::path::PathBuf {
+    std::env::var_os("VPNCTL_CADDY_CACHE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_caddy_cache_path)
+}
 
-    fn supported_protocols(&self) -> Vec<ProtocolId> {
-        vec![ProtocolId("naive".to_string())]
-    }
+/// Default cache path, stamped with the Caddy + forwardproxy versions so
+/// a version bump invalidates the old cache (a stale binary would
+/// silently ship the wrong version). Pure (reads no env) → deterministic
+/// to test.
+pub(crate) fn default_caddy_cache_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        "/var/lib/vpnctl/cache/caddy-{CADDY_VERSION}-{FORWARDPROXY_PIN}-amd64"
+    ))
+}
 
-    async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // Built from source (stock apt caddy has no forwardproxy), same
-        // shape as wgturn's Go build. Heavy on a 1-vCPU/1-GB box (~10
-        // min, RAM-tight) — hence the temporary build swapfile and
-        // `GOFLAGS=-p=1` to cap parallelism/peak-RAM. Fully idempotent:
-        // a node that already has the plugin skips straight to the
-        // user/site/unit provisioning.
-        let script = format!(
-            r#"
-            set -eu
-            export DEBIAN_FRONTEND=noninteractive
+/// Classify the idempotency-probe stdout. Pure (testable) so an inverted
+/// branch can't slip through CI: the node is "ready" only when the probe
+/// printed exactly `present` (caddy on PATH AND the forward_proxy module
+/// compiled in).
+fn caddy_present(probe_stdout: &str) -> bool {
+    probe_stdout.trim() == "present"
+}
 
-            if command -v /usr/local/bin/caddy >/dev/null 2>&1 \
-               && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy; then
-                echo "caddy+forwardproxy already present: $(/usr/local/bin/caddy version | head -1)"
-            else
-                apt-get update -qq
-                apt-get install -y --no-install-recommends git curl ca-certificates
+/// On-node build fallback (no cache present): install Go + xcaddy and
+/// build caddy with the naive forwardproxy. Heavy on a 1-vCPU/1-GB box
+/// (~10 min, RAM-tight) — hence the temporary build swapfile and
+/// `GOFLAGS=-p=1`. `CGO_ENABLED=0` makes the result the same portable
+/// static binary the cache path ships.
+fn caddy_build_script() -> String {
+    format!(
+        r#"
+        set -eu
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y --no-install-recommends git curl ca-certificates
 
-                # Temporary build swap on low-RAM boxes (Go build peaks
-                # well above 960 MB). Removed again after the build.
-                ADDED_SWAP=0
-                if ! swapon --show 2>/dev/null | grep -q /caddy-build-swap; then
-                    total_mb=$(free -m | awk '/Mem/{{print $2}}')
-                    if [ "$total_mb" -lt 1300 ]; then
-                        fallocate -l 1G /caddy-build-swap 2>/dev/null \
-                            || dd if=/dev/zero of=/caddy-build-swap bs=1M count=1024 status=none
-                        chmod 600 /caddy-build-swap
-                        mkswap /caddy-build-swap >/dev/null
-                        swapon /caddy-build-swap
-                        ADDED_SWAP=1
-                    fi
-                fi
-
-                curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/{go_version}.linux-amd64.tar.gz"
-                rm -rf /usr/local/go
-                tar -C /usr/local -xzf /tmp/go.tgz
-                rm -f /tmp/go.tgz
-                export PATH="$PATH:/usr/local/go/bin:/root/go/bin"
-                export GOFLAGS=-p=1 GOMAXPROCS=1 CGO_ENABLED=0
-
-                go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-                /root/go/bin/xcaddy build {caddy_version} \
-                    --with github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@{fp_pin} \
-                    --output /usr/local/bin/caddy
-
-                /usr/local/bin/caddy list-modules | grep -q forward_proxy
-
-                if [ "$ADDED_SWAP" = 1 ]; then
-                    swapoff /caddy-build-swap 2>/dev/null || true
-                    rm -f /caddy-build-swap
-                fi
+        # Temporary build swap on low-RAM boxes (Go build peaks well above
+        # 960 MB). Removed again after the build.
+        ADDED_SWAP=0
+        if ! swapon --show 2>/dev/null | grep -q /caddy-build-swap; then
+            total_mb=$(free -m | awk '/Mem/{{print $2}}')
+            if [ "$total_mb" -lt 1300 ]; then
+                fallocate -l 1G /caddy-build-swap 2>/dev/null \
+                    || dd if=/dev/zero of=/caddy-build-swap bs=1M count=1024 status=none
+                chmod 600 /caddy-build-swap
+                mkswap /caddy-build-swap >/dev/null
+                swapon /caddy-build-swap
+                ADDED_SWAP=1
             fi
+        fi
 
-            # Service user, data dir, web root, config dir.
-            id caddy >/dev/null 2>&1 \
-                || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
-            install -d -o caddy -g caddy -m 0755 /var/lib/caddy /var/www/naive-site
-            install -d -m 0755 /etc/caddy
+        curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/{go_version}.linux-amd64.tar.gz"
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf /tmp/go.tgz
+        rm -f /tmp/go.tgz
+        export PATH="$PATH:/usr/local/go/bin:/root/go/bin"
+        export GOFLAGS=-p=1 GOMAXPROCS=1 CGO_ENABLED=0
 
-            # Masquerade site (constant — provisioned once here).
-            cat > /var/www/naive-site/index.html <<'NAIVE_SITE_EOF'
+        go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+        /root/go/bin/xcaddy build {caddy_version} \
+            --with github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@{fp_pin} \
+            --output /usr/local/bin/caddy
+
+        /usr/local/bin/caddy list-modules | grep -q forward_proxy
+
+        if [ "$ADDED_SWAP" = 1 ]; then
+            swapoff /caddy-build-swap 2>/dev/null || true
+            rm -f /caddy-build-swap
+        fi
+        "#,
+        go_version = GO_VERSION,
+        caddy_version = CADDY_VERSION,
+        fp_pin = FORWARDPROXY_PIN,
+    )
+}
+
+/// Provision the node runtime regardless of how the binary arrived:
+/// service user, masquerade web root + site, systemd unit, firewall.
+/// Idempotent — safe to re-run on every deploy.
+fn caddy_runtime_provision_script() -> String {
+    format!(
+        r#"
+        set -eu
+        id caddy >/dev/null 2>&1 \
+            || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
+        install -d -o caddy -g caddy -m 0755 /var/lib/caddy /var/www/naive-site
+        install -d -m 0755 /etc/caddy
+
+        # Masquerade site (constant — provisioned here).
+        cat > /var/www/naive-site/index.html <<'NAIVE_SITE_EOF'
 {site}NAIVE_SITE_EOF
-            chown -R caddy:caddy /var/www/naive-site
+        chown -R caddy:caddy /var/www/naive-site
 
-            # systemd unit. Type=notify + CAP_NET_BIND_SERVICE so the
-            # non-root caddy user can bind 80/443.
-            cat > /etc/systemd/system/caddy.service <<'CADDY_UNIT_EOF'
+        # systemd unit. Type=notify + CAP_NET_BIND_SERVICE so the non-root
+        # caddy user can bind 80/443.
+        cat > /etc/systemd/system/caddy.service <<'CADDY_UNIT_EOF'
 [Unit]
 Description=Caddy (naive forward proxy)
 Documentation=https://caddyserver.com/docs/
@@ -227,24 +255,80 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 CADDY_UNIT_EOF
-            systemctl daemon-reload
+        systemctl daemon-reload
 
-            # naive needs 80 (ACME HTTP) + 443. vpnctl doesn't manage the
-            # firewall elsewhere, but a closed 80/443 here means no cert
-            # and no service — so open them best-effort when ufw is present.
-            if command -v ufw >/dev/null 2>&1; then
-                ufw allow 80/tcp  >/dev/null 2>&1 || true
-                ufw allow 443/tcp >/dev/null 2>&1 || true
-            fi
+        # naive needs 80 (ACME HTTP) + 443. vpnctl doesn't manage the
+        # firewall elsewhere, but a closed 80/443 here means no cert and
+        # no service — so open them best-effort when ufw is present.
+        if command -v ufw >/dev/null 2>&1; then
+            ufw allow 80/tcp  >/dev/null 2>&1 || true
+            ufw allow 443/tcp >/dev/null 2>&1 || true
+        fi
 
-            command -v /usr/local/bin/caddy
-            "#,
-            go_version = GO_VERSION,
-            caddy_version = CADDY_VERSION,
-            fp_pin = FORWARDPROXY_PIN,
-            site = MASQUERADE_INDEX_HTML,
-        );
-        ssh.exec(&script).await?;
+        command -v /usr/local/bin/caddy
+        "#,
+        site = MASQUERADE_INDEX_HTML,
+    )
+}
+
+#[async_trait]
+impl Kernel for Caddy {
+    fn id(&self) -> KernelId {
+        KernelId("caddy".to_string())
+    }
+
+    fn supported_protocols(&self) -> Vec<ProtocolId> {
+        vec![ProtocolId("naive".to_string())]
+    }
+
+    async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
+        // Idempotency probe: a node that already has caddy+forwardproxy
+        // skips straight to runtime provisioning.
+        let present = ssh
+            .exec(
+                "command -v /usr/local/bin/caddy >/dev/null 2>&1 \
+                 && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy \
+                 && echo present || echo absent",
+            )
+            .await?;
+
+        if !caddy_present(&present) {
+            // FAST PATH: a prebuilt static (CGO-free) amd64 caddy cached on
+            // the CONTROL node — upload it (seconds; no Go/swap/RAM pressure
+            // on the target). The same binary runs on any amd64 node.
+            // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
+            // cache is present (e.g. a CLI deploy from a host without it).
+            let cache = caddy_cache_path();
+            match std::fs::read(&cache) {
+                Ok(bytes) => {
+                    // Integrity-verify on the node before installing it as a
+                    // root systemd service: SHA256 the bytes we read, upload
+                    // to .new, `sha256sum -c` there, then atomic mv. `set -eu`
+                    // aborts the deploy on a corrupted/truncated upload.
+                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                    ssh.upload("/usr/local/bin/caddy.new", &bytes).await?;
+                    ssh.exec(&format!(
+                        "set -eu\n\
+                         echo '{digest}  /usr/local/bin/caddy.new' | sha256sum -c - >/dev/null\n\
+                         chmod 0755 /usr/local/bin/caddy.new\n\
+                         mv -f /usr/local/bin/caddy.new /usr/local/bin/caddy\n\
+                         /usr/local/bin/caddy list-modules | grep -q forward_proxy"
+                    ))
+                    .await?;
+                }
+                // No cache → build on the node. A cache path that's SET but
+                // unreadable (bad VPNCTL_CADDY_CACHE, wrong perms, a dir)
+                // fails loudly rather than silently triggering a 10-min build.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    ssh.exec(&caddy_build_script()).await?;
+                }
+                Err(e) => return Err(CoreError::Io(e)),
+            }
+        }
+
+        // Provision the runtime (user, masquerade site, systemd unit,
+        // firewall) regardless of how the binary arrived. Idempotent.
+        ssh.exec(&caddy_runtime_provision_script()).await?;
         Ok(())
     }
 
@@ -452,6 +536,31 @@ mod tests {
         let c = Caddy::new();
         assert_eq!(c.id(), KernelId("caddy".into()));
         assert_eq!(c.supported_protocols(), vec![ProtocolId("naive".into())]);
+    }
+
+    #[test]
+    fn default_cache_path_embeds_version_and_pin() {
+        // The cache key MUST carry both versions so a Caddy/forwardproxy
+        // bump invalidates a stale prebuilt binary instead of silently
+        // uploading the wrong one.
+        let s = default_caddy_cache_path().to_string_lossy().into_owned();
+        assert!(s.contains(CADDY_VERSION), "missing caddy version: {s}");
+        assert!(
+            s.contains(FORWARDPROXY_PIN),
+            "missing forwardproxy pin: {s}"
+        );
+        assert!(s.ends_with("-amd64"), "must be arch-stamped: {s}");
+    }
+
+    #[test]
+    fn caddy_present_only_on_exact_present_token() {
+        assert!(caddy_present("present"));
+        assert!(caddy_present("present\n"));
+        assert!(caddy_present("  present  "));
+        assert!(!caddy_present("absent"));
+        assert!(!caddy_present(""));
+        // A noisy probe (e.g. a banner before the token) is NOT "ready".
+        assert!(!caddy_present("present extra"));
     }
 
     #[test]
