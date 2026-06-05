@@ -496,15 +496,24 @@ async fn collect_extra_protocol_uris(
                 let fragment = format!("{label} {label_tag} ~{}", user.id.0);
                 let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
                 let mut out = relabel_uri_fragment(&link, &encoded);
-                // Co-located naive↔HY2 pairing (see the pid defs above): when
-                // THIS server exposes BOTH, stamp the naive/HY2 link with
-                // `pair=<server id>` in the query. Same node → same pair; a
-                // naive- or HY2-only node → none; other nodes → their own id.
-                // Opaque to the client (it only matches naive↔HY2 on it);
-                // unknown to other clients (silently ignored).
+                // Co-located naive↔HY2 pairing (UX-3, migration 0031). Stamp
+                // the naive/HY2 link with `pair=<server id>` in the query when
+                // ALL hold: (a) THIS server has UDP pairing OPTED-IN by the
+                // operator (`udp_pair_enabled`), and (b) it exposes BOTH naive
+                // and HY2. Same node → same pair; a naive- or HY2-only node, or
+                // a node without the opt-in → none; other nodes → their own id.
+                // Single-server only by construction (the tag IS the server
+                // id). Opaque to the client (it only matches naive↔HY2 on it);
+                // unknown to other clients (silently ignored). DB error on the
+                // flag → no pair (fail-safe; the link still works unpaired).
                 if (pid == &naive_pid || pid == &hy2_pid)
                     && visible.contains(&naive_pid)
                     && visible.contains(&hy2_pid)
+                    && state
+                        .inv
+                        .is_server_udp_pair_enabled(&server.id)
+                        .await
+                        .unwrap_or(false)
                 {
                     let pair = utf8_percent_encode(&server.id.0, NINITUX_QUOTE).to_string();
                     out = add_query_param(&out, "pair", &pair);

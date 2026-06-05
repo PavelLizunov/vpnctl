@@ -1080,6 +1080,10 @@ async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
     inv.set_server_display_name(&cdn.id, Some("Latvia"))
         .await
         .unwrap();
+    // UDP pairing opt-in (UX-3) — without it no `pair=` tag is emitted.
+    inv.set_server_udp_pair_enabled(&cdn.id, true)
+        .await
+        .unwrap();
 
     let user = User {
         id: UserId("tester-1".into()),
@@ -1173,6 +1177,11 @@ async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
         .grant(&UserId("tester-1".into()), &ServerId("nl2".into()))
         .await
         .unwrap();
+    state
+        .inv
+        .set_server_udp_pair_enabled(&ServerId("nl2".into()), true)
+        .await
+        .unwrap();
 
     let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
     let has = |scheme: &str, pair: &str| {
@@ -1185,4 +1194,31 @@ async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
     assert!(has("hysteria2://", "pair=cdn#"), "cdn hy2: {lines:?}");
     assert!(has("naive+https://", "pair=nl2#"), "nl2 naive: {lines:?}");
     assert!(has("hysteria2://", "pair=nl2#"), "nl2 hy2: {lines:?}");
+}
+
+/// The pairing tag is an OPT-IN (UX-3): a node with BOTH naive+HY2 but the
+/// `udp_pair_enabled` flag OFF emits NO `pair=` on either link — both still
+/// render, just unpaired.
+#[tokio::test]
+async fn vpn_router_paired_node_without_optin_has_no_pair() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_paired_node(&dir).await; // cdn: opt-in ON by default
+    state
+        .inv
+        .set_server_udp_pair_enabled(&ServerId("cdn".into()), false)
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
+    assert!(
+        !lines.iter().any(|l| l.contains("pair=")),
+        "no pair tag without the opt-in: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("naive+https://")),
+        "naive still renders: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("hysteria2://")),
+        "hy2 still renders: {lines:?}"
+    );
 }

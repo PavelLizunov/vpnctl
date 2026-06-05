@@ -1793,6 +1793,81 @@ async fn admin_server_set_naive_config_mutates_and_audits() {
 }
 
 #[tokio::test]
+async fn admin_server_set_udp_pair_toggles_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("lv".into()),
+            address: "1.2.3.4".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let sid = vpnctl_core::ServerId("lv".into());
+    assert!(
+        !s.inv.is_server_udp_pair_enabled(&sid).await.unwrap(),
+        "default off"
+    );
+
+    // Enable via the handler.
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/lv/udp-pair")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("enabled=true"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert!(
+        s.inv.is_server_udp_pair_enabled(&sid).await.unwrap(),
+        "enable must persist"
+    );
+    assert!(
+        s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.action == "server.udp_pair.set" && e.target.as_deref() == Some("lv")),
+        "audit row server.udp_pair.set must land"
+    );
+
+    // Disable via the handler.
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/lv/udp-pair")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("enabled=false"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !s.inv.is_server_udp_pair_enabled(&sid).await.unwrap(),
+        "disable must persist"
+    );
+}
+
+#[tokio::test]
 async fn admin_server_set_naive_config_rejects_empty_domain() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
