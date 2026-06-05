@@ -590,6 +590,11 @@ async fn vpn_router_naive_uri_appended_after_all_vless() {
         naive.ends_with("#Latvia%20NAIVE%20~tester-1"),
         "naive fragment must carry the server display label: {naive}"
     );
+    // naive-only node (no co-located HY2) → no pairing tag.
+    assert!(
+        !naive.contains("pair="),
+        "a naive-only node must not carry a pair param: {naive}"
+    );
     // The naive line never precedes a vless line — guards the two-pass order.
     let first_naive = lines
         .iter()
@@ -839,6 +844,11 @@ async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
         hy2.ends_with("#Latvia%20HY2%20~tester-1"),
         "fragment must carry the server display label, not the username: {hy2}"
     );
+    // HY2-only node (no co-located naive) → no pairing tag.
+    assert!(
+        !hy2.contains("pair="),
+        "an HY2-only node must not carry a pair param: {hy2}"
+    );
 }
 
 /// Kill-switch parity with naive: hiding hysteria2 (NM-10) drops it from the
@@ -1029,4 +1039,150 @@ async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
         !hy2.contains("Evil\nLatvia"),
         "raw newline must not survive into the URI: {hy2}"
     );
+}
+
+const PAIR_DEVICE_ID: &str = "d1d2d3d4d5d6d7d8d9d0d1d2d3d4d5d6";
+
+/// One physical node with BOTH naive and hysteria2 enabled — the co-location
+/// case the `pair=` tag exists for (so a client can carry UDP, which naive
+/// can't, over the HY2 on the same node).
+async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(Caddy::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(Naive::new())).unwrap();
+    reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
+
+    let cdn = Server {
+        id: ServerId("cdn".into()),
+        address: "213.155.15.93".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("caddy".into()), KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("naive".into()), ProtocolId("hysteria2".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&cdn).await.unwrap();
+    inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
+        .await
+        .unwrap();
+    inv.set_server_secret(&cdn.id, "hysteria2.obfs.password", "OBFS")
+        .await
+        .unwrap();
+    inv.set_server_display_name(&cdn.id, Some("Latvia"))
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: Some("PW".into()),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, PAIR_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("cdn".into())).await.unwrap();
+
+    let (state, _w) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+/// A node with BOTH naive + HY2 stamps both share-links with the SAME
+/// `pair=<server id>` in the query (before the fragment).
+#[tokio::test]
+async fn vpn_router_colocated_naive_and_hy2_share_a_pair_param() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_paired_node(&dir).await;
+    let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
+    let naive = lines
+        .iter()
+        .find(|l| l.starts_with("naive+https://"))
+        .expect("naive line");
+    let hy2 = lines
+        .iter()
+        .find(|l| l.starts_with("hysteria2://"))
+        .expect("hy2 line");
+
+    // naive had no query → "?pair="; hy2 already had a query → "&pair=".
+    assert!(naive.contains("?pair=cdn#"), "naive pair in query: {naive}");
+    assert!(hy2.contains("&pair=cdn#"), "hy2 pair in query: {hy2}");
+
+    // Identical pair value on both.
+    let pair_of = |u: &str| {
+        u.split("pair=")
+            .nth(1)
+            .and_then(|s| s.split(['#', '&']).next())
+            .map(str::to_string)
+    };
+    assert_eq!(pair_of(naive), Some("cdn".to_string()));
+    assert_eq!(
+        pair_of(naive),
+        pair_of(hy2),
+        "naive & hy2 of one node must share the pair"
+    );
+
+    // pair lives in the query (before '#'), not the fragment.
+    assert!(
+        naive.find("pair=").unwrap() < naive.find('#').unwrap(),
+        "pair must precede the fragment: {naive}"
+    );
+}
+
+/// Different nodes get DIFFERENT pair values (each its own server id) — the
+/// "разные узлы → разный pair" half of the contract.
+#[tokio::test]
+async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_paired_node(&dir).await; // node "cdn" (naive+hy2)
+
+    // A SECOND co-located node "nl2".
+    let nl2 = Server {
+        id: ServerId("nl2".into()),
+        address: "1.2.3.4".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("caddy".into()), KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("naive".into()), ProtocolId("hysteria2".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    state.inv.add_server(&nl2).await.unwrap();
+    state
+        .inv
+        .set_server_secret(&nl2.id, "naive.domain", "nl2.example.com")
+        .await
+        .unwrap();
+    state
+        .inv
+        .grant(&UserId("tester-1".into()), &ServerId("nl2".into()))
+        .await
+        .unwrap();
+
+    let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
+    let has = |scheme: &str, pair: &str| {
+        lines
+            .iter()
+            .any(|l| l.starts_with(scheme) && l.contains(pair))
+    };
+    // cdn's pair=cdn on both, nl2's pair=nl2 on both — distinct per node.
+    assert!(has("naive+https://", "pair=cdn#"), "cdn naive: {lines:?}");
+    assert!(has("hysteria2://", "pair=cdn#"), "cdn hy2: {lines:?}");
+    assert!(has("naive+https://", "pair=nl2#"), "nl2 naive: {lines:?}");
+    assert!(has("hysteria2://", "pair=nl2#"), "nl2 hy2: {lines:?}");
 }
