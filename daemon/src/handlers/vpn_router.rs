@@ -437,6 +437,11 @@ async fn collect_extra_protocol_uris(
         .await
         .map_err(|e| format!("servers_for_user: {e}"))?;
 
+    // A node exposing BOTH naive and HY2 tags both share-links with a shared
+    // `pair=<server id>` query param, so a client can route UDP — which naive
+    // can't carry — through the co-located HY2 on the same node.
+    let naive_pid = vpnctl_core::ProtocolId("naive".to_string());
+    let hy2_pid = vpnctl_core::ProtocolId("hysteria2".to_string());
     let mut uris: Vec<String> = Vec::new();
     for server in &servers {
         // Same auto-suppress (migration 0030) skip as the vless path.
@@ -490,7 +495,21 @@ async fn collect_extra_protocol_uris(
                 let label = server_display_label(&server.id.0, custom.as_deref());
                 let fragment = format!("{label} {label_tag} ~{}", user.id.0);
                 let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
-                uris.push(relabel_uri_fragment(&link, &encoded));
+                let mut out = relabel_uri_fragment(&link, &encoded);
+                // Co-located naive↔HY2 pairing (see the pid defs above): when
+                // THIS server exposes BOTH, stamp the naive/HY2 link with
+                // `pair=<server id>` in the query. Same node → same pair; a
+                // naive- or HY2-only node → none; other nodes → their own id.
+                // Opaque to the client (it only matches naive↔HY2 on it);
+                // unknown to other clients (silently ignored).
+                if (pid == &naive_pid || pid == &hy2_pid)
+                    && visible.contains(&naive_pid)
+                    && visible.contains(&hy2_pid)
+                {
+                    let pair = utf8_percent_encode(&server.id.0, NINITUX_QUOTE).to_string();
+                    out = add_query_param(&out, "pair", &pair);
+                }
+                uris.push(out);
             }
             Err(e) => {
                 // One server's failure must not abort the others or the
@@ -520,6 +539,19 @@ fn relabel_uri_fragment(uri: &str, encoded_fragment: &str) -> String {
         Some(i) => format!("{}#{encoded_fragment}", &uri[..i]),
         None => format!("{uri}#{encoded_fragment}"),
     }
+}
+
+/// Insert `key=encoded_value` into the query of a share-link URI, BEFORE any
+/// `#fragment`. Uses `?` when the URI has no query yet, else `&`. The
+/// protocols percent-encode every other `?`/`#`, so the first of each is the
+/// genuine query / fragment boundary.
+fn add_query_param(uri: &str, key: &str, encoded_value: &str) -> String {
+    let (head, frag) = match uri.find('#') {
+        Some(i) => (&uri[..i], &uri[i..]),
+        None => (uri, ""),
+    };
+    let sep = if head.contains('?') { '&' } else { '?' };
+    format!("{head}{sep}{key}={encoded_value}{frag}")
 }
 
 /// Encode the joined URIs as base64. Empty input → empty output.
