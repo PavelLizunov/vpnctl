@@ -140,6 +140,60 @@ pub fn validate_shape(fp: &str) -> bool {
 /// flag-injection via attacker-controlled inventory addresses. See
 /// crate-level docs for the full rationale.
 pub fn fetch_via_keyscan(host: &str, port: u16) -> Result<String, Error> {
+    let stdout = run_keyscan(host, port)?;
+    let chosen =
+        pick_key_line(&String::from_utf8_lossy(&stdout)).ok_or_else(|| Error::KeyscanEmpty {
+            host: host.to_string(),
+            port,
+        })?;
+    let keygen_out = run_keygen_fingerprint(chosen.as_bytes())?;
+    extract_sha256_token(&keygen_out).ok_or(Error::NoFingerprintToken {
+        output: keygen_out.trim().to_string(),
+    })
+}
+
+/// Fetch the SHA256 fingerprints of EVERY host key `<host>:<port>`
+/// currently serves (ed25519 + rsa, per [`build_keyscan_args`]),
+/// rather than the single canonical one [`fetch_via_keyscan`] picks.
+///
+/// ## Why this exists (drift-check robustness)
+///
+/// The pinned `trusted_host_fingerprint` is one specific key
+/// (ed25519-preferred at pin time). A single `ssh-keyscan` invocation
+/// can legitimately return only a SUBSET of the server's keys when a
+/// per-algorithm probe times out under packet loss — and
+/// [`pick_key_line`] then falls back to whatever line DID come back
+/// (e.g. rsa). Comparing that rsa fingerprint against the ed25519 pin
+/// produces a spurious «fingerprint drift» (observed on `kg`
+/// 2026-06-06: the firing scan returned only the rsa key, the alert
+/// auto-recovered two ticks later when ed25519 came back).
+///
+/// Returning the full set lets the caller ask the robust question —
+/// «is the pinned key still AMONG the keys this server serves?» —
+/// instead of «does this one picked key equal the pin?».
+///
+/// **Synchronous** — same `spawn_blocking` contract as
+/// [`fetch_via_keyscan`]. **Security:** identical `--` flag-injection
+/// defence (shares [`build_keyscan_args`] via [`run_keyscan`]).
+pub fn fetch_all_fingerprints(host: &str, port: u16) -> Result<Vec<String>, Error> {
+    let stdout = run_keyscan(host, port)?;
+    let keygen_out = run_keygen_fingerprint(&stdout)?;
+    let tokens = extract_all_sha256_tokens(&keygen_out);
+    if tokens.is_empty() {
+        return Err(Error::NoFingerprintToken {
+            output: keygen_out.trim().to_string(),
+        });
+    }
+    Ok(tokens)
+}
+
+/// Run `ssh-keyscan` for `<host>:<port>` and return its raw stdout
+/// (one `<host> <key-type> <base64>` line per advertised algorithm).
+///
+/// Shared spawn + error-mapping core of [`fetch_via_keyscan`] and
+/// [`fetch_all_fingerprints`] (extracted 2026-06-06 to keep the second
+/// fetcher from copy-pasting the keyscan invocation).
+fn run_keyscan(host: &str, port: u16) -> Result<Vec<u8>, Error> {
     let port_s = port.to_string();
     let args = build_keyscan_args(&port_s, host);
     let scan = Command::new("ssh-keyscan")
@@ -163,12 +217,19 @@ pub fn fetch_via_keyscan(host: &str, port: u16) -> Result<String, Error> {
             port,
         });
     }
-    let chosen = pick_key_line(&String::from_utf8_lossy(&scan.stdout)).ok_or_else(|| {
-        Error::KeyscanEmpty {
-            host: host.to_string(),
-            port,
-        }
-    })?;
+    Ok(scan.stdout)
+}
+
+/// Pipe `input` (one or more public-key lines) through
+/// `ssh-keygen -lf -` and return its stdout verbatim. The caller
+/// extracts the SHA256 token(s) with [`extract_sha256_token`] /
+/// [`extract_all_sha256_tokens`].
+///
+/// Shared by both fetchers. The explicit `drop(stdin)` sends EOF —
+/// without it `wait_with_output` blocks forever (the `.take()`
+/// returning None would mean Stdio::piped was ignored; surfacing it
+/// as an error beats a silent deadlock).
+fn run_keygen_fingerprint(input: &[u8]) -> Result<String, Error> {
     let mut child = Command::new("ssh-keygen")
         .args(["-lf", "-"])
         .stdin(Stdio::piped())
@@ -176,25 +237,18 @@ pub fn fetch_via_keyscan(host: &str, port: u16) -> Result<String, Error> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::KeygenSpawn(e.to_string()))?;
-    // `.take()` returning None would mean Stdio::piped was ignored —
-    // silently skipping the write would deadlock `wait_with_output`
-    // forever, waiting on an EOF nobody will send.
     let mut stdin = child.stdin.take().ok_or(Error::KeygenStdinPipe)?;
     stdin
-        .write_all(chosen.as_bytes())
+        .write_all(input)
         .map_err(|e| Error::KeygenStdinWrite(e.to_string()))?;
-    drop(stdin); // explicit EOF — wait_with_output otherwise stalls
+    drop(stdin);
     let keygen = child
         .wait_with_output()
         .map_err(|e| Error::KeygenWait(e.to_string()))?;
     if !keygen.status.success() {
         return Err(Error::KeygenFailed(keygen.status.code()));
     }
-    extract_sha256_token(&String::from_utf8_lossy(&keygen.stdout)).ok_or_else(|| {
-        Error::NoFingerprintToken {
-            output: String::from_utf8_lossy(&keygen.stdout).trim().to_string(),
-        }
-    })
+    Ok(String::from_utf8_lossy(&keygen.stdout).into_owned())
 }
 
 /// Walk `ssh-keyscan` stdout (one `<host> <key-type> <base64>` line
@@ -239,6 +293,22 @@ pub fn extract_sha256_token(stdout: &str) -> Option<String> {
         .split_whitespace()
         .find(|t| t.starts_with("SHA256:"))
         .map(str::to_owned)
+}
+
+/// Extract EVERY `SHA256:<base64>` token from `ssh-keygen -lf -`
+/// output. When the daemon pipes a multi-key `ssh-keyscan` dump
+/// through `ssh-keygen -lf -`, the output carries one fingerprint
+/// line per host key — this returns all of them (ed25519 + rsa +
+/// ecdsa), in the order ssh-keygen printed them.
+///
+/// Sibling of [`extract_sha256_token`] (first-only); kept separate so
+/// the single-fingerprint pinning path is byte-for-byte unchanged.
+pub fn extract_all_sha256_tokens(stdout: &str) -> Vec<String> {
+    stdout
+        .split_whitespace()
+        .filter(|t| t.starts_with("SHA256:"))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Build the `ssh-keyscan` argv used by [`fetch_via_keyscan`].
