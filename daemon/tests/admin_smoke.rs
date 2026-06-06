@@ -12407,25 +12407,28 @@ async fn alerts_page_renders_ack_all_button_when_unacked_total_nonzero() {
         html.contains("ack all") && html.contains("(2)"),
         "button must show «ack all (2)» with the current unacked count"
     );
-    // onsubmit=confirm guards the destructive action with one prompt.
+    // CSP-safe guard: the confirm message rides in a `data-confirm`
+    // attribute (admin.js attaches the confirm() dialog). An inline
+    // `onsubmit` would be blocked by `script-src 'self'` and the guard
+    // would silently never run.
     assert!(
-        html.contains("onsubmit=\"return confirm("),
-        "button form must guard with in-browser confirm()"
+        html.contains("data-confirm="),
+        "ack-all form must carry a data-confirm attribute for admin.js"
+    );
+    assert!(
+        !html.contains("onsubmit="),
+        "no inline onsubmit on the alerts page (CSP script-src 'self' blocks it)"
     );
 }
 
 #[tokio::test]
-async fn alerts_page_ack_all_confirm_dialog_escapes_apostrophes_if_translator_adds_them() {
-    // Forward-compat test for the JS-literal escape contract
-    // added after review-agent 2026-05-22 caught that
-    // `onsubmit=(format!(\"return confirm('{}');\", tr(...)))`
-    // silently breaks the first time a translator writes
-    // `don't`. We can't trigger the original tr() to produce
-    // an apostrophe (current EN+RU strings are safe), but we
-    // CAN verify the rendered onsubmit attribute is syntactically
-    // valid: the inner `confirm('…');` must contain EXACTLY one
-    // un-escaped pair of single quotes — the outer pair. Counting
-    // bare `'` (not `\'`) catches the apostrophe-leak regression.
+async fn alerts_page_ack_all_uses_data_confirm_not_inline_js() {
+    // The ack-all confirm rides in a `data-confirm` attribute wired by
+    // admin.js, NOT an inline `onsubmit` (CSP `script-src 'self'` would
+    // block the latter, letting ack-all fire on a single click). maud
+    // HTML-escapes the attribute value and admin.js reads it back via
+    // getAttribute — there is no JS-string-literal layer, so translator
+    // apostrophes («don't») can never break the dialog.
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     st.inv
@@ -12444,53 +12447,16 @@ async fn alerts_page_ack_all_confirm_dialog_escapes_apostrophes_if_translator_ad
         .unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // maud renders attribute values inside double quotes and
-    // does NOT escape `'` (which would only need escaping inside
-    // single-quoted attributes). So the rendered HTML looks like:
-    //   onsubmit="return confirm('Ack all ...');"
-    // with literal apostrophes for the JS string delimiters.
-    //
-    // For the escape contract to hold, the substring between the
-    // opening `confirm('` and the closing `');` must NOT contain
-    // any UNESCAPED apostrophe. We slice the substring and check
-    // it. Current EN/RU strings are apostrophe-free, so the inner
-    // slice contains zero apostrophes; the test would flunk the
-    // moment a translator added a bare `'` and we forgot to
-    // escape it.
-    let opener_idx = html
-        .find("confirm('")
-        .expect("ack-all confirm() opener (`confirm('`) must appear");
-    let after_opener = &html[opener_idx + "confirm('".len()..];
-    let closer_rel_idx = after_opener
-        .find("');")
-        .expect("ack-all confirm() closer (`');`) must appear");
-    let inner = &after_opener[..closer_rel_idx];
-    // Bare apostrophes are illegal here. Escaped ones (`\'`) are fine.
-    // Count `'` not preceded by `\`.
-    let mut bare_apostrophes = 0;
-    let bytes = inner.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'\'' && (i == 0 || bytes[i - 1] != b'\\') {
-            bare_apostrophes += 1;
-        }
-    }
-    assert_eq!(
-        bare_apostrophes, 0,
-        "confirm() body must not contain bare apostrophes \
-         (would break the JS string literal); inner: {inner:?}"
+    // The English confirm copy must appear as a data-confirm value.
+    assert!(
+        html.contains(r#"data-confirm="Ack all unacked alerts?"#),
+        "ack-all form must carry the confirm message in data-confirm"
+    );
+    assert!(
+        !html.contains("onsubmit="),
+        "ack-all must not use an inline onsubmit handler (CSP-blocked)"
     );
 }
-
-// End-to-end version of the escape contract: insert an alert,
-// MONKEY-PATCH the rendered string by reaching through the live
-// page response, and confirm the apostrophe handling. We can't
-// actually pass `don't` through tr() without changing the source
-// strings, so this complements the unit test by exercising the
-// FULL render path with the current copy.
-//
-// `js_single_quote_escape` itself is tested indirectly here +
-// could be lifted to a dedicated unit test if it gets a second
-// caller. For now: one caller, one round-trip assertion.
 
 #[tokio::test]
 async fn alerts_page_omits_ack_all_button_when_no_unacked() {
@@ -13284,6 +13250,86 @@ async fn server_revoke_all_users_requires_confirm_match() {
         .find(|e| e.action == "server.grants.bulk_revoke")
         .expect("bulk_revoke audit row required");
     assert_eq!(row.payload.as_ref().unwrap()["revoked"].as_u64(), Some(1));
+}
+
+#[tokio::test]
+async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
+    // The revoke-all (destructive typed-confirm) form must wire its
+    // prompt via data-attributes for admin.js, NOT an inline onsubmit —
+    // CSP `script-src 'self'` blocks inline handlers, which left the
+    // hidden `confirm` field empty and the POST rejected (the live bug
+    // on `kg` 2026-06-06: "bulk-revoke confirm mismatch: form sent ''").
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("srv".into()),
+            address: "203.0.113.22".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .add_user(&User {
+            id: UserId("u".into()),
+            uuid: "00000000-0000-0000-0000-000000000099".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    st.inv
+        .grant(&UserId("u".into()), &ServerId("srv".into()))
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/srv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // The revoke-all form must POST to the bulk endpoint…
+    assert!(
+        html.contains(r#"action="/admin/servers/srv/grants/_revoke-all""#),
+        "revoke-all form must render (one granted user seeded)"
+    );
+    // …carry the typed-confirm data-attributes admin.js consumes…
+    assert!(
+        html.contains("data-confirm-prompt="),
+        "revoke-all must carry data-confirm-prompt for admin.js"
+    );
+    assert!(
+        html.contains(r#"data-confirm-match="srv""#),
+        "revoke-all must require typing the server id (data-confirm-match)"
+    );
+    // …keep the hidden confirm field admin.js populates + backend checks…
+    assert!(
+        html.contains(r#"name="confirm""#),
+        "revoke-all must keep the hidden confirm field"
+    );
+    // …and use NO inline onsubmit (CSP script-src 'self' blocks it).
+    assert!(
+        !html.contains("onsubmit="),
+        "revoke-all must not use an inline onsubmit handler"
+    );
 }
 
 // ── A3 — per-server 24h resource-trend sparklines ───────────────────
