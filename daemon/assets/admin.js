@@ -93,8 +93,49 @@
     });
   }
 
+  // ── CSP-safe confirmations ──────────────────────────────────────
+  // The admin CSP is `script-src 'self'` (no 'unsafe-inline'), so an
+  // inline `onsubmit="…"` handler is refused by the browser — the form
+  // then submits WITHOUT the guard ever running (a destructive confirm
+  // is silently skipped; a typed-confirm submits an empty field and the
+  // backend rejects it). These wire the same UX from data-attributes.
+
+  // Simple yes/no: <form data-confirm="message"> — submit proceeds
+  // only if the operator accepts the confirm() dialog.
+  function wireConfirm(form) {
+    var msg = form.getAttribute("data-confirm");
+    form.addEventListener("submit", function (e) {
+      if (!window.confirm(msg)) e.preventDefault();
+    });
+  }
+
+  // Typed-match: <form data-confirm-prompt="ask…" data-confirm-match="kg"
+  // [data-confirm-field="confirm"]> — the operator must type the exact
+  // match value; it is copied into the named hidden field (default
+  // "confirm") which the backend re-checks. A mismatch or a cancelled
+  // prompt blocks the submit (nothing is sent).
+  function wireConfirmPrompt(form) {
+    var ask = form.getAttribute("data-confirm-prompt");
+    var match = form.getAttribute("data-confirm-match");
+    var field = form.getAttribute("data-confirm-field") || "confirm";
+    form.addEventListener("submit", function (e) {
+      var v = window.prompt(ask);
+      if (v !== match) {
+        e.preventDefault();
+        if (v !== null) window.alert("confirm did not match — nothing changed");
+        return;
+      }
+      var target = form.elements[field];
+      if (target) target.value = v;
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
+    var confirms = document.querySelectorAll("[data-confirm]");
+    for (var c = 0; c < confirms.length; c++) wireConfirm(confirms[c]);
+    var prompts = document.querySelectorAll("[data-confirm-prompt]");
+    for (var p = 0; p < prompts.length; p++) wireConfirmPrompt(prompts[p]);
   });
 })();
