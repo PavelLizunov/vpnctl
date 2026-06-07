@@ -3135,6 +3135,44 @@ pub(crate) async fn user_detail(
             }
         }
 
+        // Extra-protocol per-user password — TUIC / naive / Hysteria2 all
+        // reuse `tuic_password`. Shown ONLY when absent: a user without it
+        // silently gets NO naive/HY2/TUIC links (the cdn 2026-06-07
+        // incident). One-click mint turns that silent skip into a fix.
+        @if user.tuic_password.is_none() {
+            div.ed-rule {}
+            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
+            div style="padding: 12px 0;" {
+                p style="font-family: var(--serif); color: var(--acc); font-size: 13px; line-height: 1.6;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "⚠ No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
+                        "⚠ Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
+                    ))
+                }
+                form method="post"
+                     action=(format!("/admin/users/{}/tuic-password/mint", path_segment_encode(&user.id.0)))
+                     style="margin-top: 10px;" {
+                    button type="submit"
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Mint this user's per-user password used by TUIC / naive / Hysteria2. Safe — no existing secret to invalidate. Redeploy the user's servers afterwards so the node accepts it.",
+                               "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
+                           ))
+                           style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                        (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
+                    }
+                }
+                p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "After minting, redeploy the affected server(s) so the node accepts the new password.",
+                        "После генерации передеплой затронутые серверы, чтобы узел принял новый пароль.",
+                    ))
+                }
+            }
+        }
+
         // WireGuard / AmneziaWG key material + distribution. Always
         // shows the pubkey verbatim (it's public). Private key marker
         // only — actual value flows through `/sub/<token>` (sing-box-
@@ -5444,6 +5482,51 @@ pub(crate) async fn user_regen_sub_token(
 
     // Step 4: redirect. `path_segment_encode` so the redirect target
     // matches the URL the operator clicked from.
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/users/{id}/tuic-password/mint` — mint a per-user
+/// `tuic_password` for a user that has none. naive + Hysteria2 reuse
+/// this field as their per-user secret, so a user without it silently
+/// gets NO naive / Hysteria2 (or TUIC) links — exactly the `cdn`
+/// 2026-06-07 incident. This is the operator's one-click fix.
+/// Idempotent: a user who already has one is a no-op (we never rotate a
+/// live password, which would break their links until redeploy). After
+/// minting, the operator redeploys the user's servers so the node
+/// accepts the new password.
+pub(crate) async fn user_mint_tuic_password(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    match state.inv.mint_tuic_password_if_absent(&uid).await {
+        Ok(true) => {
+            if let Err(e) = state
+                .inv
+                .audit("admin", "user.mint_tuic_password", Some(&user_id_str), None)
+                .await
+            {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %user_id_str,
+                    error = %e,
+                    "audit write failed for user.mint_tuic_password — mutation already committed"
+                );
+            }
+        }
+        // Already had a password — idempotent no-op, no audit spam.
+        Ok(false) => {}
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
     Redirect::to(&format!(
         "/admin/users/{}",
         path_segment_encode(&user_id_str)

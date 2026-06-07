@@ -13332,6 +13332,153 @@ async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
     );
 }
 
+#[tokio::test]
+async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
+    // A user without tuic_password silently loses naive/HY2/TUIC links
+    // (cdn 2026-06-07). The user-detail page must surface a one-click
+    // mint when absent, hide it when present, and the POST must mint +
+    // audit. Regression guard for the durable fix.
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_user(&User {
+            id: UserId("notuic".into()),
+            uuid: "00000000-0000-0000-0000-0000000000aa".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    let app = router(st.clone());
+
+    // Missing → page shows the mint form + button.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/notuic")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        html.contains(r#"action="/admin/users/notuic/tuic-password/mint""#),
+        "missing-tuic user must show the mint form"
+    );
+    assert!(
+        html.contains("mint tuic password"),
+        "mint button label must render"
+    );
+
+    // POST mints it → 303, password now present, audit row written.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/notuic/tuic-password/mint")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let u = st
+        .inv
+        .get_user(&UserId("notuic".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        u.tuic_password.as_deref().is_some_and(|p| !p.is_empty()),
+        "tuic_password must be minted after POST"
+    );
+    let audit = st.inv.recent_audit(20).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action == "user.mint_tuic_password" && e.target.as_deref() == Some("notuic")),
+        "audit row user.mint_tuic_password required"
+    );
+
+    // A user WITH a tuic_password must NOT show the mint form.
+    st.inv
+        .add_user(&User {
+            id: UserId("hastuic".into()),
+            uuid: "00000000-0000-0000-0000-0000000000bb".into(),
+            tuic_password: Some("already-set-pw".into()),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/hastuic")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !html.contains("/admin/users/hastuic/tuic-password/mint"),
+        "user WITH tuic_password must NOT show the mint form"
+    );
+
+    // Idempotent no-op: POST mint on a user that already HAS a password
+    // must NOT rotate it and must NOT write an audit row (NM-10
+    // audit-on-actual-mutation contract).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/hastuic/tuic-password/mint")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let h = st
+        .inv
+        .get_user(&UserId("hastuic".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        h.tuic_password.as_deref(),
+        Some("already-set-pw"),
+        "no-op mint must NOT rotate an existing password"
+    );
+    let n = st
+        .inv
+        .recent_audit(50)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.action == "user.mint_tuic_password" && e.target.as_deref() == Some("hastuic"))
+        .count();
+    assert_eq!(n, 0, "no-op mint must NOT write an audit row");
+}
+
 // ── A3 — per-server 24h resource-trend sparklines ───────────────────
 //
 // Renders ONLY when at least one node_health row exists for the
