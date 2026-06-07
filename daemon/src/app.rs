@@ -923,6 +923,13 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/sub-token/regenerate",
             post(admin::user_regen_sub_token),
         )
+        // Mint a per-user tuic_password for a user that has none. naive +
+        // Hysteria2 reuse this field, so without it those protocols
+        // silently drop from the user's subscription (cdn 2026-06-07).
+        .route(
+            "/admin/users/{id}/tuic-password/mint",
+            post(admin::user_mint_tuic_password),
+        )
         // Rotate the WireGuard keypair. Both halves replaced
         // atomically; previous pubkey will fall off the server's
         // [Peer] block on the next `vpnctl deploy`. UI lives on
