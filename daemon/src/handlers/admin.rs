@@ -923,27 +923,6 @@ pub(crate) async fn dashboard(
     Ok(shell("dashboard", &theme, &accent, lang, body))
 }
 
-/// Escape a string so it can be safely interpolated into a JS
-/// single-quoted string literal embedded in an HTML `onsubmit` /
-/// `onclick` attribute. Replaces backslash + single-quote in that
-/// order (order matters — `\` must be escaped FIRST so we don't
-/// double-escape the slash we add for `'`).
-///
-/// Use case: `onsubmit=(format!("return confirm('{}');", js_single_quote_escape(msg)))`
-/// where `msg` may be operator-/translator-supplied copy that
-/// contains apostrophes («don't», «it's», «можно ль»).
-///
-/// Note: HTML attribute escaping is independent and handled by maud
-/// — this function only addresses the JS-string-literal layer. The
-/// two are stacked: the browser HTML-decodes the attribute first
-/// (turning `&apos;` into `'`), then the JS parser sees the source.
-/// So we need JS-level escapes, not HTML-level.
-///
-/// Pinned by `js_single_quote_escape_handles_apostrophe_and_backslash`.
-fn js_single_quote_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
 /// Colour bucket for an uptime percentage. Shared by the per-server
 /// `server_detail_uptime_section` chips and the dashboard-wide
 /// `dashboard_fleet_uptime` chips so palette stays in one place. The
@@ -3152,6 +3131,44 @@ pub(crate) async fn user_detail(
                                 "mint sub-token"
                             }
                     }
+                }
+            }
+        }
+
+        // Extra-protocol per-user password — TUIC / naive / Hysteria2 all
+        // reuse `tuic_password`. Shown ONLY when absent: a user without it
+        // silently gets NO naive/HY2/TUIC links (the cdn 2026-06-07
+        // incident). One-click mint turns that silent skip into a fix.
+        @if user.tuic_password.is_none() {
+            div.ed-rule {}
+            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
+            div style="padding: 12px 0;" {
+                p style="font-family: var(--serif); color: var(--acc); font-size: 13px; line-height: 1.6;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "⚠ No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
+                        "⚠ Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
+                    ))
+                }
+                form method="post"
+                     action=(format!("/admin/users/{}/tuic-password/mint", path_segment_encode(&user.id.0)))
+                     style="margin-top: 10px;" {
+                    button type="submit"
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Mint this user's per-user password used by TUIC / naive / Hysteria2. Safe — no existing secret to invalidate. Redeploy the user's servers afterwards so the node accepts it.",
+                               "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
+                           ))
+                           style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                        (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
+                    }
+                }
+                p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "After minting, redeploy the affected server(s) so the node accepts the new password.",
+                        "После генерации передеплой затронутые серверы, чтобы узел принял новый пароль.",
+                    ))
                 }
             }
         }
@@ -5465,6 +5482,51 @@ pub(crate) async fn user_regen_sub_token(
 
     // Step 4: redirect. `path_segment_encode` so the redirect target
     // matches the URL the operator clicked from.
+    Redirect::to(&format!(
+        "/admin/users/{}",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/users/{id}/tuic-password/mint` — mint a per-user
+/// `tuic_password` for a user that has none. naive + Hysteria2 reuse
+/// this field as their per-user secret, so a user without it silently
+/// gets NO naive / Hysteria2 (or TUIC) links — exactly the `cdn`
+/// 2026-06-07 incident. This is the operator's one-click fix.
+/// Idempotent: a user who already has one is a no-op (we never rotate a
+/// live password, which would break their links until redeploy). After
+/// minting, the operator redeploys the user's servers so the node
+/// accepts the new password.
+pub(crate) async fn user_mint_tuic_password(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    match state.inv.mint_tuic_password_if_absent(&uid).await {
+        Ok(true) => {
+            if let Err(e) = state
+                .inv
+                .audit("admin", "user.mint_tuic_password", Some(&user_id_str), None)
+                .await
+            {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %user_id_str,
+                    error = %e,
+                    "audit write failed for user.mint_tuic_password — mutation already committed"
+                );
+            }
+        }
+        // Already had a password — idempotent no-op, no audit spam.
+        Ok(false) => {}
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
     Redirect::to(&format!(
         "/admin/users/{}",
         path_segment_encode(&user_id_str)
@@ -8038,23 +8100,20 @@ pub(crate) async fn alerts(
             // confirm prompt is the right friction level. Pinned by
             // `alerts_page_renders_ack_all_button_when_unacked_total_nonzero`.
             @if unacked_total > 0 {
-                // `onsubmit` embeds the translated string into a JS
-                // single-quoted literal. Future-proof against
-                // apostrophe regressions («don't», «it's») via
-                // `js_single_quote_escape` — current copy is
-                // apostrophe-free but the helper makes silent breakage
-                // impossible. Caught by review-agent 2026-05-22:
-                // unescaped interpolation silently broke confirm()
-                // dialogs the first time an editor added `don't`.
-                @let confirm_msg = js_single_quote_escape(crate::i18n::tr(
+                // CSP-safe confirm: the message rides in a `data-confirm`
+                // attribute (maud HTML-escapes it) and admin.js attaches
+                // the confirm() guard. An inline `onsubmit="…"` would be
+                // blocked by `script-src 'self'` → the guard would never
+                // run and ack-all would fire on a single click.
+                @let confirm_msg = crate::i18n::tr(
                     lang,
                     "Ack all unacked alerts? They will stay visible under «show all» for 30 days; nothing is deleted, just marked seen.",
                     "Принять все непринятые алерты? Они останутся видимы в «показать всё» 30 дней; ничего не удаляется, только помечается просмотренным.",
-                ));
+                );
                 form method="post"
                      action="/admin/alerts/ack-all"
                      style="display: inline; margin-left: auto;"
-                     onsubmit=(format!("return confirm('{confirm_msg}');")) {
+                     data-confirm=(confirm_msg) {
                     button type="submit"
                            title=(crate::i18n::tr(
                                lang,
@@ -11254,21 +11313,19 @@ pub(crate) async fn server_detail(
                         }
                     }
                     @if granted_count > 0 {
-                        // JS confirm() — destructive but reversible
-                        // (operator can re-grant individually). For
-                        // a fully-server-wipe flow use the danger-
-                        // zone delete-server action. Hidden input
-                        // confirm=<server-id> matches handler's
-                        // double-submit gate; JS prompt() returns
-                        // the typed value which we POST as-is.
+                        // CSP-safe typed-confirm — destructive but
+                        // reversible (operator can re-grant individually).
+                        // The prompt text + required match value ride in
+                        // `data-confirm-prompt` / `data-confirm-match`
+                        // (maud HTML-escapes both); admin.js runs the
+                        // prompt(), checks the typed value, and copies it
+                        // into the hidden `confirm` field the handler
+                        // re-validates. An inline `onsubmit="…"` would be
+                        // blocked by `script-src 'self'` → the field would
+                        // stay empty and the POST would be rejected.
                         @let sid_clean = server.id.0.clone();
                         @let confirm_msg = match lang {
                             crate::i18n::Locale::En => format!(
-                                // Single-line — the double-escape path through
-                                // `js_single_quote_escape` turns `\n` into a
-                                // literal backslash-n in prompt(). Period-space
-                                // reads cleanly in the prompt dialog and avoids
-                                // the escape-gymnastics rabbit hole.
                                 "Revoke access for all {granted_count} granted users on server '{sid_clean}'? Type the server id to confirm:"
                             ),
                             crate::i18n::Locale::Ru => format!(
@@ -11277,11 +11334,8 @@ pub(crate) async fn server_detail(
                         };
                         form method="post"
                              action=(format!("/admin/servers/{sid_enc_b}/grants/_revoke-all"))
-                             onsubmit=(format!(
-                                 "var v = prompt('{}'); if (v !== '{}') {{ alert('confirm did not match server id; nothing revoked'); return false; }} this.confirm.value = v;",
-                                 js_single_quote_escape(&confirm_msg),
-                                 js_single_quote_escape(&sid_clean),
-                             ))
+                             data-confirm-prompt=(confirm_msg)
+                             data-confirm-match=(sid_clean)
                              style="margin: 0; padding: 0;" {
                             input type="hidden" name="confirm" value="";
                             button type="submit"

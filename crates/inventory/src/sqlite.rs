@@ -1618,6 +1618,30 @@ impl SqliteInventory {
         Ok(token)
     }
 
+    /// Mint a `tuic_password` for `id` **only if it currently has none**.
+    ///
+    /// Returns `Ok(true)` if a password was minted, `Ok(false)` if the
+    /// user already had one (no-op). We never rotate a live password
+    /// here — that would break the user's TUIC / naive / Hysteria2 links
+    /// until the node is redeployed. naive + hysteria2 reuse this field
+    /// as their per-user secret, so a NULL `tuic_password` silently drops
+    /// those protocols from the user's subscription (the `cdn`
+    /// 2026-06-07 incident).
+    pub async fn mint_tuic_password_if_absent(&self, id: &UserId) -> Result<bool> {
+        // 24 bytes → 32-char url-safe base64, identical to the add-user
+        // and CLI mint (`gen_password(TUIC_PW_BYTES)`).
+        let pw = vpnctl_crypto::gen_password(24).map_err(SqliteInventoryError::CryptoIo)?;
+        let res = sqlx::query(
+            "UPDATE users SET tuic_password = ?1
+             WHERE id = ?2 AND (tuic_password IS NULL OR tuic_password = '')",
+        )
+        .bind(&pw)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn get_user(&self, id: &UserId) -> Result<Option<User>> {
         let row = sqlx::query(
             "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
