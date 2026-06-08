@@ -1,0 +1,243 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//! Spec tests for `vpnctl_kernels::DnsTunnel` — the slipstream-rust
+//! DNS-over-НСДИ last-resort kernel. Written from the spec only:
+//! non-empty supported_protocols, the two-file bundle (slipstream env +
+//! loopback VLESS), the loopback-only forward-target guard, the engine
+//! seam. If a test fails, the impl is wrong — DO NOT weaken the test.
+
+use std::collections::HashMap;
+
+use vpnctl_core::{
+    CoreError, Kernel, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
+};
+use vpnctl_kernels::DnsTunnel;
+use vpnctl_protocols::DnsTunnel as DnsTunnelProto;
+
+const FP: &str = "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
+const UUID: &str = "e09b09af-2500-4753-b219-937ce13b5257";
+
+fn srv() -> Server {
+    Server {
+        id: ServerId("dns-tunnel-node".into()),
+        address: "203.0.113.42".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("dns-tunnel".into())],
+        enabled_protocols: vec![ProtocolId("dns-tunnel".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
+fn user(name: &str) -> User {
+    User {
+        id: UserId(name.into()),
+        uuid: format!("uuid-{name}"),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    }
+}
+
+fn secrets() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("dns-tunnel:domain".into(), "t.example.com".into());
+    m.insert("dns-tunnel:fingerprint".into(), FP.into());
+    m.insert("dns-tunnel:loopback_uuid".into(), UUID.into());
+    m
+}
+
+fn render(sec: &HashMap<String, String>, users: &[User]) -> vpnctl_core::Result<String> {
+    let s = srv();
+    let ctx = RenderCtx::new(&s, sec);
+    let proto = DnsTunnelProto::new();
+    let protos: Vec<&dyn Protocol> = vec![&proto];
+    DnsTunnel::new()
+        .render_config(&ctx, users, &protos)
+        .map(|b| String::from_utf8(b).unwrap())
+}
+
+#[test]
+fn id_is_dns_tunnel() {
+    assert_eq!(DnsTunnel::new().id(), KernelId("dns-tunnel".into()));
+}
+
+#[test]
+fn supported_protocols_is_non_empty_singleton() {
+    // LOAD-BEARING: an empty supported_protocols() means the kernel is
+    // silently never configured/started by deploy + admin.
+    let protos = DnsTunnel::new().supported_protocols();
+    assert_eq!(protos.len(), 1, "must be non-empty");
+    assert_eq!(protos[0], ProtocolId("dns-tunnel".into()));
+}
+
+#[test]
+fn render_requires_the_dns_tunnel_protocol() {
+    let s = srv();
+    let sec = secrets();
+    let ctx = RenderCtx::new(&s, &sec);
+    let err = DnsTunnel::new().render_config(&ctx, &[], &[]).unwrap_err();
+    assert!(format!("{err}").contains("dns-tunnel protocol"));
+}
+
+#[test]
+fn render_emits_both_bundle_file_markers() {
+    let sec = secrets();
+    let body = render(&sec, &[]).unwrap();
+    assert!(
+        body.contains("====FILE: /etc/dns-tunnel/slipstream.env===="),
+        "slipstream env marker missing:\n{body}"
+    );
+    assert!(
+        body.contains("====FILE: /etc/dns-tunnel/tunnel-sb.json===="),
+        "sing-box config marker missing:\n{body}"
+    );
+}
+
+#[test]
+fn render_emits_slipstream_flags_and_loopback_forward() {
+    let sec = secrets();
+    let body = render(&sec, &[]).unwrap();
+    // slipstream-server flags (via the EnvironmentFile shape).
+    assert!(
+        body.contains("SLIPSTREAM_LISTEN_PORT=53"),
+        "listen port:\n{body}"
+    );
+    assert!(
+        body.contains("SLIPSTREAM_FORWARD_TARGET=127.0.0.1:9001"),
+        "forward target:\n{body}"
+    );
+    assert!(
+        body.contains("SLIPSTREAM_DOMAIN=t.example.com"),
+        "domain:\n{body}"
+    );
+}
+
+#[test]
+fn render_emits_loopback_vless_inbound_with_uuid() {
+    let sec = secrets();
+    let body = render(&sec, &[]).unwrap();
+    // The dedicated loopback-only TLS-less VLESS inbound.
+    assert!(
+        body.contains("\"type\": \"vless\""),
+        "vless inbound:\n{body}"
+    );
+    assert!(
+        body.contains("\"listen\": \"127.0.0.1\""),
+        "loopback listen:\n{body}"
+    );
+    assert!(
+        body.contains("\"listen_port\": 9001"),
+        "loopback port:\n{body}"
+    );
+    assert!(body.contains(UUID), "wrapped loopback UUID:\n{body}");
+    // The PoC inbound is TLS-less (tunnel already encrypts) — no tls block.
+    assert!(!body.contains("\"tls\""), "must be TLS-less:\n{body}");
+}
+
+#[test]
+fn render_rejects_non_loopback_forward_target() {
+    let mut sec = secrets();
+    sec.insert(
+        "dns-tunnel:forward_target".into(),
+        "203.0.113.9:9001".into(),
+    );
+    let err = render(&sec, &[]).unwrap_err();
+    match err {
+        CoreError::Render(m) => {
+            assert!(m.contains("forward_target"), "msg: {m}");
+            assert!(m.contains("loopback"), "msg: {m}");
+        }
+        other => panic!("expected Render, got {other:?}"),
+    }
+}
+
+#[test]
+fn render_accepts_loopback_forward_target_override() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:forward_target".into(), "127.0.0.5:9100".into());
+    let body = render(&sec, &[]).unwrap();
+    assert!(body.contains("SLIPSTREAM_FORWARD_TARGET=127.0.0.5:9100"));
+    assert!(
+        body.contains("\"listen\": \"127.0.0.5\""),
+        "inbound host:\n{body}"
+    );
+    assert!(
+        body.contains("\"listen_port\": 9100"),
+        "inbound port:\n{body}"
+    );
+}
+
+#[test]
+fn render_missing_domain_is_error() {
+    let mut sec = secrets();
+    sec.remove("dns-tunnel:domain");
+    let err = render(&sec, &[]).unwrap_err();
+    assert!(format!("{err}").contains("dns-tunnel:domain"));
+}
+
+#[test]
+fn render_missing_loopback_uuid_is_error() {
+    let mut sec = secrets();
+    sec.remove("dns-tunnel:loopback_uuid");
+    let err = render(&sec, &[]).unwrap_err();
+    assert!(format!("{err}").contains("dns-tunnel:loopback_uuid"));
+}
+
+#[test]
+fn render_rejects_non_numeric_listen_port() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:listen_port".into(), "not-a-port".into());
+    let err = render(&sec, &[]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("dns-tunnel:listen_port"), "msg: {msg}");
+    assert!(msg.contains("not-a-port"), "msg: {msg}");
+}
+
+#[test]
+fn render_is_byte_stable_and_lf_only() {
+    let sec = secrets();
+    let a = render(&sec, &[user("alex")]).unwrap();
+    let b = render(&sec, &[user("alex")]).unwrap();
+    assert_eq!(a, b, "render not byte-stable");
+    assert_eq!(
+        a.bytes().filter(|&c| c == b'\r').count(),
+        0,
+        "CRLF present — must be LF-only"
+    );
+}
+
+#[test]
+fn render_rejects_unknown_engine_loudly() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:engine".into(), "wireguard".into());
+    let err = render(&sec, &[]).unwrap_err();
+    assert!(
+        format!("{err}").contains("unknown engine"),
+        "must reject loudly: {err}"
+    );
+}
+
+#[test]
+fn render_dnstt_engine_errors_cleanly_as_placeholder() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:engine".into(), "dnstt".into());
+    let err = render(&sec, &[]).unwrap_err();
+    match err {
+        CoreError::Render(m) => assert_eq!(m, "dns-tunnel engine 'dnstt' not yet implemented"),
+        other => panic!("expected clean Render placeholder, got {other:?}"),
+    }
+}
+
+#[test]
+fn render_slipstream_engine_explicit_is_accepted() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:engine".into(), "slipstream".into());
+    let body = render(&sec, &[]).unwrap();
+    assert!(body.contains("SLIPSTREAM_DOMAIN=t.example.com"));
+}

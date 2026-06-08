@@ -2,10 +2,12 @@
 //! `registry` subcommand and (in v0.2 Phase 3b) `deploy` will pull from here.
 
 use vpnctl_core::Registry;
-use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, WgTurn as WgTurnKernel};
+use vpnctl_kernels::{
+    AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel,
+};
 use vpnctl_protocols::{
-    AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality,
-    WgTurn as WgTurnProtocol, WireGuard,
+    AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
+    VlessReality, WgTurn as WgTurnProtocol, WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -30,6 +32,15 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // Caddy. Binds 80+443 → a naive node must not also run a 443-TCP
     // sing-box protocol. Secrets: `naive.domain`, `naive.acme_email`.
     reg.register_kernel(Box::new(Caddy::new()))?;
+    // dns-tunnel — slipstream-rust DNS-over-НСДИ last-resort transport
+    // (4th fallback after VLESS-REALITY / TUIC / NAIVE). Owns TWO units:
+    // `dns-tunnel` (slipstream-server UDP:53) + `dns-tunnel-singbox`
+    // (loopback-only TLS-less VLESS on 127.0.0.1:9001). Binary is a
+    // prebuilt amd64 cache (≥2 GB RAM build → no on-node build). Secrets:
+    // `dns-tunnel:domain`, `dns-tunnel:loopback_uuid`,
+    // `dns-tunnel:fingerprint`, `dns-tunnel:resolvers` (opt),
+    // `dns-tunnel:engine` (opt).
+    reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
 
     // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
     // All stateless — real REALITY keys / TUIC certs / WG private keys
@@ -59,6 +70,12 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // `User.tuic_password` for HTTP Basic; server params
     // `naive.domain` / `naive.acme_email` in inventory.server_secrets.
     reg.register_protocol(Box::new(Naive::new()))?;
+    // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
+    // client (slipstream-client + loopback VLESS), so
+    // `appears_in_sing_box_sub()` is false; `share_link` emits the
+    // `dns-tunnel://` bundle (domain + resolvers + cert fp pin + wrapped
+    // loopback UUID). DPI risk Moderate (last-resort; НСДИ is monitored).
+    reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
 
     Ok(reg)
 }
