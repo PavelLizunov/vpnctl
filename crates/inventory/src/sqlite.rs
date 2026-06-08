@@ -694,6 +694,63 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Subscription-render flag (migration 0031, UX-3): `true` iff the
+    /// operator enabled naive↔HY2 UDP pairing on this server. When ON **and**
+    /// the server exposes BOTH naive and hysteria2, the `/api/v1/app/config`
+    /// render stamps both share-links with a shared `pair=<server id>` so a
+    /// client can route UDP — which naive can't carry — over the co-located
+    /// HY2. Default false; no such server → false.
+    pub async fn is_server_udp_pair_enabled(&self, sid: &ServerId) -> Result<bool> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT udp_pair_enabled FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(v,)| v != 0).unwrap_or(false))
+    }
+
+    /// Set the per-server naive↔HY2 UDP-pairing opt-in (migration 0031).
+    /// Pure boolean — no side effects. Audit-on-actual-change
+    /// (`server.udp_pair.set`); `Invalid` on unknown id.
+    pub async fn set_server_udp_pair_enabled(&self, sid: &ServerId, enabled: bool) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let prior: Option<(i64,)> =
+            sqlx::query_as("SELECT udp_pair_enabled FROM servers WHERE id = ?1")
+                .bind(&sid.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prior_enabled = match prior {
+            Some((o,)) => o != 0,
+            None => {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such server '{}'; cannot set udp_pair_enabled",
+                    sid.0
+                )));
+            }
+        };
+        if prior_enabled == enabled {
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query("UPDATE servers SET udp_pair_enabled = ?1 WHERE id = ?2")
+            .bind(i64::from(enabled))
+            .bind(&sid.0)
+            .execute(&mut *tx)
+            .await?;
+        let payload = serde_json::json!({ "server_id": sid.0, "enabled": enabled });
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind("admin")
+        .bind("server.udp_pair.set")
+        .bind(&sid.0)
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Monitor-driven: set or clear the runtime `suppressed_at` flag.
     /// Idempotent — only writes (and audits) on an actual transition;
     /// returns `true` when it changed. Audits `server.auto_suppressed`

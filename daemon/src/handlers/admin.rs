@@ -11018,6 +11018,13 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // naive↔HY2 UDP-pairing opt-in (migration 0031, UX-3).
+    let udp_pair_enabled = state
+        .inv
+        .is_server_udp_pair_enabled(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
         .as_ref()
@@ -11224,6 +11231,11 @@ pub(crate) async fn server_detail(
         // Auto-suppress from subscription when unreachable (migration
         // 0030). Per-server opt-in + live "suppressed since X" status.
         (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
+
+        // naive↔HY2 UDP pairing opt-in (migration 0031, UX-3). Tags the
+        // node's naive + HY2 share-links with a shared `pair=` so a client
+        // can route UDP (which naive can't carry) over the co-located HY2.
+        (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
 
         // Reserved ports — operator-pinned port allowlist that the
         // sing-box pre-apply guard refuses to bind. Use when this
@@ -12614,6 +12626,56 @@ fn server_detail_auto_suppress_section(
     }
 }
 
+/// naive↔HY2 UDP-pairing opt-in on the server-detail page (migration 0031,
+/// UX-3). Takes effect only when this server exposes BOTH naive and
+/// hysteria2 — the render then stamps both share-links with `pair=<server
+/// id>`. Always rendered (discoverable); the copy explains the both-protocols
+/// requirement. Single-server only by construction (the tag is the id).
+fn server_detail_udp_pair_section(
+    server: &vpnctl_core::Server,
+    enabled: bool,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid_enc = path_segment_encode(&server.id.0);
+    let (btn_bg, btn_fg) = if enabled {
+        ("transparent", "var(--ink)")
+    } else {
+        ("var(--ink)", "var(--paper)")
+    };
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(
+                lang,
+                "When ON, this node's naive AND HY2 share-links carry a shared `pair=<server id>` tag, so a client routes UDP — which naive can't carry — over the HY2 co-located on the same node. Effective only if this server has BOTH naive and HY2 enabled. Pairing is single-server only (the tag is this server's id). OFF (default) = no pair tag.",
+                "Когда ВКЛ, naive- и HY2-ссылки этого узла получают общий тег `pair=<id сервера>`, чтобы клиент гнал UDP (который naive не умеет) через HY2 на том же узле. Действует только если на сервере включены И naive, И HY2. Пара — строго в рамках одного сервера (тег = id этого сервера). ВЫКЛ (по умолчанию) = без тега pair.",
+            )) {
+            (tr(lang, "UDP PAIRING (NAIVE ↔ HY2)", "UDP-ПАРА (NAIVE ↔ HY2)"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            @if enabled {
+                (tr(lang, "On — naive & HY2 on this node share a `pair` tag (a client routes UDP over the co-located HY2). No effect unless both run here.", "Вкл — naive и HY2 этого узла имеют общий тег `pair` (клиент гонит UDP через парный HY2). Без эффекта, если оба не подняты здесь."))
+            } @else {
+                (tr(lang, "Off — no pairing tag. Turn on for a node that runs BOTH naive and HY2.", "Выкл — без тега pair. Включи для узла, где есть И naive, И HY2."))
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/udp-pair"))
+             style="display: inline;" {
+            input type="hidden" name="enabled" value=(if enabled { "false" } else { "true" });
+            button type="submit"
+                   style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
+                @if enabled {
+                    (tr(lang, "turn off pairing", "выключить пару"))
+                } @else {
+                    (tr(lang, "turn on pairing", "включить пару"))
+                }
+            }
+        }
+    }
+}
+
 /// Reserved-ports section on the server-detail page (migration 0028).
 /// Renders ALWAYS (even when the list is empty) so the operator has
 /// a discoverable place to add port pins for a newly-detected co-
@@ -12952,6 +13014,32 @@ pub(crate) async fn server_set_auto_suppress(
     }
     let enabled = form_field(&body, "enabled").as_deref() == Some("true");
     if let Err(e) = state.inv.set_server_auto_suppress(&sid, enabled).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/udp-pair` — toggle the per-server naive↔HY2
+/// UDP-pairing opt-in (migration 0031, UX-3). Form field `enabled` =
+/// "true"/"false". Audited (`server.udp_pair.set`); redirects to the detail
+/// page.
+pub(crate) async fn server_set_udp_pair(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    let enabled = form_field(&body, "enabled").as_deref() == Some("true");
+    if let Err(e) = state.inv.set_server_udp_pair_enabled(&sid, enabled).await {
         return internal_error(anyhow::Error::new(e));
     }
     Redirect::to(&format!(
