@@ -1242,10 +1242,12 @@ fn admin_router(state: AppState) -> Router {
 /// caller that needs the canonical protocol set) build the real registry
 /// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, WgTurn as WgTurnKernel};
+    use vpnctl_kernels::{
+        AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel,
+    };
     use vpnctl_protocols::{
-        AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality,
-        WgTurn as WgTurnProtocol, WireGuard,
+        AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
+        VlessReality, WgTurn as WgTurnProtocol, WireGuard,
     };
 
     let mut reg = Registry::new();
@@ -1259,6 +1261,10 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // Caddy + forwardproxy@naive — serves the `naive` protocol with a
     // real masquerade website. MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(Caddy::new()))?;
+    // dns-tunnel — slipstream-rust DNS-over-НСДИ last-resort transport.
+    // Owns TWO units (slipstream-server UDP:53 + loopback VLESS sing-box).
+    // MUST stay in lockstep with cli/registry.rs.
+    reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
@@ -1271,6 +1277,10 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // Without this the daemon's /sub render + admin dpi-chip silently
     // drop naive (the CLI deploy still worked, hiding the gap).
     reg.register_protocol(Box::new(Naive::new()))?;
+    // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
+    // client → appears_in_sing_box_sub() is false. MUST stay in lockstep
+    // with cli/registry.rs.
+    reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
     Ok(reg)
 }
 
@@ -1296,6 +1306,7 @@ mod registry_drift_guard {
 
         let mut want_protos = [
             "anytls",
+            "dns-tunnel",
             "hysteria2",
             "naive",
             "shadowsocks-2022",
@@ -1309,7 +1320,7 @@ mod registry_drift_guard {
         .to_vec();
         want_protos.sort();
 
-        let mut want_kernels = ["amneziawg", "caddy", "sing-box", "wgturn"]
+        let mut want_kernels = ["amneziawg", "caddy", "dns-tunnel", "sing-box", "wgturn"]
             .map(String::from)
             .to_vec();
         want_kernels.sort();
