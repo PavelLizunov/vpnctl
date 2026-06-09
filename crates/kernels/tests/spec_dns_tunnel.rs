@@ -200,6 +200,60 @@ fn render_rejects_non_numeric_listen_port() {
 }
 
 #[test]
+fn render_config_rejects_domain_with_newline_injection() {
+    // A newline in the operator-set domain would forge a second
+    // `KEY=value` line in the slipstream EnvironmentFile (env-file line
+    // injection) — here a bogus `EVIL=1`. The guard must fail closed and
+    // the injected env line must NEVER reach the rendered bundle.
+    // Mirrors caddy's `render_rejects_domain_with_injection`.
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:domain".into(), "t.example.com\nEVIL=1".into());
+    let result = render(&sec, &[]);
+    match &result {
+        Err(CoreError::Render(m)) => {
+            assert!(m.contains("dns-tunnel:domain"), "msg: {m}");
+        }
+        other => panic!("expected CoreError::Render, got {other:?}"),
+    }
+    // The forged `EVIL=1` env line must NEVER reach a rendered bundle. On
+    // the (asserted) error path there is no output at all; this guards
+    // against a future regression that lets the bad domain render anyway.
+    if let Ok(body) = &result {
+        assert!(
+            !body.contains("EVIL="),
+            "forged env line leaked into rendered bundle:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn render_config_rejects_control_char_domain() {
+    // `is_control()` is the load-bearing check — an embedded NUL is not
+    // whitespace and not in the ILLEGAL set, but is still illegal in a
+    // hostname destined for an EnvironmentFile + command line.
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:domain".into(), "t.example\0.com".into());
+    let err = render(&sec, &[]).unwrap_err();
+    match err {
+        CoreError::Render(m) => assert!(m.contains("dns-tunnel:domain"), "msg: {m}"),
+        other => panic!("expected CoreError::Render, got {other:?}"),
+    }
+}
+
+#[test]
+fn render_config_rejects_listen_port_zero() {
+    // Port 0 parses as a valid u16 but is OS-ephemeral — unreachable for
+    // the :53 delegation the relay fronts. Mirrors
+    // `render_rejects_non_numeric_listen_port`.
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:listen_port".into(), "0".into());
+    let err = render(&sec, &[]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("dns-tunnel:listen_port"), "msg: {msg}");
+    assert!(msg.contains("1..=65535"), "msg: {msg}");
+}
+
+#[test]
 fn render_is_byte_stable_and_lf_only() {
     let sec = secrets();
     let a = render(&sec, &[user("alex")]).unwrap();
