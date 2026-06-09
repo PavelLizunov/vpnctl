@@ -47,13 +47,18 @@
 //!     fingerprint, for client-side cert pinning (the cert is
 //!     self-signed → the pin replaces a CA). NOT a secret — it's a
 //!     public pin. Operator-set secret `dns-tunnel:fingerprint`.
-//!   * `uuid` — the wrapped loopback VLESS UUID. This is the single
-//!     server-wide inbound UUID the kernel renders into
-//!     `127.0.0.1:9001` (PoC `tunnel-singbox-server.json.tpl`
-//!     `${TUNNEL_UUID}`). Minted server-side as the
-//!     `dns-tunnel:loopback_uuid` secret (see
-//!     [`Protocol::server_secret_specs`]), so the low-tech user imports
-//!     a single artefact with nothing to fill in (CLAUDE.md north-star).
+//!   * `uuid` — the wrapped loopback VLESS UUID. This is the USER'S OWN
+//!     per-user identity (`User.uuid`) — the SAME UUID they already
+//!     carry for VLESS-REALITY — reusing the standard vpnctl user model
+//!     instead of a single shared server-wide secret. The kernel renders
+//!     every granted user's `User.uuid` into the loopback VLESS inbound's
+//!     `users[]` at `127.0.0.1:9001` (see
+//!     `crates/kernels/src/dns_tunnel.rs`), so the link authenticates as
+//!     that specific user through the tunnel. The historical server-wide
+//!     `dns-tunnel:loopback_uuid` secret (PoC `${TUNNEL_UUID}`) survives
+//!     only as the kernel's optional backward-compat fallback entry. The
+//!     low-tech user still imports a single artefact with nothing to fill
+//!     in (CLAUDE.md north-star).
 //!
 //! Format version is `1`; an older client fails a newer version with
 //! «unsupported version». The byte-shape is pinned by
@@ -185,12 +190,17 @@ impl Protocol for DnsTunnel {
     }
 
     fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
-        // The wrapped loopback VLESS inbound UUID — a single server-wide
-        // value the kernel renders into `127.0.0.1:9001` (PoC
-        // `${TUNNEL_UUID}`) and the share-link embeds. Minted as a
-        // url-safe random string consumed as an OPAQUE UUID by sing-box
-        // → `Password` (NOT base64-decoded). 16 bytes of entropy is a
-        // UUID's worth.
+        // The wrapped loopback VLESS inbound's OPTIONAL admin/fallback
+        // UUID — the historical single server-wide value (PoC
+        // `${TUNNEL_UUID}`, live on box 213). Post per-user-UUID it is no
+        // longer the primary auth path: the kernel renders every GRANTED
+        // user's own `User.uuid` into `127.0.0.1:9001` and each user's
+        // share-link embeds THEIR `User.uuid`. This secret is kept &
+        // minted so (a) the live `e09b09af-…` deploy keeps working
+        // byte-for-byte and (b) a server with zero granted users still has
+        // one inbound entry. Minted as a url-safe random string consumed
+        // as an OPAQUE UUID by sing-box → `Password` (NOT base64-decoded).
+        // 16 bytes of entropy is a UUID's worth.
         //
         // `dns-tunnel:domain`, `dns-tunnel:resolvers`,
         // `dns-tunnel:fingerprint`, `dns-tunnel:forward_target` and
@@ -231,15 +241,17 @@ impl Protocol for DnsTunnel {
             )
         })?;
 
-        // ── Wrapped loopback VLESS UUID — minted server secret. ───────
-        let uuid = ctx.secrets.get("dns-tunnel:loopback_uuid").ok_or_else(|| {
-            CoreError::Render(
-                "dns-tunnel share_link: missing server secret \
-                 `dns-tunnel:loopback_uuid` — mint via the add-server \
-                 wizard, or visit /admin/servers/<id>/secrets to fix"
-                    .into(),
-            )
-        })?;
+        // ── Wrapped loopback VLESS UUID — the user's OWN identity. ────
+        // Per-user: embed `user.uuid` (the SAME UUID this user already
+        // carries for VLESS-REALITY), not the shared server-wide
+        // `dns-tunnel:loopback_uuid` secret. The kernel renders every
+        // granted user's `user.uuid` into the loopback VLESS inbound's
+        // `users[]` (see `crates/kernels/src/dns_tunnel.rs`), so this link
+        // authenticates as that specific user through the tunnel. The
+        // shared `loopback_uuid` survives only as the kernel's optional
+        // backward-compat fallback entry — the per-user link is the
+        // correct primary path.
+        let uuid = user.uuid.as_str();
 
         // ── Multipath resolver list — operator-set or vpnctl default. ─
         let resolvers_raw = ctx
@@ -375,11 +387,73 @@ mod tests {
         assert_eq!(v["v"], 1);
         assert_eq!(v["d"], "t.example.com");
         assert_eq!(v["fp"], FAKE_FP);
-        assert_eq!(v["uuid"], FAKE_UUID);
+        // Per-user UUID: the link carries the USER'S own uuid, NOT the
+        // shared `dns-tunnel:loopback_uuid` secret (FAKE_UUID).
+        assert_eq!(v["uuid"], dummy_user().uuid);
+        assert_ne!(
+            v["uuid"], FAKE_UUID,
+            "must embed the per-user uuid, not the shared loopback secret"
+        );
         assert_eq!(
             v["r"],
             serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"])
         );
+    }
+
+    #[test]
+    fn share_link_embeds_per_user_uuid_not_loopback_secret() {
+        // The core per-user-identity contract: even with the shared
+        // `dns-tunnel:loopback_uuid` secret present, the emitted link
+        // carries `user.uuid` (the same UUID the user has for VLESS).
+        let server = dummy_server();
+        let secrets = secrets_complete();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let alice = dummy_user();
+        let mut bob = dummy_user();
+        bob.id = UserId("bob".into());
+        bob.uuid = "22222222-2222-2222-2222-222222222222".into();
+
+        let link_a = DnsTunnel::new().share_link(&ctx, &alice).unwrap();
+        let link_b = DnsTunnel::new().share_link(&ctx, &bob).unwrap();
+
+        let decode = |link: &str| -> serde_json::Value {
+            let payload = link
+                .strip_prefix("dns-tunnel://")
+                .unwrap()
+                .split('#')
+                .next()
+                .unwrap();
+            let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+            serde_json::from_slice(&raw).unwrap()
+        };
+        assert_eq!(decode(&link_a)["uuid"], alice.uuid);
+        assert_eq!(decode(&link_b)["uuid"], bob.uuid);
+        // Two different users → two different embedded UUIDs.
+        assert_ne!(decode(&link_a)["uuid"], decode(&link_b)["uuid"]);
+        // And neither equals the shared loopback secret.
+        assert_ne!(decode(&link_a)["uuid"], FAKE_UUID);
+    }
+
+    #[test]
+    fn share_link_works_without_loopback_secret() {
+        // share_link no longer depends on `dns-tunnel:loopback_uuid` — the
+        // per-user uuid is its own identity. Removing that secret must NOT
+        // break the link (regression guard for the old required-secret
+        // behaviour).
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.remove("dns-tunnel:loopback_uuid");
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["uuid"], dummy_user().uuid);
     }
 
     #[test]
@@ -445,18 +519,6 @@ mod tests {
             .share_link(&ctx, &dummy_user())
             .unwrap_err();
         assert!(format!("{err}").contains("dns-tunnel:fingerprint"));
-    }
-
-    #[test]
-    fn share_link_errors_when_uuid_missing() {
-        let server = dummy_server();
-        let mut secrets = secrets_complete();
-        secrets.remove("dns-tunnel:loopback_uuid");
-        let ctx = RenderCtx::new(&server, &secrets);
-        let err = DnsTunnel::new()
-            .share_link(&ctx, &dummy_user())
-            .unwrap_err();
-        assert!(format!("{err}").contains("dns-tunnel:loopback_uuid"));
     }
 
     #[test]

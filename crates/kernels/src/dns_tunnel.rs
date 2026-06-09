@@ -435,7 +435,7 @@ impl Kernel for DnsTunnel {
     fn render_config(
         &self,
         ctx: &RenderCtx<'_>,
-        _users: &[User],
+        users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
         // Defense-in-depth: Registry::validate_server should reject a
@@ -495,15 +495,54 @@ impl Kernel for DnsTunnel {
             )));
         }
 
-        // Wrapped loopback VLESS inbound UUID — minted server secret
-        // (the single server-wide `${TUNNEL_UUID}` from the PoC).
-        let loopback_uuid = ctx.secrets.get("dns-tunnel:loopback_uuid").ok_or_else(|| {
-            CoreError::Render(
-                "dns-tunnel kernel: missing secret `dns-tunnel:loopback_uuid` — \
-                 mint via the add-server wizard, or set via /admin/servers/<id>"
+        // Wrapped loopback VLESS inbound `users[]`. Per-user identity is
+        // the standard vpnctl user model: every user GRANTED the
+        // dns-tunnel protocol on this server arrives here in `users`
+        // (the same `users_for_server` slice every kernel's
+        // `render_config` receives — the grant path is protocol-agnostic),
+        // carrying the SAME `User.uuid` they already use for VLESS-REALITY.
+        // We render one PLAIN VLESS entry per granted user (no `flow`, no
+        // reality — the tunnel itself provides the encryption, so the
+        // loopback inbound is intentionally TLS-less + auth-by-UUID only).
+        //
+        // Backward-compat: the historical single server-wide
+        // `dns-tunnel:loopback_uuid` secret (the PoC `${TUNNEL_UUID}`, live
+        // on box 213) stays supported as an OPTIONAL admin/fallback entry —
+        // when set, it's appended to `users[]`, de-duplicated against the
+        // granted users so it's never double-listed. This keeps the live
+        // `e09b09af-…` deploy working untouched AND lets per-user identities
+        // ride the same inbound.
+        let loopback_uuid = ctx.secrets.get("dns-tunnel:loopback_uuid");
+        // dedup(granted users' uuids ++ [loopback_uuid if set]), preserving
+        // the granted-users order (stable `ORDER BY id` from inventory) so
+        // the rendered config is byte-stable, with the fallback appended.
+        let mut inbound_uuids: Vec<&str> = Vec::with_capacity(users.len() + 1);
+        for u in users {
+            let uuid = u.uuid.as_str();
+            if !inbound_uuids.contains(&uuid) {
+                inbound_uuids.push(uuid);
+            }
+        }
+        if let Some(lb) = loopback_uuid.map(String::as_str) {
+            if !inbound_uuids.contains(&lb) {
+                inbound_uuids.push(lb);
+            }
+        }
+        // An inbound with zero users is a misconfiguration — sing-box would
+        // accept VLESS handshakes it can never authenticate, and there is
+        // nothing to hand any client. Fail closed rather than ship a dead
+        // inbound. (The historical guard required `loopback_uuid`; now
+        // EITHER a granted user OR the fallback secret satisfies it.)
+        if inbound_uuids.is_empty() {
+            return Err(CoreError::Render(
+                "dns-tunnel kernel: the loopback VLESS inbound has no users — \
+                 grant the dns-tunnel protocol to at least one user (their \
+                 per-user UUID is reused, same as VLESS-REALITY), or set the \
+                 `dns-tunnel:loopback_uuid` fallback secret via \
+                 /admin/servers/<id>"
                     .into(),
-            )
-        })?;
+            ));
+        }
 
         // Listen port — operator-overridable, validated as u16 at render
         // time so a typo surfaces as a clear CoreError::Render rather
@@ -575,6 +614,13 @@ impl Kernel for DnsTunnel {
         // Shape = configs/tunnel-singbox-server.json.tpl. Built as a
         // serde_json::Value then pretty-printed for byte-stability
         // (BTreeMap key order is deterministic; serde_json emits LF-only).
+        // PLAIN VLESS entries — only `uuid`, no `flow`/reality (the entry
+        // shape vless_reality.rs uses for a vision user minus the
+        // xtls-rprx-vision flow, which is loopback-inappropriate here).
+        let users_json: Vec<serde_json::Value> = inbound_uuids
+            .iter()
+            .map(|uuid| serde_json::json!({ "uuid": uuid }))
+            .collect();
         let sb_config = serde_json::json!({
             "log": {"level": "warn"},
             "inbounds": [
@@ -583,7 +629,7 @@ impl Kernel for DnsTunnel {
                     "tag": "tunnel-in",
                     "listen": fwd_host,
                     "listen_port": fwd_port,
-                    "users": [{"uuid": loopback_uuid}]
+                    "users": users_json
                 }
             ],
             "outbounds": [

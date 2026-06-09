@@ -103,12 +103,45 @@ fn share_link_scheme_and_required_fields_round_trip() {
     assert_eq!(v["v"], 1, "format version: {v}");
     assert_eq!(v["d"], "t.example.com");
     assert_eq!(v["fp"], FP);
-    assert_eq!(v["uuid"], UUID);
+    // Per-user identity: the link carries the USER'S own uuid (the same
+    // one they use for VLESS-REALITY), NOT the shared server-wide
+    // `dns-tunnel:loopback_uuid` secret (UUID).
+    assert_eq!(v["uuid"], user("alex").uuid);
+    assert_ne!(
+        v["uuid"], UUID,
+        "must embed per-user uuid, not the shared loopback secret"
+    );
     assert_eq!(
         v["r"],
         serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"]),
         "default multipath НСДИ resolvers: {v}"
     );
+}
+
+#[test]
+fn share_link_embeds_distinct_uuid_per_user() {
+    // Two different granted users must get two different embedded UUIDs —
+    // the whole point of per-user identity (vs the old single shared
+    // loopback UUID where every user's link was byte-identical).
+    let s = srv();
+    let sec = secrets();
+    let ctx = RenderCtx::new(&s, &sec);
+    let decode_uuid = |name: &str| -> String {
+        let link = DnsTunnel::new().share_link(&ctx, &user(name)).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap()
+            .to_string();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        v["uuid"].as_str().unwrap().to_string()
+    };
+    assert_eq!(decode_uuid("alex"), user("alex").uuid);
+    assert_eq!(decode_uuid("bob"), user("bob").uuid);
+    assert_ne!(decode_uuid("alex"), decode_uuid("bob"));
 }
 
 #[test]
@@ -172,13 +205,14 @@ fn share_link_exact_bytes_mutation_resistant() {
 
     // Reconstruct the expected payload from the spec'd JSON so the test
     // documents the exact wire shape without hard-coding an opaque blob
-    // that nobody can verify by eye.
+    // that nobody can verify by eye. `uuid` is the PER-USER identity
+    // (`user("alex").uuid` == "uuid-alex"), not the shared loopback secret.
     let expected_json = serde_json::json!({
         "v": 1,
         "d": "t.example.com",
         "r": ["195.208.4.1:53", "195.208.5.1:53"],
         "fp": FP,
-        "uuid": UUID,
+        "uuid": user("alex").uuid,
     });
     let expected_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expected_json).unwrap());
     let expected = format!("dns-tunnel://{expected_payload}#alex");
@@ -208,12 +242,12 @@ fn share_link_honours_resolver_override_trimmed() {
 
 #[test]
 fn share_link_errors_name_the_missing_secret() {
+    // `domain` + `fingerprint` stay required (the two-process client can't
+    // start without them). `dns-tunnel:loopback_uuid` is NO LONGER one of
+    // them — share_link embeds the per-user `user.uuid`, so the shared
+    // loopback secret is irrelevant to the link.
     let s = srv();
-    for missing in [
-        "dns-tunnel:domain",
-        "dns-tunnel:fingerprint",
-        "dns-tunnel:loopback_uuid",
-    ] {
+    for missing in ["dns-tunnel:domain", "dns-tunnel:fingerprint"] {
         let mut sec = secrets();
         sec.remove(missing);
         let ctx = RenderCtx::new(&s, &sec);
@@ -225,4 +259,25 @@ fn share_link_errors_name_the_missing_secret() {
             "error for missing {missing} must name it: {err}"
         );
     }
+}
+
+#[test]
+fn share_link_succeeds_without_loopback_uuid_secret() {
+    // Regression guard for the per-user migration: removing the shared
+    // `dns-tunnel:loopback_uuid` secret must NOT break share_link (it used
+    // to be required). The per-user uuid is the link's own identity.
+    let s = srv();
+    let mut sec = secrets();
+    sec.remove("dns-tunnel:loopback_uuid");
+    let ctx = RenderCtx::new(&s, &sec);
+    let link = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let payload = link
+        .strip_prefix("dns-tunnel://")
+        .unwrap()
+        .split('#')
+        .next()
+        .unwrap();
+    let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(v["uuid"], user("alex").uuid);
 }
