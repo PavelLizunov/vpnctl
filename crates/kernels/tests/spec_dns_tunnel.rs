@@ -62,6 +62,22 @@ fn render(sec: &HashMap<String, String>, users: &[User]) -> vpnctl_core::Result<
         .map(|b| String::from_utf8(b).unwrap())
 }
 
+/// Pull the sing-box JSON member out of the multi-file bundle. The bundle
+/// format (mirrors wgturn) frames each file with a `====FILE: <path>====`
+/// marker line; the sing-box config is the last member, after
+/// `/etc/dns-tunnel/tunnel-sb.json`. Returns its raw bytes so the test can
+/// `serde_json::from_slice` and assert on the structured `users[]`.
+fn extract_sb_json(bundle: &str) -> Vec<u8> {
+    let marker = "====FILE: /etc/dns-tunnel/tunnel-sb.json====";
+    let after = bundle
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("sing-box bundle marker missing:\n{bundle}"))
+        .1;
+    // Drop the leading newline after the marker line; the rest (to EOF) is
+    // the JSON member (it's the final file in the bundle).
+    after.trim_start_matches('\n').as_bytes().to_vec()
+}
+
 #[test]
 fn id_is_dns_tunnel() {
     assert_eq!(DnsTunnel::new().id(), KernelId("dns-tunnel".into()));
@@ -182,11 +198,100 @@ fn render_missing_domain_is_error() {
 }
 
 #[test]
-fn render_missing_loopback_uuid_is_error() {
+fn render_zero_users_and_no_loopback_uuid_is_error() {
+    // With NEITHER any granted user NOR the fallback loopback_uuid secret,
+    // the loopback inbound would have zero users — a misconfiguration. The
+    // kernel must fail closed with a clear Render error that names both
+    // remediation paths (grant a user OR set the fallback secret).
     let mut sec = secrets();
     sec.remove("dns-tunnel:loopback_uuid");
     let err = render(&sec, &[]).unwrap_err();
-    assert!(format!("{err}").contains("dns-tunnel:loopback_uuid"));
+    match err {
+        CoreError::Render(m) => {
+            assert!(m.contains("no users"), "msg: {m}");
+            assert!(m.contains("dns-tunnel:loopback_uuid"), "msg: {m}");
+        }
+        other => panic!("expected CoreError::Render, got {other:?}"),
+    }
+}
+
+#[test]
+fn render_zero_users_but_loopback_uuid_set_keeps_backward_compat() {
+    // The LIVE box-213 shape: 0 granted users + the fallback
+    // `dns-tunnel:loopback_uuid` (e09b09af-…) set. The inbound must carry
+    // exactly the 1 loopback entry — the e09b09af deploy keeps working.
+    let sec = secrets(); // loopback_uuid = UUID
+    let body = render(&sec, &[]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&extract_sb_json(&body)).unwrap();
+    let users = v["inbounds"][0]["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1, "exactly the loopback fallback entry");
+    assert_eq!(users[0]["uuid"], UUID);
+    // PLAIN VLESS — no flow on the loopback entry.
+    assert!(
+        users[0].get("flow").is_none(),
+        "loopback entry must be plain"
+    );
+}
+
+#[test]
+fn render_two_granted_users_emits_both_uuids() {
+    // The per-user core: two GRANTED users → the loopback inbound's users[]
+    // carries BOTH of their UUIDs (the same uuid each user has for VLESS).
+    // No loopback fallback secret here — granted users alone satisfy the
+    // non-empty guard.
+    let mut sec = secrets();
+    sec.remove("dns-tunnel:loopback_uuid");
+    let alice = user("alex");
+    let bob = user("bob");
+    let body = render(&sec, &[alice.clone(), bob.clone()]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&extract_sb_json(&body)).unwrap();
+    let users = v["inbounds"][0]["users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "both granted users present: {users:?}");
+    let got: std::collections::HashSet<&str> =
+        users.iter().map(|u| u["uuid"].as_str().unwrap()).collect();
+    assert!(
+        got.contains(alice.uuid.as_str()),
+        "alex uuid missing: {got:?}"
+    );
+    assert!(got.contains(bob.uuid.as_str()), "bob uuid missing: {got:?}");
+    // PLAIN VLESS entries — no flow, no reality (tunnel encrypts).
+    for u in users {
+        assert!(
+            u.get("flow").is_none(),
+            "per-user entry must be plain VLESS: {u}"
+        );
+    }
+}
+
+#[test]
+fn render_granted_users_plus_loopback_uuid_are_deduplicated() {
+    // granted users AND the loopback fallback set → all present, and if the
+    // loopback uuid equals a granted user's uuid it is NOT double-listed.
+    // Use a granted user whose uuid IS the loopback UUID + one distinct
+    // user, plus the loopback secret set to UUID.
+    let sec = secrets(); // loopback_uuid = UUID
+    let mut same_as_loopback = user("dup");
+    same_as_loopback.uuid = UUID.to_string();
+    let distinct = user("alex"); // uuid-alex
+    let body = render(&sec, &[same_as_loopback, distinct.clone()]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&extract_sb_json(&body)).unwrap();
+    let users = v["inbounds"][0]["users"].as_array().unwrap();
+    let got: Vec<&str> = users.iter().map(|u| u["uuid"].as_str().unwrap()).collect();
+    // Exactly two distinct entries: the shared UUID once + the distinct one.
+    assert_eq!(
+        users.len(),
+        2,
+        "loopback uuid must not be double-listed: {got:?}"
+    );
+    assert_eq!(
+        got.iter().filter(|&&u| u == UUID).count(),
+        1,
+        "the loopback uuid appears exactly once: {got:?}"
+    );
+    assert!(
+        got.contains(&distinct.uuid.as_str()),
+        "distinct user missing: {got:?}"
+    );
 }
 
 #[test]
