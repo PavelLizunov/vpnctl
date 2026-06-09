@@ -776,6 +776,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/udp-pair",
             post(admin::server_set_udp_pair),
         )
+        // Delete a server from inventory (retype-to-confirm, mirrors user
+        // delete). GET renders the confirm page; POST does the cascade
+        // delete + audits server.remove.
+        .route(
+            "/admin/servers/{id}/delete-confirm",
+            get(admin::server_delete_confirm),
+        )
+        .route("/admin/servers/{id}/delete", post(admin::server_delete))
         // Reserved-ports list (migration 0028). Operator pins ports
         // the daemon must never touch via sing-box — a sing-box
         // pre-apply guard refuses any rendered inbound on a
