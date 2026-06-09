@@ -474,6 +474,26 @@ impl Kernel for DnsTunnel {
                     .into(),
             )
         })?;
+        // Fail closed: the domain lands VERBATIM in the systemd
+        // EnvironmentFile line `SLIPSTREAM_DOMAIN=<domain>` (loaded into
+        // the relay env + ExecStart) and in the `====FILE:` bundle. A
+        // newline forges a second `KEY=value` env line (env-file line
+        // injection) or breaks the bundle framing. Mirrors the operator-
+        // set-domain guards in `crates/kernels/src/caddy.rs` (Caddyfile)
+        // and `crates/protocols/src/naive.rs` (client URI). `is_control`
+        // is load-bearing — it catches NUL and the newline.
+        const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
+        if domain.is_empty()
+            || domain.chars().count() > 253
+            || domain.contains(ILLEGAL)
+            || domain.chars().any(|c| c.is_control())
+        {
+            return Err(CoreError::Render(format!(
+                "dns-tunnel kernel: `dns-tunnel:domain` {domain:?} is invalid — must be a \
+                 non-empty hostname <=253 chars with no control characters or whitespace \
+                 (it lands verbatim in the slipstream EnvironmentFile and command line)"
+            )));
+        }
 
         // Wrapped loopback VLESS inbound UUID — minted server secret
         // (the single server-wide `${TUNNEL_UUID}` from the PoC).
@@ -491,12 +511,23 @@ impl Kernel for DnsTunnel {
         // listen_port pre-validation).
         let listen_port: u16 = match ctx.secrets.get("dns-tunnel:listen_port") {
             None => DEFAULT_LISTEN_PORT,
-            Some(s) => s.parse().map_err(|_| {
-                CoreError::Render(format!(
-                    "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
-                     must be an integer in 0..=65535"
-                ))
-            })?,
+            Some(s) => {
+                let port = s.parse::<u16>().map_err(|_| {
+                    CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
+                         must be an integer in 1..=65535"
+                    ))
+                })?;
+                if port == 0 {
+                    // Port 0 is OS-ephemeral — unreachable for the :53
+                    // delegation the relay fronts. Reject like a parse error.
+                    return Err(CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
+                         must be an integer in 1..=65535"
+                    )));
+                }
+                port
+            }
         };
 
         // Forward-target — operator-overridable, but REJECTED if it
