@@ -95,6 +95,15 @@ pub struct AlertEvent {
     /// Serialized as `payload_json` — small JSON object with the
     /// crossing thresholds + prior/current values for the audit row.
     pub payload: serde_json::Value,
+    /// For recovery events (`*.up` / `*.recovered`): the kind of the
+    /// PAIRED condition alert this event closes. The dispatch loop
+    /// auto-acks any open alert of that kind for the same server and
+    /// inserts the recovery row pre-acked (alerts-cleanup 2026-06-10):
+    /// before this, a down→up cycle left TWO open rows — the stale
+    /// `*.down` (condition already gone) and an `*.up` info row that
+    /// demanded a manual ack just to say «everything is fine».
+    /// `None` for condition alerts (down / pressure / too_big).
+    pub resolves: Option<&'static str>,
 }
 
 /// Compute mem-used percentage from a `NodeHealthRow`. Mirrors
@@ -137,6 +146,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         if p && !c {
             out.push(AlertEvent {
                 kind: "server.singbox.down",
+                resolves: None,
                 severity: "critical",
                 summary: "sing-box is no longer active".into(),
                 payload: serde_json::json!({"prior": p, "current": c}),
@@ -144,6 +154,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         } else if !p && c {
             out.push(AlertEvent {
                 kind: "server.singbox.up",
+                resolves: Some("server.singbox.down"),
                 severity: "info",
                 summary: "sing-box recovered to active".into(),
                 payload: serde_json::json!({"prior": p, "current": c}),
@@ -154,6 +165,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         if p && !c {
             out.push(AlertEvent {
                 kind: "server.fail2ban.down",
+                resolves: None,
                 severity: "warning",
                 summary: "fail2ban is no longer active".into(),
                 payload: serde_json::json!({"prior": p, "current": c}),
@@ -161,6 +173,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         } else if !p && c {
             out.push(AlertEvent {
                 kind: "server.fail2ban.up",
+                resolves: Some("server.fail2ban.down"),
                 severity: "info",
                 summary: "fail2ban recovered to active".into(),
                 payload: serde_json::json!({"prior": p, "current": c}),
@@ -173,6 +186,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         if p < DISK_PRESSURE_TRIGGER_PCT && c >= DISK_PRESSURE_TRIGGER_PCT {
             out.push(AlertEvent {
                 kind: "server.disk.pressure",
+                resolves: None,
                 severity: "warning",
                 summary: format!("disk usage crossed {DISK_PRESSURE_TRIGGER_PCT}% ({p}% → {c}%)"),
                 payload: serde_json::json!({
@@ -182,6 +196,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         } else if p >= DISK_PRESSURE_TRIGGER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.disk.recovered",
+                resolves: Some("server.disk.pressure"),
                 severity: "info",
                 summary: format!(
                     "disk usage dropped back under {DISK_PRESSURE_RECOVER_PCT}% ({p}% → {c}%)"
@@ -198,6 +213,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         if p < MEM_PRESSURE_TRIGGER_PCT && c >= MEM_PRESSURE_TRIGGER_PCT {
             out.push(AlertEvent {
                 kind: "server.mem.pressure",
+                resolves: None,
                 severity: "warning",
                 summary: format!("memory usage crossed {MEM_PRESSURE_TRIGGER_PCT}% ({p}% → {c}%)"),
                 payload: serde_json::json!({
@@ -207,6 +223,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         } else if p >= MEM_PRESSURE_TRIGGER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.mem.recovered",
+                resolves: Some("server.mem.pressure"),
                 severity: "info",
                 summary: format!(
                     "memory usage dropped back under {MEM_PRESSURE_RECOVER_PCT}% ({p}% → {c}%)"
@@ -223,6 +240,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         if p < SINGBOX_LOG_TRIGGER_BYTES && c >= SINGBOX_LOG_TRIGGER_BYTES {
             out.push(AlertEvent {
                 kind: "server.singbox.log.too_big",
+                resolves: None,
                 severity: "warning",
                 summary: format!("sing-box log size crossed 500 MiB ({} → {} bytes)", p, c),
                 payload: serde_json::json!({
@@ -318,8 +336,61 @@ pub async fn scan_once(
                     Some("{}".to_string())
                 }
             };
-            match inv
-                .insert_alert(
+            // Recovery events (alerts-cleanup 2026-06-10) first CLOSE
+            // their paired condition alert, then land pre-acked: the
+            // good news belongs in history (`?show=all`), not in the
+            // open feed demanding a manual ack. Condition alerts keep
+            // the original open-insert path.
+            if let Some(resolved_kind) = ev.resolves {
+                match inv.ack_open_alerts(resolved_kind, Some(&server.id)).await {
+                    Ok(0) => {} // paired alert was never open (or already acked)
+                    Ok(n) => {
+                        tracing::info!(
+                            target = "vpnctld::health_monitor",
+                            server = %server.id.0,
+                            resolved_kind,
+                            acked = n,
+                            "auto-resolved paired condition alert on recovery"
+                        );
+                        // Audit the actual mutation (review 2026-06-10):
+                        // node_probe_poller's auto-ack sets the
+                        // convention — without this row the unified
+                        // timeline shows fire(*.down) + fire(*.up) but
+                        // silently loses WHO closed the down alert.
+                        if let Err(e) = inv
+                            .audit(
+                                "vpnctld",
+                                "alert.auto_ack",
+                                Some(&server.id.0),
+                                Some(&serde_json::json!({
+                                    "kind": resolved_kind,
+                                    "rows_acked": n,
+                                    "reason": ev.kind,
+                                })),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                target = "vpnctld::health_monitor",
+                                server = %server.id.0,
+                                error = %e,
+                                "alert.auto_ack audit row failed; ack already committed"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target = "vpnctld::health_monitor",
+                            server = %server.id.0,
+                            resolved_kind,
+                            error = %e,
+                            "auto-resolve ack failed; stale condition alert stays open"
+                        );
+                    }
+                }
+            }
+            let insert_res = if ev.resolves.is_some() {
+                inv.insert_alert_acked(
                     ev.kind,
                     Some(&server.id),
                     ev.severity,
@@ -327,7 +398,17 @@ pub async fn scan_once(
                     payload_str.as_deref(),
                 )
                 .await
-            {
+            } else {
+                inv.insert_alert(
+                    ev.kind,
+                    Some(&server.id),
+                    ev.severity,
+                    &ev.summary,
+                    payload_str.as_deref(),
+                )
+                .await
+            };
+            match insert_res {
                 Ok(alert_id) => {
                     tracing::info!(
                         target = "vpnctld::health_monitor",
@@ -915,6 +996,69 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "server.singbox.up");
         assert_eq!(evs[0].severity, "info");
+        assert_eq!(
+            evs[0].resolves,
+            Some("server.singbox.down"),
+            "recovery must name the paired condition it closes"
+        );
+    }
+
+    /// Alerts-cleanup 2026-06-10 pin: every recovery event resolves its
+    /// paired condition kind; every condition event resolves nothing.
+    /// The dispatch loop keys auto-ack + born-acked insert on this.
+    #[test]
+    fn diff_rows_resolves_pairing_is_complete() {
+        // (prev-state, cur-state) per metric chosen to fire each kind.
+        let fire = |prev: NodeHealthRow, cur: NodeHealthRow| diff_rows(&prev, &cur);
+        let cases: Vec<(Vec<AlertEvent>, &str, Option<&str>)> = vec![
+            (
+                fire(
+                    row(10, Some(true), None, None, None, None, None, None),
+                    row(0, Some(false), None, None, None, None, None, None),
+                ),
+                "server.singbox.down",
+                None,
+            ),
+            (
+                fire(
+                    row(10, None, Some(true), None, None, None, None, None),
+                    row(0, None, Some(false), None, None, None, None, None),
+                ),
+                "server.fail2ban.down",
+                None,
+            ),
+            (
+                fire(
+                    row(10, None, Some(false), None, None, None, None, None),
+                    row(0, None, Some(true), None, None, None, None, None),
+                ),
+                "server.fail2ban.up",
+                Some("server.fail2ban.down"),
+            ),
+            (
+                fire(
+                    row(10, None, None, Some(80), Some(100), None, None, None),
+                    row(0, None, None, Some(95), Some(100), None, None, None),
+                ),
+                "server.disk.pressure",
+                None,
+            ),
+            (
+                fire(
+                    row(10, None, None, Some(95), Some(100), None, None, None),
+                    row(0, None, None, Some(80), Some(100), None, None, None),
+                ),
+                "server.disk.recovered",
+                Some("server.disk.pressure"),
+            ),
+        ];
+        for (evs, kind, resolves) in cases {
+            let ev = evs
+                .iter()
+                .find(|e| e.kind == kind)
+                .unwrap_or_else(|| panic!("{kind} did not fire"));
+            assert_eq!(ev.resolves, resolves, "pairing wrong for {kind}");
+        }
     }
 
     #[test]

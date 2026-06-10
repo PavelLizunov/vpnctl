@@ -4324,6 +4324,38 @@ impl SqliteInventory {
         }
     }
 
+    /// Insert an alert row that is born ACKED (`acked_at = now`).
+    /// Used for recovery events (`*.up` / `*.recovered`) since the
+    /// alerts-cleanup (2026-06-10): a recovery is good news — it
+    /// belongs in the history (`?show=all`) but must NOT sit in the
+    /// open feed demanding a manual ack. Bypasses the partial UNIQUE
+    /// dedup index by construction (the index only covers
+    /// `acked_at IS NULL` rows), which is correct: each recovery is
+    /// its own historical event.
+    pub async fn insert_alert_acked(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+        severity: &str,
+        summary: &str,
+        payload_json: Option<&str>,
+    ) -> Result<i64> {
+        let server_id_str = server_id.map(|s| s.0.as_str());
+        let res = sqlx::query(
+            "INSERT INTO admin_alerts
+                 (kind, server_id, severity, summary, payload_json, acked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        )
+        .bind(kind)
+        .bind(server_id_str)
+        .bind(severity)
+        .bind(summary)
+        .bind(payload_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.last_insert_rowid())
+    }
+
     /// Bulk-ack every currently-unacked alert of the given `(kind,
     /// server_id)` pair. Returns `rows_affected` — `0` if no matching
     /// open row existed (idempotent: the caller's recovery-detection

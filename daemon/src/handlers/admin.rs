@@ -8748,11 +8748,204 @@ pub(crate) struct AlertsQuery {
 /// Render the feed table — newest-first, severity badge, server link,
 /// per-row ack button (hidden when already acked). Inline styles keep
 /// this self-contained so admin.css doesn't need a Phase G section.
+/// Human-readable (title, what-to-do hint) for an alert kind. The raw
+/// kind stays available in the row tooltip; the title is what the
+/// operator scans. Returns `None` hint for recovery/info kinds — they
+/// need no action. (Alerts-cleanup 2026-06-10: Pavel's feedback —
+/// «алерты сумбурные и непонятные» — raw kinds + mixed summaries gave
+/// no answer to "так что мне ДЕЛАТЬ?".)
+fn alert_explainer(kind: &str, lang: crate::i18n::Locale) -> (&'static str, Option<&'static str>) {
+    use crate::i18n::tr;
+    // Per-user suspicious kinds carry a `:<user>` suffix — match on prefix.
+    if kind.starts_with("sub_access.suspicious_local_ip") {
+        return (
+            tr(
+                lang,
+                "subscription fetched from a LAN/loopback IP",
+                "подписку дёрнули с LAN/loopback IP",
+            ),
+            Some(tr(
+                lang,
+                "If this is your own service host (monitoring, claude-chat, smoke checks) — add its IP to VPNCTLD_SUSPICIOUS_IP_ALLOWLIST and ack. If you don't recognise the IP/UA, the sub link may have leaked into the LAN: regenerate the user's sub_token.",
+                "Если это твой служебный хост (мониторинг, claude-chat, smoke-проверки) — добавь его IP в VPNCTLD_SUSPICIOUS_IP_ALLOWLIST и прими. Если IP/UA незнакомы — sub-ссылка могла утечь в LAN: перегенерируй sub_token юзера.",
+            )),
+        );
+    }
+    match kind {
+        "server.singbox.down" => (
+            tr(
+                lang,
+                "sing-box is DOWN — VPN dead on this node",
+                "sing-box УПАЛ — VPN на ноде не работает",
+            ),
+            Some(tr(
+                lang,
+                "Every user on this server is offline. Open the server page → check live status → redeploy; if SSH is dead too, use the hoster console.",
+                "Все юзеры этого сервера оффлайн. Открой страницу сервера → проверь живой статус → redeploy; если SSH тоже мёртв — консоль хостера.",
+            )),
+        ),
+        "server.singbox.up" => (
+            tr(lang, "sing-box recovered", "sing-box восстановился"),
+            None,
+        ),
+        "server.fail2ban.down" => (
+            tr(
+                lang,
+                "fail2ban stopped — SSH brute-force shield off",
+                "fail2ban остановлен — защита SSH от перебора выключена",
+            ),
+            Some(tr(
+                lang,
+                "SSH is unprotected against password guessing. On the node: systemctl restart fail2ban (deploy page can push it too).",
+                "SSH не защищён от перебора паролей. На ноде: systemctl restart fail2ban (или передеплой с страницы сервера).",
+            )),
+        ),
+        "server.fail2ban.up" => (
+            tr(lang, "fail2ban recovered", "fail2ban восстановился"),
+            None,
+        ),
+        "server.disk.pressure" => (
+            tr(lang, "disk almost full", "диск почти заполнен"),
+            Some(tr(
+                lang,
+                "Above 90% — sing-box logs are the usual culprit. Server page shows the trend; a redeploy rotates the log.",
+                "Выше 90% — обычно виноваты логи sing-box. Тренд на странице сервера; redeploy ротирует лог.",
+            )),
+        ),
+        "server.disk.recovered" => (tr(lang, "disk pressure cleared", "диск разгрузился"), None),
+        "server.mem.pressure" => (
+            tr(lang, "memory almost exhausted", "память почти исчерпана"),
+            Some(tr(
+                lang,
+                "Above 95% — check what's eating RAM on the node (sing-box leak? neighbour process?). OOM-kill of sing-box = outage.",
+                "Выше 95% — посмотри, что ест RAM на ноде (течёт sing-box? соседний процесс?). OOM-kill sing-box = простой.",
+            )),
+        ),
+        "server.mem.recovered" => (
+            tr(lang, "memory pressure cleared", "память разгрузилась"),
+            None,
+        ),
+        "server.singbox.log.too_big" => (
+            tr(
+                lang,
+                "sing-box log over 500 MiB",
+                "лог sing-box больше 500 MiB",
+            ),
+            Some(tr(
+                lang,
+                "Log rotation isn't keeping up. Redeploy (re-installs the logrotate fragment) or truncate /var/log/sing-box.log on the node.",
+                "Ротация логов не справляется. Передеплой (переставит logrotate-фрагмент) или обрежь /var/log/sing-box.log на ноде.",
+            )),
+        ),
+        "server.unreachable" => (
+            tr(lang, "node unreachable over SSH", "нода недоступна по SSH"),
+            Some(tr(
+                lang,
+                "3+ probes failed in a row: host down, IP blocked, or sshd broken. Try the hoster console; if the node is gone for good — delete it from inventory.",
+                "3+ probe подряд не прошли: хост лежит, IP заблокирован или sshd сломан. Зайди через консоль хостера; если нода умерла насовсем — удали её из инвентаря.",
+            )),
+        ),
+        "server.fingerprint.drift" => (
+            tr(
+                lang,
+                "SSH host key CHANGED on the node",
+                "SSH host-ключ ноды ИЗМЕНИЛСЯ",
+            ),
+            Some(tr(
+                lang,
+                "Legit if you rebuilt the VPS; MITM if you didn't. Verify via the hoster console, then re-pin the fingerprint on the server page.",
+                "Норма, если ты пересобирал VPS; MITM — если нет. Проверь через консоль хостера, затем перепинь отпечаток на странице сервера.",
+            )),
+        ),
+        "server.fail2ban.banned_self" => (
+            tr(
+                lang,
+                "fail2ban banned OUR OWN IP",
+                "fail2ban забанил НАШ СОБСТВЕННЫЙ IP",
+            ),
+            Some(tr(
+                lang,
+                "The daemon can't SSH the node until unbanned. Via hoster console: fail2ban-client unban --all.",
+                "Демон не попадёт на ноду по SSH, пока бан не снят. Через консоль хостера: fail2ban-client unban --all.",
+            )),
+        ),
+        _ => (tr(lang, "", ""), None),
+    }
+}
+
+/// Sort key: open-first, then critical → warning → info, then newest.
+fn alert_sort_rank(a: &vpnctl_inventory::AdminAlert) -> (u8, u8, i64) {
+    let open = u8::from(a.acked_at.is_some()); // open=0 first
+    // Severity ranks only the OPEN section (triage order); acked rows
+    // are history and stay purely chronological — an old acked
+    // critical jumping above newer acked rows would misread as recent.
+    let sev = if a.acked_at.is_some() {
+        0
+    } else {
+        match a.severity.as_str() {
+            "critical" => 0,
+            "warning" => 1,
+            _ => 2,
+        }
+    };
+    (open, sev, -a.id)
+}
+
 fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::{K, t, tr};
+    use crate::i18n::tr;
+    // Open-first, severity-ranked view (alerts-cleanup 2026-06-10) —
+    // the raw feed was strictly chronological, so one chatty info row
+    // could sit above an unacked critical.
+    let mut sorted: Vec<&vpnctl_inventory::AdminAlert> = rows.iter().collect();
+    sorted.sort_by_key(|a| alert_sort_rank(a));
+    // The suspicious-local-ip family is the known spam cluster — when
+    // 3+ are OPEN, collapse them into one <details> group (pure HTML,
+    // no JS) so they stop burying the rest of the feed. Below the
+    // threshold the single sorted list renders untouched (review
+    // 2026-06-10: an unconditional partition floated 1-2 warning-level
+    // spam rows above an open CRITICAL, contradicting the sort).
+    let susp_open_count = sorted
+        .iter()
+        .filter(|a| a.acked_at.is_none() && a.kind.starts_with("sub_access.suspicious_local_ip"))
+        .count();
+    let collapse_susp = susp_open_count >= 3;
+    let (susp_open, rest): (Vec<_>, Vec<_>) = if collapse_susp {
+        sorted.into_iter().partition(|a| {
+            a.acked_at.is_none() && a.kind.starts_with("sub_access.suspicious_local_ip")
+        })
+    } else {
+        (Vec::new(), sorted)
+    };
+    let (susp_title, susp_hint) = alert_explainer("sub_access.suspicious_local_ip", lang);
     html! {
+        @if collapse_susp {
+            details style="border: 1px solid var(--rule); margin: 0 0 14px; padding: 8px 12px;" {
+                summary style="cursor: pointer; font-family: var(--mono); font-size: 12px;" {
+                    b { (susp_open.len()) " × " (susp_title) }
+                    span style="color: var(--mute);" { " — " (tr(lang, "expand for per-user rows", "раскрой для строк по юзерам")) }
+                }
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0;" {
+                    (susp_hint.unwrap_or(""))
+                }
+                div.ed-time {
+                    @for a in &susp_open { (alert_row(a, lang, false)) }
+                }
+            }
+        }
         div.ed-time {
-            @for a in rows {
+            @for a in &rest { (alert_row(a, lang, true)) }
+        }
+    }
+}
+
+fn alert_row(
+    a: &vpnctl_inventory::AdminAlert,
+    lang: crate::i18n::Locale,
+    with_hint: bool,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
+    let (title, hint) = alert_explainer(&a.kind, lang);
+    html! {
                 div.ed-time-row {
                     span.ed-time-row__t { (format_msk_iso(a.created_at)) }
                     span class=(format!("ed-time-row__a ed-time-row__a--{}", severity_class(&a.severity))) {
@@ -8770,8 +8963,16 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale
                         }
                     }
                     span.ed-time-row__pl {
-                        span.ed-mono { (a.kind) }
-                        " · " (a.summary)
+                        // Human title first (raw kind in the tooltip) —
+                        // operators scan titles, machines grep kinds.
+                        @if !title.is_empty() {
+                            b title=(a.kind) { (title) }
+                            " · "
+                        } @else {
+                            span.ed-mono { (a.kind) }
+                            " · "
+                        }
+                        (a.summary)
                         @match &a.acked_at {
                             Some(when) => {
                                 " · " span style="color: var(--mute);" {
@@ -8795,10 +8996,20 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale
                                 }
                             }
                         }
+                        // What-to-do hint — rendered only while the
+                        // alert is OPEN (an acked row is history; the
+                        // operator already decided). Suppressed inside
+                        // the collapsed spam group, which shows the
+                        // hint once at group level instead.
+                        @if with_hint && a.acked_at.is_none() {
+                            @if let Some(h) = hint {
+                                span style="display: block; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 2px;" {
+                                    "→ " (h)
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        }
     }
 }
 

@@ -181,6 +181,7 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                 if kind.is_lan_or_loopback()
                     && !is_lan_alert_allowed(rec.device_class.as_deref())
                     && !is_trusted_reverse_proxy(&rec.ip)
+                    && !is_allowlisted_service_ip(&rec.ip)
                 {
                     if let Err(e) = fire_suspicious_local_ip_alert(&inv, &rec, kind).await {
                         tracing::warn!(
@@ -255,6 +256,57 @@ fn is_lan_alert_allowed(device_class: Option<&str>) -> bool {
 fn is_trusted_reverse_proxy(ip_str: &str) -> bool {
     match ip_str.parse::<std::net::IpAddr>() {
         Ok(ip) => crate::real_ip::trusted_proxies().contains(&ip),
+        Err(_) => false,
+    }
+}
+
+/// Lazy-init cache of `VPNCTLD_SUSPICIOUS_IP_ALLOWLIST` — operator-
+/// declared SERVICE hosts whose subscription fetches are expected and
+/// must not raise `sub_access.suspicious_local_ip`. Same OnceLock
+/// posture as `real_ip::trusted_proxies` (config is daemon-lifetime).
+static SUSPICIOUS_IP_ALLOWLIST: std::sync::OnceLock<Vec<std::net::IpAddr>> =
+    std::sync::OnceLock::new();
+
+/// Read `VPNCTLD_SUSPICIOUS_IP_ALLOWLIST` (comma-separated `IpAddr`
+/// list; default EMPTY — every LAN/loopback fetch alerts unless the
+/// operator opts specific hosts out).
+///
+/// Why this exists (alerts-cleanup 2026-06-10): on Pavel's homelab the
+/// open alert feed was ~80% `suspicious_local_ip` rows caused by OUR
+/// OWN service traffic — post-deploy verification curls from the
+/// claude-chat container (192.168.0.200) and localhost smoke checks
+/// (127.0.0.1). Those are not incidents; alert-fatigue buries the one
+/// row that IS (an unknown LAN device fetching a subscription).
+/// Distinct from `VPNCTLD_TRUSTED_PROXIES`: a proxy forwards OTHER
+/// clients (XFF is honoured, alerting then sees the real source); an
+/// allowlisted host is itself the expected client. The access-log ROW
+/// is still written either way — only the alert is skipped, so the
+/// user's fetch history stays complete.
+fn suspicious_ip_allowlist() -> &'static [std::net::IpAddr] {
+    SUSPICIOUS_IP_ALLOWLIST.get_or_init(|| {
+        std::env::var("VPNCTLD_SUSPICIOUS_IP_ALLOWLIST")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|x| x.trim().parse::<std::net::IpAddr>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// True when `ip_str` is on the operator's expected-service-host
+/// allowlist (don't fire the suspicious-LAN alert). Thin env wrapper
+/// over [`is_allowlisted_service_ip_with`] — the `_with` split keeps
+/// the positive branch testable without process-mutating env vars
+/// (same convention as `real_ip::resolve_real_ip_with`).
+fn is_allowlisted_service_ip(ip_str: &str) -> bool {
+    is_allowlisted_service_ip_with(ip_str, suspicious_ip_allowlist())
+}
+
+fn is_allowlisted_service_ip_with(ip_str: &str, allowlist: &[std::net::IpAddr]) -> bool {
+    match ip_str.parse::<std::net::IpAddr>() {
+        Ok(ip) => allowlist.contains(&ip),
         Err(_) => false,
     }
 }
@@ -349,6 +401,22 @@ mod tests {
     /// here; the positive «IP is in the trusted list» branch is
     /// covered indirectly by `real_ip::tests::*_with` variants
     /// (which exercise the same `&[IpAddr]` lookup).
+    /// Alerts-cleanup 2026-06-10: service hosts on the allowlist must
+    /// suppress the suspicious-LAN alert; everything else must not.
+    /// Positive branch via `_with` (env-free, parallel-safe).
+    #[test]
+    fn allowlisted_service_ip_matches_exactly() {
+        let list: Vec<std::net::IpAddr> = vec![
+            "127.0.0.1".parse().unwrap(),
+            "192.168.0.200".parse().unwrap(),
+        ];
+        assert!(is_allowlisted_service_ip_with("127.0.0.1", &list));
+        assert!(is_allowlisted_service_ip_with("192.168.0.200", &list));
+        assert!(!is_allowlisted_service_ip_with("192.168.0.201", &list));
+        assert!(!is_allowlisted_service_ip_with("not-an-ip", &list));
+        assert!(!is_allowlisted_service_ip_with("127.0.0.1", &[]));
+    }
+
     #[test]
     fn is_trusted_reverse_proxy_returns_false_for_garbage_input() {
         assert!(!is_trusted_reverse_proxy(""));

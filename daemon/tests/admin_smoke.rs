@@ -13310,6 +13310,207 @@ async fn alerts_ack_all_endpoint_noop_when_nothing_unacked_writes_no_audit() {
     );
 }
 
+/// Alerts-cleanup 2026-06-10: the feed renders OPEN rows first,
+/// severity-ranked (critical above info regardless of age), shows the
+/// human title + what-to-do hint for known kinds, and collapses 3+
+/// open suspicious-local-ip rows into one <details> group.
+#[tokio::test]
+async fn alerts_page_orders_titles_hints_and_collapses_spam() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 1, 0, &[]).await; // s0 for server-scoped alerts
+    let sid = ServerId("s0".into());
+    // Old info row first (lower id), then a critical — chronological
+    // order would put info on top; severity order must flip them.
+    st.inv
+        .insert_alert(
+            "server.fail2ban.up",
+            Some(&sid),
+            "info",
+            "fail2ban recovered",
+            None,
+        )
+        .await
+        .unwrap();
+    st.inv
+        .insert_alert(
+            "server.singbox.down",
+            Some(&sid),
+            "critical",
+            "sing-box is no longer active",
+            None,
+        )
+        .await
+        .unwrap();
+    // 3 suspicious rows → collapse threshold.
+    for u in ["ua", "ub", "uc"] {
+        st.inv
+            .insert_alert(
+                &format!("sub_access.suspicious_local_ip:{u}"),
+                None,
+                "warning",
+                &format!("local-loop fetch · user={u}"),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(st), "/admin/alerts").await;
+
+    // Severity ordering: critical title appears before the info title.
+    let crit_pos = html
+        .find("sing-box is DOWN")
+        .expect("critical human title must render");
+    let info_pos = html
+        .find("fail2ban recovered")
+        .expect("info row must render");
+    assert!(
+        crit_pos < info_pos,
+        "open critical must render above open info (severity rank, not age)"
+    );
+    // What-to-do hint for the open critical.
+    assert!(
+        html.contains("hoster console"),
+        "open critical must carry its what-to-do hint"
+    );
+    // Spam collapse: <details> group with the count, individual rows inside.
+    assert!(
+        html.contains("<details"),
+        "3+ suspicious rows must collapse"
+    );
+    assert!(
+        html.contains("3 ×") || html.contains("3 &#215;"),
+        "collapsed group must show the row count"
+    );
+    assert!(
+        html.contains("user=ua") && html.contains("user=uc"),
+        "per-user rows must stay reachable inside the group"
+    );
+}
+
+/// Alerts-cleanup 2026-06-10 end-to-end: a recovery observed by
+/// scan_once must CLOSE the paired open condition alert, land the
+/// recovery row born-acked, and audit the auto-ack. The pieces
+/// (diff_rows pairing, insert_alert_acked) are unit-tested; this pins
+/// the dispatch wiring between them.
+#[tokio::test]
+async fn scan_once_auto_resolves_paired_alert_on_recovery() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 1, 0, &[]).await; // s0, sing-box kernel → probeable
+    let sid = ServerId("s0".into());
+    // Open condition alert, as the down-transition would have left it.
+    st.inv
+        .insert_alert(
+            "server.singbox.down",
+            Some(&sid),
+            "critical",
+            "sing-box is no longer active",
+            None,
+        )
+        .await
+        .unwrap();
+    // Two probe rows: prev = down, cur = up (insertion order — newest
+    // row wins the recent_node_health_for_server sort).
+    let probe = |active: bool| {
+        let inv = st.inv.clone();
+        let sid = sid.clone();
+        async move {
+            inv.record_node_health(
+                &sid,
+                Some(active),
+                Some(true),
+                Some(1000),
+                Some(20480),
+                Some(500),
+                Some(960),
+                Some(1),
+                None,
+                Some(1024),
+            )
+            .await
+            .unwrap();
+        }
+    };
+    probe(false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    probe(true).await;
+
+    vpnctld::health_monitor::scan_once(&st.inv).await.unwrap();
+
+    // Paired down alert auto-acked; recovery row exists born-acked.
+    assert_eq!(
+        st.inv.unacked_alert_count().await.unwrap(),
+        0,
+        "recovery must close the open down alert and not open a new one"
+    );
+    let all = st.inv.recent_alerts(20, true).await.unwrap();
+    let up = all
+        .iter()
+        .find(|a| a.kind == "server.singbox.up")
+        .expect("recovery row must be recorded");
+    assert!(up.acked_at.is_some(), "recovery row must be born-acked");
+    // Auto-ack audited (convention from node_probe_poller).
+    assert!(
+        st.inv
+            .recent_audit(50)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.action == "alert.auto_ack"
+                && e.payload
+                    .as_ref()
+                    .is_some_and(|p| p["kind"] == "server.singbox.down")),
+        "auto-resolve must write an alert.auto_ack audit row"
+    );
+}
+
+/// Alerts-cleanup 2026-06-10: `insert_alert_acked` rows are history-
+/// only — they must not raise the unacked count and must not be
+/// blocked by the partial UNIQUE open-dedup index.
+#[tokio::test]
+async fn insert_alert_acked_is_history_only() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+    let before = st.inv.unacked_alert_count().await.unwrap();
+    st.inv
+        .insert_alert_acked(
+            "server.disk.recovered",
+            Some(&sid),
+            "info",
+            "disk back under 85%",
+            None,
+        )
+        .await
+        .unwrap();
+    // Twice — dedup index only covers open rows; history rows stack.
+    st.inv
+        .insert_alert_acked(
+            "server.disk.recovered",
+            Some(&sid),
+            "info",
+            "disk back under 85%",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        st.inv.unacked_alert_count().await.unwrap(),
+        before,
+        "born-acked rows must not appear in the open feed"
+    );
+    let all = st.inv.recent_alerts(50, true).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|a| a.kind == "server.disk.recovered")
+            .count(),
+        2,
+        "both history rows must persist (no dedup on acked)"
+    );
+}
+
 #[tokio::test]
 async fn alerts_page_renders_ack_all_button_when_unacked_total_nonzero() {
     let dir = TempDir::new().unwrap();
