@@ -261,6 +261,231 @@ async fn sub_skips_wgturn_protocol_in_sing_box_envelope() {
     );
 }
 
+/// Sibling of `sub_skips_wgturn_protocol_in_sing_box_envelope` for
+/// dns-tunnel. dns-tunnel is ALSO a non-sing-box two-process bundle
+/// (`appears_in_sing_box_sub() == false` — slipstream-client + loopback
+/// VLESS), so a `type: "dns-tunnel"` object in the /sub envelope would
+/// make the whole config unparseable and sing-box / Hiddify would drop
+/// EVERY route (including the working VLESS one). This pins the
+/// exclusion end-to-end through the real router: surfacing dns-tunnel
+/// elsewhere (the per-user Flow E card / CLI `vpnctl sub`) must NOT leak
+/// it into the strict sing-box base64/JSON sub.
+#[tokio::test]
+async fn sub_skips_dns_tunnel_protocol_in_sing_box_envelope() {
+    use vpnctl_protocols::DnsTunnel;
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    // Register dns-tunnel so the registry lookup succeeds — the WHOLE
+    // point is to verify the handler then SKIPS its client_config
+    // rather than emitting `{"type":"dns-tunnel"}`.
+    reg.register_protocol(Box::new(DnsTunnel::new())).unwrap();
+
+    // Server with BOTH protocols enabled. Without the filter, the sub
+    // envelope would carry a dns-tunnel outbound and sing-box would
+    // refuse the entire config.
+    let server = Server {
+        id: ServerId("mixed".into()),
+        address: "10.0.0.51".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("dns-tunnel".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    // dns-tunnel share-link secrets — present so that, IF the filter
+    // were missing, the protocol WOULD render (proving the test isn't
+    // vacuously passing because of a missing-secret skip).
+    inv.set_server_secret(&server.id, "dns-tunnel:domain", "t.example.com")
+        .await
+        .unwrap();
+    inv.set_server_secret(
+        &server.id,
+        "dns-tunnel:fingerprint",
+        "47:1E:87:8F:3E:48:C8:1C",
+    )
+    .await
+    .unwrap();
+
+    let user = User {
+        id: UserId("u1".into()),
+        uuid: "uuid-u1".into(),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let serialised = std::str::from_utf8(&body).unwrap();
+    // The custom scheme must never appear in the sing-box envelope.
+    assert!(
+        !serialised.contains("dns-tunnel"),
+        "dns-tunnel leaked into the sing-box sub envelope: {serialised}"
+    );
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let outbounds = v["outbounds"].as_array().expect("outbounds is array");
+    for ob in outbounds {
+        let ty = ob["type"].as_str().unwrap_or("");
+        assert_ne!(
+            ty, "dns-tunnel",
+            "dns-tunnel outbound leaked into sing-box sub envelope: {ob:?}. \
+             /sub handler must filter via Protocol::appears_in_sing_box_sub()."
+        );
+    }
+    // And the legit vless+reality outbound IS present.
+    let has_vless = outbounds
+        .iter()
+        .any(|ob| ob["type"].as_str() == Some("vless"));
+    assert!(
+        has_vless,
+        "vless+reality outbound is missing — filter dropped too much: {outbounds:?}"
+    );
+}
+
+/// dns-tunnel must ALSO stay out of the V2Ray-family base64 sub. That
+/// path (`resolve_v2ray_subscription`) hard-allowlists schemes
+/// (vless/vmess/trojan/ss/ssr/tuic/hy2/anytls); a `dns-tunnel://` line
+/// would either be dropped or crash a strict importer. This pins that a
+/// v2rayNG-shaped UA pulling the same mixed server gets the vless URI
+/// and NOT the `dns-tunnel://` link.
+#[tokio::test]
+async fn v2ray_sub_excludes_dns_tunnel_share_link() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use vpnctl_protocols::DnsTunnel;
+
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(DnsTunnel::new())).unwrap();
+
+    let server = Server {
+        id: ServerId("mixed".into()),
+        address: "10.0.0.52".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("dns-tunnel".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "dns-tunnel:domain", "t.example.com")
+        .await
+        .unwrap();
+    inv.set_server_secret(
+        &server.id,
+        "dns-tunnel:fingerprint",
+        "47:1E:87:8F:3E:48:C8:1C",
+    )
+    .await
+    .unwrap();
+
+    let user = User {
+        id: UserId("u1".into()),
+        uuid: "uuid-u1".into(),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .header("user-agent", "v2rayNG/1.9.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let b64 = std::str::from_utf8(&body).unwrap();
+    let decoded = BASE64_STANDARD.decode(b64.trim()).unwrap();
+    let lines = std::str::from_utf8(&decoded).unwrap();
+    assert!(
+        lines.contains("vless://"),
+        "v2ray sub must carry the vless URI: {lines}"
+    );
+    assert!(
+        !lines.contains("dns-tunnel"),
+        "dns-tunnel:// leaked into the V2Ray base64 sub: {lines}"
+    );
+}
+
 #[tokio::test]
 async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
     let dir = TempDir::new().unwrap();
