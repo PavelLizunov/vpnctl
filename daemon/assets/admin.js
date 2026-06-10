@@ -44,7 +44,10 @@
       es.addEventListener("step", function (ev) {
         try {
           var d = JSON.parse(ev.data);
-          line((d.phase ? "[" + d.phase + "] " : "") + d.message);
+          // stderr-tagged steps (geoip runner) render red so warnings
+          // stand out from progress chatter.
+          var color = d.stream === "stderr" ? "var(--acc-bad, #97233f)" : null;
+          line((d.phase ? "[" + d.phase + "] " : "") + d.message, color);
         } catch (_) {
           line(ev.data);
         }
@@ -53,10 +56,19 @@
       es.addEventListener("ok", function (ev) {
         done = true;
         var redirect = null;
+        var okMsg = null;
         try {
-          redirect = JSON.parse(ev.data).redirect;
+          var okd = JSON.parse(ev.data);
+          redirect = okd.redirect;
+          okMsg = okd.message;
         } catch (_) {}
-        line("✓ complete.", "var(--acc-good, #2c5f2d)");
+        // Render the server's terminal message when it carries one —
+        // the geoip runner's «new DBs load on next vpnctld restart» is
+        // operator-actionable and must not be swallowed by a generic
+        // «complete». The 1.2 s pre-reload pause keeps it readable;
+        // it also lands in the log pane, which survives if the
+        // operator cancels the reload.
+        line("✓ " + (okMsg || "complete."), "var(--acc-good, #2c5f2d)");
         es.close();
         btn.textContent = "✓ done — reloading…";
         // `data-reload-self` reloads the CURRENT page (ignoring the

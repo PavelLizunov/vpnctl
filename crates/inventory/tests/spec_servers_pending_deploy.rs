@@ -210,3 +210,70 @@ async fn enable_disable_count_as_user_mutations() {
         "user.disable after deploy must mark server pending"
     );
 }
+
+#[tokio::test]
+async fn server_side_detector_tracks_membership_vs_deploy() {
+    // Server-side counterpart (audit 2026-06-10): after a REVOKE the
+    // per-user detector can't flag the revoked server (it left the
+    // user's granted list) — `server_pending_deploy` keys on the
+    // canonical rows' `payload.server` field instead.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    // No membership rows at all → not pending (quiet server).
+    assert!(
+        !inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap()
+    );
+
+    // Grant row, no deploy ever → pending.
+    inv.audit(
+        "admin",
+        "user.grant",
+        Some("alice"),
+        Some(&serde_json::json!({ "server": "srv", "source": "test" })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap()
+    );
+
+    // Deploy after the grant → cleared.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit("admin", "server.deploy", Some("srv"), None)
+        .await
+        .unwrap();
+    assert!(
+        !inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap()
+    );
+
+    // REVOKE after the deploy → pending again (the dangerous case:
+    // the node still accepts the revoked UUID).
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "user.revoke",
+        Some("alice"),
+        Some(&serde_json::json!({ "server": "srv", "source": "test" })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap()
+    );
+
+    // Mutations addressed at a DIFFERENT server must not leak in.
+    assert!(
+        !inv.server_pending_deploy(&ServerId("other".into()))
+            .await
+            .unwrap()
+    );
+}

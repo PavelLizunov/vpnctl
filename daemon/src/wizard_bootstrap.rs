@@ -203,13 +203,18 @@ fn lock_inflight() -> std::sync::MutexGuard<'static, HashSet<String>> {
 /// [`DeployGuard::try_acquire`]; the server-id is removed from the
 /// in-flight set on drop — so a pipeline that returns early, errors, or
 /// is cancelled never leaks a permanent lock.
-pub(crate) struct DeployGuard(String);
+///
+/// `pub` (not `pub(crate)`) since 2026-06-10 so integration tests can
+/// hold a permit while exercising the handlers that contend on it
+/// (`server_deploy`, `server_delete`, the SSE redeploy).
+#[derive(Debug)]
+pub struct DeployGuard(String);
 
 impl DeployGuard {
     /// Try to claim the per-server deploy permit. Returns `None` if a
     /// deploy of `server_id` is already in flight (the caller should
     /// refuse rather than start a second concurrent node restart).
-    pub(crate) fn try_acquire(server_id: &str) -> Option<Self> {
+    pub fn try_acquire(server_id: &str) -> Option<Self> {
         let mut set = lock_inflight();
         if set.contains(server_id) {
             None

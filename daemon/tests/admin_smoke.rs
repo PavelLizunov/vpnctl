@@ -2807,6 +2807,284 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     );
 }
 
+/// REGRESSION (audit 2026-06-10) — mirror of the grant fix: a REVOKE
+/// through any real handler must be visible to the pending-deploy
+/// detector. The handlers used to write `action="revoke",
+/// target=<server>` (bulk only a summary), invisible to
+/// `servers_pending_deploy_for_user` — so a revoked UUID stayed live
+/// on the node with no warning anywhere. The detector is coarse by
+/// design: a revoke timestamps a user mutation, so the user's
+/// REMAINING granted servers go pending (the revoked one leaves the
+/// granted list and can't appear on this per-user surface).
+#[tokio::test]
+async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    // u0 granted s0+s1; u1 granted s1+s2 (raw seed → zero audit rows).
+    seed(&inv, 3, 2, &[(0, 0), (0, 1), (1, 1), (1, 2)]).await;
+    for sid in ["s0", "s1", "s2"] {
+        inv.audit("admin", "server.deploy", Some(sid), None)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let app = router(s);
+
+    // 1. user-detail revoke: u0 loses s0 → remaining s1 goes pending.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s0/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending = inv
+        .servers_pending_deploy_for_user(&UserId("u0".into()), &[ServerId("s1".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        vec![ServerId("s1".into())],
+        "user-detail revoke must timestamp a user.revoke mutation"
+    );
+
+    // 2. server-detail revoke: u1 loses s1 → remaining s2 goes pending.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/grants/u1/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending = inv
+        .servers_pending_deploy_for_user(&UserId("u1".into()), &[ServerId("s2".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        vec![ServerId("s2".into())],
+        "server-detail revoke must timestamp a user.revoke mutation"
+    );
+
+    // 3. Canonical row shape + idempotency: re-revoking writes nothing.
+    let count_revokes = |entries: &[vpnctl_inventory::AuditEntry]| {
+        entries.iter().filter(|e| e.action == "user.revoke").count()
+    };
+    let entries = inv.recent_audit(100).await.unwrap();
+    let r = entries
+        .iter()
+        .find(|e| e.action == "user.revoke" && e.target.as_deref() == Some("u0"))
+        .expect("user.revoke row with target=USER id missing");
+    assert_eq!(r.payload.as_ref().unwrap()["server"], "s0");
+    let before = count_revokes(&entries);
+    for uri in [
+        "/admin/users/u0/grants/s0/revoke",
+        "/admin/servers/s1/grants/u1/revoke",
+    ] {
+        app.clone()
+            .oneshot(
+                add_same_origin(Request::builder().method("POST").uri(uri))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let after = count_revokes(&inv.recent_audit(100).await.unwrap());
+    assert_eq!(
+        before, after,
+        "idempotent re-revokes must not add user.revoke rows"
+    );
+
+    // 4. server-detail revoke of an UNKNOWN user must 404 (the grant
+    // twin always had the existence check; revoke silently 303'd).
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/grants/no-such-user/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Server-side pending-deploy banner (audit 2026-06-10 follow-up):
+/// the ONE surface that can warn about a revoked-but-still-deployed
+/// UUID is the server's own detail page — after a revoke the server
+/// leaves the user's granted list, so no user-detail banner mentions
+/// it. Pin: banner appears after a real revoke, clears after a
+/// server.deploy row lands.
+#[tokio::test]
+async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 1, &[(0, 0)]).await; // u0 granted s0
+    inv.audit("admin", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let app = router(s);
+
+    // Deployed + no membership change since → no banner.
+    let html = fetch_html(app.clone(), "/admin/servers/s0").await;
+    assert!(
+        !html.contains("pending-deploy-banner"),
+        "freshly-deployed server must not show the pending banner"
+    );
+
+    // Revoke u0 through the real handler → banner appears.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/grants/u0/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(app.clone(), "/admin/servers/s0").await;
+    assert!(
+        html.contains("pending-deploy-banner"),
+        "revoke must raise the server-side pending-deploy banner"
+    );
+
+    // A deploy AFTER the revoke clears it.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    inv.audit("admin", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    let html = fetch_html(app, "/admin/servers/s0").await;
+    assert!(
+        !html.contains("pending-deploy-banner"),
+        "deploy must clear the pending banner"
+    );
+}
+
+/// W4 pin (review 2026-06-10): search results must mask the uuid —
+/// it IS the VLESS credential; the users list masks it for exactly
+/// that reason and search must not be the page that leaks it whole.
+#[tokio::test]
+async fn search_masks_user_uuid() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await; // u0, uuid 00000000-0000-0000-0000-000000000000
+    let html = fetch_html(router(s), "/admin/search?q=u0").await;
+    assert!(
+        html.contains("uuid=0000\u{2026}0000 (36 chars)")
+            || html.contains("uuid=0000…0000 (36 chars)"),
+        "search must render the masked uuid preview"
+    );
+    assert!(
+        !html.contains("00000000-0000-0000-0000-000000000000"),
+        "search must not leak the full uuid (it is the VLESS credential)"
+    );
+}
+
+/// REGRESSION (audit 2026-06-10): deleting a server while its deploy
+/// pipeline holds the per-server permit must 409, not proceed — the
+/// pipeline would keep SSH-pushing to the node, FK-fail its secret
+/// upserts mid-stream, then audit a deploy for a deleted server.
+///
+/// Server id is test-UNIQUE («del-409-srv», not the shared «s0»):
+/// DeployGuard's in-flight set is process-global and admin_smoke tests
+/// run in parallel threads — holding «s0» here would intermittently
+/// collide with every other test that deploys s0.
+#[tokio::test]
+async fn admin_server_delete_refuses_while_deploy_in_flight() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&vpnctl_core::Server {
+        id: ServerId("del-409-srv".into()),
+        address: "203.0.113.77".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: Vec::new(),
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+
+    // Hold the deploy permit, as a live pipeline would.
+    let _held =
+        vpnctld::wizard_bootstrap::DeployGuard::try_acquire("del-409-srv").expect("hold permit");
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/del-409-srv/delete")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("confirm=del-409-srv"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "delete during an in-flight deploy must 409"
+    );
+    assert!(
+        inv.get_server(&ServerId("del-409-srv".into()))
+            .await
+            .unwrap()
+            .is_some(),
+        "server must survive the refused delete"
+    );
+
+    // Permit released → the same delete goes through.
+    drop(_held);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/del-409-srv/delete")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("confirm=del-409-srv"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert!(
+        inv.get_server(&ServerId("del-409-srv".into()))
+            .await
+            .unwrap()
+            .is_none(),
+        "delete must proceed once the deploy permit is free"
+    );
+}
+
 #[tokio::test]
 async fn admin_user_revoke_server_happy_path() {
     let dir = TempDir::new().unwrap();
@@ -2847,12 +3125,15 @@ async fn admin_user_revoke_server_happy_path() {
         "grant must be removed after revoke"
     );
 
+    // Canonical revoke-audit shape (2026-06-10, mirror of grants):
+    // per-user `user.revoke` with target = USER id — the shape the
+    // pending-deploy detector keys on.
     let entries = inv.recent_audit(10).await.unwrap();
     assert!(
-        entries
-            .iter()
-            .any(|e| e.action == "revoke" && e.target.as_deref() == Some("s0")),
-        "revoke audit row missing"
+        entries.iter().any(|e| e.action == "user.revoke"
+            && e.target.as_deref() == Some("u0")
+            && e.payload.as_ref().is_some_and(|p| p["server"] == "s0")),
+        "user.revoke audit row missing"
     );
 }
 
@@ -10866,8 +11147,11 @@ async fn tooltips_audit_filter_form_carries_explainers() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/audit").await;
+    // Placeholder refreshed 2026-06-10 (post grant-audit rename):
+    // `user.grant` replaces the stale bare `grant.` hint, which matched
+    // neither the new `user.grant` rows nor legacy `grant` ones.
     assert!(
-        html.contains("server.protocol. / user. / grant. / settings."),
+        html.contains("server. / user.grant / user. / settings."),
         "audit filter placeholder must list concrete dot-prefixes"
     );
     assert!(
@@ -11343,11 +11627,13 @@ async fn track_1_4_subscription_access_omits_ja_chips_when_null() {
 
 #[tokio::test]
 async fn phase3c_settings_renders_geoip_update_now_button_and_eventsource_wiring() {
-    // Pin the Settings page: the «update now» button + the inline
-    // EventSource wiring + the live-log <pre> all render. Pavel
-    // confirmed via UI requirement — operator must NEVER need to
-    // open a terminal; the equivalent of `vpnctl geoip-update` has
-    // to be one click.
+    // Pin the Settings page: the «update now» button + live-log <pre>
+    // render, wired CSP-SAFE through admin.js's `[data-sse-url]`
+    // trigger. Audit 2026-06-10: the original inline `<script>` +
+    // `onclick` were silently refused by the admin CSP (`script-src
+    // 'self'`, no 'unsafe-inline') — the button did NOTHING in a real
+    // browser. Pavel UI requirement stands — operator must never need
+    // a terminal; `vpnctl geoip-update` must stay one click.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/settings").await;
@@ -11357,18 +11643,22 @@ async fn phase3c_settings_renders_geoip_update_now_button_and_eventsource_wiring
         "Settings must surface the GeoIP «update now» button"
     );
     assert!(
+        html.contains("data-sse-url=\"/admin/settings/geoip/update-now\""),
+        "button must carry the data-sse-url trigger admin.js wires"
+    );
+    assert!(
+        html.contains("data-log=\"geoip-update-now-log\""),
+        "button must point at its log pane via data-log"
+    );
+    assert!(
         html.contains("id=\"geoip-update-now-log\""),
         "Settings must surface the live-log pane"
     );
+    // CSP-regression guard: NO inline script / onclick may return —
+    // they render but never execute under `script-src 'self'`.
     assert!(
-        html.contains("new EventSource('/admin/settings/geoip/update-now')"),
-        "button JS must attach EventSource to the SSE source"
-    );
-    assert!(
-        html.contains("addEventListener('step'")
-            && html.contains("addEventListener('ok'")
-            && html.contains("addEventListener('error'"),
-        "all three named SSE events (step/ok/error) must be handled in JS"
+        !html.contains("vpnctlGeoipUpdateNow") && !html.contains("onclick="),
+        "settings must not regress to CSP-blocked inline JS"
     );
 }
 
@@ -11514,27 +11804,26 @@ async fn phase3c_geoip_update_now_accepts_same_origin_sec_fetch() {
 }
 
 #[tokio::test]
-async fn phase3c_inline_script_does_not_contain_unescaped_script_terminator() {
-    // XSS defense — the inline JS interpolates 4 `tr()` labels via
-    // `json_for_script` (which escapes `</` → `<\/`). If any
-    // translation ever contains `</script>`, the raw literal must
-    // not appear inside the inline <script> block. Pin the
-    // contract: the inline JS body (between our function definition
-    // and its corresponding </script>) is free of any further
-    // </script> sequence.
+async fn phase3c_settings_page_carries_no_inline_script_blocks() {
+    // CSP contract (2026-06-10, supersedes the old json_for_script XSS
+    // pin): the admin CSP is `script-src 'self'` with NO
+    // 'unsafe-inline', so ANY inline `<script>…</script>` body on the
+    // page renders but never executes — exactly how the GeoIP button
+    // sat dead for weeks. Pin: the ONLY <script> on Settings is the
+    // external admin.js include from the shell; everything interactive
+    // must ride data-attributes.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/settings").await;
 
-    let start_marker = "function vpnctlGeoipUpdateNow()";
-    let start = html.find(start_marker).expect("inline script must render");
-    let end_rel = html[start..].find("</script>").expect("script must close");
-    let script_body = &html[start..start + end_rel];
-
+    let script_tags = html.matches("<script").count();
+    assert_eq!(
+        script_tags, 1,
+        "settings must carry exactly the shell's external admin.js <script>, found {script_tags}"
+    );
     assert!(
-        !script_body.contains("</script>"),
-        "inline JS body must not contain a script-close sequence — found a stray </script> in: …{}…",
-        &script_body[script_body.len().saturating_sub(120)..]
+        html.contains("src=\"/admin/assets/admin.js\""),
+        "the single script tag must be the external admin.js include"
     );
 }
 

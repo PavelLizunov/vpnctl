@@ -5461,23 +5461,12 @@ fn error_resp(status: StatusCode, detail: &str) -> Response {
     (status, error_text(detail)).into_response()
 }
 
-/// JSON-encode `s` for safe interpolation inside an inline `<script>`
-/// block. Standard `serde_json::to_string` escapes `"`, `\` and
-/// control chars — but **not `/`**. A string containing `</script>`
-/// would close the script tag prematurely and yield XSS. The
-/// post-process `replace("</", "<\\/")` produces a JSON-equivalent
-/// string (JSON-spec allows escaped `\/`) that browsers tokenise
-/// safely inside `<script>`. The escaped form is JS-identical
-/// (`"<\/script>"` == `"</script>"` at runtime — only the parser
-/// sees the difference).
-///
-/// Fallback to `""` JSON string on serialise failure (only happens
-/// on non-UTF-8 input, which `&str` can't hold — defensive).
-fn json_for_script(s: &str) -> String {
-    serde_json::to_string(s)
-        .unwrap_or_else(|_| String::from("\"\""))
-        .replace("</", "<\\/")
-}
+// `json_for_script` removed 2026-06-10 — its only caller was the GeoIP
+// «update now» inline `<script>`, which the admin CSP (`script-src
+// 'self'`, no 'unsafe-inline') silently refused anyway; the button is
+// now wired through admin.js's `[data-sse-url]` trigger. If inline-
+// script interpolation ever returns, remember the `</` → `<\/` escape
+// it carried (un-escaped `</script>` inside a JSON string = XSS).
 
 /// 400 Bad Request with the editorial-prefixed body. Single source of
 /// truth — was inlined as `(StatusCode::BAD_REQUEST, error_text(...))
@@ -6419,23 +6408,41 @@ pub(crate) async fn server_revoke_user(
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
+    // User-existence check — the grant twin always had it; without it
+    // an unknown user 200-redirected as if revoked (audit 2026-06-10).
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    // Membership BEFORE the revoke — the audit row is written only for
+    // an ACTUAL revoke (mirror of the grant paths' 2026-06-04 shape).
+    let was_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(v) => v.iter().any(|s| s.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
     if let Err(e) = state.inv.revoke(&uid, &sid).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "revoke",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "user": user_id_str,
-                "from": "server-detail",
-            })),
-        )
-        .await
+    // Canonical per-user `user.revoke` (target = USER id) — the
+    // pending-deploy detector keys on per-user mutation rows; the old
+    // `action="revoke", target=<server>` row was invisible to it, so a
+    // revoked UUID stayed live on the node with no warning anywhere.
+    if was_granted
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "user.revoke",
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "server": server_id_str,
+                    "source": "server-detail",
+                })),
+            )
+            .await
     {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for revoke");
+        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.revoke");
     }
     Redirect::to(&format!(
         "/admin/servers/{}",
@@ -7230,25 +7237,37 @@ pub(crate) async fn user_revoke_server(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
+    // Membership BEFORE the revoke — audit only an ACTUAL revoke
+    // (mirror of the grant paths; see `server_revoke_user`).
+    let was_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(v) => v.iter().any(|s| s.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
     if let Err(e) = state.inv.revoke(&uid, &sid).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "revoke",
-            Some(&server_id_str),
-            Some(&serde_json::json!({ "user": user_id_str })),
-        )
-        .await
+    // Canonical per-user `user.revoke` (target = USER id) — visible to
+    // the pending-deploy detector, unlike the old server-targeted row.
+    if was_granted
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "user.revoke",
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "server": server_id_str,
+                    "source": "user-detail",
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
             user = %user_id_str,
             server = %server_id_str,
             error = %e,
-            "audit write failed for revoke — mutation already committed"
+            "audit write failed for user.revoke — mutation already committed"
         );
     }
     Redirect::to(&format!(
@@ -7437,7 +7456,35 @@ pub(crate) async fn server_revoke_all_users(
     let mut failed: u32 = 0;
     for u in &granted {
         match state.inv.revoke(&u.id, &sid).await {
-            Ok(()) => revoked += 1,
+            Ok(()) => {
+                revoked += 1;
+                // Per-user `user.revoke` row for each ACTUAL revoke
+                // (the `granted` list is exactly the granted set, so
+                // every Ok here is a real mutation). Mirrors the bulk
+                // grant path; keeps the pending-deploy detector fed.
+                // Audit failure non-fatal: revoke already committed.
+                if let Err(e) = state
+                    .inv
+                    .audit(
+                        "admin",
+                        "user.revoke",
+                        Some(&u.id.0),
+                        Some(&serde_json::json!({
+                            "server": server_id_str,
+                            "source": "server-detail.bulk",
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::admin",
+                        server = %server_id_str,
+                        user = %u.id,
+                        error = %e,
+                        "audit write failed for user.revoke (bulk) — mutation already committed"
+                    );
+                }
+            }
             Err(e) => {
                 failed += 1;
                 tracing::warn!(
@@ -7680,6 +7727,24 @@ pub(crate) async fn server_delete(
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    // Deploy-concurrency gate (audit 2026-06-10): deleting a server
+    // while its deploy pipeline is in flight let the pipeline keep
+    // SSH-pushing to the node, fail FK-wise on secret upserts mid-
+    // stream, and then write a server.deploy audit row for a server
+    // that no longer exists. Hold the same per-server permit a deploy
+    // takes; 409 if one is running. The guard drops at handler return
+    // (RAII), covering every early-return below.
+    let _deploy_guard = match crate::wizard_bootstrap::DeployGuard::try_acquire(&server_id_str) {
+        Some(g) => g,
+        None => {
+            return error_resp(
+                StatusCode::CONFLICT,
+                &format!(
+                    "deploy in flight for server '{server_id_str}' — wait for it to finish, then delete"
+                ),
+            );
+        }
+    };
     // Capture cascade scope BEFORE the delete (FK CASCADE wipes grants).
     let grants_removed = state
         .inv
@@ -7889,7 +7954,11 @@ pub(crate) async fn search(
                       style="color: var(--ink);" {
                         "/admin/audit"
                     }
-                    (crate::i18n::tr(lang, " page (action filter accepts substrings).", " (фильтр action поддерживает подстроки)."))
+                    // Honest copy (2026-06-10): the action filter is
+                    // PREFIX-only — the old «accepts substrings» promise
+                    // made this deep link near-useless for typical
+                    // search terms.
+                    (crate::i18n::tr(lang, " page (action filter is prefix-match).", " (фильтр action ищет по префиксу)."))
                 }
             }
             @if !users.is_empty() {
@@ -7904,7 +7973,12 @@ pub(crate) async fn search(
                                 b { (u.id.0) }
                             }
                             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                                "uuid=" (u.uuid)
+                                // Masked (audit 2026-06-10): the full
+                                // uuid IS the VLESS credential; the
+                                // users list shows a masked preview for
+                                // exactly that reason — search must not
+                                // be the page that leaks it whole.
+                                "uuid=" (mask_secret(&u.uuid))
                                 @if u.disabled {
                                     " · "
                                     span style="color: var(--acc);" {
@@ -8057,11 +8131,15 @@ pub(crate) async fn audit(
             label { (crate::i18n::tr(lang, "action prefix", "префикс действия")) }
             input type="text" name="action"
                   value=(action.unwrap_or(""))
-                  placeholder="server.protocol. / user. / grant. / settings."
+                  // Hint refreshed post-grant-rename (2026-06-10):
+                  // grants now write `user.grant` / `user.revoke` /
+                  // `server.grants.bulk_*` — the old bare `grant.` hint
+                  // matched only the protocol-override actions.
+                  placeholder="server. / user.grant / user. / settings."
                   title=(crate::i18n::tr(
                       lang,
-                      "Substring/prefix match on action column. Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Underscores allowed INSIDE a verb.",
-                      "Поиск по подстроке/префиксу в колонке action. Конвенция: точка-разделитель domain.subdomain.verb (напр. `server.protocol.set_hidden`, `user.sub_token.regen`, `grant.protocol.set_override`). Подчёркивания допустимы ВНУТРИ verb.",
+                      "PREFIX match on the action column (not substring — `sub_token` won't match `user.sub_token.regen`; `user.` will). Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.grant`, `user.sub_token.regen`). Underscores allowed INSIDE a verb.",
+                      "Поиск по ПРЕФИКСУ в колонке action (не подстрока — `sub_token` не найдёт `user.sub_token.regen`; `user.` найдёт). Конвенция: точка-разделитель domain.subdomain.verb (напр. `server.protocol.set_hidden`, `user.grant`, `user.sub_token.regen`). Подчёркивания допустимы ВНУТРИ verb.",
                   ))
                   style="padding: 3px 6px; max-width: 320px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
             button type="submit"
@@ -8853,7 +8931,12 @@ fn settings_disaster_recovery_section(
                     (tr(lang, "run self-test now", "запустить self-test сейчас"))
                 }
             }
-            a href="/admin/audit?action_prefix=backup"
+            // `?action=` is the real filter param (audit 2026-06-10:
+            // `action_prefix` doesn't exist in AuditQuery — the old
+            // link silently showed the unfiltered timeline). Trailing
+            // dot per the prefix-filter convention: matches
+            // backup.snapshot + backup.self_test.
+            a href="/admin/audit?action=backup."
               style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 (tr(lang, "self-test history", "история self-test"))
             }
@@ -8893,7 +8976,15 @@ fn settings_disaster_recovery_section(
                 b { (tr(lang, "Verify + push deploy key", "Проверь + push deploy-ключ")) }
                 " — "
                 (tr(lang, "click ", "кликни "))
-                a href="/admin/backup/self-test" style="color: var(--ink);" { (tr(lang, "run self-test", "run self-test")) }
+                // POST form, not an anchor (audit 2026-06-10): the
+                // self-test route is POST-only — a GET link 405'd.
+                form method="post" action="/admin/backup/self-test"
+                     style="display: inline;" {
+                    button type="submit"
+                           style="border: none; background: none; padding: 0; color: var(--ink); font: inherit; text-decoration: underline; cursor: pointer;" {
+                        (tr(lang, "run self-test", "run self-test"))
+                    }
+                }
                 (tr(lang, " on the restored daemon, then for each server in ", " на восстановленном демоне, потом для каждого сервера в "))
                 a href="/admin/servers" style="color: var(--ink);" { (tr(lang, "/admin/servers", "/admin/servers")) }
                 (tr(lang, " click «push deploy key» so the daemon re-authorises itself on every VPN node. ", " кликни «push deploy key» чтобы демон переавторизовался на каждой VPN-ноде. "))
@@ -9008,17 +9099,26 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                 " на хосте демона. Команда скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Перезапусти vpnctld чтобы новая БД загрузилась.",
             ))
         }
-        // ── «update now» button (Phase 3c) ─────────────────────────
-        // Operator clicks → button replaces itself with a live log
-        // pane streaming from /admin/settings/geoip/update-now.
-        // Inline vanilla JS — no framework dep. Idempotent (clicking
-        // twice spawns two subprocesses; the later atomic-rename
-        // wins, harmless). Subprocess is the same `vpnctl
-        // geoip-update` that the monthly systemd timer fires.
+        // ── «update now» button (Phase 3c, CSP-safe since 2026-06-10) ──
+        // Operator clicks → live log pane streams from
+        // /admin/settings/geoip/update-now. Wired through admin.js's
+        // generic `[data-sse-url]` trigger — the original inline
+        // `<script>` + `onclick` were silently REFUSED by the admin CSP
+        // (`script-src 'self'`, no 'unsafe-inline'), so the button did
+        // nothing in a real browser (audit 2026-06-10). The geoip
+        // runner's step/ok/error event shapes parse fine in the generic
+        // handler (no `phase` field → message renders bare; terminal
+        // `ok` has no redirect → admin.js reloads this page, which
+        // also refreshes the file-status lines above). Idempotent
+        // server-side: a concurrent click hits the 1-permit semaphore
+        // and streams an «already running» error event.
         div style="margin: 14px 0;" {
             button id="geoip-update-now-btn"
                    type="button"
-                   onclick="vpnctlGeoipUpdateNow()"
+                   data-sse-url="/admin/settings/geoip/update-now"
+                   data-log="geoip-update-now-log"
+                   data-busy-label=(tr(lang, "running…", "запущено…"))
+                   data-retry-label=(tr(lang, "retry", "повторить"))
                    style="font-family: var(--mono); font-size: 12px; padding: 6px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); cursor: pointer;"
                    title=(tr(
                        lang,
@@ -9027,63 +9127,8 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                    )) {
                 (tr(lang, "update now", "обновить сейчас"))
             }
-            (maud::PreEscaped(format!(r#"
-<pre id="geoip-update-now-log"
-     style="display:none; margin: 10px 0 0; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; max-height: 320px; overflow-y: auto; white-space: pre-wrap;"></pre>
-<script>
-function vpnctlGeoipUpdateNow() {{
-  var btn = document.getElementById('geoip-update-now-btn');
-  var log = document.getElementById('geoip-update-now-log');
-  btn.disabled = true;
-  btn.textContent = {running_label};
-  log.style.display = 'block';
-  log.textContent = '';
-  var es = new EventSource('/admin/settings/geoip/update-now');
-  function append(line, color) {{
-    var span = document.createElement('span');
-    if (color) {{ span.style.color = color; }}
-    span.textContent = line + '\n';
-    log.appendChild(span);
-    log.scrollTop = log.scrollHeight;
-  }}
-  es.addEventListener('step', function(e) {{
-    try {{
-      var d = JSON.parse(e.data);
-      var color = (d.stream === 'stderr') ? 'var(--acc, #c14)' : null;
-      append(d.message, color);
-    }} catch (err) {{ append('[parse error] ' + e.data, 'var(--acc, #c14)'); }}
-  }});
-  es.addEventListener('ok', function(e) {{
-    try {{ var d = JSON.parse(e.data); append('✓ ' + d.message, 'var(--acc-good, #2c5f2d)'); }}
-    catch (err) {{ append('✓ done', 'var(--acc-good, #2c5f2d)'); }}
-    es.close();
-    btn.disabled = false;
-    btn.textContent = {done_label};
-  }});
-  es.addEventListener('error', function(e) {{
-    try {{ var d = JSON.parse(e.data); append('✗ ' + d.message, 'var(--acc, #c14)'); }}
-    catch (err) {{ append('✗ stream error', 'var(--acc, #c14)'); }}
-    es.close();
-    btn.disabled = false;
-    btn.textContent = {retry_label};
-  }});
-  es.onerror = function() {{
-    // Transport-level error (network, server crash). The named-event
-    // 'error' handler above also fires on terminal errors emitted by
-    // the runner — onerror catches the connection-level cases.
-    es.close();
-    if (!btn.disabled) {{ return; }}
-    append('✗ ' + {transport_err_label}, 'var(--acc, #c14)');
-    btn.disabled = false;
-    btn.textContent = {retry_label};
-  }};
-}}
-</script>"#,
-                running_label = json_for_script(tr(lang, "running…", "запущено…")),
-                done_label = json_for_script(tr(lang, "update now", "обновить сейчас")),
-                retry_label = json_for_script(tr(lang, "retry", "повторить")),
-                transport_err_label = json_for_script(tr(lang, "connection lost", "соединение потеряно")),
-            )))
+            pre id="geoip-update-now-log" hidden
+                style="margin: 10px 0 0; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
         }
     }
 }
@@ -9153,16 +9198,17 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
 
     // Phase 5e — Disaster recovery section pulls the LATEST
     // `backup.self_test` audit row to show last drill result inline.
-    // No new schema: every backup_self_test handler call writes an
-    // audit row with the overall status + duration in its payload.
-    // Filter in-memory (50 rows ≪ 1ms) rather than adding a
-    // per-action SQL helper for one use site.
+    // Filtered SQL query (audit 2026-06-10): the old in-memory scan of
+    // `recent_audit(50)` went blind within ~2 days — the hourly
+    // `backup.snapshot` scheduler writes 24 rows/day, evicting the
+    // self-test row from the last-50 window and rendering a false
+    // «Never run».
     let last_self_test = state
         .inv
-        .recent_audit(50)
+        .recent_audit_paginated(1, 0, None, Some("backup.self_test"))
         .await
         .ok()
-        .and_then(|rows| rows.into_iter().find(|e| e.action == "backup.self_test"));
+        .and_then(|rows| rows.into_iter().next());
 
     // 2026-05-23 — display timezone (migration 0027). Render the
     // current setting in the dropdown's selected state. Failure to
@@ -11180,6 +11226,14 @@ pub(crate) async fn server_detail(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // Server-side pending-deploy flag (audit 2026-06-10 follow-up):
+    // «grant membership changed since the last deploy». Crucially this
+    // covers the REVOKE case the per-user banner can't — the revoked
+    // server leaves the user's granted list, so THIS page is the only
+    // surface that can warn that the node still runs the revoked UUID.
+    // Best-effort: a detector error renders no banner, not a 500.
+    let pending_deploy = state.inv.server_pending_deploy(&sid).await.unwrap_or(false);
+
     // Phase H+ — rolling uptime windows for the per-server SLO chip
     // section. Three independent SQL aggregates (24h / 7d / 30d) —
     // each is one indexed scan against `(server_id, ts)`. Failure
@@ -11407,6 +11461,22 @@ pub(crate) async fn server_detail(
         // untouched; already-installed kernels skip apt-get; config
         // render is deterministic so a redeploy with no changes is a
         // no-op systemctl restart.
+        // Pending-deploy banner — grant/revoke happened after the last
+        // deploy, so the node's running config doesn't match inventory.
+        // The revoke case is the dangerous one: the revoked user's UUID
+        // is STILL ACCEPTED by the node until the deploy below runs.
+        @if pending_deploy {
+            div id="pending-deploy-banner"
+                style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--acc); background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
+                b { (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
+                " — "
+                (crate::i18n::tr(
+                    lang,
+                    "grants changed since the last deploy. Until you click deploy, the node keeps running the OLD user set — a revoked user can still connect.",
+                    "гранты менялись после последнего деплоя. Пока не нажат deploy, нода работает со СТАРЫМ списком юзеров — отозванный юзер всё ещё может подключиться.",
+                ))
+            }
+        }
         div id="deploy-button" style="margin: 12px 0 18px;" {
             // JS-driven: streams per-step progress + terminal status
             // into the log pane below via SSE (admin.js wires the
@@ -12705,10 +12775,18 @@ fn server_detail_fingerprint_section(
             (t(lang, K::EyebrowTrustedFingerprint))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            // Honest copy (audit 2026-06-10): the daemon's SSH transport
+            // uses `StrictHostKeyChecking=accept-new` + its own
+            // known_hosts and does NOT read this pin — daemon-side the
+            // pin only feeds the fingerprint-drift WARNING alert
+            // (health_monitor::check_fingerprint_drift). Hard refusal
+            // happens only on the CLI deploy path (russh
+            // `trusted_fingerprint`). The old copy claimed every
+            // pipeline refuses on mismatch.
             (tr(
                 lang,
-                "Pinned SHA-256 of the node's SSH ed25519 host key. vpnctld + the deploy / probe / clash-poller pipelines all refuse to talk to a host whose live key doesn't match this value — ",
-                "Закреплённый SHA-256 хост-ключа ed25519 ноды. vpnctld + пайплайны деплоя / probe / clash-poller отказываются разговаривать с хостом чей live-ключ не совпадает с этим значением — ",
+                "Pinned SHA-256 of the node's SSH ed25519 host key. The CLI deploy refuses a host whose live key doesn't match; the daemon's pipelines (web deploy / probe / clash-poller) verify against their own known_hosts and use this pin to raise a fingerprint-drift warning alert — ",
+                "Закреплённый SHA-256 хост-ключа ed25519 ноды. CLI-деплой отказывается работать с хостом, чей live-ключ не совпадает; пайплайны демона (web-деплой / probe / clash-poller) сверяются со своим known_hosts, а по этому пину поднимают warning-алерт о дрейфе отпечатка — ",
             ))
             span title=(tr(
                 lang,

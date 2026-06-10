@@ -2134,11 +2134,21 @@ impl SqliteInventory {
     /// Given a user_id + list of granted server_ids, return the
     /// subset of servers whose **latest `server.deploy` audit row
     /// is older than the user's latest mutation** (`user.add`,
-    /// `user.grant`, `user.set_vpn_router_device_id`, `user.disable`,
-    /// `user.enable`). Those servers' running sing-box config does
-    /// NOT yet include the user's current state — clicking their
-    /// detail page's «deploy» button pushes the fresh render and
+    /// `user.grant`, `user.revoke`, `user.set_vpn_router_device_id`,
+    /// `user.disable`, `user.enable`). Those servers' running sing-box
+    /// config does NOT yet include the user's current state — clicking
+    /// their detail page's «deploy» button pushes the fresh render and
     /// closes the gap.
+    ///
+    /// **Coarse by design:** ANY user mutation marks ALL the user's
+    /// granted servers pending (a grant/revoke of server A also flags
+    /// B and C). Over-notifying costs one idempotent redeploy;
+    /// under-notifying leaves a stale UUID live on a node — the
+    /// silent-miss class this detector exists to catch. `user.revoke`
+    /// (added 2026-06-10) inherits the same semantics: the revoked
+    /// server itself leaves the user's granted list (so this per-user
+    /// surface can't show it), but the row still timestamps the
+    /// mutation for the remaining servers.
     ///
     /// **Heuristic, not exact:** an alternative deploy via CLI (not
     /// through the web button) doesn't write the same audit row.
@@ -2162,7 +2172,7 @@ impl SqliteInventory {
         let user_row = sqlx::query(
             "SELECT MAX(ts) AS ts FROM audit_log
              WHERE target = ?1
-               AND action IN ('user.add', 'user.grant',
+               AND action IN ('user.add', 'user.grant', 'user.revoke',
                               'user.set_vpn_router_device_id',
                               'user.disable', 'user.enable')",
         )
@@ -2197,6 +2207,55 @@ impl SqliteInventory {
             }
         }
         Ok(out)
+    }
+
+    /// **Server-side pending-deploy detection** (audit 2026-06-10,
+    /// review follow-up to the revoke unification). The per-user
+    /// detector above can't cover one case at all: after a REVOKE the
+    /// server leaves the user's granted list, so no user-detail banner
+    /// will ever mention it — yet that node is exactly the one still
+    /// running the revoked UUID. This is the server-detail counterpart:
+    /// «has this server's grant MEMBERSHIP changed since its last
+    /// deploy?»
+    ///
+    /// Keys on the canonical per-user rows (`user.grant` /
+    /// `user.revoke`) via their `payload.server` field — both written
+    /// since the 2026-06-04/2026-06-10 unifications, and only for
+    /// ACTUAL mutations, so an idempotent re-grant can't raise a false
+    /// pending here. Pre-unification legacy rows (`action='grant'`,
+    /// target=server) are invisible to this query — acceptable: any
+    /// server deployed since then has a fresher `server.deploy` row
+    /// anyway.
+    ///
+    /// Scope is membership only (grant/revoke). Other user mutations
+    /// (disable, device-id) surface through the per-user banner on
+    /// every granted server — duplicating them here would make the
+    /// server banner near-permanent on busy inventories.
+    pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT MAX(ts) AS ts FROM audit_log
+             WHERE action IN ('user.grant', 'user.revoke')
+               AND json_extract(payload, '$.server') = ?1",
+        )
+        .bind(&server_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let mutation_ts: Option<String> = row.try_get("ts")?;
+        let Some(mts) = mutation_ts else {
+            return Ok(false);
+        };
+        let row = sqlx::query(
+            "SELECT MAX(ts) AS ts FROM audit_log
+             WHERE target = ?1 AND action = 'server.deploy'",
+        )
+        .bind(&server_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let deploy_ts: Option<String> = row.try_get("ts")?;
+        Ok(match deploy_ts {
+            None => true,
+            Some(dts) => dts < mts,
+        })
     }
 
     /// Count of users with `disabled = 1` (B1.user, migration 0026).

@@ -60,15 +60,28 @@ pub(crate) async fn run_revoke(
     let db_path = ui::resolve_db_path(db_flag)?;
     let inv = SqliteInventory::open(&db_path).await?;
 
-    inv.revoke(&UserId(user.to_string()), &ServerId(server.to_string()))
+    let uid = UserId(user.to_string());
+    let sid = ServerId(server.to_string());
+    // Membership BEFORE the revoke — write the canonical per-user
+    // `user.revoke` row (target = USER id) only for an ACTUAL revoke,
+    // mirroring `run_grant`. The old `action="revoke", target=<server>`
+    // shape was invisible to the pending-deploy detector, so a revoked
+    // UUID stayed live on the node with no warning.
+    let was_granted = inv
+        .servers_for_user(&uid)
+        .await?
+        .iter()
+        .any(|s| s.id == sid);
+    inv.revoke(&uid, &sid).await?;
+    if was_granted {
+        inv.audit(
+            "cli",
+            "user.revoke",
+            Some(user),
+            Some(&json!({ "server": server, "source": "cli" })),
+        )
         .await?;
-    inv.audit(
-        "cli",
-        "revoke",
-        Some(server),
-        Some(&json!({ "user": user })),
-    )
-    .await?;
+    }
     println!("revoked '{user}' from '{server}'");
     Ok(())
 }
@@ -157,5 +170,41 @@ mod tests {
             vec![ServerId("s1".into())],
             "CLI grant must mark the server pending-deploy"
         );
+    }
+
+    #[tokio::test]
+    async fn cli_revoke_writes_canonical_user_revoke_row_only_on_actual_revoke() {
+        // Mirror of the grant contract (audit 2026-06-10): revoke writes
+        // a per-user `user.revoke` row (target = USER id) — and ONLY for
+        // an actual revoke; a no-op re-revoke writes nothing.
+        let dir = TempDir::new().unwrap();
+        let inv = seeded_inv(&dir).await;
+        inv.grant(&UserId("alice".into()), &ServerId("s1".into()))
+            .await
+            .unwrap();
+        let db = dir.path().join("inv.db");
+
+        run_revoke("alice", "s1", Some(db.clone())).await.unwrap();
+        let entries = inv.recent_audit(10).await.unwrap();
+        let r = entries
+            .iter()
+            .find(|e| e.action == "user.revoke")
+            .expect("CLI revoke must write a user.revoke row");
+        assert_eq!(r.actor, "cli");
+        assert_eq!(r.target.as_deref(), Some("alice"));
+        assert_eq!(r.payload.as_ref().unwrap()["server"], "s1");
+        assert_eq!(r.payload.as_ref().unwrap()["source"], "cli");
+
+        // Idempotent re-revoke → no new row.
+        let before = entries.iter().filter(|e| e.action == "user.revoke").count();
+        run_revoke("alice", "s1", Some(db)).await.unwrap();
+        let after = inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "user.revoke")
+            .count();
+        assert_eq!(before, after, "no-op re-revoke must not write a row");
     }
 }
