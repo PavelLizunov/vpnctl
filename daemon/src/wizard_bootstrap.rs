@@ -942,6 +942,68 @@ async fn bootstrap_pipeline(
         }
     }
 
+    // ── 8.5 Deploy-baseline audit (review 2026-06-04) ─────────────
+    // The wizard genuinely rendered + applied config above, but used
+    // to audit only `server.wizard` — so the server's deploy HISTORY
+    // stayed empty until the first manual deploy and the audit
+    // timeline read «server is live» with zero deploys. Write the
+    // canonical `server.deploy` row (via:"wizard-bootstrap"). This
+    // also gives the pending-deploy detector a real baseline: a grant
+    // made after the wizard (a per-user `user.grant` row) compares
+    // newer than this ts → the «config not yet deployed» banner fires
+    // exactly when it should. Reaching this point = every kernel
+    // applied successfully (any failure above returned via fail!).
+    //
+    // MASKING GUARD (review-agent important): the applied config was
+    // rendered from the `users` snapshot taken BEFORE the slow
+    // install/apply steps. A grant landing in that window would get
+    // `user.grant ts < server.deploy ts` → the detector would call it
+    // deployed while the live config excludes the user — the exact
+    // silent-miss class this fix targets. So re-fetch the grant set
+    // and SKIP the baseline if it changed: with no `server.deploy`
+    // row the detector's «no deploy ever» branch correctly marks
+    // those grants pending. Audit failure is non-fatal — node is live.
+    let snapshot_ids: std::collections::HashSet<&str> =
+        users.iter().map(|u| u.id.0.as_str()).collect();
+    let grants_unchanged = match inv.users_for_server(&server.id).await {
+        Ok(now) => {
+            let now_ids: std::collections::HashSet<String> =
+                now.into_iter().map(|u| u.id.0).collect();
+            now_ids.len() == snapshot_ids.len()
+                && now_ids.iter().all(|id| snapshot_ids.contains(id.as_str()))
+        }
+        // Can't verify → assume changed (skip the baseline; safe side).
+        Err(_) => false,
+    };
+    if grants_unchanged {
+        if let Err(e) = inv
+            .audit(
+                "admin",
+                "server.deploy",
+                Some(&plan.server_id),
+                Some(&serde_json::json!({
+                    "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+                    "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+                    "via": "wizard-bootstrap",
+                })),
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::wizard",
+                server = %plan.server_id,
+                error = %e,
+                "audit write failed for server.deploy (wizard-bootstrap) — node already live"
+            );
+        }
+    } else {
+        send_step!(
+            "apply",
+            "note: grants changed while bootstrapping — the applied config predates them; \
+             deploy this server again to include the new users."
+        );
+    }
+
     // ── 9. Done ───────────────────────────────────────────────────
     let redirect = format!("/admin/servers/{}", path_segment_encode(&plan.server_id));
     let _ = tx

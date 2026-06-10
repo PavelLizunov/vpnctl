@@ -2655,16 +2655,155 @@ async fn admin_user_grant_server_happy_path() {
     assert_eq!(granted.len(), 1, "u0 must have 1 grant after POST");
     assert_eq!(granted[0].id.0, "s0");
 
+    // Canonical grant-audit shape (2026-06-04): per-user `user.grant`
+    // with target = USER id — the shape the pending-deploy detector
+    // keys on. Guards against regressing to the old `action="grant",
+    // target=<server>` rows the detector never saw.
     let entries = inv.recent_audit(10).await.unwrap();
     let g = entries
         .iter()
-        .find(|e| e.action == "grant")
-        .expect("grant audit row missing");
+        .find(|e| e.action == "user.grant")
+        .expect("user.grant audit row missing");
     assert_eq!(g.actor, "admin");
-    assert_eq!(g.target.as_deref(), Some("s0"));
+    assert_eq!(g.target.as_deref(), Some("u0"));
     assert_eq!(
-        g.payload.as_ref().unwrap()["user"],
-        serde_json::Value::String("u0".into())
+        g.payload.as_ref().unwrap()["server"],
+        serde_json::Value::String("s0".into())
+    );
+    assert_eq!(
+        g.payload.as_ref().unwrap()["source"],
+        serde_json::Value::String("user-detail".into())
+    );
+}
+
+/// REGRESSION (review 2026-06-04): a grant made through ANY real
+/// handler must be visible to the pending-deploy detector even after
+/// the server already has a deploy baseline. The handlers used to
+/// write `action="grant", target=<server>` (and bulk only a summary
+/// row) — invisible to `servers_pending_deploy_for_user`, which keys
+/// on `user.grant` + target=<user>. So a grant made AFTER the
+/// server's first deploy never raised the «config not yet deployed»
+/// banner and the node silently missed the user's UUID.
+///
+/// Seeded users carry ZERO audit rows (raw `inv.add_user`), so the
+/// only possible user-mutation timestamp is the one the handler under
+/// test writes — if it regresses to the old shape, the detector sees
+/// no mutations and the assertions fail.
+#[tokio::test]
+async fn grants_via_real_handlers_mark_server_pending_deploy() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 3, 3, &[]).await; // s0..s2 + u0..u2, no grants yet
+
+    // Deploy BASELINE first — the regression only bites once a
+    // `server.deploy` row exists (before that the "no deploy ever"
+    // branch masks the missing user.grant rows).
+    for sid in ["s0", "s1", "s2"] {
+        inv.audit("admin", "server.deploy", Some(sid), None)
+            .await
+            .unwrap();
+    }
+    // Audit ts has millisecond precision; guarantee the grants below
+    // land strictly AFTER the baseline rows.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let app = router(s);
+
+    // 1. user-detail grant handler.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s0"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending = inv
+        .servers_pending_deploy_for_user(&UserId("u0".into()), &[ServerId("s0".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        vec![ServerId("s0".into())],
+        "user-detail grant must mark s0 pending-deploy"
+    );
+
+    // 2. server-detail grant handler.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/grants/u1"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending = inv
+        .servers_pending_deploy_for_user(&UserId("u1".into()), &[ServerId("s1".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        vec![ServerId("s1".into())],
+        "server-detail grant must mark s1 pending-deploy"
+    );
+
+    // 3. bulk grant-all handler (writes per-user rows for NEW grants).
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s2/grants/_grant-all"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending = inv
+        .servers_pending_deploy_for_user(&UserId("u2".into()), &[ServerId("s2".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        vec![ServerId("s2".into())],
+        "bulk grant-all must mark s2 pending-deploy for each newly-granted user"
+    );
+
+    // 4. Idempotency contract (review-agent): RE-running a grant (or
+    // grant-all) must NOT write fresh user.grant rows — a no-op
+    // re-grant would otherwise falsely re-mark the server pending
+    // after the operator's next deploy.
+    let count_user_grants = |entries: &[vpnctl_inventory::AuditEntry]| {
+        entries.iter().filter(|e| e.action == "user.grant").count()
+    };
+    let before = count_user_grants(&inv.recent_audit(100).await.unwrap());
+    for uri in [
+        "/admin/users/u0/grants/s0",
+        "/admin/servers/s1/grants/u1",
+        "/admin/servers/s2/grants/_grant-all",
+    ] {
+        app.clone()
+            .oneshot(
+                add_same_origin(Request::builder().method("POST").uri(uri))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let after = count_user_grants(&inv.recent_audit(100).await.unwrap());
+    assert_eq!(
+        before, after,
+        "idempotent re-grants must not add user.grant rows (false pending-deploy)"
     );
 }
 
@@ -5632,9 +5771,11 @@ async fn admin_wizard_new_renders_form_with_required_fields() {
         html.contains(r#"id="root_password" name="root_password" type="password""#),
         "root_password must be type=password"
     );
-    // Headline + step indicator (copy contract).
+    // Headline + step indicator (copy contract). «of 2» — the wizard
+    // is a 2-step flow; the old «of 3» promised a step that never
+    // existed (review 2026-06-04).
     assert!(
-        html.contains("Add server · step 1 of 3"),
+        html.contains("Add server · step 1 of 2"),
         "step indicator missing"
     );
 }
@@ -5811,9 +5952,9 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
         !html.contains("secret"),
         "root password must NEVER appear in step-2 HTML"
     );
-    // Step indicator.
+    // Step indicator («of 2» — see step-1's copy-contract note).
     assert!(
-        html.contains("Add server · step 2 of 3"),
+        html.contains("Add server · step 2 of 2"),
         "step indicator missing on step-2"
     );
 }
@@ -7406,6 +7547,89 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert!(pids.contains(&"hysteria2"));
     // wireguard must NOT be in defaults — different kernel.
     assert!(!pids.contains(&"wireguard"));
+}
+
+/// REGRESSION (review 2026-06-04): quick-add validated server ids with
+/// the USER-id validator (2..=32, lowercase-only) while the error text
+/// promised «1-64 chars of A-Z a-z 0-9 . _ -» — so a 1-char or
+/// mixed-case id was rejected with a message claiming it's allowed.
+/// The dedicated `valid_server_id` now enforces exactly what the
+/// message says.
+#[tokio::test]
+async fn admin_server_quick_add_id_policy_matches_error_text() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let post = |id_addr: &'static str| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/quick-add")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(id_addr))
+        .unwrap()
+    };
+
+    // Mixed case — promised by the message, used to 400.
+    let resp = app
+        .clone()
+        .oneshot(post("id=Fra-01&address=203.0.113.8"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "mixed-case server id must be accepted (the error text always promised A-Z)"
+    );
+    assert!(
+        inv.get_server(&vpnctl_core::ServerId("Fra-01".into()))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // 1-char — promised by the message («1-64»), used to 400 (user cap 2..=32).
+    let resp = app
+        .clone()
+        .oneshot(post("id=x&address=203.0.113.9"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "1-char server id must be accepted"
+    );
+
+    // Genuinely invalid stays rejected: embedded space…
+    let resp = app
+        .clone()
+        .oneshot(post("id=bad%20id&address=203.0.113.10"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // …and over-long (65 chars).
+    let long = format!("id={}&address=203.0.113.11", "a".repeat(65));
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/quick-add")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(long))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "65-char id must 400"
+    );
 }
 
 #[tokio::test]

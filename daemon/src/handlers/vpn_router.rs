@@ -261,7 +261,10 @@ fn render_vless_uri(
 ///      country mapping is stable (Germany was Germany 50 years ago)
 ///   3. Compiled mapping means typos surface at build time
 pub(crate) fn country_display_name(server_id: &str) -> String {
-    match server_id {
+    // Case-insensitive lookup (2026-06-04): quick-add now accepts
+    // mixed-case server ids, and `De`/`DE` should still map to
+    // Germany rather than fall through to the uppercased-id branch.
+    match server_id.to_ascii_lowercase().as_str() {
         "de" => "Germany".into(),
         "is" => "Iceland".into(),
         "fi" => "Finland".into(),
@@ -270,7 +273,7 @@ pub(crate) fn country_display_name(server_id: &str) -> String {
         "us" => "United States".into(),
         "gb" => "United Kingdom".into(),
         "fr" => "France".into(),
-        other => other.to_ascii_uppercase(),
+        _ => server_id.to_ascii_uppercase(),
     }
 }
 

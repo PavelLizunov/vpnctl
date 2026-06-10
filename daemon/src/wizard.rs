@@ -1,9 +1,11 @@
 //! Phase E — add-server wizard session store.
 //!
 //! The wizard collects the IP + root password on step 1, then streams
-//! `vpnctl bootstrap` + `vpnctl deploy` output on step 2 (SSE), then
-//! offers a first-grant prompt on step 3. Between steps the operator's
-//! input has to live somewhere; the choices are:
+//! the bootstrap (key push → register → secrets → install → apply) on
+//! step 2 (SSE) and finishes on the server's detail page — a 2-step
+//! flow. (A step-3 «first-grant prompt» was planned but never built;
+//! the UI copy stopped promising it 2026-06-04.) Between steps the
+//! operator's input has to live somewhere; the choices are:
 //!
 //!   1. **Server-side in-memory store keyed by a random session id**
 //!      (this module). Pros: secrets never leave the daemon process.

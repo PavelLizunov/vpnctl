@@ -6363,23 +6363,39 @@ pub(crate) async fn server_grant_user(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
+    // Membership BEFORE the grant — the audit row is written only for
+    // a NEW grant. An idempotent re-grant must NOT add a fresh
+    // `user.grant` row: it would falsely re-mark the server
+    // pending-deploy until a no-op redeploy (review-agent important;
+    // matches the bulk path's skip-already-granted semantics).
+    let was_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(v) => v.iter().any(|s| s.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
     if let Err(e) = state.inv.grant(&uid, &sid).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "grant",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "user": user_id_str,
-                "from": "server-detail",
-            })),
-        )
-        .await
+    // Canonical grant-audit shape (2026-06-04 unification): per-user
+    // `user.grant` row with target = USER id. The pending-deploy
+    // detector keys on exactly this; the previous `action="grant",
+    // target=<server>` row was invisible to it, so a grant made from
+    // the server-detail page never raised the «config not yet
+    // deployed» banner once the server had its first deploy baseline.
+    if !was_granted
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "user.grant",
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "server": server_id_str,
+                    "source": "server-detail",
+                })),
+            )
+            .await
     {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for grant");
+        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.grant");
     }
     Redirect::to(&format!(
         "/admin/servers/{}",
@@ -6667,9 +6683,11 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
     let id: String = form_field(&body, "id")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    if !valid_user_id(&id) {
-        // Reuse user-id validator — same allowed alphabet (alphanumerics,
-        // . _ -). Length cap 64 is reasonable for server ids too.
+    if !valid_server_id(&id) {
+        // Dedicated server-id validator (review 2026-06-04): the user-id
+        // validator (2..=32 lowercase) used to gate this while the error
+        // text promised 1-64 mixed-case — now the message matches the
+        // enforced policy exactly.
         return bad_request(&format!(
             "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
         ));
@@ -6870,15 +6888,18 @@ pub(crate) async fn server_disable_kernel(
     .into_response()
 }
 
-/// Validate a candidate user id from the web form. The HTML5 `pattern`
+/// Validate a candidate USER id from the web form. The HTML5 `pattern`
 /// attribute already filters most input client-side, but we re-validate
 /// server-side because (a) browsers can be bypassed and (b) the CLI
 /// has no client-side filter, so the rule should live in one place.
 ///
-/// Permitted: ASCII letters, digits, `.`, `_`, `-`. Length 1..=64.
-/// Rejected: spaces, slashes, `?`, `#`, percent-escapes, anything
-/// non-ASCII. Same set as `path_segment_encode`'s "unreserved" with
-/// the additional constraint of bounded length.
+/// Permitted: lowercase ASCII letters, digits, `.`, `_`, `-`.
+/// Length **2..=32** (the `^[a-z0-9._-]{2,32}$` convention from the
+/// NM-7 username normalisation). Rejected: uppercase, spaces, slashes,
+/// `?`, `#`, percent-escapes, anything non-ASCII. (Doc fixed
+/// 2026-06-04 — it used to claim 1..=64 mixed-case, which the code
+/// never accepted. Server ids have their own, WIDER validator:
+/// [`valid_server_id`].)
 fn valid_user_id(id: &str) -> bool {
     let len = id.len();
     if !(2..=32).contains(&len) {
@@ -6894,6 +6915,28 @@ fn valid_user_id(id: &str) -> bool {
     // direct curl path or a malicious POST.
     id.bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Validate a candidate SERVER id (quick-add form). Deliberately WIDER
+/// than [`valid_user_id`] (review 2026-06-04 — quick-add used the user
+/// validator while its error text promised `1-64 chars of A-Z a-z 0-9
+/// . _ -`, so e.g. a 1-char or mixed-case id was rejected with a
+/// message claiming it's allowed):
+///
+///   * length **1..=64** — wizard-derived ids from IPv6 addresses
+///     (`2001-db8--1`) and dotted IPv4s easily exceed the user cap;
+///     prod also has 2-char ISO ids (`de`, `fi`).
+///   * mixed case allowed — `derive_server_id` preserves the case of a
+///     hostname-derived id, and the inventory has no case constraint.
+///   * same charset family as `path_segment_encode`'s unreserved set,
+///     so the id is always URL-safe in `/admin/servers/{id}` routes.
+fn valid_server_id(id: &str) -> bool {
+    let len = id.len();
+    if !(1..=64).contains(&len) {
+        return false;
+    }
+    id.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// `POST /admin/users` — create a new user from the form on
@@ -7120,25 +7163,40 @@ pub(crate) async fn user_grant_server(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
+    // Membership BEFORE the grant — audit only a NEW grant (an
+    // idempotent re-grant must not falsely re-mark the server
+    // pending-deploy; see `server_grant_user`).
+    let was_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(v) => v.iter().any(|s| s.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
     if let Err(e) = state.inv.grant(&uid, &sid).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "grant",
-            Some(&server_id_str),
-            Some(&serde_json::json!({ "user": user_id_str })),
-        )
-        .await
+    // Canonical grant-audit shape (2026-06-04 unification): per-user
+    // `user.grant` with target = USER id — what the pending-deploy
+    // detector keys on. Previously this wrote `action="grant",
+    // target=<server>`, which the detector never saw.
+    if !was_granted
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "user.grant",
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "server": server_id_str,
+                    "source": "user-detail",
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
             user = %user_id_str,
             server = %server_id_str,
             error = %e,
-            "audit write failed for grant — mutation already committed"
+            "audit write failed for user.grant — mutation already committed"
         );
     }
     Redirect::to(&format!(
@@ -7207,13 +7265,21 @@ pub(crate) async fn user_revoke_server(
 /// is idempotent at the SQL layer (`ON CONFLICT DO NOTHING`), so
 /// re-running this on a fully-granted server is a no-op.
 ///
-/// Writes ONE summary audit row (`server.grants.bulk_grant` with
-/// `{granted, already_granted, failed, total_users}`) rather than
-/// N individual rows — avoids audit timeline flood for the common
-/// «50 users × 1 click» case. Per-user grant failures (rare —
-/// inventory-layer DB error) are counted in `failed` and logged at
-/// warn but DO NOT abort the batch — partial success is operator-
-/// recoverable via the per-row UI.
+/// Audit shape (2026-06-04 unification): ONE summary row
+/// (`server.grants.bulk_grant` with `{granted, already_granted,
+/// failed, total_users}`) **plus a per-user `user.grant` row
+/// (target = user id) for each NEWLY-granted user**. The per-user
+/// rows are what the pending-deploy detector
+/// (`servers_pending_deploy_for_user`) keys on — without them a
+/// bulk grant after the server's first deploy never raised the
+/// «config not yet deployed» banner. Timeline flood stays bounded:
+/// re-running on a fully-granted server grants 0 → writes 0
+/// per-user rows (idempotent), so only the first click of the «50
+/// users» case pays the N rows — and those N are exactly the N
+/// real mutations. Per-user grant failures (rare — inventory-layer
+/// DB error) are counted in `failed` and logged at warn but DO NOT
+/// abort the batch — partial success is operator-recoverable via
+/// the per-row UI.
 ///
 /// No confirm gate (safe + reversible — operator can revoke
 /// per-user OR use the bulk revoke flow).
@@ -7258,7 +7324,34 @@ pub(crate) async fn server_grant_all_users(
             continue;
         }
         match state.inv.grant(&u.id, &sid).await {
-            Ok(()) => granted += 1,
+            Ok(()) => {
+                granted += 1;
+                // Per-user `user.grant` row for each ACTUAL new grant —
+                // the canonical shape the pending-deploy detector keys
+                // on (see the handler doc-comment). Audit failure is
+                // non-fatal: the grant is already committed.
+                if let Err(e) = state
+                    .inv
+                    .audit(
+                        "admin",
+                        "user.grant",
+                        Some(&u.id.0),
+                        Some(&serde_json::json!({
+                            "server": server_id_str,
+                            "source": "server-detail.bulk",
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::admin",
+                        server = %server_id_str,
+                        user = %u.id,
+                        error = %e,
+                        "audit write failed for user.grant (bulk) — mutation already committed"
+                    );
+                }
+            }
             Err(e) => {
                 failed += 1;
                 tracing::warn!(
@@ -10340,23 +10433,21 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     use crate::i18n::tr;
     let body = html! {
-        div.ed-art-eyebrow { (tr(lang, "Add server · step 1 of 3", "Добавить сервер · шаг 1 из 3")) }
+        div.ed-art-eyebrow { (tr(lang, "Add server · step 1 of 2", "Добавить сервер · шаг 1 из 2")) }
         h1.ed-art-h1 {
             (tr(lang, "Paste an ", "Вставь ")) em { "IP" }
             (tr(lang, " and the ", " и ")) em { (tr(lang, "root password", "root-пароль")) }
         }
         p.ed-art-deck {
             (tr(lang, "The daemon will SSH in as ", "Демон зайдёт по SSH как ")) span.ed-mono { "root" }
+            // Honest copy (review 2026-06-04): the pipeline pushes the
+            // key, installs fail2ban + sing-box and applies the config —
+            // it does NOT create a non-root user or harden sshd_config
+            // (that's a future `harden` phase). Don't promise it.
             (tr(
                 lang,
-                ", push its key, create a non-root user, harden ",
-                ", запушит свой ключ, создаст non-root пользователя, усилит ",
-            ))
-            span.ed-mono { "sshd_config" }
-            (tr(
-                lang,
-                ", install fail2ban + sing-box, render the config, and prove the service is live — all on the next screen.",
-                ", установит fail2ban + sing-box, отрендерит конфиг и проверит что сервис живёт — всё это на следующем экране.",
+                ", push its key, install fail2ban + sing-box, render the config, and prove the service is live — all on the next screen. SSH hardening (non-root user, sshd lockdown) is not part of this wizard yet.",
+                ", запушит свой ключ, установит fail2ban + sing-box, отрендерит конфиг и проверит что сервис живёт — всё это на следующем экране. SSH-hardening (non-root пользователь, lockdown sshd) пока не входит в этот мастер.",
             ))
         }
 
@@ -10378,10 +10469,13 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
                       ))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                    // Honest copy (review 2026-06-04): the wizard keeps
+                    // whatever SSH port you enter — there is no
+                    // automatic harden-to-2222 step.
                     (tr(
                         lang,
-                        "DigitalOcean droplets must keep SSH on port 22 (Cloud Firewall blocks the rest); other hosters get the harden-to-2222 step automatically on the next screen.",
-                        "Дроплеты DigitalOcean должны держать SSH на 22 (Cloud Firewall блокирует остальное); другие хостеры получают шаг harden-to-2222 автоматически на следующем экране.",
+                        "DigitalOcean droplets must keep SSH on port 22 (Cloud Firewall blocks the rest). The wizard connects on the port you enter and keeps it — no automatic port change.",
+                        "Дроплеты DigitalOcean должны держать SSH на 22 (Cloud Firewall блокирует остальное). Мастер подключается на введённый порт и оставляет его — порт автоматически не меняется.",
                     ))
                 }
             }
@@ -10394,10 +10488,13 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
                       autocomplete="new-password"
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                    // Honest copy (review 2026-06-04): the wizard does
+                    // NOT disable password auth — every later step just
+                    // uses key auth instead.
                     (tr(
                         lang,
-                        "Used once to push our SSH key, then password auth gets disabled. Held in daemon memory for 10 minutes; nothing is written to disk.",
-                        "Используется один раз чтобы запушить наш SSH-ключ, затем password-auth отключается. Лежит в памяти демона 10 минут; на диск ничего не пишется.",
+                        "Used once to push our SSH key; every later step authenticates with the key. Held in daemon memory for 10 minutes; nothing is written to disk. Password auth stays as the host had it.",
+                        "Используется один раз чтобы запушить наш SSH-ключ; дальше все шаги ходят по ключу. Лежит в памяти демона 10 минут; на диск ничего не пишется. Password-auth остаётся как был на хосте.",
                     ))
                 }
             }
@@ -10501,10 +10598,12 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
 ///
 /// The actual bootstrap work happens in `wizard_step2_sse` (the
 /// EventSource source), which calls into
-/// `crate::wizard_bootstrap::run_bootstrap`. Splitting the page
-/// from the stream lets the operator hit refresh during a
-/// bootstrap and resume watching (the bootstrap is in flight on
-/// the daemon; the SSE just attaches a new viewer).
+/// `crate::wizard_bootstrap::run_bootstrap`. NOTE: the SSE session
+/// is SINGLE-SHOT — the first attach consumes it, so a refresh gets
+/// «session missing», NOT a re-attach (the bootstrap itself keeps
+/// running server-side; result lands on the server detail page +
+/// audit timeline). A job-id store with multi-viewer attach is the
+/// future fix if re-attach is ever wanted.
 ///
 /// On missing/expired session: 400 + canonical error body — the
 /// operator's session has timed out and there's nothing actionable
@@ -10534,7 +10633,7 @@ pub(crate) async fn wizard_step2_stub(
     // `/admin/servers/new` (which covers the SSE endpoint too).
     let body = html! {
         div.ed-art-eyebrow {
-            (crate::i18n::tr(lang, "Add server · step 2 of 3", "Добавить сервер · шаг 2 из 3"))
+            (crate::i18n::tr(lang, "Add server · step 2 of 2", "Добавить сервер · шаг 2 из 2"))
         }
         h1.ed-art-h1 {
             (crate::i18n::tr(lang, "Bootstrapping ", "Bootstrap ")) span.ed-mono { (session.address) }
@@ -10546,16 +10645,20 @@ pub(crate) async fn wizard_step2_stub(
                 "Демон заходит по SSH под ",
             ))
             span.ed-mono { "root" }
+            // Honest copy (review 2026-06-04): no host lockdown happens
+            // here (fail2ban install ≠ SSH hardening), and the SSE
+            // session is SINGLE-SHOT — a refresh loses the live log
+            // (the bootstrap itself keeps running server-side).
             (crate::i18n::tr(
                 lang,
-                " (one-time password use), pushing its deploy key, locking down the host, installing ",
-                " (одноразовое использование пароля), закидывает deploy-ключ, hardening хоста, ставит ",
+                " (one-time password use), pushing its deploy key, installing fail2ban + ",
+                " (одноразовое использование пароля), закидывает deploy-ключ, ставит fail2ban + ",
             ))
             span.ed-mono { "sing-box" }
             (crate::i18n::tr(
                 lang,
-                " and pushing the rendered config. Every step shows up below as it happens. Don't close this tab — refresh is fine, the bootstrap runs server-side and you'll re-attach.",
-                " и пушит готовый конфиг. Каждый шаг появится ниже по мере выполнения. Не закрывай вкладку — refresh нормально, bootstrap идёт серверно и переподключишься.",
+                " and pushing the rendered config. Every step shows up below as it happens. Don't close or refresh this tab — the live log attaches once; if you lose it, the bootstrap still finishes server-side and the result lands on the server's detail page + the audit timeline.",
+                " и пушит готовый конфиг. Каждый шаг появится ниже по мере выполнения. Не закрывай и не обновляй вкладку — живой лог подключается один раз; если потерял его, bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
             ))
         }
         div id="wizard-status" role="status"
