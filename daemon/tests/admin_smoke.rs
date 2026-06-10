@@ -13912,3 +13912,163 @@ async fn user_detail_page_shows_amber_banner_when_disabled() {
         "must NOT also show disable button (already disabled)"
     );
 }
+
+// ── server delete (retype-to-confirm + cascade + audit) ──────────────────
+
+/// The server-detail page must surface a "danger zone" link to the
+/// delete-confirm page. Without it the operator has no UI path to remove
+/// a decommissioned server (the bug this feature fixes).
+#[tokio::test]
+async fn admin_server_detail_has_delete_link() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains(r#"href="/admin/servers/s0/delete-confirm""#),
+        "server-detail must link to the delete-confirm page"
+    );
+}
+
+/// The delete-confirm page must render the retype form (POSTing to the
+/// delete route, with a `confirm` field) and disclose the cascade scope —
+/// the exact grant count that will be dropped.
+#[tokio::test]
+async fn admin_server_delete_confirm_page_shows_form_and_grant_count() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // s0 carries two grants (u0, u1); s1 carries none.
+    seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
+    let html = fetch_html(router(s), "/admin/servers/s0/delete-confirm").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/s0/delete""#),
+        "confirm form must POST to the delete route"
+    );
+    assert!(
+        html.contains(r#"name="confirm""#),
+        "retype-to-confirm input must be present"
+    );
+    assert!(
+        html.contains("2 grant(s)"),
+        "must disclose the exact cascade grant count (2)"
+    );
+}
+
+/// A mismatched confirm token must be rejected with 400 and leave the
+/// server (and its grants) fully intact — the guard against fat-finger
+/// deletes.
+#[tokio::test]
+async fn admin_server_delete_rejects_confirm_mismatch() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/delete")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("confirm=wrong"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        s.inv
+            .get_server(&ServerId("s0".into()))
+            .await
+            .unwrap()
+            .is_some(),
+        "server must survive a mismatched confirm"
+    );
+    assert_eq!(
+        s.inv
+            .users_for_server(&ServerId("s0".into()))
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "grants must survive a mismatched confirm"
+    );
+}
+
+/// The happy path: an exact-match confirm deletes the server, cascades its
+/// grants, audits `server.remove` (with the captured grant count), redirects
+/// to the server list — and leaves OTHER servers and the affected users
+/// themselves untouched.
+#[tokio::test]
+async fn admin_server_delete_cascades_grants_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/delete")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("confirm=s0"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // Server is gone.
+    assert!(
+        s.inv
+            .get_server(&ServerId("s0".into()))
+            .await
+            .unwrap()
+            .is_none(),
+        "deleted server must be absent from inventory"
+    );
+    // Its grants cascaded.
+    assert_eq!(
+        s.inv
+            .users_for_server(&ServerId("s0".into()))
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "grants for the deleted server must cascade away"
+    );
+    // The other server is untouched.
+    assert!(
+        s.inv
+            .get_server(&ServerId("s1".into()))
+            .await
+            .unwrap()
+            .is_some(),
+        "cascade must be scoped — sibling server must survive"
+    );
+    // The users themselves survive (only the grant rows cascade).
+    assert!(
+        s.inv
+            .get_user(&UserId("u0".into()))
+            .await
+            .unwrap()
+            .is_some(),
+        "user must survive — only its grant to s0 is removed"
+    );
+    // Audit row landed, target s0, with the captured grant count.
+    let audit = s.inv.recent_audit(20).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|e| e.action == "server.remove" && e.target.as_deref() == Some("s0"))
+        .expect("server.remove audit row must land");
+    let payload = row
+        .payload
+        .as_ref()
+        .expect("server.remove must carry a payload");
+    assert_eq!(
+        payload.get("grants_removed").and_then(|v| v.as_u64()),
+        Some(2),
+        "audit payload must record the 2 grants removed"
+    );
+}

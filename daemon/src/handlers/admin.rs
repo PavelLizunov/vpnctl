@@ -7499,6 +7499,127 @@ pub(crate) async fn user_delete(
     Redirect::to("/admin/users").into_response()
 }
 
+/// `GET /admin/servers/{id}/delete-confirm` — retype-to-confirm page
+/// for removing a server from the inventory (mirrors user delete). Shows
+/// the cascade scope (grants / secrets / protocols) before the operator
+/// commits.
+pub(crate) async fn server_delete_confirm(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+) -> Result<Markup, Response> {
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return Err(not_found(&format!("no such server '{server_id_str}'"))),
+        Err(e) => return Err(internal_error(anyhow::Error::new(e))),
+    };
+    let grant_count = state
+        .inv
+        .users_for_server(&sid)
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let back = format!("/admin/servers/{}", path_segment_encode(&server_id_str));
+    let body = html! {
+        div.ed-art-eyebrow {
+            a href=(back) style="color: var(--mute); text-decoration: none;" { "← back to server" }
+            "  ·  delete"
+        }
+        h1.ed-art-h1 { "delete " em { (server_id_str) } " — really?" }
+        p.ed-art-deck {
+            "Drops the server (" span.ed-mono { (server.address) } ") from the inventory. "
+            b { (grant_count) " grant(s)" }
+            " cascade-delete — those users lose this server from their subscription on the next pull. "
+            b { "Secrets" }
+            " (REALITY keypair, short_id, obfs passwords) are deleted — re-adding the server later generates BRAND-NEW ones. "
+            "Protocols, kernels, probe history + alerts also cascade. If another server uses this one as a ProxyJump host, that link is cleared. "
+            b { "The sing-box on the node itself is NOT touched" }
+            " — stop/wipe it on the host separately if the VPS lives on."
+        }
+        p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+            "Type the server-id "
+            span.ed-mono { (server_id_str) }
+            " in the box below to confirm. Exact match — copy/paste counts."
+        }
+        form method="post"
+             action=(format!("/admin/servers/{}/delete", path_segment_encode(&server_id_str)))
+             style="display: flex; gap: 10px; align-items: baseline; padding: 14px 16px; border: 1px solid var(--rule); margin: 16px 0;" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                "confirm id"
+            }
+            input type="text" name="confirm" required="required"
+                  autocomplete="off"
+                  style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
+            button type="submit"
+                   title=(format!("Delete server {server_id_str} from the inventory permanently"))
+                   style="padding: 4px 12px; border: 1px solid var(--acc-bad, #97233f); background: var(--acc-bad, #97233f); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                "delete forever"
+            }
+            a href=(back)
+              style="padding: 4px 10px; border: 1px solid var(--rule-s); color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                "cancel"
+            }
+        }
+    };
+    Ok(shell("servers", &theme, &accent, lang, body))
+}
+
+/// `POST /admin/servers/{id}/delete` — actually delete. Body must be
+/// `confirm=<exact-server-id>`; mismatch → 400. Captures the cascade
+/// scope (grant count) for the audit payload BEFORE the FK cascade wipes
+/// it, then removes the server and audits `server.remove`.
+pub(crate) async fn server_delete(
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let confirm = form_field(&body, "confirm").unwrap_or_default();
+    if confirm != server_id_str {
+        return bad_request(&format!(
+            "delete confirm mismatch: form sent '{confirm}', URL targets '{server_id_str}' — type the server id exactly to confirm"
+        ));
+    }
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // Capture cascade scope BEFORE the delete (FK CASCADE wipes grants).
+    let grants_removed = state
+        .inv
+        .users_for_server(&sid)
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if let Err(e) = state.inv.remove_server(&sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "server.remove",
+            Some(&server_id_str),
+            Some(&serde_json::json!({
+                "address": server.address,
+                "grants_removed": grants_removed,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit row for server.remove failed; mutation already committed"
+        );
+    }
+    Redirect::to("/admin/servers").into_response()
+}
+
 /// `POST /admin/users/{id}/disable` — set the disabled flag to
 /// true (B1.user, migration 0026). Idempotent: re-POSTing on an
 /// already-disabled user is a no-op redirect, no audit row written.
@@ -11495,6 +11616,24 @@ pub(crate) async fn server_detail(
                         }
                     }
                 }
+            }
+        }
+
+        // Danger zone — remove this server from inventory entirely.
+        // Retype-to-confirm page (mirrors user delete). Grants, secrets,
+        // protocols, probe history + alerts cascade-delete; if another
+        // server uses this as a ProxyJump host that link clears. The
+        // node's own sing-box is NOT touched.
+        div.ed-rule {}
+        div style="margin: 18px 0 8px;" {
+            a href=(format!("/admin/servers/{}/delete-confirm", path_segment_encode(&server.id.0)))
+              title=(crate::i18n::tr(
+                  lang,
+                  "Remove this server from the inventory (grants + secrets + protocols cascade). Opens a retype-to-confirm page.",
+                  "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
+              ))
+              style="display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--acc-bad, #97233f); text-decoration: none; border: 1px solid var(--acc-bad, #97233f); padding: 5px 12px;" {
+                (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
             }
         }
     };
