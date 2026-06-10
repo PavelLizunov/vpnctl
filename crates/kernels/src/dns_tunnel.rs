@@ -435,7 +435,7 @@ impl Kernel for DnsTunnel {
     fn render_config(
         &self,
         ctx: &RenderCtx<'_>,
-        _users: &[User],
+        users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
         // Defense-in-depth: Registry::validate_server should reject a
@@ -474,16 +474,75 @@ impl Kernel for DnsTunnel {
                     .into(),
             )
         })?;
+        // Fail closed: the domain lands VERBATIM in the systemd
+        // EnvironmentFile line `SLIPSTREAM_DOMAIN=<domain>` (loaded into
+        // the relay env + ExecStart) and in the `====FILE:` bundle. A
+        // newline forges a second `KEY=value` env line (env-file line
+        // injection) or breaks the bundle framing. Mirrors the operator-
+        // set-domain guards in `crates/kernels/src/caddy.rs` (Caddyfile)
+        // and `crates/protocols/src/naive.rs` (client URI). `is_control`
+        // is load-bearing — it catches NUL and the newline.
+        const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
+        if domain.is_empty()
+            || domain.chars().count() > 253
+            || domain.contains(ILLEGAL)
+            || domain.chars().any(|c| c.is_control())
+        {
+            return Err(CoreError::Render(format!(
+                "dns-tunnel kernel: `dns-tunnel:domain` {domain:?} is invalid — must be a \
+                 non-empty hostname <=253 chars with no control characters or whitespace \
+                 (it lands verbatim in the slipstream EnvironmentFile and command line)"
+            )));
+        }
 
-        // Wrapped loopback VLESS inbound UUID — minted server secret
-        // (the single server-wide `${TUNNEL_UUID}` from the PoC).
-        let loopback_uuid = ctx.secrets.get("dns-tunnel:loopback_uuid").ok_or_else(|| {
-            CoreError::Render(
-                "dns-tunnel kernel: missing secret `dns-tunnel:loopback_uuid` — \
-                 mint via the add-server wizard, or set via /admin/servers/<id>"
+        // Wrapped loopback VLESS inbound `users[]`. Per-user identity is
+        // the standard vpnctl user model: every user GRANTED the
+        // dns-tunnel protocol on this server arrives here in `users`
+        // (the same `users_for_server` slice every kernel's
+        // `render_config` receives — the grant path is protocol-agnostic),
+        // carrying the SAME `User.uuid` they already use for VLESS-REALITY.
+        // We render one PLAIN VLESS entry per granted user (no `flow`, no
+        // reality — the tunnel itself provides the encryption, so the
+        // loopback inbound is intentionally TLS-less + auth-by-UUID only).
+        //
+        // Backward-compat: the historical single server-wide
+        // `dns-tunnel:loopback_uuid` secret (the PoC `${TUNNEL_UUID}`, live
+        // on box 213) stays supported as an OPTIONAL admin/fallback entry —
+        // when set, it's appended to `users[]`, de-duplicated against the
+        // granted users so it's never double-listed. This keeps the live
+        // `e09b09af-…` deploy working untouched AND lets per-user identities
+        // ride the same inbound.
+        let loopback_uuid = ctx.secrets.get("dns-tunnel:loopback_uuid");
+        // dedup(granted users' uuids ++ [loopback_uuid if set]), preserving
+        // the granted-users order (stable `ORDER BY id` from inventory) so
+        // the rendered config is byte-stable, with the fallback appended.
+        let mut inbound_uuids: Vec<&str> = Vec::with_capacity(users.len() + 1);
+        for u in users {
+            let uuid = u.uuid.as_str();
+            if !inbound_uuids.contains(&uuid) {
+                inbound_uuids.push(uuid);
+            }
+        }
+        if let Some(lb) = loopback_uuid.map(String::as_str) {
+            if !inbound_uuids.contains(&lb) {
+                inbound_uuids.push(lb);
+            }
+        }
+        // An inbound with zero users is a misconfiguration — sing-box would
+        // accept VLESS handshakes it can never authenticate, and there is
+        // nothing to hand any client. Fail closed rather than ship a dead
+        // inbound. (The historical guard required `loopback_uuid`; now
+        // EITHER a granted user OR the fallback secret satisfies it.)
+        if inbound_uuids.is_empty() {
+            return Err(CoreError::Render(
+                "dns-tunnel kernel: the loopback VLESS inbound has no users — \
+                 grant the dns-tunnel protocol to at least one user (their \
+                 per-user UUID is reused, same as VLESS-REALITY), or set the \
+                 `dns-tunnel:loopback_uuid` fallback secret via \
+                 /admin/servers/<id>"
                     .into(),
-            )
-        })?;
+            ));
+        }
 
         // Listen port — operator-overridable, validated as u16 at render
         // time so a typo surfaces as a clear CoreError::Render rather
@@ -491,12 +550,23 @@ impl Kernel for DnsTunnel {
         // listen_port pre-validation).
         let listen_port: u16 = match ctx.secrets.get("dns-tunnel:listen_port") {
             None => DEFAULT_LISTEN_PORT,
-            Some(s) => s.parse().map_err(|_| {
-                CoreError::Render(format!(
-                    "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
-                     must be an integer in 0..=65535"
-                ))
-            })?,
+            Some(s) => {
+                let port = s.parse::<u16>().map_err(|_| {
+                    CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
+                         must be an integer in 1..=65535"
+                    ))
+                })?;
+                if port == 0 {
+                    // Port 0 is OS-ephemeral — unreachable for the :53
+                    // delegation the relay fronts. Reject like a parse error.
+                    return Err(CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:listen_port` value {s:?} — \
+                         must be an integer in 1..=65535"
+                    )));
+                }
+                port
+            }
         };
 
         // Forward-target — operator-overridable, but REJECTED if it
@@ -544,6 +614,13 @@ impl Kernel for DnsTunnel {
         // Shape = configs/tunnel-singbox-server.json.tpl. Built as a
         // serde_json::Value then pretty-printed for byte-stability
         // (BTreeMap key order is deterministic; serde_json emits LF-only).
+        // PLAIN VLESS entries — only `uuid`, no `flow`/reality (the entry
+        // shape vless_reality.rs uses for a vision user minus the
+        // xtls-rprx-vision flow, which is loopback-inappropriate here).
+        let users_json: Vec<serde_json::Value> = inbound_uuids
+            .iter()
+            .map(|uuid| serde_json::json!({ "uuid": uuid }))
+            .collect();
         let sb_config = serde_json::json!({
             "log": {"level": "warn"},
             "inbounds": [
@@ -552,7 +629,7 @@ impl Kernel for DnsTunnel {
                     "tag": "tunnel-in",
                     "listen": fwd_host,
                     "listen_port": fwd_port,
-                    "users": [{"uuid": loopback_uuid}]
+                    "users": users_json
                 }
             ],
             "outbounds": [

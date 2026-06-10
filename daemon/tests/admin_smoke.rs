@@ -49,6 +49,14 @@ async fn state(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::WgTurn::new()))
         .unwrap();
+    reg.register_kernel(Box::new(vpnctl_kernels::Caddy::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::Naive::new()))
+        .unwrap();
+    reg.register_kernel(Box::new(vpnctl_kernels::DnsTunnel::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::DnsTunnel::new()))
+        .unwrap();
     // Wire the access-log writer the same way `build()` does. Drop the
     // JoinHandle — for tests that don't introspect the writer, the
     // task lives until the AppState clones drop, which happens at end
@@ -1080,6 +1088,107 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
         "Maud escaped `>` in the QR CSS selector — selector is invalid and \
          the size-normalisation CSS will silently fail. Use a descendant \
          selector (no `>`) or wrap the CSS string in PreEscaped."
+    );
+}
+
+/// Seed a dns-tunnel server (with the share-link secrets) granted to one
+/// user; return the inventory ready for a user-detail render.
+async fn seed_dns_tunnel_server(inv: &SqliteInventory, server_id: &str, granted_user: &str) {
+    let sid = ServerId(server_id.into());
+    inv.add_server(&Server {
+        id: sid.clone(),
+        address: "203.0.113.9".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("dns-tunnel".into())],
+        enabled_protocols: vec![ProtocolId("dns-tunnel".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(&sid, "dns-tunnel:domain", "t.example.com")
+        .await
+        .unwrap();
+    inv.set_server_secret(&sid, "dns-tunnel:fingerprint", "47:1E:87:8F:3E:48:C8:1C")
+        .await
+        .unwrap();
+    inv.grant(&UserId(granted_user.into()), &sid).await.unwrap();
+}
+
+/// A user granted a dns-tunnel server sees the dedicated "Flow E —
+/// dns-tunnel" delivery card carrying their OWN per-user
+/// `dns-tunnel://…uuid=user.uuid…` link (mirror of wgturn's Flow D).
+/// The link must NOT leak into the strict sing-box subscription
+/// (`appears_in_sing_box_sub() == false`, pinned separately in
+/// sub_endpoint.rs).
+#[tokio::test]
+async fn user_detail_renders_dns_tunnel_flow_e_card_for_granted_user() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // u0 granted, u1 not granted.
+    seed(&s.inv, 0, 2, &[]).await;
+    seed_dns_tunnel_server(&s.inv, "dt", "u0").await;
+
+    let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/u0").await;
+
+    // The Flow E delivery card renders.
+    assert!(
+        html.contains("Flow E"),
+        "dns-tunnel Flow E delivery card missing for granted user"
+    );
+    // The per-user dns-tunnel:// link is surfaced.
+    assert!(
+        html.contains("dns-tunnel://"),
+        "per-user dns-tunnel:// share-link missing from user-detail"
+    );
+    // The link embeds THIS user's own uuid (base64url payload decodes to
+    // JSON carrying `"uuid":"<u0.uuid>"`). Locate the link, decode it,
+    // and assert the embedded uuid is u0's.
+    use base64::Engine;
+    let start = html.find("dns-tunnel://").unwrap() + "dns-tunnel://".len();
+    let tail = &html[start..];
+    let payload: String = tail
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.as_bytes())
+        .expect("payload is base64url-no-pad");
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(
+        v["uuid"].as_str(),
+        Some(u0.uuid.as_str()),
+        "dns-tunnel link must embed the granted user's own uuid"
+    );
+}
+
+/// A user with NO dns-tunnel grant must NOT see the Flow E card or any
+/// `dns-tunnel://` link — the card is gated on a granted dns-tunnel
+/// server (sibling of wgturn's Flow-D gating).
+#[tokio::test]
+async fn user_detail_omits_dns_tunnel_flow_e_card_for_non_granted_user() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 2, &[]).await;
+    // dt granted to u0 only; u1 must not inherit the card.
+    seed_dns_tunnel_server(&s.inv, "dt", "u0").await;
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/u1").await;
+
+    assert!(
+        !html.contains("Flow E"),
+        "Flow E card leaked onto a user with no dns-tunnel grant"
+    );
+    assert!(
+        !html.contains("dns-tunnel://"),
+        "dns-tunnel:// link leaked onto a user with no dns-tunnel grant"
     );
 }
 
@@ -9668,25 +9777,24 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/allsrv").await;
-    // Tier distribution after the review-agent re-tier (NM-12
-    // 2026-05-20: Trojan + Hysteria2 demoted to Weak because their
-    // server_inbound has no fallback / no obfs):
-    //   Strong:   vless+reality, wgturn          (2)
-    //   Moderate: tuic-v5, anytls                (2)
+    // Tier distribution across the FULL production registry (the test
+    // `state` mirrors `build_registry` — naive + dns-tunnel included):
+    //   Strong:   vless+reality, wgturn, naive     (3)
+    //   Moderate: tuic-v5, anytls, dns-tunnel      (3)
     //   Weak:     shadowsocks-2022, wireguard,
-    //             trojan, hysteria2              (4)
+    //             trojan, hysteria2                (4)
     //   ────────────────────────────────────────────
-    //   total                                    (8)
+    //   total                                      (10)
     let strong_count = html.matches("DPI: strong").count();
     let moderate_count = html.matches("DPI: moderate").count();
     let weak_count = html.matches("DPI: weak").count();
     assert_eq!(
-        strong_count, 2,
-        "expected 2 Strong chips (vless+reality, wgturn), got {strong_count}"
+        strong_count, 3,
+        "expected 3 Strong chips (vless+reality, wgturn, naive), got {strong_count}"
     );
     assert_eq!(
-        moderate_count, 2,
-        "expected 2 Moderate chips (tuic-v5, anytls), got {moderate_count}"
+        moderate_count, 3,
+        "expected 3 Moderate chips (tuic-v5, anytls, dns-tunnel), got {moderate_count}"
     );
     assert_eq!(
         weak_count, 4,
@@ -9809,15 +9917,15 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/unksrv").await;
-    // 8 registered protocols → 8 chips (Strong + Moderate + Weak
+    // 10 registered protocols → 10 chips (Strong + Moderate + Weak
     // sum). If the chip-or-no-chip decision branches on something
     // OTHER than "registry knows this id", the count drifts.
     let total_chips = html.matches("DPI: strong").count()
         + html.matches("DPI: moderate").count()
         + html.matches("DPI: weak").count();
     assert_eq!(
-        total_chips, 8,
-        "8 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+        total_chips, 10,
+        "10 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
     );
 }
 

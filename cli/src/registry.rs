@@ -73,8 +73,9 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
     // client (slipstream-client + loopback VLESS), so
     // `appears_in_sing_box_sub()` is false; `share_link` emits the
-    // `dns-tunnel://` bundle (domain + resolvers + cert fp pin + wrapped
-    // loopback UUID). DPI risk Moderate (last-resort; НСДИ is monitored).
+    // `dns-tunnel://` bundle (domain + resolvers + cert fp pin + the
+    // user's per-user `User.uuid`, same one used for VLESS-REALITY). DPI
+    // risk Moderate (last-resort; НСДИ is monitored).
     reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
 
     Ok(reg)
