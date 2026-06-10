@@ -328,17 +328,24 @@ pub(crate) async fn run(
             // so future review can distinguish without grepping snapshots.
             let previous = server.trusted_host_fingerprint.clone();
             inv.update_trusted_fingerprint(&sid, &fp).await?;
-            inv.audit(
-                "cli",
-                "server.set_fingerprint",
-                Some(&id),
-                Some(&json!({
-                    "fingerprint": fp,
-                    "previous": previous,
-                    "source": if from_keyscan { "ssh-keyscan" } else { "operator-provided" },
-                })),
-            )
-            .await?;
+            // Dot-convention name + NM-10 no-op gate, in lockstep with
+            // the daemon handler (renamed there 2026-06-10): a same-
+            // value re-pin writes nothing; a real change writes
+            // `server.fingerprint.set` so `server.fingerprint.`-prefix
+            // filtering sees BOTH entry points.
+            if previous.as_deref() != Some(fp.as_str()) {
+                inv.audit(
+                    "cli",
+                    "server.fingerprint.set",
+                    Some(&id),
+                    Some(&json!({
+                        "fingerprint": fp,
+                        "previous": previous,
+                        "source": if from_keyscan { "ssh-keyscan" } else { "operator-provided" },
+                    })),
+                )
+                .await?;
+            }
             println!("set trusted_host_fingerprint on server '{id}' to {fp}");
             Ok(())
         }

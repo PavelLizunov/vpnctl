@@ -2924,6 +2924,249 @@ async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// ────────────────────────────────────────────────────────────────────────
+//  Coverage batch (audit 2026-06-10) — routes that had ZERO test
+//  references: logout, set-fingerprint, reserved-ports, timezone,
+//  auto-suppress, display-name; plus pins for the W5 fixes (no-op
+//  audit gating, LIKE-escape).
+// ────────────────────────────────────────────────────────────────────────
+
+/// POST /admin/logout must expire the session cookie (Max-Age=0) —
+/// auth surface; a broken logout means sessions can't be ended and
+/// nothing else would catch it.
+#[tokio::test]
+async fn admin_logout_expires_session_cookie() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(Request::builder().method("POST").uri("/admin/logout"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "logout must redirect");
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("logout must set a cookie header");
+    assert!(
+        cookie.contains("Max-Age=0"),
+        "logout cookie must expire the session, got: {cookie}"
+    );
+}
+
+/// POST set-fingerprint (manual): 303 + ONE dot-convention audit row
+/// (`server.fingerprint.set`); a same-value re-pin is a no-op (no
+/// second row — NM-10); junk shape is a 400.
+#[tokio::test]
+async fn admin_set_fingerprint_manual_audits_once_and_validates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 0, &[]).await;
+    let app = router(s);
+    let fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 43 b64 chars
+    let post = |body: String| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/set-fingerprint")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+    };
+
+    let resp = app
+        .clone()
+        .oneshot(post(format!("mode=manual&fingerprint={fp}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let count = |entries: &[vpnctl_inventory::AuditEntry]| {
+        entries
+            .iter()
+            .filter(|e| e.action == "server.fingerprint.set")
+            .count()
+    };
+    assert_eq!(count(&inv.recent_audit(20).await.unwrap()), 1);
+
+    // Same-value re-pin → no second row.
+    app.clone()
+        .oneshot(post(format!("mode=manual&fingerprint={fp}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&inv.recent_audit(20).await.unwrap()),
+        1,
+        "same-value re-pin must not write an audit row (NM-10)"
+    );
+
+    // Junk shape → 400.
+    let resp = app
+        .oneshot(post("mode=manual&fingerprint=not-a-fingerprint".into()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// POST reserved-ports: valid list 303s; junk 400s (form-parsing layer
+/// — the query layer is covered by spec_reserved_ports.rs).
+#[tokio::test]
+async fn admin_reserved_ports_post_validates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let post = |body: &str| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/reserved-ports")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap()
+    };
+    let resp = app.clone().oneshot(post("ports=443%2C8443")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let resp = app.oneshot(post("ports=not-a-port")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// POST settings/timezone: valid IANA name accepted, junk 400s.
+#[tokio::test]
+async fn admin_timezone_post_validates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s);
+    let post = |body: &str| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/timezone")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("tz=Europe%2FMoscow"))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection() || resp.status().is_success(),
+        "valid IANA tz must be accepted, got {}",
+        resp.status()
+    );
+    let resp = app.oneshot(post("tz=Not%2FAZone")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// POST auto-suppress + display-name: the HTTP/form layer round-trips
+/// (until now only the inventory queries were tested).
+#[tokio::test]
+async fn admin_auto_suppress_and_display_name_post_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/auto-suppress")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("enabled=true"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/display-name")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("display_name=Frankfurt+Box"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let html = fetch_html(app, "/admin/servers/s0").await;
+    assert!(
+        html.contains("Frankfurt Box"),
+        "display name must round-trip to the detail page"
+    );
+}
+
+/// W5 pin: protocol enable no-op re-POST writes NO second audit row
+/// (NM-10) — the 4 toggle handlers audited unconditionally before.
+#[tokio::test]
+async fn protocol_enable_noop_repost_writes_no_audit_row() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 0, &[]).await;
+    let app = router(s);
+    let post = || {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/protocols/tuic-v5/enable"),
+        )
+        .body(Body::empty())
+        .unwrap()
+    };
+    let r1 = app.clone().oneshot(post()).await.unwrap();
+    assert_eq!(
+        r1.status(),
+        StatusCode::SEE_OTHER,
+        "first enable must succeed"
+    );
+    let r2 = app.oneshot(post()).await.unwrap();
+    assert_eq!(
+        r2.status(),
+        StatusCode::SEE_OTHER,
+        "no-op re-enable must still redirect"
+    );
+    let rows = inv
+        .recent_audit(20)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.action == "server.protocol.enable")
+        .count();
+    assert_eq!(rows, 1, "no-op re-enable must not write a second row");
+}
+
+/// W5 pin: LIKE metacharacters in search match LITERALLY — `%` must
+/// not return the whole fleet.
+#[tokio::test]
+async fn search_percent_is_literal_not_wildcard() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await; // u0 + s0 exist
+    let html = fetch_html(router(s), "/admin/search?q=%25").await;
+    assert!(
+        !html.contains("/admin/users/u0"),
+        "bare % must not wildcard-match every user"
+    );
+}
+
 /// Server-side pending-deploy banner (audit 2026-06-10 follow-up):
 /// the ONE surface that can warn about a revoked-but-still-deployed
 /// UUID is the server's own detail page — after a revoke the server
@@ -6687,9 +6930,11 @@ async fn admin_user_detail_track3_empty_state_quotes_chunk4_status() {
         html.contains("No live stats yet"),
         "empty-state nudge missing"
     );
+    // Copy refreshed 2026-06-10: the scheduler is LIVE — empty state
+    // now explains why a covered user can still be blank.
     assert!(
-        html.contains("chunk 4"),
-        "empty-state must point at chunk 4 so operator knows what's missing"
+        html.contains("every 5 minutes"),
+        "empty-state must state the live poller cadence"
     );
     assert!(
         html.contains("/var/lib/vpnctl/.ssh"),
@@ -6835,9 +7080,11 @@ async fn admin_server_detail_no_probe_shows_chunk4_empty_state() {
         html.contains("No probes yet"),
         "empty-state copy must mention 'No probes yet'"
     );
+    // Copy refreshed 2026-06-10: poller is LIVE at a 10-min cadence;
+    // blank = not probed yet / not a sing-box node.
     assert!(
-        html.contains("Phase H chunk 4"),
-        "must point at chunk 4 so operator knows what's missing"
+        html.contains("every 10 min"),
+        "must state the live poller cadence"
     );
 }
 

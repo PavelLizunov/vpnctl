@@ -1111,8 +1111,12 @@ fn dashboard_vpn_activity(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (tr(
                     lang,
-                    "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user attribution is currently blocked upstream (NM-11: sing-box's clash-api wire format omits the User field); server-wide aggregates are unaffected.",
-                    "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user attribution заблокирован upstream (NM-11: sing-box's clash-api не передаёт поле User в wire-формате); сервер-агрегатные сводки работают.",
+                    // Refreshed (audit 2026-06-10): per-user numbers DO
+                    // exist now — the sing-box access-log scraper
+                    // attributes traffic per user; only the clash-api
+                    // path stays blocked upstream (NM-11).
+                    "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user numbers come from the access-log scraper on each user's page (clash-api itself omits the User field upstream — NM-11).",
+                    "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user цифры считает скрейпер access-логов — смотри страницу юзера (сам clash-api не передаёт поле User — NM-11).",
                 ))
             }
             @if !any_polled {
@@ -1235,8 +1239,13 @@ fn dashboard_idle_users(
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
                 (tr(
                     lang,
-                    "Users whose subscription URL hasn't been hit in 30+ days, or who have never connected. ",
-                    "Пользователи, чей URL подписки не запрашивался 30+ дней, либо ни разу не подключались. ",
+                    // Honest copy (audit 2026-06-10): the metric is
+                    // SUBSCRIPTION pulls, not tunnel traffic — a client
+                    // with a cached config can use the VPN daily and
+                    // still look «idle» here. Check the user's traffic
+                    // page before revoking.
+                    "Users whose subscription URL hasn't been pulled in 30+ days (or never). Apps with a cached config can still be USING the VPN — check the user's traffic page before revoking. ",
+                    "Пользователи, чей URL подписки не запрашивался 30+ дней (или никогда). Приложение с закэшированным конфигом может продолжать ПОЛЬЗОВАТЬСЯ VPN — проверь страницу трафика юзера перед отзывом. ",
                 ))
                 em { (tr(lang, "Click to drill in", "Кликни, чтобы зайти")) }
                 (tr(
@@ -1939,7 +1948,7 @@ pub(crate) async fn servers(
                 (crate::i18n::tr(lang, "No servers yet. Click ", "Серверов ещё нет. Кликни "))
                 span.ed-mono { (crate::i18n::tr(lang, "add server →", "добавить сервер →")) }
                 (crate::i18n::tr(lang, " above, or run ", " выше, или запусти "))
-                span.ed-mono { "vpnctl bootstrap <id> <address> <ssh-user> <ssh-port>" }
+                span.ed-mono { "vpnctl bootstrap <id> --address <addr> --root-password <pw>" }
                 (crate::i18n::tr(
                     lang,
                     " on a fresh node and refresh.",
@@ -3674,7 +3683,7 @@ pub(crate) async fn user_detail(
                     "No servers in the inventory yet. Run ",
                     "Серверов в инвентаре ещё нет. Запусти ",
                 ))
-                span.ed-mono { "vpnctl bootstrap <id> <ip>" }
+                span.ed-mono { "vpnctl bootstrap <id> --address <ip> --root-password <pw>" }
                 (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
             }
         } @else {
@@ -5147,8 +5156,13 @@ async fn live_vpn_stats_section(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 (tr(
                     lang,
-                    "No live stats yet. The clash-api poller is shipped (Track-3 chunks 1+2) but the daemon-side scheduler that pulls snapshots from each VPN node is queued for chunk 4 — it needs the SSH key on the vpnctld host's ",
-                    "Живой статистики пока нет. Поллер clash-api уже работает (Track-3 chunks 1+2), но шедулер на стороне демона, который снимает снэпшоты с каждой VPN-ноды, в очереди на chunk 4 — нужен SSH-ключ на хосте vpnctld в ",
+                    // Honest copy (audit 2026-06-10): the scheduler is
+                    // LIVE (spawn_clash_poller, 5-min cadence) — blank
+                    // here means no snapshot reached this user yet:
+                    // poller can't SSH the node, sing-box clash-api off,
+                    // or the user simply hasn't connected.
+                    "No live stats yet. The clash-api poller runs every 5 minutes — blank means no snapshot has covered this user yet: the node may be unreachable over SSH, its sing-box may lack the clash-api block, or the user hasn't connected. The poller needs the SSH key on the vpnctld host's ",
+                    "Живой статистики пока нет. Поллер clash-api снимает снэпшоты каждые 5 минут — пусто значит ни один снэпшот ещё не зацепил этого юзера: нода может быть недоступна по SSH, в её sing-box может не быть clash-api блока, либо юзер не подключался. Поллеру нужен SSH-ключ на хосте vpnctld в ",
                 ))
                 span.ed-mono { "/var/lib/vpnctl/.ssh" }
                 (tr(
@@ -6168,18 +6182,22 @@ pub(crate) async fn server_enable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.protocol.enable",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "protocol": protocol_id_str,
-                "newly_added": inserted == 1,
-            })),
-        )
-        .await
+    // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
+    // writes NO audit row — unconditional writes polluted the timeline
+    // and the `newly_added` flag inside is honest-but-buried.
+    if inserted == 1
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.protocol.enable",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "protocol": protocol_id_str,
+                    "newly_added": inserted == 1,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -6219,18 +6237,22 @@ pub(crate) async fn server_disable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.protocol.disable",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "protocol": protocol_id_str,
-                "was_present": removed == 1,
-            })),
-        )
-        .await
+    // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
+    // writes NO audit row — unconditional writes polluted the timeline
+    // and the `was_present` flag inside is honest-but-buried.
+    if removed == 1
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.protocol.disable",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "protocol": protocol_id_str,
+                    "was_present": removed == 1,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -6758,7 +6780,12 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         .inv
         .audit(
             "admin",
-            "server.quick-add",
+            // dot+underscore per naming convention (was the hyphenated
+            // `server.quick-add`). Convention-only: the action_kind
+            // chip maps the last dot-segment and `quick_add` still
+            // lands on «other» — the win is consistent `server.`-prefix
+            // filtering and one fewer odd-man-out name.
+            "server.quick_add",
             Some(&id),
             Some(&serde_json::json!({
                 "address": address,
@@ -6773,7 +6800,7 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
             target = "vpnctld::admin",
             server = %id,
             error = %e,
-            "audit write failed for server.quick-add"
+            "audit write failed for server.quick_add"
         );
     }
 
@@ -6817,18 +6844,22 @@ pub(crate) async fn server_enable_kernel(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.kernel.enable",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "kernel": kernel_id_str,
-                "newly_added": inserted == 1,
-            })),
-        )
-        .await
+    // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
+    // writes NO audit row — unconditional writes polluted the timeline
+    // and the `newly_added` flag inside is honest-but-buried.
+    if inserted == 1
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.kernel.enable",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "kernel": kernel_id_str,
+                    "newly_added": inserted == 1,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -6867,18 +6898,22 @@ pub(crate) async fn server_disable_kernel(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.kernel.disable",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "kernel": kernel_id_str,
-                "was_present": removed == 1,
-            })),
-        )
-        .await
+    // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
+    // writes NO audit row — unconditional writes polluted the timeline
+    // and the `was_present` flag inside is honest-but-buried.
+    if removed == 1
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.kernel.disable",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "kernel": kernel_id_str,
+                    "was_present": removed == 1,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -7307,8 +7342,12 @@ pub(crate) async fn server_grant_all_users(
     Path(server_id_str): Path<String>,
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id_str.clone());
-    if let Ok(None) = state.inv.get_server(&sid).await {
-        return not_found(&format!("no such server '{server_id_str}'"));
+    // 3-arm match (audit 2026-06-10): the old `if let Ok(None)` SWALLOWED
+    // the DB-error arm and fell through as if the server existed.
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     }
     let users = match state.inv.list_users().await {
         Ok(u) => u,
@@ -7444,8 +7483,12 @@ pub(crate) async fn server_revoke_all_users(
         ));
     }
     let sid = vpnctl_core::ServerId(server_id_str.clone());
-    if let Ok(None) = state.inv.get_server(&sid).await {
-        return not_found(&format!("no such server '{server_id_str}'"));
+    // 3-arm match (audit 2026-06-10): the old `if let Ok(None)` SWALLOWED
+    // the DB-error arm and fell through as if the server existed.
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     }
     let granted = match state.inv.users_for_server(&sid).await {
         Ok(v) => v,
@@ -7655,12 +7698,41 @@ pub(crate) async fn server_delete_confirm(
         Ok(None) => return Err(not_found(&format!("no such server '{server_id_str}'"))),
         Err(e) => return Err(internal_error(anyhow::Error::new(e))),
     };
-    let grant_count = state
-        .inv
-        .users_for_server(&sid)
-        .await
-        .map(|v| v.len())
-        .unwrap_or(0);
+    // `Option` so a DB error renders as «unknown», not a reassuring
+    // fake «0 grant(s)» (audit 2026-06-10).
+    let grant_count = match state.inv.users_for_server(&sid).await {
+        Ok(v) => Some(v.len()),
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "users_for_server failed on delete-confirm; rendering count as unknown"
+            );
+            None
+        }
+    };
+    // Telegram alert relay: deleting the proxy server is allowed (the
+    // FK is a deliberate non-cascade dangle, migration 0015) but every
+    // subsequent alert send will fail at SSH-spawn time — warn the
+    // operator BEFORE the delete, not in the logs after.
+    let is_telegram_proxy = match state.inv.get_telegram_config().await {
+        Ok(cfg) => cfg
+            .and_then(|c| c.proxy_via_server_id)
+            .is_some_and(|p| p == server_id_str),
+        Err(e) => {
+            // Don't silently drop the relay warning on a DB error —
+            // log it; the page still renders (warning-less, like the
+            // pre-fix behavior, but now visibly in the daemon log).
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "get_telegram_config failed on delete-confirm; relay warning suppressed"
+            );
+            false
+        }
+    };
     let back = format!("/admin/servers/{}", path_segment_encode(&server_id_str));
     let body = html! {
         div.ed-art-eyebrow {
@@ -7670,13 +7742,24 @@ pub(crate) async fn server_delete_confirm(
         h1.ed-art-h1 { "delete " em { (server_id_str) } " — really?" }
         p.ed-art-deck {
             "Drops the server (" span.ed-mono { (server.address) } ") from the inventory. "
-            b { (grant_count) " grant(s)" }
+            b {
+                @match grant_count {
+                    Some(n) => { (n) " grant(s)" },
+                    None => { "an unknown number of grants (inventory read failed — reload to retry)" },
+                }
+            }
             " cascade-delete — those users lose this server from their subscription on the next pull. "
             b { "Secrets" }
             " (REALITY keypair, short_id, obfs passwords) are deleted — re-adding the server later generates BRAND-NEW ones. "
             "Protocols, kernels, probe history + alerts also cascade. If another server uses this one as a ProxyJump host, that link is cleared. "
             b { "The sing-box on the node itself is NOT touched" }
             " — stop/wipe it on the host separately if the VPS lives on."
+        }
+        @if is_telegram_proxy {
+            p style="font-family: var(--mono); font-size: 11px; color: var(--acc); border: 1px solid var(--acc); padding: 8px 12px; margin: 10px 0;" {
+                b { "This server is the Telegram alert relay" }
+                " (settings → notifications → proxy-via). Deleting it silently breaks every alert send until you pick another relay or clear the setting."
+            }
         }
         p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
             "Type the server-id "
@@ -8404,9 +8487,23 @@ pub(crate) async fn audit_csv(
 /// `"`, `,`, `\n`, or `\r` we wrap it in double-quotes and double
 /// any internal quotes; otherwise return the field verbatim.
 fn csv_field(s: &str) -> String {
+    // Formula-injection guard (audit 2026-06-10, OWASP CSV-injection):
+    // Excel/LibreOffice execute a cell starting with = + - @ as a
+    // formula — an attacker-influenced field (user id, alert summary)
+    // beginning with `=HYPERLINK(...)` would run on the operator's
+    // machine when the export is opened. Standard mitigation: prefix a
+    // single quote, which spreadsheets treat as a text marker. Server
+    // ids may legitimately start with `-` — they render with a visible
+    // leading `'` in a spreadsheet, an accepted cosmetic cost.
+    let injectable = matches!(s.chars().next(), Some('=' | '+' | '-' | '@'));
+    let s = if injectable {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    };
     let needs_quote = s.contains(['"', ',', '\n', '\r']);
     if !needs_quote {
-        return s.to_string();
+        return s;
     }
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
@@ -10946,10 +11043,14 @@ pub(crate) async fn server_deploy_sse(
 
     // Same-origin guard for the state-changing GET.
     if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs == "cross-site" || sfs == "none" {
+        // Unified predicate (audit 2026-06-10, same as the geoip SSE):
+        // allow only "same-origin" (EventSource from an admin page) and
+        // "none" (direct navigation). The old check let "same-site"
+        // through while refusing "none" — opposite of the geoip guard.
+        if sfs != "same-origin" && sfs != "none" {
             return error_resp(
                 StatusCode::FORBIDDEN,
-                "cross-site deploy trigger refused (same-origin only)",
+                "cross-origin deploy trigger refused (same-origin only)",
             );
         }
     }
@@ -11012,10 +11113,14 @@ pub(crate) async fn servers_deploy_all_sse(
     use tokio_stream::StreamExt;
 
     if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs == "cross-site" || sfs == "none" {
+        // Unified predicate (audit 2026-06-10, same as the geoip SSE):
+        // allow only "same-origin" (EventSource from an admin page) and
+        // "none" (direct navigation). The old check let "same-site"
+        // through while refusing "none" — opposite of the geoip guard.
+        if sfs != "same-origin" && sfs != "none" {
             return error_resp(
                 StatusCode::FORBIDDEN,
-                "cross-site deploy trigger refused (same-origin only)",
+                "cross-origin deploy trigger refused (same-origin only)",
             );
         }
     }
@@ -11994,17 +12099,20 @@ fn server_detail_hero(
             div.ed-rule {}
             div.ed-art-eyebrow { (tr(lang, "Live status", "Живой статус")) }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                // Honest copy (audit 2026-06-10): the poller is LIVE
+                // (spawn_node_probe_poller, 10-min cadence) and probes
+                // sing-box servers only — blank means «not probed yet»
+                // or «not probeable», not «feature unshipped».
                 (tr(
                     lang,
-                    "No probes yet. The node-telemetry poller is scheduled for ",
-                    "Probe-ов пока нет. Поллер телеметрии нод запланирован в ",
+                    "No probes yet. The node-telemetry poller SSHes ",
+                    "Probe-ов пока нет. Поллер телеметрии SSH-ит ",
                 ))
-                em { (tr(lang, "Phase H chunk 4", "Phase H chunk 4")) }
-                (tr(lang, " — it'll SSH ", " — он будет SSH-ить ")) span.ed-mono { (server.address) }
+                span.ed-mono { (server.address) }
                 (tr(
                     lang,
-                    " every 5 min and persist disk/mem/load + listening-port observations. Until then this section reads as blank.",
-                    " каждые 5 минут и сохранять наблюдения disk/mem/load + слушающие порты. До тех пор раздел остаётся пустым.",
+                    " every 10 min for disk/mem/load + listening ports. Blank here means the first probe hasn't landed (fresh server / daemon restart), the node is unreachable over SSH, or this server has no sing-box kernel (only sing-box nodes are probed).",
+                    " каждые 10 минут за disk/mem/load + слушающими портами. Пусто значит: первый probe ещё не прошёл (новый сервер / рестарт демона), нода недоступна по SSH, либо у сервера нет ядра sing-box (probe-ятся только sing-box ноды).",
                 ))
             }
         };
@@ -12742,8 +12850,12 @@ fn server_detail_push_deploy_key_section(
                 button type="submit"
                        title=(crate::i18n::tr(
                            lang,
-                           "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. Tries reference key first (if configured) then falls back to sshpass + the password above.",
-                           "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. Сначала пробует reference-key (если настроен), затем fallback на sshpass + пароль выше.",
+                           // Honest copy (audit 2026-06-10): with the
+                           // password filled the handler goes straight
+                           // to sshpass — the reference key is tried
+                           // ONLY when the password field is empty.
+                           "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. With the password filled it connects via sshpass; leave the password empty to use the configured reference key instead.",
+                           "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. С заполненным паролем подключается через sshpass; оставь пароль пустым, чтобы использовать настроенный reference-key.",
                        ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                     (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
@@ -13170,7 +13282,7 @@ fn server_detail_reserved_ports_section(
 ///   * `manual` — operator pasted a fingerprint string into the form.
 ///     Same shape validation as the CLI side.
 ///
-/// Both audit-log `server.set_fingerprint` with the pinned value +
+/// Both audit-log `server.fingerprint.set` with the pinned value +
 /// source, then redirect to `/admin/servers/{id}` so the section
 /// re-renders with the new value visible.
 pub(crate) async fn server_set_fingerprint(
@@ -13255,19 +13367,27 @@ pub(crate) async fn server_set_fingerprint(
     if let Err(e) = state.inv.update_trusted_fingerprint(&sid, &fp).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.set_fingerprint",
-            Some(&server_id),
-            Some(&serde_json::json!({
-                "fingerprint": fp,
-                "previous": previous,
-                "source": source,
-            })),
-        )
-        .await
+    // Audit only a REAL pin change (NM-10) under the dot-convention
+    // name `server.fingerprint.set` (was `server.set_fingerprint` —
+    // the only server.* action with the verb glued to the domain,
+    // breaking `server.fingerprint.`-prefix filtering; renamed
+    // 2026-06-10, old rows keep the legacy name). A same-value re-pin
+    // is a no-op — writing a row made every re-submit look like a
+    // TOFU rotation in the timeline.
+    if previous.as_deref() != Some(fp.as_str())
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.fingerprint.set",
+                Some(&server_id),
+                Some(&serde_json::json!({
+                    "fingerprint": fp,
+                    "previous": previous,
+                    "source": source,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin::server_set_fingerprint",
@@ -13472,8 +13592,12 @@ pub(crate) async fn server_set_reserved_ports(
     body: String,
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id.clone());
-    if let Ok(None) = state.inv.get_server(&sid).await {
-        return not_found(&format!("no such server '{server_id}'"));
+    // 3-arm match (audit 2026-06-10): the old `if let Ok(None)` SWALLOWED
+    // the DB-error arm and fell through as if the server existed.
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
     let raw = form_field(&body, "ports").unwrap_or_default();
@@ -14019,7 +14143,7 @@ fn server_detail_drift_section(
                 }
                 @if !have_probe {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        (tr(lang, "(no probe — chunk 4 pending)", "(probe ещё нет — chunk 4 в очереди)"))
+                        (tr(lang, "(no probe yet — poller runs every 10 min; sing-box nodes only)", "(probe ещё нет — поллер ходит раз в 10 минут; только sing-box ноды)"))
                     }
                 } @else if observed.is_empty() {
                     p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
@@ -14342,5 +14466,27 @@ mod helper_tests {
             enrich_destination_label("www.microsoft.com:443", &cache),
             "www.microsoft.com:443"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod csv_tests {
+    use super::csv_field;
+
+    /// OWASP CSV-injection pin (audit 2026-06-10): a field starting
+    /// with = + - @ must be neutralised with a leading quote so
+    /// Excel/LibreOffice render text instead of executing a formula.
+    #[test]
+    fn csv_field_neutralises_formula_prefixes() {
+        assert_eq!(csv_field("=HYPERLINK(1)"), "'=HYPERLINK(1)");
+        assert_eq!(csv_field("+1"), "'+1");
+        assert_eq!(csv_field("-srv"), "'-srv");
+        assert_eq!(csv_field("@cmd"), "'@cmd");
+        // Quoting still composes with the injection guard.
+        assert_eq!(csv_field("=a,b"), "\"'=a,b\"");
+        // Plain fields stay untouched.
+        assert_eq!(csv_field("user.grant"), "user.grant");
+        assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
     }
 }

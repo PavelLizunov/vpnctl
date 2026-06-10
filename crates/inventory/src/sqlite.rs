@@ -2058,14 +2058,14 @@ impl SqliteInventory {
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        let pat = format!("%{}%", q.to_lowercase());
+        let pat = format!("%{}%", escape_like(&q.to_lowercase()));
         let rows = sqlx::query(
             "SELECT id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled
              FROM users
-             WHERE LOWER(id) LIKE ?1
-                OR LOWER(uuid) LIKE ?1
-                OR LOWER(COALESCE(sub_token, '')) LIKE ?1
-                OR LOWER(COALESCE(vpn_router_device_id, '')) LIKE ?1
+             WHERE LOWER(id) LIKE ?1 ESCAPE '\\'
+                OR LOWER(uuid) LIKE ?1 ESCAPE '\\'
+                OR LOWER(COALESCE(sub_token, '')) LIKE ?1 ESCAPE '\\'
+                OR LOWER(COALESCE(vpn_router_device_id, '')) LIKE ?1 ESCAPE '\\'
              ORDER BY id
              LIMIT ?2",
         )
@@ -2086,10 +2086,10 @@ impl SqliteInventory {
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        let pat = format!("%{}%", q.to_lowercase());
+        let pat = format!("%{}%", escape_like(&q.to_lowercase()));
         let rows = sqlx::query(
             "SELECT id FROM servers
-             WHERE LOWER(id) LIKE ?1 OR LOWER(address) LIKE ?1
+             WHERE LOWER(id) LIKE ?1 ESCAPE '\\' OR LOWER(address) LIKE ?1 ESCAPE '\\'
              ORDER BY id
              LIMIT ?2",
         )
@@ -2113,11 +2113,11 @@ impl SqliteInventory {
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        let pat = format!("%{}%", q.to_lowercase());
+        let pat = format!("%{}%", escape_like(&q.to_lowercase()));
         let rows = sqlx::query(
             "SELECT id, created_at, kind, server_id, severity, summary, payload_json, acked_at
              FROM admin_alerts
-             WHERE LOWER(kind) LIKE ?1 OR LOWER(summary) LIKE ?1
+             WHERE LOWER(kind) LIKE ?1 ESCAPE '\\' OR LOWER(summary) LIKE ?1 ESCAPE '\\'
              ORDER BY id DESC
              LIMIT ?2",
         )
