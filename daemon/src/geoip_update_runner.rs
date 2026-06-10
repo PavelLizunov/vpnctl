@@ -261,6 +261,29 @@ mod tests {
         M.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
+    /// Wait until the process-global `concurrent_fire_gate()` is
+    /// actually free.
+    ///
+    /// Holding `test_gate_serializer` only serializes test *bodies*;
+    /// it does NOT guarantee the gate permit from the previous test is
+    /// already released. `run_update` drops its permit inside the
+    /// `spawn_blocking` task *after* the terminal event is sent, so a
+    /// prior test can return (and release the serializer) while that
+    /// background task is still between "sent terminal event" and
+    /// "dropped permit". Every gate-touching test calls this right
+    /// after taking the serializer so it observes a quiescent gate —
+    /// otherwise `run_update` would race-fail with an "already running"
+    /// Error (CI saw exactly this flake).
+    async fn await_gate_free() {
+        for _ in 0..200 {
+            if concurrent_fire_gate().available_permits() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("gate must become free within 1s (no real subprocess holds it this long)");
+    }
+
     #[test]
     fn event_name_matches_serde_tag() {
         // Pinning the SSE event name → JSON tag mapping. The UI's
@@ -293,6 +316,7 @@ mod tests {
     #[tokio::test]
     async fn run_update_streams_subprocess_stdout_then_ok_on_success() {
         let _serial = test_gate_serializer().lock().await;
+        await_gate_free().await;
         // Use `/bin/sh -c 'echo hi'` as a stand-in for `vpnctl
         // geoip-update` — we want to prove the wiring (stdout →
         // Step → Ok), not the geoip download itself.
@@ -328,6 +352,7 @@ mod tests {
     #[tokio::test]
     async fn run_update_emits_error_when_binary_missing() {
         let _serial = test_gate_serializer().lock().await;
+        await_gate_free().await;
         // Spawn a path that definitely doesn't exist → spawn fails
         // → terminal Error event, no Step events. Use a tempdir
         // so the test is portable across Linux distros (don't
@@ -352,6 +377,7 @@ mod tests {
     #[tokio::test]
     async fn run_update_emits_error_when_subprocess_exits_nonzero() {
         let _serial = test_gate_serializer().lock().await;
+        await_gate_free().await;
         // /bin/false exits 1 without output. Should yield zero
         // Steps + a terminal Error mentioning the exit status.
         let mut stream = run_update("/bin/false".to_string());
@@ -391,12 +417,13 @@ mod tests {
         // thread for the full download duration). Instead it gets
         // a single Error event explaining the situation.
         //
+        await_gate_free().await;
         // We acquire a permit manually so the gate is "busy" without
         // having to spawn a real long-running subprocess that would
         // make the test slow + flaky.
         let _hold = concurrent_fire_gate()
             .try_acquire()
-            .expect("first acquire must succeed (serializer ensures no other test holds it)");
+            .expect("first acquire must succeed (gate confirmed free above)");
         let mut stream = run_update("/bin/echo".to_string());
         let ev = stream.next().await.expect("expected one Error event");
         match &ev {

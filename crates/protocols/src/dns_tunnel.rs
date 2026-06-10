@@ -32,21 +32,22 @@
 //! ## Share-link wire format
 //!
 //! ```text
-//! dns-tunnel://<base64url-nopad(JSON{v:1, d, r, fp, uuid})>#<query-escaped-label>
+//! dns-tunnel://<base64url-nopad(JSON{v, d, r, fp, uuid, cert?})>#<query-escaped-label>
 //! ```
 //!
-//! Fields (all required — the two-process client can't start without
-//! any of them):
+//! Fields:
+//!   * `v`    — format version. `1` (no `cert`) or `2` (with `cert`); see
+//!     the versioning note below. Required.
 //!   * `d`    — tunnel domain (the slipstream `-d` value; doubles as the
-//!     QUIC SNI). Operator-set secret `dns-tunnel:domain`.
+//!     QUIC SNI). Operator-set secret `dns-tunnel:domain`. Required.
 //!   * `r`    — multipath resolver list (`["195.208.4.1:53","195.208.5.1:53"]`),
 //!     the slipstream-client `-r` flags. Operator-set secret
 //!     `dns-tunnel:resolvers` (comma-separated); a vpnctl default of the
-//!     two НСДИ resolvers applies when unset.
+//!     two НСДИ resolvers applies when unset. Required.
 //!   * `fp`   — the node-auto-generated ECDSA-P256 leaf cert SHA-256
-//!     fingerprint, for client-side cert pinning (the cert is
+//!     fingerprint, for client-side cert pinning / display (the cert is
 //!     self-signed → the pin replaces a CA). NOT a secret — it's a
-//!     public pin. Operator-set secret `dns-tunnel:fingerprint`.
+//!     public pin. Operator-set secret `dns-tunnel:fingerprint`. Required.
 //!   * `uuid` — the wrapped loopback VLESS UUID. This is the USER'S OWN
 //!     per-user identity (`User.uuid`) — the SAME UUID they already
 //!     carry for VLESS-REALITY — reusing the standard vpnctl user model
@@ -58,12 +59,33 @@
 //!     `dns-tunnel:loopback_uuid` secret (PoC `${TUNNEL_UUID}`) survives
 //!     only as the kernel's optional backward-compat fallback entry. The
 //!     low-tech user still imports a single artefact with nothing to fill
-//!     in (CLAUDE.md north-star).
+//!     in (CLAUDE.md north-star). Required.
+//!   * `cert` — OPTIONAL. The FULL server leaf certificate in PEM
+//!     (`-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----`,
+//!     multi-line, the `\n` line breaks survive JSON as an escaped
+//!     string). Present ONLY when the operator has set the
+//!     `dns-tunnel:cert_pem` secret. `slipstream-client` pins the
+//!     self-signed cert with `--cert <leaf.pem>` (a FULL PEM file) —
+//!     it has NO `--pin <hash>` flag — so the SHA-256 `fp` alone is NOT
+//!     consumable by the client. The client writes `cert` to a temp file
+//!     and passes `--cert <that file>`. When `cert` is present the
+//!     profile is fully self-contained (the client needs no out-of-band
+//!     PEM). `fp` stays alongside `cert` for human verification / display.
 //!
-//! Format version is `1`; an older client fails a newer version with
-//! «unsupported version». The byte-shape is pinned by
-//! `spec_dns_tunnel.rs` (cargo-mutants soft-fails on the protocols
-//! crate, so an exact-bytes test is the regression net).
+//! ### Versioning
+//!
+//! Backward-compat is decided by FIELD PRESENCE, with `v` as a redundant
+//! signal:
+//!   * `dns-tunnel:cert_pem` UNSET → output is byte-identical to the
+//!     historical link: `{d, fp, r, uuid, v:1}`, NO `cert` field. Pre-cert
+//!     consumers keep working unchanged.
+//!   * `dns-tunnel:cert_pem` SET → `v` is bumped to `2` AND the `cert`
+//!     field is added. A consumer can detect cert-carrying links by EITHER
+//!     `v == 2` OR the presence of `cert` (both signal the same thing).
+//!
+//! Format version is pinned by `spec_dns_tunnel.rs` (cargo-mutants
+//! soft-fails on the protocols crate, so an exact-bytes test is the
+//! regression net).
 //!
 //! ## server_inbound + client_config
 //!
@@ -81,9 +103,17 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-/// Format-version byte the dns-tunnel share-link carries under the `v`
-/// key. Bumping requires a coordinated client + server change.
-const FORMAT_VERSION: i32 = 1;
+/// Format-version byte for a cert-LESS dns-tunnel share-link (the
+/// historical shape `{d, fp, r, uuid, v:1}`). Emitted when the
+/// `dns-tunnel:cert_pem` secret is absent — byte-identical to the
+/// pre-cert link so existing consumers don't break.
+const FORMAT_VERSION_NO_CERT: i32 = 1;
+
+/// Format-version byte for a cert-CARRYING dns-tunnel share-link (adds
+/// the optional `cert` field with the full leaf PEM). Emitted ONLY when
+/// the `dns-tunnel:cert_pem` secret is set. Consumers can detect the
+/// richer shape by EITHER `v == 2` OR the presence of `cert`.
+const FORMAT_VERSION_WITH_CERT: i32 = 2;
 
 /// vpnctl default multipath resolver set — both НСДИ resolvers
 /// (`195.208.4.1` / `195.208.5.1`), which stay reachable even under
@@ -118,18 +148,40 @@ impl DnsTunnel {
 ///
 /// **Key order:** `serde_json::Value::Object` is a `BTreeMap` (the
 /// `preserve_order` feature is NOT enabled in our workspace), so keys
-/// serialise in lexicographic order — `d, fp, r, uuid, v` — NOT
+/// serialise in lexicographic order — `cert, d, fp, r, uuid, v` — NOT
 /// declaration order. The byte-stability guarantee holds because
 /// `BTreeMap` ordering is deterministic per key set. The two-process
 /// client parser is field-order-insensitive (`serde`/`encoding-json`).
-fn build_wire_format(domain: &str, resolvers: &[String], fingerprint: &str, uuid: &str) -> Value {
-    json!({
-        "v": FORMAT_VERSION,
-        "d": domain,
-        "r": resolvers,
-        "fp": fingerprint,
-        "uuid": uuid,
-    })
+///
+/// `cert_pem` is the OPTIONAL full leaf-cert PEM. When `Some`, the
+/// payload gains a `cert` field (the full PEM, line breaks preserved as
+/// `\n` through JSON) AND `v` becomes `2`; when `None` the output is
+/// byte-identical to the historical `v:1` link (no `cert` field) for
+/// backward compatibility.
+fn build_wire_format(
+    domain: &str,
+    resolvers: &[String],
+    fingerprint: &str,
+    uuid: &str,
+    cert_pem: Option<&str>,
+) -> Value {
+    match cert_pem {
+        Some(cert) => json!({
+            "v": FORMAT_VERSION_WITH_CERT,
+            "d": domain,
+            "r": resolvers,
+            "fp": fingerprint,
+            "uuid": uuid,
+            "cert": cert,
+        }),
+        None => json!({
+            "v": FORMAT_VERSION_NO_CERT,
+            "d": domain,
+            "r": resolvers,
+            "fp": fingerprint,
+            "uuid": uuid,
+        }),
+    }
 }
 
 /// Parse the comma-separated `dns-tunnel:resolvers` secret (or the
@@ -203,12 +255,14 @@ impl Protocol for DnsTunnel {
         // 16 bytes of entropy is a UUID's worth.
         //
         // `dns-tunnel:domain`, `dns-tunnel:resolvers`,
-        // `dns-tunnel:fingerprint`, `dns-tunnel:forward_target` and
-        // `dns-tunnel:engine` are operator-set PARAMS (the cert
-        // fingerprint is the node-auto-generated ECDSA leaf's SHA-256,
-        // captured by the operator after first run), so nothing to
-        // mint for them. The ECDSA keypair is node-auto-generated by
-        // slipstream on first start → NO crypto secret declared here.
+        // `dns-tunnel:fingerprint`, `dns-tunnel:cert_pem`,
+        // `dns-tunnel:forward_target` and `dns-tunnel:engine` are
+        // operator-set PARAMS (the cert fingerprint is the
+        // node-auto-generated ECDSA leaf's SHA-256, and `cert_pem` is the
+        // full leaf-cert PEM, both captured by the operator after first
+        // run), so nothing to mint for them. The ECDSA keypair is
+        // node-auto-generated by slipstream on first start → NO crypto
+        // secret declared here.
         vec![vpnctl_core::ServerSecretSpec::Password {
             key: "dns-tunnel:loopback_uuid",
             entropy_bytes: 16,
@@ -268,7 +322,22 @@ impl Protocol for DnsTunnel {
             )));
         }
 
-        let wire = build_wire_format(domain, &resolvers, fingerprint, uuid);
+        // ── Full leaf-cert PEM — operator-set, OPTIONAL. ──────────────
+        // `slipstream-client` pins the self-signed cert with
+        // `--cert <leaf.pem>` (a FULL PEM file; there is NO `--pin <hash>`
+        // flag), so the SHA-256 `fp` alone is not consumable by the
+        // client. When the operator has captured the node's leaf cert and
+        // set `dns-tunnel:cert_pem`, embed the full PEM under `cert` so
+        // the profile is self-contained (the client writes it to a temp
+        // file and passes `--cert`). Absent → behave exactly as before
+        // (no `cert`, `v:1`); setting it is a separate ops step.
+        let cert_pem = ctx
+            .secrets
+            .get("dns-tunnel:cert_pem")
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty());
+
+        let wire = build_wire_format(domain, &resolvers, fingerprint, uuid, cert_pem);
         let json_bytes = serde_json::to_vec(&wire)
             .map_err(|e| CoreError::Render(format!("dns-tunnel share_link: marshal: {e}")))?;
         let payload = URL_SAFE_NO_PAD.encode(&json_bytes);
@@ -286,6 +355,10 @@ mod tests {
 
     const FAKE_FP: &str = "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
     const FAKE_UUID: &str = "e09b09af-2500-4753-b219-937ce13b5257";
+    /// A multi-line dummy leaf-cert PEM. The point is the BEGIN/END
+    /// markers + embedded newlines survive base64url + JSON round-trip.
+    const FAKE_CERT_PEM: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIBdummyLine1\nMIIBdummyLine2\n-----END CERTIFICATE-----\n";
 
     fn dummy_user() -> User {
         User {
@@ -454,6 +527,124 @@ mod tests {
         let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(v["uuid"], dummy_user().uuid);
+    }
+
+    #[test]
+    fn share_link_embeds_full_cert_pem_when_secret_present() {
+        // With `dns-tunnel:cert_pem` set the link carries the FULL PEM
+        // under `cert` (so the client can write it to a temp file +
+        // `--cert`), bumps `v` to 2, and STILL carries the per-user uuid
+        // and the fingerprint.
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:cert_pem".into(), FAKE_CERT_PEM.into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["v"], 2, "cert-carrying link bumps version to 2");
+        assert_eq!(v["cert"], FAKE_CERT_PEM, "full PEM must round-trip");
+        // BEGIN/END markers + newlines survive base64url + JSON.
+        let cert = v["cert"].as_str().unwrap();
+        assert!(cert.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(cert.contains("-----END CERTIFICATE-----"));
+        assert!(cert.contains('\n'), "PEM line breaks must survive");
+        // uuid is still the per-user identity; fp still present.
+        assert_eq!(v["uuid"], dummy_user().uuid);
+        assert_eq!(v["fp"], FAKE_FP);
+    }
+
+    #[test]
+    fn share_link_without_cert_pem_is_unchanged_v1() {
+        // Backward-compat: absent `dns-tunnel:cert_pem` → no `cert` field,
+        // v stays 1, fp present — byte-identical to the historical link.
+        let server = dummy_server();
+        let secrets = secrets_complete();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["v"], 1);
+        assert!(v.get("cert").is_none(), "no cert field when secret unset");
+        assert_eq!(v["fp"], FAKE_FP, "fp stays present");
+    }
+
+    #[test]
+    fn share_link_blank_cert_pem_treated_as_absent() {
+        // A whitespace-only secret must NOT flip the link to v2 with an
+        // empty cert — treat it as absent (defensive against a cleared
+        // secret left as "" / "  ").
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:cert_pem".into(), "   \n  ".into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["v"], 1);
+        assert!(v.get("cert").is_none());
+    }
+
+    #[test]
+    fn share_link_two_users_share_cert_distinct_uuid() {
+        // Two granted users → same cert + domain (server-wide), distinct
+        // per-user uuid.
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:cert_pem".into(), FAKE_CERT_PEM.into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let alice = dummy_user();
+        let mut bob = dummy_user();
+        bob.id = UserId("bob".into());
+        bob.uuid = "22222222-2222-2222-2222-222222222222".into();
+
+        let decode = |link: &str| -> serde_json::Value {
+            let payload = link
+                .strip_prefix("dns-tunnel://")
+                .unwrap()
+                .split('#')
+                .next()
+                .unwrap();
+            let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+            serde_json::from_slice(&raw).unwrap()
+        };
+        let va = decode(&DnsTunnel::new().share_link(&ctx, &alice).unwrap());
+        let vb = decode(&DnsTunnel::new().share_link(&ctx, &bob).unwrap());
+        assert_eq!(va["cert"], FAKE_CERT_PEM);
+        assert_eq!(vb["cert"], FAKE_CERT_PEM);
+        assert_eq!(va["d"], vb["d"]);
+        assert_ne!(va["uuid"], vb["uuid"]);
+        assert_eq!(va["uuid"], alice.uuid);
+        assert_eq!(vb["uuid"], bob.uuid);
+    }
+
+    #[test]
+    fn share_link_with_cert_is_byte_stable() {
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:cert_pem".into(), FAKE_CERT_PEM.into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let a = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let b = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        assert_eq!(a, b, "cert-carrying share_link is not byte-stable");
     }
 
     #[test]

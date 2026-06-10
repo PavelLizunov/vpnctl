@@ -16,6 +16,21 @@ use vpnctl_protocols::DnsTunnel;
 
 const FP: &str = "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
 const UUID: &str = "e09b09af-2500-4753-b219-937ce13b5257";
+/// Multi-line dummy leaf-cert PEM — the BEGIN/END markers + embedded
+/// newlines must survive base64url + JSON round-trip intact.
+const CERT_PEM: &str =
+    "-----BEGIN CERTIFICATE-----\nMIIBfakeLineOne\nMIIBfakeLineTwo\n-----END CERTIFICATE-----\n";
+
+fn decode_payload(link: &str) -> serde_json::Value {
+    let payload = link
+        .strip_prefix("dns-tunnel://")
+        .unwrap()
+        .split('#')
+        .next()
+        .unwrap();
+    let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+    serde_json::from_slice(&raw).unwrap()
+}
 
 fn srv() -> Server {
     Server {
@@ -259,6 +274,89 @@ fn share_link_errors_name_the_missing_secret() {
             "error for missing {missing} must name it: {err}"
         );
     }
+}
+
+#[test]
+fn share_link_embeds_full_leaf_cert_pem_when_secret_set() {
+    // With `dns-tunnel:cert_pem` set, the per-user profile carries the
+    // FULL leaf PEM under `cert` (so `slipstream-client --cert <pem>` is
+    // satisfiable), `v` bumps to 2, and the per-user uuid + fp remain.
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:cert_pem".into(), CERT_PEM.into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let link = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let v = decode_payload(&link);
+    assert_eq!(v["v"], 2, "cert-carrying link is v2: {v}");
+    assert_eq!(v["cert"], CERT_PEM, "full PEM must round-trip verbatim");
+    let cert = v["cert"].as_str().unwrap();
+    assert!(
+        cert.contains("-----BEGIN CERTIFICATE-----"),
+        "BEGIN marker lost: {cert}"
+    );
+    assert!(
+        cert.contains("-----END CERTIFICATE-----"),
+        "END marker lost: {cert}"
+    );
+    assert!(cert.contains('\n'), "PEM newlines lost: {cert}");
+    assert_eq!(v["uuid"], user("alex").uuid, "per-user uuid stays");
+    assert_eq!(v["fp"], FP, "fingerprint stays alongside cert");
+}
+
+#[test]
+fn share_link_without_cert_pem_is_backward_compatible_v1() {
+    // Backward-compat contract: absent `dns-tunnel:cert_pem` → NO `cert`
+    // field, `v` stays 1, `fp` present → byte-identical to the historical
+    // pre-cert link. Reconstruct the expected v1 shape and assert equality.
+    let s = srv();
+    let sec = secrets();
+    let ctx = RenderCtx::new(&s, &sec);
+    let link = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let v = decode_payload(&link);
+    assert_eq!(v["v"], 1);
+    assert!(v.get("cert").is_none(), "no cert field when secret unset");
+    assert_eq!(v["fp"], FP);
+
+    let expected_json = serde_json::json!({
+        "v": 1,
+        "d": "t.example.com",
+        "r": ["195.208.4.1:53", "195.208.5.1:53"],
+        "fp": FP,
+        "uuid": user("alex").uuid,
+    });
+    let expected_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expected_json).unwrap());
+    let expected = format!("dns-tunnel://{expected_payload}#alex");
+    assert_eq!(link, expected, "cert-less link drifted from v1 shape");
+}
+
+#[test]
+fn share_link_two_users_share_cert_distinct_uuid() {
+    // Two granted users → identical server-wide cert + domain, distinct
+    // per-user uuid.
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:cert_pem".into(), CERT_PEM.into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let va = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap());
+    let vb = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("bob")).unwrap());
+    assert_eq!(va["cert"], CERT_PEM);
+    assert_eq!(vb["cert"], CERT_PEM);
+    assert_eq!(va["d"], vb["d"]);
+    assert_eq!(va["uuid"], user("alex").uuid);
+    assert_eq!(vb["uuid"], user("bob").uuid);
+    assert_ne!(va["uuid"], vb["uuid"]);
+}
+
+#[test]
+fn share_link_with_cert_is_byte_stable() {
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:cert_pem".into(), CERT_PEM.into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let a = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let b = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    assert_eq!(a, b, "cert-carrying share_link not byte-stable");
+    assert!(!a.contains('\r') && !a.contains('\n'), "CR/LF in URL: {a}");
 }
 
 #[test]
