@@ -176,6 +176,39 @@ When making non-trivial design decisions, re-read this section first
 and check the choice doesn't quietly bake in an assumption that
 contradicts a confirmed answer above.
 
+## Multi-session conventions (BLOCKING — общее дерево, несколько сессий)
+
+Pavel работает из **нескольких параллельных сессий Claude** в одном и
+том же рабочем дереве `/home/user/vpn-control/vpnctl`. У каждой сессии
+свои таски, ветки и uncommitted-файлы. Правила, чтобы сессии не топтали
+друг друга (введены 2026-06-10 после инцидента: сессия закоммитила фикс
+на чужую ветку `feat/server-delete`, предположив, что дерево на main):
+
+1. **`git branch --show-current` ПЕРЕД каждым коммитом.** Другая сессия
+   могла переключить дерево в любой момент. Никогда не предполагай main —
+   даже если в начале твоей сессии это был main.
+2. **Stage только свои файлы.** Никогда `git add -A` / `git add .` — в
+   дереве почти всегда чужие uncommitted-правки. `git status --short`
+   перед коммитом; чужие `M`/`??` файлы не стейджить и не «чинить».
+3. **Не трогать чужое состояние.** Никаких `reset --hard` / `checkout` /
+   `stash` / `clean`, затрагивающих не-свои файлы или ветку другой
+   сессии. Если свой коммит попал на чужую ветку: `git worktree add` от
+   main → `cherry-pick <sha>` → на чужой ветке `git reset --keep
+   <sha>~1` (`--keep`, НЕ `--hard` — `--hard` снесёт чужие uncommitted
+   tracked-правки).
+4. **Работа для main — через свой worktree** (`git worktree add
+   /tmp/vpnctl-<topic> main`), а не через переключение общего дерева.
+   `git worktree list` показывает занятые. Гочи: `cargo zigbuild` в
+   worktree требует СВОЙ `target/` (с `CARGO_TARGET_DIR` на общий target
+   падает с «cannot find binary path»); следи за диском (`just gc`).
+5. **Деплой на 192.168.0.236 — ТОЛЬКО из main (CI green).** Прод-демон
+   один: деплой из feature-ветки перезапишет бинарь и потеряет фиксы
+   других сессий. Перед деплоем — бэкап текущего бинаря
+   (`sudo cp -a /opt/vpnctl/vpnctld /opt/vpnctl/vpnctld.bak-<метка>`).
+6. **После `git pull` перепроверь ветку** (п.1): pull на чужой ветке
+   тянет её upstream, не main — «Merge … into <branch>» в выводе pull
+   это красный флаг, что ты не на main.
+
 ## Workflow rules (BLOCKING — must run before every commit)
 
 Эти правила — про то, как мы (Pavel + Claude) разрабатываем `vpnctl`.
