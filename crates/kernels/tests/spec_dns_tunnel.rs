@@ -305,6 +305,60 @@ fn render_rejects_non_numeric_listen_port() {
 }
 
 #[test]
+fn render_emits_default_idle_timeout_180() {
+    // With no `dns-tunnel:idle_timeout_seconds` secret the relay env +
+    // ExecStart carry the deliberate 180s bump (from upstream's 60s).
+    let sec = secrets();
+    let body = render(&sec, &[]).unwrap();
+    assert!(
+        body.contains("SLIPSTREAM_IDLE_TIMEOUT_SECONDS=180"),
+        "default idle-timeout env var missing:\n{body}"
+    );
+}
+
+#[test]
+fn render_honours_idle_timeout_override() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:idle_timeout_seconds".into(), "300".into());
+    let body = render(&sec, &[]).unwrap();
+    assert!(
+        body.contains("SLIPSTREAM_IDLE_TIMEOUT_SECONDS=300"),
+        "idle-timeout override not honoured:\n{body}"
+    );
+    assert!(
+        !body.contains("SLIPSTREAM_IDLE_TIMEOUT_SECONDS=180"),
+        "default leaked alongside override:\n{body}"
+    );
+}
+
+#[test]
+fn render_rejects_non_numeric_idle_timeout() {
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:idle_timeout_seconds".into(), "forever".into());
+    let err = render(&sec, &[]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("dns-tunnel:idle_timeout_seconds"),
+        "msg: {msg}"
+    );
+    assert!(msg.contains("forever"), "msg: {msg}");
+}
+
+#[test]
+fn render_rejects_zero_idle_timeout() {
+    // 0 disables the idle timeout in slipstream — never wanted here.
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:idle_timeout_seconds".into(), "0".into());
+    let err = render(&sec, &[]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("dns-tunnel:idle_timeout_seconds"),
+        "msg: {msg}"
+    );
+    assert!(msg.contains("1..=65535"), "msg: {msg}");
+}
+
+#[test]
 fn render_config_rejects_domain_with_newline_injection() {
     // A newline in the operator-set domain would forge a second
     // `KEY=value` line in the slipstream EnvironmentFile (env-file line
