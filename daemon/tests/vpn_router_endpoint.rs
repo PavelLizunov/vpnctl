@@ -1335,9 +1335,13 @@ async fn vpn_router_dns_tunnel_uri_appended_after_all_vless() {
         dnst.starts_with("dns-tunnel://"),
         "dns-tunnel must be last: {lines:?}"
     );
-    // Operator label surfaces in the fragment, like vless/naive.
+    // Operator label surfaces in the fragment, like vless/naive. The
+    // `WL-BYPASS` tag (whitelist-bypass — the break-glass transport)
+    // uses a hyphen so it stays a single token (no space) for any
+    // client-side fragment parser; the hyphen is unreserved in
+    // NINITUX_QUOTE so it is NOT percent-encoded.
     assert!(
-        dnst.ends_with("#Iceland%20DNS%20~tester-1"),
+        dnst.ends_with("#Iceland%20WL-BYPASS%20~tester-1"),
         "dns-tunnel fragment must carry the server display label: {dnst}"
     );
     // No co-located UDP sibling → no pairing tag.

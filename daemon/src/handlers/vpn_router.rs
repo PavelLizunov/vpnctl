@@ -866,7 +866,7 @@ pub(crate) async fn get_config(
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
         ("hysteria2", "HY2", None),
-        ("dns-tunnel", "DNS", Some("dns-tunnel:domain")),
+        ("dns-tunnel", "WL-BYPASS", Some("dns-tunnel:domain")),
     ];
     for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {
         let pid = vpnctl_core::ProtocolId((*pid_str).to_string());
