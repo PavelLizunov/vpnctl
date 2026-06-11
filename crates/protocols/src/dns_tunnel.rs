@@ -32,18 +32,22 @@
 //! ## Share-link wire format
 //!
 //! ```text
-//! dns-tunnel://<base64url-nopad(JSON{v, d, r, fp, uuid, cert?})>#<query-escaped-label>
+//! dns-tunnel://<base64url-nopad(JSON{v, d, r, fp, uuid, cert?, auth?})>#<query-escaped-label>
 //! ```
 //!
 //! Fields:
 //!   * `v`    — format version. `1` (no `cert`) or `2` (with `cert`); see
-//!     the versioning note below. Required.
+//!     the versioning note below. Required. NOTE: `auth` (below) is
+//!     INDEPENDENT of `v` — adding `auth` does NOT change the version; its
+//!     presence is signalled by the field itself.
 //!   * `d`    — tunnel domain (the slipstream `-d` value; doubles as the
 //!     QUIC SNI). Operator-set secret `dns-tunnel:domain`. Required.
 //!   * `r`    — multipath resolver list (`["195.208.4.1:53","195.208.5.1:53"]`),
 //!     the slipstream-client `-r` flags. Operator-set secret
 //!     `dns-tunnel:resolvers` (comma-separated); a vpnctl default of the
-//!     two НСДИ resolvers applies when unset. Required.
+//!     two НСДИ resolvers applies when unset. Required. ALWAYS present —
+//!     it's the censorship-network fallback path, NEVER removed or gated
+//!     by the presence of `auth`.
 //!   * `fp`   — the node-auto-generated ECDSA-P256 leaf cert SHA-256
 //!     fingerprint, for client-side cert pinning / display (the cert is
 //!     self-signed → the pin replaces a CA). NOT a secret — it's a
@@ -71,6 +75,19 @@
 //!     and passes `--cert <that file>`. When `cert` is present the
 //!     profile is fully self-contained (the client needs no out-of-band
 //!     PEM). `fp` stays alongside `cert` for human verification / display.
+//!   * `auth` — OPTIONAL. The AUTHORITATIVE DNS endpoint(s) the box binds
+//!     directly (`213.155.15.93:53`), so an r6+ client can run
+//!     `slipstream-client --authoritative <auth>` and bypass the recursive
+//!     НСДИ resolvers entirely (the recursor drops the covert-DNS stream
+//!     after a few minutes — see `plans/dns-tunnel-server-side-2026-06-11.md`).
+//!     Present ONLY when the operator has set the `dns-tunnel:authoritative`
+//!     secret. Value semantics mirror the secret: a SINGLE `host:port`
+//!     emits `auth` as a JSON STRING; a comma-separated MULTI value emits
+//!     `auth` as a JSON ARRAY of strings (the client accepts string OR
+//!     array). The authoritative path is fast + stable but NOT
+//!     whitelist/DPI-resistant (DNS goes straight to the box IP) — `r`
+//!     stays the censorship fallback. `auth` is INDEPENDENT of `v`: it does
+//!     NOT bump the version; its presence alone signals the capability.
 //!
 //! ### Versioning
 //!
@@ -82,6 +99,11 @@
 //!   * `dns-tunnel:cert_pem` SET → `v` is bumped to `2` AND the `cert`
 //!     field is added. A consumer can detect cert-carrying links by EITHER
 //!     `v == 2` OR the presence of `cert` (both signal the same thing).
+//!   * `dns-tunnel:authoritative` is ORTHOGONAL to the version: setting it
+//!     adds an `auth` field but does NOT touch `v` (a cert-less link with
+//!     `auth` is still `v:1`; a cert-carrying link with `auth` is still
+//!     `v:2`). A consumer detects the authoritative capability purely by
+//!     the presence of `auth`, not by `v`.
 //!
 //! Format version is pinned by `spec_dns_tunnel.rs` (cargo-mutants
 //! soft-fails on the protocols crate, so an exact-bytes test is the
@@ -148,8 +170,8 @@ impl DnsTunnel {
 ///
 /// **Key order:** `serde_json::Value::Object` is a `BTreeMap` (the
 /// `preserve_order` feature is NOT enabled in our workspace), so keys
-/// serialise in lexicographic order — `cert, d, fp, r, uuid, v` — NOT
-/// declaration order. The byte-stability guarantee holds because
+/// serialise in lexicographic order — `auth, cert, d, fp, r, uuid, v` —
+/// NOT insertion order. The byte-stability guarantee holds because
 /// `BTreeMap` ordering is deterministic per key set. The two-process
 /// client parser is field-order-insensitive (`serde`/`encoding-json`).
 ///
@@ -158,29 +180,65 @@ impl DnsTunnel {
 /// `\n` through JSON) AND `v` becomes `2`; when `None` the output is
 /// byte-identical to the historical `v:1` link (no `cert` field) for
 /// backward compatibility.
+///
+/// `auth` is the OPTIONAL authoritative-endpoint value, already shaped by
+/// [`parse_authoritative`] as a JSON STRING (single `host:port`) or a
+/// JSON ARRAY of strings (comma-separated multi). When `Some`, the
+/// payload gains an `auth` field; when `None` the field is omitted. `auth`
+/// is INDEPENDENT of `v` — it never changes the version byte; only `cert`
+/// drives `v`. (`r` is emitted UNCONDITIONALLY regardless of `auth`.)
 fn build_wire_format(
     domain: &str,
     resolvers: &[String],
     fingerprint: &str,
     uuid: &str,
     cert_pem: Option<&str>,
+    auth: Option<Value>,
 ) -> Value {
-    match cert_pem {
-        Some(cert) => json!({
-            "v": FORMAT_VERSION_WITH_CERT,
-            "d": domain,
-            "r": resolvers,
-            "fp": fingerprint,
-            "uuid": uuid,
-            "cert": cert,
-        }),
-        None => json!({
-            "v": FORMAT_VERSION_NO_CERT,
-            "d": domain,
-            "r": resolvers,
-            "fp": fingerprint,
-            "uuid": uuid,
-        }),
+    // Version is driven ONLY by cert presence (auth is orthogonal).
+    let version = if cert_pem.is_some() {
+        FORMAT_VERSION_WITH_CERT
+    } else {
+        FORMAT_VERSION_NO_CERT
+    };
+    // Build via the BTreeMap-backed Object so keys stay lexicographic
+    // (`auth, cert, d, fp, r, uuid, v`) and the output is byte-stable.
+    let mut obj = serde_json::Map::new();
+    obj.insert("v".into(), json!(version));
+    obj.insert("d".into(), json!(domain));
+    obj.insert("r".into(), json!(resolvers));
+    obj.insert("fp".into(), json!(fingerprint));
+    obj.insert("uuid".into(), json!(uuid));
+    if let Some(cert) = cert_pem {
+        obj.insert("cert".into(), json!(cert));
+    }
+    if let Some(auth) = auth {
+        obj.insert("auth".into(), auth);
+    }
+    Value::Object(obj)
+}
+
+/// Parse the OPTIONAL `dns-tunnel:authoritative` secret into the `auth`
+/// field value, or `None` when the secret is absent / blank. Mirrors
+/// [`parse_resolvers`]'s comma-split-and-trim discipline:
+///   * a SINGLE non-empty `host:port` → a JSON STRING (`"213…:53"`);
+///   * MULTIPLE comma-separated entries → a JSON ARRAY of strings;
+///   * an all-empty value (typo'd `" , "`) → `None`, treated as absent so
+///     a cleared secret can't ship an empty/garbage `auth`.
+///
+/// The client accepts either string or array, so the string form keeps
+/// the common single-endpoint link compact.
+fn parse_authoritative(raw: &str) -> Option<Value> {
+    let endpoints: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    match endpoints.as_slice() {
+        [] => None,
+        [single] => Some(json!(single)),
+        _ => Some(json!(endpoints)),
     }
 }
 
@@ -337,7 +395,23 @@ impl Protocol for DnsTunnel {
             .map(String::as_str)
             .filter(|s| !s.trim().is_empty());
 
-        let wire = build_wire_format(domain, &resolvers, fingerprint, uuid, cert_pem);
+        // ── Authoritative DNS endpoint(s) — operator-set, OPTIONAL. ───
+        // When set, embed `auth` so an r6+ client can run
+        // `slipstream-client --authoritative <auth>`, bypassing the
+        // recursive НСДИ resolvers (which drop the covert-DNS stream after
+        // a few minutes — see plans/dns-tunnel-server-side-2026-06-11.md).
+        // A single `host:port` → STRING; comma-separated → ARRAY. The
+        // authoritative path is fast + stable but NOT whitelist/DPI-proof
+        // (DNS goes straight to the box IP), so `r` ALWAYS stays as the
+        // censorship fallback. Absent → no `auth`, output unchanged. `auth`
+        // does NOT change `v` (orthogonal to the cert version bump).
+        let auth = ctx
+            .secrets
+            .get("dns-tunnel:authoritative")
+            .map(String::as_str)
+            .and_then(parse_authoritative);
+
+        let wire = build_wire_format(domain, &resolvers, fingerprint, uuid, cert_pem, auth);
         let json_bytes = serde_json::to_vec(&wire)
             .map_err(|e| CoreError::Render(format!("dns-tunnel share_link: marshal: {e}")))?;
         let payload = URL_SAFE_NO_PAD.encode(&json_bytes);
@@ -645,6 +719,142 @@ mod tests {
         let a = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
         let b = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
         assert_eq!(a, b, "cert-carrying share_link is not byte-stable");
+    }
+
+    #[test]
+    fn share_link_emits_auth_string_for_single_endpoint() {
+        // A single `host:port` in `dns-tunnel:authoritative` → `auth` is a
+        // JSON STRING. `r` still present; `v` unchanged (no cert → 1).
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:authoritative".into(), "213.155.15.93:53".into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["auth"], "213.155.15.93:53", "single → string auth");
+        assert!(v["auth"].is_string(), "single endpoint must be a string");
+        // `r` is the censorship fallback — ALWAYS present.
+        assert_eq!(
+            v["r"],
+            serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"])
+        );
+        // auth is orthogonal to v — no cert → still v1.
+        assert_eq!(v["v"], 1, "auth must NOT bump the version");
+    }
+
+    #[test]
+    fn share_link_emits_auth_array_for_multiple_endpoints() {
+        // Comma-separated `dns-tunnel:authoritative` → `auth` is a JSON
+        // ARRAY of strings (trimmed). Empty entries dropped.
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert(
+            "dns-tunnel:authoritative".into(),
+            " 213.155.15.93:53 , 198.51.100.7:53 ".into(),
+        );
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(v["auth"].is_array(), "multi endpoint must be an array");
+        assert_eq!(
+            v["auth"],
+            serde_json::json!(["213.155.15.93:53", "198.51.100.7:53"])
+        );
+        // r untouched.
+        assert_eq!(
+            v["r"],
+            serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"])
+        );
+    }
+
+    #[test]
+    fn share_link_no_auth_field_when_secret_absent() {
+        // Backward-compat: absent `dns-tunnel:authoritative` → no `auth`
+        // field at all, output byte-identical to the historical link.
+        let server = dummy_server();
+        let secrets = secrets_complete();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(v.get("auth").is_none(), "no auth field when secret unset");
+    }
+
+    #[test]
+    fn share_link_blank_auth_treated_as_absent() {
+        // A whitespace/comma-only secret must NOT emit an empty/garbage
+        // `auth` — treat it as absent (defensive against a cleared secret).
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:authoritative".into(), " , , ".into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(v.get("auth").is_none());
+    }
+
+    #[test]
+    fn share_link_auth_coexists_with_cert_v2() {
+        // `auth` is orthogonal to the cert version bump: cert + auth → v2
+        // with BOTH fields present.
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert("dns-tunnel:cert_pem".into(), FAKE_CERT_PEM.into());
+        secrets.insert("dns-tunnel:authoritative".into(), "213.155.15.93:53".into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let link = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let payload = link
+            .strip_prefix("dns-tunnel://")
+            .unwrap()
+            .split('#')
+            .next()
+            .unwrap();
+        let raw = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["v"], 2, "cert still drives v2");
+        assert_eq!(v["cert"], FAKE_CERT_PEM);
+        assert_eq!(v["auth"], "213.155.15.93:53");
+    }
+
+    #[test]
+    fn share_link_with_auth_is_byte_stable() {
+        let server = dummy_server();
+        let mut secrets = secrets_complete();
+        secrets.insert(
+            "dns-tunnel:authoritative".into(),
+            "213.155.15.93:53,198.51.100.7:53".into(),
+        );
+        let ctx = RenderCtx::new(&server, &secrets);
+        let a = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        let b = DnsTunnel::new().share_link(&ctx, &dummy_user()).unwrap();
+        assert_eq!(a, b, "auth-carrying share_link is not byte-stable");
     }
 
     #[test]

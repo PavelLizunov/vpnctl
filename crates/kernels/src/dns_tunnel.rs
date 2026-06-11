@@ -105,6 +105,19 @@ const DEFAULT_LISTEN_PORT: u16 = 53;
 /// TLS-less inbound to the internet).
 const DEFAULT_FORWARD_TARGET: &str = "127.0.0.1:9001";
 
+/// QUIC idle-timeout (seconds) the slipstream-server enforces on tunnel
+/// connections — rendered into the relay ExecStart as
+/// `--idle-timeout-seconds`. The upstream slipstream default is 60s, but
+/// the recursive НСДИ resolver intermittently stalls the covert-DNS
+/// stream for a handful of seconds (rate-limit / state eviction; see
+/// `plans/dns-tunnel-server-side-2026-06-11.md`). A 60s idle window tears
+/// the QUIC connection on such a hiccup, forcing a full re-handshake; we
+/// bump the DEFAULT to **180s** so the connection survives a short
+/// resolver stall and recovers without re-handshaking. Operator-
+/// overridable via `dns-tunnel:idle_timeout_seconds`, validated as a
+/// non-zero u16 at render time (mirrors the `listen_port` guard).
+const DEFAULT_IDLE_TIMEOUT_SECONDS: u16 = 180;
+
 /// On-node working directory holding the slipstream binary, its
 /// auto-generated cert/key/reset-seed, and the sing-box tunnel config.
 /// Mirrors the PoC `/root/dnstt-run/` layout (DNS-TUNNEL.md §4) but
@@ -270,7 +283,7 @@ User=dns-tunnel
 Group=dns-tunnel
 WorkingDirectory={run_dir}
 EnvironmentFile={slipstream_env}
-ExecStart={binary} -l ${{SLIPSTREAM_LISTEN_PORT}} -a ${{SLIPSTREAM_FORWARD_TARGET}} -d ${{SLIPSTREAM_DOMAIN}} -c {cert} -k {key} --reset-seed {reset}
+ExecStart={binary} -l ${{SLIPSTREAM_LISTEN_PORT}} -a ${{SLIPSTREAM_FORWARD_TARGET}} -d ${{SLIPSTREAM_DOMAIN}} -c {cert} -k {key} --reset-seed {reset} --idle-timeout-seconds ${{SLIPSTREAM_IDLE_TIMEOUT_SECONDS}}
 Restart=on-failure
 RestartSec=3
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -569,6 +582,35 @@ impl Kernel for DnsTunnel {
             }
         };
 
+        // Idle-timeout (seconds) — operator-overridable, validated as a
+        // non-zero u16 at render time (mirrors the listen_port guard so a
+        // typo surfaces as a clear CoreError::Render, not an is-active
+        // poll timeout). Default 180 (a deliberate bump from upstream's
+        // 60s so the QUIC connection survives a short НСДИ-resolver stall
+        // and recovers without a full re-handshake — see
+        // plans/dns-tunnel-server-side-2026-06-11.md).
+        let idle_timeout_seconds: u16 = match ctx.secrets.get("dns-tunnel:idle_timeout_seconds") {
+            None => DEFAULT_IDLE_TIMEOUT_SECONDS,
+            Some(s) => {
+                let secs = s.parse::<u16>().map_err(|_| {
+                    CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:idle_timeout_seconds` value \
+                         {s:?} — must be an integer in 1..=65535 seconds"
+                    ))
+                })?;
+                if secs == 0 {
+                    // 0 disables the idle timeout in slipstream — never what
+                    // an operator wants here (a dead path would linger
+                    // forever). Reject like a parse error.
+                    return Err(CoreError::Render(format!(
+                        "dns-tunnel kernel: invalid `dns-tunnel:idle_timeout_seconds` value \
+                         {s:?} — must be an integer in 1..=65535 seconds"
+                    )));
+                }
+                secs
+            }
+        };
+
         // Forward-target — operator-overridable, but REJECTED if it
         // isn't a loopback address (a public forward-target exposes the
         // TLS-less VLESS inbound to the internet).
@@ -609,6 +651,9 @@ impl Kernel for DnsTunnel {
         env_file.push_str(&format!("SLIPSTREAM_LISTEN_PORT={listen_port}\n"));
         env_file.push_str(&format!("SLIPSTREAM_FORWARD_TARGET={forward_target}\n"));
         env_file.push_str(&format!("SLIPSTREAM_DOMAIN={domain}\n"));
+        env_file.push_str(&format!(
+            "SLIPSTREAM_IDLE_TIMEOUT_SECONDS={idle_timeout_seconds}\n"
+        ));
 
         // ── 2. Render the loopback-only TLS-less VLESS sing-box config. ─
         // Shape = configs/tunnel-singbox-server.json.tpl. Built as a

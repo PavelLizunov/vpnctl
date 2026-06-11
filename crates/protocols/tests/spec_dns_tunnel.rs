@@ -360,6 +360,109 @@ fn share_link_with_cert_is_byte_stable() {
 }
 
 #[test]
+fn share_link_auth_single_endpoint_is_string() {
+    // `dns-tunnel:authoritative` with one `host:port` → `auth` is a JSON
+    // STRING. `r` stays present (the censorship fallback is never gated by
+    // `auth`); `v` is unchanged (no cert → 1).
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:authoritative".into(), "213.155.15.93:53".into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let v = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap());
+    assert!(v["auth"].is_string(), "single endpoint → string: {v}");
+    assert_eq!(v["auth"], "213.155.15.93:53");
+    assert_eq!(
+        v["r"],
+        serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"]),
+        "r is the fallback, always present: {v}"
+    );
+    assert_eq!(v["v"], 1, "auth must not bump version: {v}");
+}
+
+#[test]
+fn share_link_auth_multiple_endpoints_is_array() {
+    // Comma-separated `dns-tunnel:authoritative` → `auth` is a JSON ARRAY
+    // of trimmed strings.
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert(
+        "dns-tunnel:authoritative".into(),
+        " 213.155.15.93:53 , 198.51.100.7:53 ".into(),
+    );
+    let ctx = RenderCtx::new(&s, &sec);
+    let v = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap());
+    assert!(v["auth"].is_array(), "multi endpoint → array: {v}");
+    assert_eq!(
+        v["auth"],
+        serde_json::json!(["213.155.15.93:53", "198.51.100.7:53"])
+    );
+    assert_eq!(
+        v["r"],
+        serde_json::json!(["195.208.4.1:53", "195.208.5.1:53"]),
+        "r untouched by auth: {v}"
+    );
+}
+
+#[test]
+fn share_link_without_authoritative_has_no_auth_field() {
+    // Backward-compat: absent `dns-tunnel:authoritative` → NO `auth` field,
+    // output byte-identical to the historical link (reconstruct + assert).
+    let s = srv();
+    let sec = secrets();
+    let ctx = RenderCtx::new(&s, &sec);
+    let link = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let v = decode_payload(&link);
+    assert!(v.get("auth").is_none(), "no auth when secret unset: {v}");
+
+    let expected_json = serde_json::json!({
+        "v": 1,
+        "d": "t.example.com",
+        "r": ["195.208.4.1:53", "195.208.5.1:53"],
+        "fp": FP,
+        "uuid": user("alex").uuid,
+    });
+    let expected_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expected_json).unwrap());
+    let expected = format!("dns-tunnel://{expected_payload}#alex");
+    assert_eq!(
+        link, expected,
+        "auth-less link drifted from historical shape"
+    );
+}
+
+#[test]
+fn share_link_auth_is_orthogonal_to_cert_version() {
+    // cert + authoritative both set → v2 (cert drives the version) WITH the
+    // `auth` field also present. `auth` never changes `v`.
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:cert_pem".into(), CERT_PEM.into());
+    sec.insert("dns-tunnel:authoritative".into(), "213.155.15.93:53".into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let v = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap());
+    assert_eq!(v["v"], 2, "cert still drives v2: {v}");
+    assert_eq!(v["cert"], CERT_PEM);
+    assert_eq!(v["auth"], "213.155.15.93:53");
+}
+
+#[test]
+fn share_link_auth_is_byte_stable_and_per_user_uuid() {
+    // Auth-carrying link is deterministic and still carries the per-user
+    // uuid (auth is server-wide, uuid is per-user).
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("dns-tunnel:authoritative".into(), "213.155.15.93:53".into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let a = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    let b = DnsTunnel::new().share_link(&ctx, &user("alex")).unwrap();
+    assert_eq!(a, b, "auth-carrying share_link not byte-stable");
+    let va = decode_payload(&a);
+    let vb = decode_payload(&DnsTunnel::new().share_link(&ctx, &user("bob")).unwrap());
+    assert_eq!(va["uuid"], user("alex").uuid);
+    assert_eq!(vb["uuid"], user("bob").uuid);
+    assert_ne!(va["uuid"], vb["uuid"]);
+}
+
+#[test]
 fn share_link_succeeds_without_loopback_uuid_secret() {
     // Regression guard for the per-user migration: removing the shared
     // `dns-tunnel:loopback_uuid` secret must NOT break share_link (it used
