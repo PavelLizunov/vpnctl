@@ -157,6 +157,17 @@ scripting / disaster recovery.
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
 
+### Binary provisioning
+
+Kernels that ship a prebuilt engine binary (the `dns-tunnel` slipstream
+relay, the `naive` Caddy build) install it from the control-node cache
+under `/var/lib/vpnctl/cache/`, uploaded to the node and **SHA256-verified**
+there before an atomic install. The install is **content-aware**: refresh
+the cached binary with a patched build and the next `vpnctl deploy`
+reinstalls it automatically when the cache binary's hash differs from the
+on-node copy — no manual on-node deletion needed. An unchanged cache binary
+is a no-op (idempotent).
+
 ## SSH integration tests
 
 ```bash

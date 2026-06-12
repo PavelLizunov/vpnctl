@@ -213,11 +213,34 @@ pub(crate) fn default_slipstream_cache_path() -> std::path::PathBuf {
 }
 
 /// `true` only when the node probe printed exactly `present` — i.e.
-/// BOTH the slipstream binary is executable AND sing-box is on PATH
-/// (the backend daemon). Pure (testable) so an inverted branch can't
-/// slip past CI. Mirrors `caddy::caddy_present`.
+/// sing-box is on PATH (the backend daemon). Pure (testable) so an
+/// inverted branch can't slip past CI. Mirrors `caddy::caddy_present`.
+///
+/// NOTE: this gates the sing-box presence half of the probe ONLY.
+/// sing-box is NOT a cache binary, so a bare presence check is correct
+/// for it. The slipstream binary itself is gated by
+/// [`slipstream_needs_reinstall`] (content-aware) instead — see
+/// `ensure_installed`.
 fn slipstream_present(probe_stdout: &str) -> bool {
     probe_stdout.trim() == "present"
+}
+
+/// Decide whether the on-node slipstream binary must be (re)installed
+/// from the control-node cache. Content-aware (sha256), NOT a bare
+/// presence check: an operator who replaces the cached binary with a
+/// patched build (same path, different bytes) MUST get it pushed on the
+/// next `vpnctl deploy` without first deleting the on-node binary by
+/// hand.
+///
+/// * `cache_sha` — lowercase hex sha256 of the cache binary's bytes
+///   (computed control-side; the same digest fed to `sha256sum -c`).
+/// * `node_sha_stdout` — raw stdout of `sha256sum <bin> | cut -d' ' -f1`
+///   on the node; EMPTY (binary absent) or any value `!= cache_sha`
+///   means reinstall.
+///
+/// Pure → unit-tested directly so an inverted branch can't slip past CI.
+fn slipstream_needs_reinstall(cache_sha: &str, node_sha_stdout: &str) -> bool {
+    node_sha_stdout.trim() != cache_sha
 }
 
 /// Reject a forward-target that isn't a loopback address — a public
@@ -364,17 +387,50 @@ impl Kernel for DnsTunnel {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // Idempotency probe: a node that already has the slipstream
-        // binary AND sing-box skips straight to runtime provisioning.
-        let present = ssh
-            .exec(
-                "command -v /usr/local/bin/slipstream-server >/dev/null 2>&1 \
-                 && command -v sing-box >/dev/null 2>&1 \
-                 && echo present || echo absent",
-            )
+        // ── Read the cache binary FIRST (NO on-node build fallback). ──
+        // slipstream-rust needs ≥2 GB RAM to build (Rust LTO +
+        // picoquic/C); the target box has 960 MB. So unlike caddy
+        // (which falls back to an on-node xcaddy build on cache-miss)
+        // there is NOTHING to fall back to here — a cache-miss is a
+        // HARD, LOUD failure pointing the operator at the docker build
+        // that populates the cache. We read it up front because its
+        // sha256 is what the content-aware reinstall decision compares
+        // the on-node binary against (and it's the integrity digest fed
+        // to `sha256sum -c` on the transfer).
+        let cache = slipstream_cache_path();
+        let bytes = match std::fs::read(&cache) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CoreError::Render(format!(
+                    "dns-tunnel: prebuilt slipstream binary not found at {} — \
+                     slipstream-rust needs ≥2 GB RAM to build so there is no on-node \
+                     build fallback. Populate the cache via the docker build on node \
+                     192.168.0.236 (DNS-TUNNEL.md §6), or point VPNCTL_SLIPSTREAM_CACHE \
+                     at the built binary.",
+                    cache.display()
+                )));
+            }
+            // A cache path that's SET but unreadable (bad
+            // VPNCTL_SLIPSTREAM_CACHE, wrong perms, a directory)
+            // fails loudly rather than being mistaken for a miss.
+            Err(e) => return Err(CoreError::Io(e)),
+        };
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+
+        // Content-aware idempotency probe: the on-node binary's sha256
+        // (empty when absent), plus a bare sing-box presence check.
+        // sing-box is NOT a cache binary, so presence is the right gate
+        // for it; the slipstream binary is gated on a sha COMPARE so an
+        // operator who refreshes the cached binary (same path, patched
+        // bytes) gets it pushed WITHOUT first deleting the on-node copy.
+        let node_sha = ssh
+            .exec("sha256sum /usr/local/bin/slipstream-server 2>/dev/null | cut -d' ' -f1")
+            .await?;
+        let singbox = ssh
+            .exec("command -v sing-box >/dev/null 2>&1 && echo present || echo absent")
             .await?;
 
-        if !slipstream_present(&present) {
+        if slipstream_needs_reinstall(&digest, &node_sha) || !slipstream_present(&singbox) {
             // ── amd64 arch guard. ─────────────────────────────────────
             // The cache binary is a static amd64 build (DNS-TUNNEL.md
             // §6). Installing it on a non-amd64 node would write a
@@ -392,38 +448,11 @@ impl Kernel for DnsTunnel {
                 )));
             }
 
-            // ── Prebuilt-cache install (NO on-node build fallback). ───
-            // slipstream-rust needs ≥2 GB RAM to build (Rust LTO +
-            // picoquic/C); the target box has 960 MB. So unlike caddy
-            // (which falls back to an on-node xcaddy build on cache-miss)
-            // there is NOTHING to fall back to here — a cache-miss is a
-            // HARD, LOUD failure pointing the operator at the docker
-            // build that populates the cache.
-            let cache = slipstream_cache_path();
-            let bytes = match std::fs::read(&cache) {
-                Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(CoreError::Render(format!(
-                        "dns-tunnel: prebuilt slipstream binary not found at {} — \
-                         slipstream-rust needs ≥2 GB RAM to build so there is no on-node \
-                         build fallback. Populate the cache via the docker build on node \
-                         192.168.0.236 (DNS-TUNNEL.md §6), or point VPNCTL_SLIPSTREAM_CACHE \
-                         at the built binary.",
-                        cache.display()
-                    )));
-                }
-                // A cache path that's SET but unreadable (bad
-                // VPNCTL_SLIPSTREAM_CACHE, wrong perms, a directory)
-                // fails loudly rather than being mistaken for a miss.
-                Err(e) => return Err(CoreError::Io(e)),
-            };
-
             // Integrity-verify on the node before installing it as a
-            // root systemd service: SHA256 the bytes we read, upload to
-            // .new, `sha256sum -c` there, then atomic mv. `set -eu`
-            // aborts the deploy on a corrupted/truncated upload. Same
-            // shape as caddy's cache-install path.
-            let digest = format!("{:x}", Sha256::digest(&bytes));
+            // root systemd service: upload the cache bytes to .new,
+            // `sha256sum -c` the control-side digest there, then atomic
+            // mv. `set -eu` aborts the deploy on a corrupted/truncated
+            // upload. Same shape as caddy's cache-install path.
             ssh.upload("/usr/local/bin/slipstream-server.new", &bytes)
                 .await?;
             ssh.exec(&format!(
@@ -878,6 +907,24 @@ mod tests {
         assert!(!slipstream_present("absent"));
         assert!(!slipstream_present(""));
         assert!(!slipstream_present("present extra"));
+    }
+
+    #[test]
+    fn slipstream_reinstall_is_content_aware_not_presence() {
+        let cache = "a".repeat(64);
+        // Absent on the node (empty `sha256sum … | cut` output) → reinstall.
+        assert!(slipstream_needs_reinstall(&cache, ""));
+        assert!(slipstream_needs_reinstall(&cache, "\n"));
+        assert!(slipstream_needs_reinstall(&cache, "   "));
+        // Present but DIFFERENT bytes (operator refreshed the cache) →
+        // reinstall. This is the bug being fixed: a bare presence check
+        // would skip here.
+        assert!(slipstream_needs_reinstall(&cache, &"b".repeat(64)));
+        // Present AND identical sha (trailing newline from the node) →
+        // skip — idempotent no-op.
+        assert!(!slipstream_needs_reinstall(&cache, &cache));
+        assert!(!slipstream_needs_reinstall(&cache, &format!("{cache}\n")));
+        assert!(!slipstream_needs_reinstall(&cache, &format!("  {cache}  ")));
     }
 
     #[test]
