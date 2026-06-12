@@ -160,13 +160,39 @@ pub async fn scrape<T: SshTransport + ?Sized>(
     log_path: &str,
     tail_lines: usize,
 ) -> anyhow::Result<AttributionMap> {
-    // -n N → last N lines; defensive strip of single-quote from
-    // the path (the env override is operator-trusted, but we
-    // never trust user-typed config). The canonical path
-    // `/var/log/sing-box.log` is shell-safe.
-    let cmd = format!("tail -n {} '{}'", tail_lines, log_path.replace('\'', ""));
+    let cmd = build_tail_cmd(log_path, tail_lines);
     let stdout = ssh.exec(&cmd).await?;
     Ok(parse_attribution(&stdout))
+}
+
+/// Build the shell command that tails the attribution-relevant
+/// sing-box log lines. Reads the most-recent ROTATED sibling
+/// `{log}.1` FIRST (older — uncompressed thanks to logrotate's
+/// `delaycompress`), THEN the live `{log}` (newer), each tailed
+/// to its last `tail_lines` lines.
+///
+/// Why read `.1` too: the deploy's logrotate fragment uses
+/// `copytruncate`, which truncates the live file in place at
+/// rotation — so right after a daily rotation the live `{log}`
+/// has lost the pre-rotation "inbound connection from …" accept
+/// lines that long-lived connections still need for attribution.
+/// Those accept lines now live in `{log}.1`. Reading `.1` then
+/// `{log}` in chronological order restores the straddling history.
+///
+/// `for f in … ; do tail -n N "$f" 2>/dev/null; done` — per-file
+/// `tail` (NOT `tail a b`, which would interleave `==> file <==`
+/// header banners into the stream and corrupt parsing). The
+/// `2>/dev/null` makes a missing `.1` (no rotation yet) a no-op
+/// rather than an error. Order matters: `.1` (older) before the
+/// live file (newer) so `parse_attribution`'s "preserve FIRST
+/// source per conn_id" keeps the authentic pre-rotation source.
+///
+/// Defensive single-quote strip on the path (the env override is
+/// operator-trusted, but we never trust user-typed config). The
+/// canonical path `/var/log/sing-box.log` is shell-safe.
+fn build_tail_cmd(log_path: &str, tail_lines: usize) -> String {
+    let log = log_path.replace('\'', "");
+    format!("for f in '{log}.1' '{log}'; do tail -n {tail_lines} \"$f\" 2>/dev/null; done")
 }
 
 #[derive(Default)]
@@ -398,6 +424,56 @@ mod tests {
     fn extract_user_returns_none_for_error_process_connection_line() {
         let after = " inbound/vless[vless-in]: process connection from 1.2.3.4:5: mux connection closed: read frame header: EOF";
         assert!(extract_user(after).is_none());
+    }
+
+    // ── Log-rotation survival: read rotated sibling + live ────────
+
+    #[test]
+    fn build_tail_cmd_reads_rotated_sibling_then_live_in_order() {
+        let cmd = build_tail_cmd("/var/log/sing-box.log", 10_000);
+        // Both the rotated sibling and the live file must be read.
+        let dot1 = "/var/log/sing-box.log.1";
+        let live = "/var/log/sing-box.log";
+        let dot1_idx = cmd
+            .find(dot1)
+            .expect("command must reference the rotated sibling .1");
+        // The live path also appears as a prefix of `.1`; find the
+        // live reference that is NOT the `.1` occurrence by looking
+        // for the live path followed by a non-`.` char (the closing
+        // quote in the loop list).
+        let live_quoted = format!("{live}'");
+        let live_idx = cmd
+            .rfind(&live_quoted)
+            .expect("command must reference the live log path");
+        assert!(
+            dot1_idx < live_idx,
+            "rotated sibling .1 (older) must be read BEFORE the live file (newer) so \
+             parse_attribution preserves the authentic pre-rotation source: cmd = {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_tail_cmd_carries_the_tail_line_count() {
+        let cmd = build_tail_cmd("/var/log/sing-box.log", 4242);
+        assert!(
+            cmd.contains("tail -n 4242"),
+            "tail line count must be honoured: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_tail_cmd_strips_single_quotes_from_path() {
+        // The single-quote strip keeps the operator-trusted env
+        // override from breaking out of the single-quoted loop list.
+        // After stripping, the ONLY single quotes left are the 4 that
+        // wrap the two loop-list items ('{log}.1' and '{log}').
+        let cmd = build_tail_cmd("/var/log/sing-'box'.log", 100);
+        assert_eq!(
+            cmd.matches('\'').count(),
+            4,
+            "stray single quotes from the path must be stripped, leaving only the 4 \
+             loop-list quotes: {cmd}"
+        );
     }
 
     #[test]
