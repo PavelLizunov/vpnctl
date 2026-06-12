@@ -156,6 +156,24 @@ fn caddy_present(probe_stdout: &str) -> bool {
     probe_stdout.trim() == "present"
 }
 
+/// Decide whether the on-node caddy binary must be (re)installed from the
+/// control-node cache. Content-aware (sha256), NOT a bare presence check:
+/// an operator who replaces the cached binary with a patched build (same
+/// path, different bytes) MUST get it pushed on the next `vpnctl deploy`
+/// without first deleting the on-node binary by hand.
+///
+/// * `cache_sha` — lowercase hex sha256 of the cache binary's bytes
+///   (computed control-side; the same digest fed to `sha256sum -c`).
+/// * `node_sha_stdout` — raw stdout of `sha256sum <bin> | cut -d' ' -f1`
+///   on the node; EMPTY (binary absent) or any value `!= cache_sha`
+///   means reinstall.
+///
+/// Pure → unit-tested directly so an inverted branch can't slip past CI.
+/// Mirrors `dns_tunnel::slipstream_needs_reinstall`.
+fn caddy_needs_reinstall(cache_sha: &str, node_sha_stdout: &str) -> bool {
+    node_sha_stdout.trim() != cache_sha
+}
+
 /// On-node build fallback (no cache present): install Go + xcaddy and
 /// build caddy with the naive forwardproxy. Heavy on a 1-vCPU/1-GB box
 /// (~10 min, RAM-tight) — hence the temporary build swapfile and
@@ -282,30 +300,32 @@ impl Kernel for Caddy {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // Idempotency probe: a node that already has caddy+forwardproxy
-        // skips straight to runtime provisioning.
-        let present = ssh
-            .exec(
-                "command -v /usr/local/bin/caddy >/dev/null 2>&1 \
-                 && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy \
-                 && echo present || echo absent",
-            )
-            .await?;
-
-        if !caddy_present(&present) {
-            // FAST PATH: a prebuilt static (CGO-free) amd64 caddy cached on
-            // the CONTROL node — upload it (seconds; no Go/swap/RAM pressure
-            // on the target). The same binary runs on any amd64 node.
-            // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
-            // cache is present (e.g. a CLI deploy from a host without it).
-            let cache = caddy_cache_path();
-            match std::fs::read(&cache) {
-                Ok(bytes) => {
+        // FAST PATH: a prebuilt static (CGO-free) amd64 caddy cached on
+        // the CONTROL node — upload it (seconds; no Go/swap/RAM pressure
+        // on the target). The same binary runs on any amd64 node.
+        // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
+        // cache is present (e.g. a CLI deploy from a host without it).
+        let cache = caddy_cache_path();
+        match std::fs::read(&cache) {
+            Ok(bytes) => {
+                // Content-aware idempotency: SHA256 the cache bytes up front
+                // (the same digest fed to `sha256sum -c` on the transfer) and
+                // probe the on-node binary's sha (empty when absent). Reinstall
+                // when the on-node binary is absent OR its sha differs from the
+                // cache sha, so an operator who refreshes the cached binary
+                // (same path, patched bytes) gets it pushed WITHOUT first
+                // deleting the on-node copy by hand. A bare presence check
+                // would skip the refresh. Mirrors dns_tunnel::ensure_installed.
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let node_sha = ssh
+                    .exec("sha256sum /usr/local/bin/caddy 2>/dev/null | cut -d' ' -f1")
+                    .await?;
+                if caddy_needs_reinstall(&digest, &node_sha) {
                     // Integrity-verify on the node before installing it as a
-                    // root systemd service: SHA256 the bytes we read, upload
-                    // to .new, `sha256sum -c` there, then atomic mv. `set -eu`
-                    // aborts the deploy on a corrupted/truncated upload.
-                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                    // root systemd service: upload the cache bytes to .new,
+                    // `sha256sum -c` the control-side digest there, then atomic
+                    // mv. `set -eu` aborts the deploy on a corrupted/truncated
+                    // upload.
                     ssh.upload("/usr/local/bin/caddy.new", &bytes).await?;
                     ssh.exec(&format!(
                         "set -eu\n\
@@ -316,14 +336,24 @@ impl Kernel for Caddy {
                     ))
                     .await?;
                 }
-                // No cache → build on the node. A cache path that's SET but
-                // unreadable (bad VPNCTL_CADDY_CACHE, wrong perms, a dir)
-                // fails loudly rather than silently triggering a 10-min build.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            }
+            // No cache → build on the node, gated on a presence probe (caddy
+            // on PATH AND forward_proxy compiled in). A cache path that's SET
+            // but unreadable (bad VPNCTL_CADDY_CACHE, wrong perms, a dir)
+            // fails loudly rather than silently triggering a 10-min build.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let present = ssh
+                    .exec(
+                        "command -v /usr/local/bin/caddy >/dev/null 2>&1 \
+                         && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy \
+                         && echo present || echo absent",
+                    )
+                    .await?;
+                if !caddy_present(&present) {
                     ssh.exec(&caddy_build_script()).await?;
                 }
-                Err(e) => return Err(CoreError::Io(e)),
             }
+            Err(e) => return Err(CoreError::Io(e)),
         }
 
         // Provision the runtime (user, masquerade site, systemd unit,
@@ -561,6 +591,24 @@ mod tests {
         assert!(!caddy_present(""));
         // A noisy probe (e.g. a banner before the token) is NOT "ready".
         assert!(!caddy_present("present extra"));
+    }
+
+    #[test]
+    fn caddy_reinstall_is_content_aware_not_presence() {
+        let cache = "a".repeat(64);
+        // Absent on the node (empty `sha256sum … | cut` output) → reinstall.
+        assert!(caddy_needs_reinstall(&cache, ""));
+        assert!(caddy_needs_reinstall(&cache, "\n"));
+        assert!(caddy_needs_reinstall(&cache, "   "));
+        // Present but DIFFERENT bytes (operator refreshed the cache) →
+        // reinstall. This is the bug being fixed: a bare presence check
+        // would skip here.
+        assert!(caddy_needs_reinstall(&cache, &"b".repeat(64)));
+        // Present AND identical sha (trailing newline from the node) →
+        // skip — idempotent no-op.
+        assert!(!caddy_needs_reinstall(&cache, &cache));
+        assert!(!caddy_needs_reinstall(&cache, &format!("{cache}\n")));
+        assert!(!caddy_needs_reinstall(&cache, &format!("  {cache}  ")));
     }
 
     #[test]
