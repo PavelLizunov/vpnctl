@@ -77,9 +77,12 @@ const SING_BOX_SETUP_SCRIPT: &str = r#"
     chmod 600 /etc/sing-box/key.pem
     chmod 644 /etc/sing-box/cert.pem
     # logrotate fragment for sing-box's main log file. `daily` check
-    # with size-based trigger at 100 MB. `copytruncate` so sing-box's
-    # open file descriptor stays valid (no SIGHUP needed). Keep 14
-    # rotations = ~14 days at most under idle load.
+    # with size-based trigger at 100 MB. `copytruncate` alone
+    # (truncate-in-place) so sing-box's open file descriptor stays
+    # valid (no SIGHUP needed); `create` removed because it triggers
+    # the rename path that orphans sing-box's open fd (no SIGHUP
+    # reopen) — the two models must not coexist. Keep 14 rotations
+    # = ~14 days at most under idle load.
     apt-get install -y --no-install-recommends logrotate
     cat > /etc/logrotate.d/sing-box <<'LR'
 /var/log/sing-box.log {
@@ -92,7 +95,6 @@ const SING_BOX_SETUP_SCRIPT: &str = r#"
     delaycompress
     copytruncate
     su sing-box sing-box
-    create 0640 sing-box sing-box
 }
 LR
     # Verify the fragment parses — logrotate's parser is strict and a
@@ -663,6 +665,37 @@ mod tests {
             "logrotate fragment"
         );
         assert!(s.contains("set -eu"), "fail-fast shell flags");
+    }
+
+    /// The rendered logrotate fragment must use `copytruncate`
+    /// (truncate-in-place keeps sing-box's open fd valid) and MUST
+    /// NOT carry a `create` directive — `create` triggers the
+    /// rename+create path that orphans sing-box's fd (sing-box never
+    /// reopens its log on SIGHUP), which silently zeroes the live log
+    /// and breaks per-user attribution.
+    #[test]
+    fn logrotate_fragment_uses_copytruncate_without_create() {
+        // Isolate the `/etc/logrotate.d/sing-box` heredoc body so the
+        // assertion is scoped to the fragment, not unrelated `create`
+        // mentions elsewhere in the setup script (e.g. the "Pre-create
+        // log file" comment).
+        let s = SING_BOX_SETUP_SCRIPT;
+        let start = s
+            .find("/var/log/sing-box.log {")
+            .expect("logrotate heredoc opening brace not found");
+        let fragment = &s[start..];
+        let end = fragment
+            .find('}')
+            .expect("logrotate heredoc closing brace not found");
+        let fragment = &fragment[..end];
+        assert!(
+            fragment.contains("copytruncate"),
+            "logrotate fragment must use copytruncate: {fragment}"
+        );
+        assert!(
+            !fragment.contains("create "),
+            "logrotate fragment must NOT carry a `create` directive (orphans sing-box's fd): {fragment}"
+        );
     }
 
     /// Pre-existing keys (log, inbounds, outbounds) must still render
