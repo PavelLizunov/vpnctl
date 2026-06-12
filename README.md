@@ -19,14 +19,13 @@ admin UI that's the operator's **only** required surface — every CLI
 action also has a web button.
 
 > **Canonical home:** [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl).
-> A mirror is published to a private Forgejo at `192.168.0.207:18300/slovn/vpnctl`
-> for LAN-only development. Issues and PRs go on GitHub.
+> A mirror is published to a private, LAN-only Forgejo instance for
+> development. Issues and PRs go on GitHub.
 
 ## Status — v0.8 in flight
 
-Operating in production on a multi-node fleet (`de` / `fi` / `is` / `nl`,
-with `kg` provisioning) serving ~30 users, ~600 daily clash-api probe
-rows per node, and a bilingual EN/RU admin UI.
+Operating in production across multiple nodes, with a bilingual EN/RU
+admin UI and per-node clash-api health probing.
 
 ### Project size
 
@@ -57,8 +56,8 @@ A quick sense of scale (mirrors the badges above):
 | Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `wgturn` | ✅ (8 across 3 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
-| Backups — VACUUM INTO snapshot + hourly retention + off-site copy to Iceland + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
-| Subscription endpoint — byte-equivalent migration from legacy Python server (33 users) | ✅ |
+| Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
+| Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY/wgturn Strong; tuic/anytls Moderate; rest Weak) | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + per-user UA fingerprint heuristic | ✅ |
@@ -171,8 +170,8 @@ is a no-op (idempotent).
 ## SSH integration tests
 
 ```bash
-VPNCTL_TEST_HOST=192.168.0.207 \
-VPNCTL_TEST_USER=user \
+VPNCTL_TEST_HOST=<your-test-host> \
+VPNCTL_TEST_USER=<ssh-user> \
 VPNCTL_TEST_KEY=$HOME/.ssh/id_ed25519 \
   cargo test -p vpnctl-ssh --test integration -- --ignored
 ```
