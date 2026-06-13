@@ -448,12 +448,21 @@ impl SqliteInventory {
 
     /// Open (or create) DB at `path`, apply pragmas, run migrations.
     pub async fn open(path: &Path) -> Result<Self> {
-        let opts =
-            SqliteConnectOptions::from_str(path.to_str().ok_or_else(|| {
+        let opts = SqliteConnectOptions::from_str(path.to_str().ok_or_else(|| {
                 SqliteInventoryError::Invalid(format!("non-utf8 path: {path:?}"))
             })?)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // synchronous=NORMAL (vs the SQLite default of FULL): in WAL
+            // mode NORMAL never fsyncs on every commit, only at checkpoint.
+            // FULL was stalling unrelated writers (dns_ptr_cache, node_health,
+            // admin_alerts, vpn_user_sessions) 1-5s under checkpoint pressure.
+            // SQLite docs: NORMAL in WAL is durability-safe — it can never
+            // corrupt the DB; the only window is losing the last few committed
+            // transactions on a power loss / OS crash, which is acceptable for
+            // this stats/inventory daemon. See sqlite.org WAL docs + forum
+            // thread 9d6f13e.
+            .pragma("synchronous", "NORMAL")
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
 
@@ -4921,6 +4930,43 @@ mod tests {
         let inv = fresh().await;
         // If we can list servers without error, migration ran.
         assert!(inv.list_servers().await?.is_empty());
+        Ok(())
+    }
+
+    // 0032: the fleet-dashboard ts index must exist after migrations so
+    // `recent_vpn_stats_fleet` can range-scan the window instead of
+    // full-scanning + temp-sorting the whole table.
+    #[tokio::test]
+    async fn migration_creates_vcs_ts_index() -> Result<()> {
+        let inv = fresh().await;
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_vcs_ts'",
+        )
+        .fetch_optional(inv.pool())
+        .await?;
+        assert_eq!(
+            row.map(|r| r.0).as_deref(),
+            Some("idx_vcs_ts"),
+            "migration 0032 must create idx_vcs_ts on vpn_connection_stats(ts)"
+        );
+        Ok(())
+    }
+
+    // open() must set synchronous=NORMAL (1). FULL (2) is the SQLite
+    // default and was stalling unrelated writers under WAL checkpoint
+    // pressure; NORMAL is WAL-safe. A connection drawn from the pool must
+    // observe the pragma applied at connect time.
+    #[tokio::test]
+    async fn open_sets_synchronous_normal() -> Result<()> {
+        let inv = fresh().await;
+        let (sync_mode,): (i64,) = sqlx::query_as("PRAGMA synchronous")
+            .fetch_one(inv.pool())
+            .await?;
+        assert_eq!(
+            sync_mode, 1,
+            "expected PRAGMA synchronous = 1 (NORMAL), got {sync_mode}"
+        );
         Ok(())
     }
 
