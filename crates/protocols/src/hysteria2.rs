@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Hysteria 2 — UDP/QUIC-based proxy. Same TLS material as TUIC by design
@@ -305,10 +306,15 @@ impl Protocol for Hysteria2 {
             }
             None => String::new(),
         };
+        // `host` is the URL authority host — IPv6 literals MUST be
+        // bracketed here (RFC 3986). `sni` is a bare TLS server-name,
+        // NOT a URL host, so it keeps the raw address: a bracketed SNI
+        // would be wrong.
         Ok(format!(
-            "hysteria2://{pw}@{addr}:8444/?sni={addr}&insecure=1{obfs_suffix}#{name}",
+            "hysteria2://{pw}@{host}:8444/?sni={sni}&insecure=1{obfs_suffix}#{name}",
             pw = pw,
-            addr = ctx.server.address,
+            host = host_for_url(&ctx.server.address),
+            sni = ctx.server.address,
             name = name,
             obfs_suffix = obfs_suffix,
         ))

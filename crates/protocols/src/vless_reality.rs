@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Set of bytes that must be percent-encoded in URL fragments (RFC 3986):
@@ -192,7 +193,7 @@ impl Protocol for VlessReality {
         Ok(format!(
             "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp#{name}",
             uuid = user.uuid,
-            addr = ctx.server.address,
+            addr = host_for_url(&ctx.server.address),
             pbk = public_key,
             sid = short_id,
             sni = sni,

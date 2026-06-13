@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// AnyTLS — TCP/TLS multiplexed proxy designed as a REALITY
@@ -155,10 +156,14 @@ impl Protocol for AnyTls {
         // sni=<address> + insecure=1 because we use a self-signed cert.
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
+        // `host` is the URL authority host — IPv6 literals MUST be
+        // bracketed here (RFC 3986). `sni` is a bare TLS server-name,
+        // NOT a URL host, so it keeps the raw address.
         Ok(format!(
-            "anytls://{pw}@{addr}:{port}/?sni={addr}&insecure=1#{name}",
+            "anytls://{pw}@{host}:{port}/?sni={sni}&insecure=1#{name}",
             pw = pw,
-            addr = ctx.server.address,
+            host = host_for_url(&ctx.server.address),
+            sni = ctx.server.address,
             port = ANYTLS_PORT,
             name = name,
         ))
