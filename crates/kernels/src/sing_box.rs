@@ -91,6 +91,24 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
             > /etc/apt/sources.list.d/sagernet.list
         apt-get update -qq
         apt-get install -y sing-box
+        # Post-install floor verification. `CUR` above is read from the
+        # RUNNING binary on PATH, which the apt install may NOT have
+        # changed: (a) a manually-installed /usr/local/bin/sing-box ahead
+        # of /usr/bin on PATH shadows the apt binary — PATH still resolves
+        # the stale one, so the gate stays unsatisfied and EVERY deploy
+        # re-runs apt forever (never converges); (b) MIN bumped past the
+        # SagerNet channel candidate — apt installs an older-than-MIN
+        # version and the deploy would otherwise report success while the
+        # floor is unreachable. Re-read the version that PATH now resolves
+        # and abort LOUD if it's STILL below MIN — a clear abort beats
+        # silent churn / shadow-install. (set -eu is active; the explicit
+        # `|| {{ … exit 1; }}` keeps the failing compare from being a bare
+        # non-zero that trips set -e before we print the diagnostic.)
+        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        dpkg --compare-versions "$CUR" ge "{min}" || {{
+            echo "sing-box still <{min} after install (have '$CUR') — floor unreachable from this repo, or a non-apt binary shadows PATH at $(command -v sing-box)" >&2
+            exit 1
+        }}
     fi
 "#,
         min = SING_BOX_MIN_VERSION,
@@ -765,6 +783,51 @@ mod tests {
         assert!(
             s.contains("command -v sing-box  # final assertion"),
             "the final `command -v sing-box` assertion must remain: {s}"
+        );
+    }
+
+    /// After the apt install, the script must RE-VERIFY that the version
+    /// PATH now resolves actually satisfies the floor — otherwise two
+    /// silent failure modes survive: (a) a non-apt /usr/local/bin/sing-box
+    /// shadowing PATH keeps `CUR < MIN` forever → apt re-runs EVERY deploy
+    /// and never converges; (b) MIN bumped past the SagerNet candidate →
+    /// apt installs an older-than-MIN version and the deploy reports
+    /// success while the floor is unreachable. The fix re-reads the
+    /// version and aborts loud (`exit 1`) when it's still below MIN.
+    /// Companion to `sing_box_setup_script_gates_install_on_min_version`.
+    #[test]
+    fn sing_box_setup_script_verifies_floor_after_install() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // The post-install re-check is a SECOND `dpkg --compare-versions`
+        // (the gate has one before apt; verification adds one after).
+        assert!(
+            s.matches("dpkg --compare-versions").count() >= 2,
+            "must re-compare the installed version against the floor AFTER apt install: {s}"
+        );
+        // The re-check uses the same `ge MIN` floor operand.
+        assert!(
+            s.matches(&format!("ge \"{SING_BOX_MIN_VERSION}\"")).count() >= 2,
+            "the post-install re-check must compare against the same floor: {s}"
+        );
+        // The re-check lives AFTER the apt install line (verification, not
+        // the pre-install gate) and aborts loud on a miss.
+        let apt_at = s
+            .find("apt-get install -y sing-box")
+            .expect("apt install of sing-box must be present");
+        let tail = &s[apt_at..];
+        assert!(
+            tail.contains("dpkg --compare-versions"),
+            "the floor re-check must come AFTER the apt install: {s}"
+        );
+        assert!(
+            tail.contains("exit 1"),
+            "a failed post-install floor check must abort the deploy with exit 1: {s}"
+        );
+        // The diagnostic names the unreachable-floor + shadowed-PATH causes
+        // and points at the resolved binary path.
+        assert!(
+            s.contains("floor unreachable") && s.contains("command -v sing-box)"),
+            "the abort diagnostic must explain the floor-unreachable / shadowed-PATH causes: {s}"
         );
     }
 
