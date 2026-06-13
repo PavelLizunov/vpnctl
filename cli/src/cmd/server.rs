@@ -58,6 +58,10 @@ pub(crate) enum ServerCmd {
     Secret {
         server: String,
         key: String,
+        /// Opaque secret value. URL-safe base64 secrets (what
+        /// `crypto::gen_password` emits) legitimately start with `-`/`_`, so
+        /// allow a leading hyphen instead of mis-parsing it as a flag.
+        #[arg(allow_hyphen_values = true)]
         value: String,
     },
 

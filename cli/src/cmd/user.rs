@@ -16,10 +16,13 @@ pub(crate) enum UserCmd {
         /// Stable id, e.g. "alex-laptop".
         id: String,
         /// Use this UUID instead of generating a fresh one.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         uuid: Option<String>,
-        /// Use this TUIC password instead of generating one.
-        #[arg(long)]
+        /// Use this TUIC password instead of generating one. URL-safe base64
+        /// passwords (what `crypto::gen_password` emits) legitimately start
+        /// with `-`/`_`, so allow a leading hyphen instead of mis-parsing it
+        /// as a flag.
+        #[arg(long, allow_hyphen_values = true)]
         tuic_password: Option<String>,
         /// WireGuard PUBLIC key (44 base64 chars ending '='). The
         /// matching PRIVATE key stays on the operator's client

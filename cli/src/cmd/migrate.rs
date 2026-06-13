@@ -88,10 +88,11 @@ pub(crate) async fn run_from_bash(
     db: Option<PathBuf>,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let key_path = args
-        .key
-        .clone()
-        .unwrap_or_else(|| dirs_home().join(".ssh/id_ed25519"));
+    // Shared resolver: honours an explicit --key, else falls back to the
+    // default `$HOME/.ssh/id_ed25519` *with* an existence pre-check so a
+    // missing default (the classic sudo `$HOME=/root` footgun) yields an
+    // actionable error instead of an opaque russh "load key io error".
+    let key_path = crate::cmd::deploy::resolve_key_path(args.key.clone())?;
     if !args.inventory_dir.is_dir() {
         anyhow::bail!(
             "inventory dir not found or not a directory: {}",
@@ -495,15 +496,6 @@ impl AddressOverwriteDiff {
     pub(crate) fn any_changed(&self) -> bool {
         self.addr_change || self.port_change || self.user_change
     }
-}
-
-/// `$HOME` resolution that doesn't pull the `dirs` crate (we avoid
-/// adding deps for tiny needs). Falls back to `/root` on the homelab
-/// where `vpnctl` runs as root via systemd.
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 #[cfg(test)]
