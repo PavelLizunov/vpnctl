@@ -30,16 +30,57 @@ impl SingBox {
     }
 }
 
+/// Declared MINIMUM sing-box version the rendered config requires. The
+/// node-setup script installs/upgrades sing-box when it is ABSENT or
+/// BELOW this floor, and no-ops when at/above it. Bump this one line to
+/// require a newer sing-box; the next `vpnctl deploy` of each node
+/// converges the fleet upward (the SagerNet apt CANDIDATE — newest in
+/// the channel — satisfies the floor, so de/is on 1.13.7 get pulled to
+/// 1.13.12+).
+///
+/// History: before the version gate the install was gated purely on
+/// PRESENCE (`if ! command -v sing-box`), so once ANY sing-box was on
+/// PATH `deploy` never upgraded it — the fleet drifted (de/is 1.13.7 vs
+/// cdn/nl 1.13.12). Same class as the caddy / dns-tunnel cache-binary
+/// presence gates. The floor is a MINIMUM, not an exact pin — we don't
+/// attempt exact-version apt pinning (SagerNet version strings are
+/// brittle), the repo candidate (≥ floor) is acceptable.
+const SING_BOX_MIN_VERSION: &str = "1.13.12";
+
 /// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
 /// EVERY deploy — both the CLI (`vpnctl deploy`) and the daemon web/SSE
-/// paths call `ensure_installed` before render/apply. Installs sing-box +
-/// its APT prereqs, pre-creates the sing-box-owned log file, wires
-/// logrotate, and provisions the shared self-signed TLS cert/key. Static
-/// (no interpolation) so it can be asserted directly in tests.
-const SING_BOX_SETUP_SCRIPT: &str = r#"
+/// paths call `ensure_installed` before render/apply. Installs (or
+/// upgrades, when below [`SING_BOX_MIN_VERSION`]) sing-box + its APT
+/// prereqs, pre-creates the sing-box-owned log file, wires logrotate,
+/// and provisions the shared self-signed TLS cert/key.
+///
+/// Built once via `LazyLock`: only the version-gate prelude is
+/// interpolated (the floor from [`SING_BOX_MIN_VERSION`]); the rest is a
+/// static raw string. The composed script can be asserted directly in
+/// tests (`SING_BOX_SETUP_SCRIPT.as_str()` yields `&str`).
+static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box is
+    // ABSENT or its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
+    // The node has dpkg, so `dpkg --compare-versions` does the comparison.
+    // `$CUR` is quoted (it can be empty if `sing-box version` ever changes
+    // its output) — an empty CUR compares LOWER than any real floor, so
+    // `ge` fails and NEED=1 (reinstall), which is the safe default. The
+    // `|| NEED=1` keeps the non-zero compare from tripping `set -e`.
+    // `apt-get install -y sing-box` installs the repo CANDIDATE (newest in
+    // the SagerNet channel), which is ≥ the floor.
+    let head = format!(
+        r#"
     set -eu
     export DEBIAN_FRONTEND=noninteractive
-    if ! command -v sing-box >/dev/null; then
+    NEED=0
+    if ! command -v sing-box >/dev/null 2>&1; then
+        NEED=1
+    else
+        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        # Upgrade when the installed version is BELOW the declared floor.
+        dpkg --compare-versions "$CUR" ge "{min}" || NEED=1
+    fi
+    if [ "$NEED" = 1 ]; then
         apt-get update -qq
         apt-get install -y --no-install-recommends \
             curl gpg ca-certificates
@@ -51,7 +92,18 @@ const SING_BOX_SETUP_SCRIPT: &str = r#"
         apt-get update -qq
         apt-get install -y sing-box
     fi
-    # Pre-create log file with sing-box ownership. Otherwise the
+"#,
+        min = SING_BOX_MIN_VERSION,
+    );
+    format!("{head}{SING_BOX_SETUP_SCRIPT_TAIL}")
+});
+
+/// Static remainder of the node-setup script (everything after the
+/// version-aware install gate). Kept as a separate raw string — it
+/// carries literal `{`/`}` (logrotate fragment, fail2ban heredoc
+/// `${F2B_SSH_PORT}`) that must NOT pass through `format!`. UNCHANGED
+/// from before the version-gate refactor.
+const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-box ownership. Otherwise the
     # service crash-loops with "open /var/log/sing-box.log:
     # permission denied" — observed live on the staging deploy.
     install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
@@ -185,7 +237,7 @@ impl Kernel for SingBox {
         // ownership, logrotate, and the shared self-signed TLS cert that
         // tuic/hy2/trojan/anytls all need). Runs in BOTH the CLI and the
         // web/SSE deploy paths.
-        ssh.exec(SING_BOX_SETUP_SCRIPT).await?;
+        ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
         Ok(())
     }
 
@@ -550,7 +602,7 @@ mod tests {
     /// looped sing-box on the missing files.
     #[test]
     fn setup_script_provisions_shared_tls_cert() {
-        let s = SING_BOX_SETUP_SCRIPT;
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
         assert!(s.contains("/etc/sing-box/cert.pem"), "cert path missing");
         assert!(s.contains("/etc/sing-box/key.pem"), "key path missing");
         assert!(
@@ -570,7 +622,7 @@ mod tests {
 
     #[test]
     fn setup_script_installs_and_configures_fail2ban() {
-        let s = SING_BOX_SETUP_SCRIPT;
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
         assert!(
             s.contains("--no-install-recommends fail2ban"),
             "fail2ban package install missing"
@@ -651,7 +703,7 @@ mod tests {
     /// dropped any of them.
     #[test]
     fn setup_script_retains_install_log_and_logrotate_steps() {
-        let s = SING_BOX_SETUP_SCRIPT;
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
         assert!(
             s.contains("apt-get install -y sing-box"),
             "sing-box install"
@@ -667,6 +719,55 @@ mod tests {
         assert!(s.contains("set -eu"), "fail-fast shell flags");
     }
 
+    /// The sing-box install must be gated on a MINIMUM VERSION, not on
+    /// bare presence. Before this gate, `if ! command -v sing-box` wrapped
+    /// the apt install directly, so once ANY sing-box was on PATH `deploy`
+    /// never upgraded it (fleet skew: de/is 1.13.7 vs cdn/nl 1.13.12).
+    /// Companion to `setup_script_retains_install_log_and_logrotate_steps`.
+    #[test]
+    fn sing_box_setup_script_gates_install_on_min_version() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // The version comparison is present and uses the node's dpkg.
+        assert!(
+            s.contains("dpkg --compare-versions"),
+            "install must be gated on a dpkg version comparison, not bare presence: {s}"
+        );
+        // The declared floor is injected literally (no hard-coded copy).
+        assert!(
+            s.contains(SING_BOX_MIN_VERSION),
+            "the SING_BOX_MIN_VERSION floor ({SING_BOX_MIN_VERSION}) must appear in the rendered script: {s}"
+        );
+        // …and it is the right-hand side of the `ge` comparison.
+        assert!(
+            s.contains(&format!("ge \"{SING_BOX_MIN_VERSION}\"")),
+            "the floor must be the `ge` operand of the version compare: {s}"
+        );
+        // The bare-presence-only gate is GONE: the old wording wrapped the
+        // apt install directly in `if ! command -v sing-box …; then`. Its
+        // absence proves the apt path is no longer skipped whenever any
+        // sing-box is on PATH.
+        assert!(
+            !s.contains("if ! command -v sing-box >/dev/null; then"),
+            "the bare-presence-only install gate must be gone: {s}"
+        );
+        // The apt install is now reached via the version-aware NEED gate.
+        assert!(
+            s.contains(r#"if [ "$NEED" = 1 ]; then"#),
+            "apt install must be reached via the version-aware NEED gate: {s}"
+        );
+        // The SagerNet repo/key setup and the final assertion are retained.
+        assert!(
+            s.contains("https://sing-box.app/gpg.key")
+                && s.contains("deb.sagernet.org")
+                && s.contains("apt-get install -y sing-box"),
+            "SagerNet repo setup + apt install must be retained inside the gate: {s}"
+        );
+        assert!(
+            s.contains("command -v sing-box  # final assertion"),
+            "the final `command -v sing-box` assertion must remain: {s}"
+        );
+    }
+
     /// The rendered logrotate fragment must use `copytruncate`
     /// (truncate-in-place keeps sing-box's open fd valid) and MUST
     /// NOT carry a `create` directive — `create` triggers the
@@ -679,7 +780,7 @@ mod tests {
         // assertion is scoped to the fragment, not unrelated `create`
         // mentions elsewhere in the setup script (e.g. the "Pre-create
         // log file" comment).
-        let s = SING_BOX_SETUP_SCRIPT;
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
         let start = s
             .find("/var/log/sing-box.log {")
             .expect("logrotate heredoc opening brace not found");
