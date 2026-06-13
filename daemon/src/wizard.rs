@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 /// to 22 but other hosters move it; pasting "address: vpn.foo.com,
 /// port: 2222" must work). 22 is the default when the form field is
 /// blank — the most common case.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WizardSession {
     pub address: String,
     pub root_password: String,
@@ -62,6 +62,23 @@ pub struct WizardSession {
     /// Wall-clock instant the session was created. Used by `get` to
     /// expire stale sessions on access.
     pub created: Instant,
+}
+
+// Hand-written so `root_password` never lands in logs / panics /
+// anyhow chains via `{:?}`. Same `<redacted>` convention as the
+// `User` Debug impl in `vpnctl-core` and the russh transport builders.
+// The derived Debug was a loaded gun: any future `tracing::debug!(?session)`
+// or `.context(format!("{session:?}"))` would have dumped the plaintext
+// root password. Pinned by `wizard_session_debug_redacts_root_password`.
+impl std::fmt::Debug for WizardSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WizardSession")
+            .field("address", &self.address)
+            .field("root_password", &"<redacted>")
+            .field("ssh_port", &self.ssh_port)
+            .field("created", &self.created)
+            .finish()
+    }
 }
 
 /// In-memory session store with lazy TTL expiry. Cloning is cheap
@@ -254,6 +271,34 @@ mod tests {
         assert_eq!(s.root_password, "hunter2");
         assert_eq!(s.ssh_port, 22);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn wizard_session_debug_redacts_root_password() {
+        // Loaded-gun fix: a future `tracing::debug!(?session)` or
+        // `format!("{session:?}")` in an anyhow chain must NOT dump the
+        // plaintext root password. Same `<redacted>` convention as the
+        // `User` Debug impl in vpnctl-core.
+        let session = WizardSession {
+            address: "198.51.100.42".into(),
+            root_password: "PW_ROOT_MUST_NOT_LEAK".into(),
+            ssh_port: 22,
+            created: Instant::now(),
+        };
+        let dbg = format!("{session:?}");
+        assert!(
+            !dbg.contains("PW_ROOT_MUST_NOT_LEAK"),
+            "Debug leaked root_password: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker in Debug output: {dbg}"
+        );
+        // The non-secret fields stay visible for diagnostics.
+        assert!(
+            dbg.contains("198.51.100.42"),
+            "address must still print: {dbg}"
+        );
     }
 
     #[test]

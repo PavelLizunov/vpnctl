@@ -104,12 +104,27 @@ pub fn resolve_log_path() -> String {
 
 /// Resolve the tail length (env override > default), parseable +
 /// non-zero. Invalid → default.
+///
+/// Warns when the var is SET but rejected (unparseable or `0`) so an
+/// operator typo doesn't silently fall back — same warn-on-reject
+/// convention as `VPNCTLD_SINGBOX_LOG_PATH` above.
 pub fn resolve_tail_lines() -> usize {
-    std::env::var("VPNCTLD_SINGBOX_LOG_TAIL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&n: &usize| n > 0)
-        .unwrap_or(DEFAULT_TAIL_LINES)
+    match std::env::var("VPNCTLD_SINGBOX_LOG_TAIL") {
+        Err(_) => DEFAULT_TAIL_LINES,
+        Ok(raw) => match raw.parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    target = "vpnctld::sing_box_log_scraper",
+                    value = %raw,
+                    default = DEFAULT_TAIL_LINES,
+                    "VPNCTLD_SINGBOX_LOG_TAIL={raw:?} is not a positive integer; \
+                     falling back to default {DEFAULT_TAIL_LINES}"
+                );
+                DEFAULT_TAIL_LINES
+            }
+        },
+    }
 }
 
 /// Parse a tail of sing-box log into an attribution map. Pure
