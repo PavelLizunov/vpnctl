@@ -741,82 +741,7 @@ impl Kernel for DnsTunnel {
         // wgturn's apply_config.
         ssh.upload("/etc/dns-tunnel/.deploy-bundle.new", config)
             .await?;
-        let cmd = format!(
-            r#"
-            set -eu
-
-            BUNDLE=/etc/dns-tunnel/.deploy-bundle.new
-            test -f "$BUNDLE"
-
-            # Unpack the bundle. Format documented in
-            # `crates/kernels/src/dns_tunnel.rs::BUNDLE_DELIMITER` (same
-            # as wgturn). Small awk splits on the marker line and writes
-            # each member into its declared path (atomic via mv).
-            awk '
-                BEGIN {{ path = ""; outfile = ""; }}
-                /^====FILE: .*====$/ {{
-                    if (outfile != "") {{ close(outfile); }}
-                    path = $0
-                    sub(/^====FILE: /, "", path)
-                    sub(/====$/, "", path)
-                    outfile = path ".new"
-                    next
-                }}
-                {{
-                    if (outfile != "") {{ print > outfile }}
-                }}
-            ' "$BUNDLE"
-
-            install -d -m 0750 {run_dir}
-
-            # Move each ".new" sibling into place atomically. Files we
-            # know about: the slipstream env file + the sing-box JSON.
-            mv {slipstream_env}.new {slipstream_env}
-            chown dns-tunnel:dns-tunnel {slipstream_env}
-            chmod 0640 {slipstream_env}
-            mv {sb_config}.new {sb_config}
-            chown root:root {sb_config}
-            chmod 0644 {sb_config}
-            # Make the run dir + auto-generated cert/key reachable by the
-            # unprivileged relay user (cert/key may not exist yet — the
-            # binary generates them on first run, inheriting this owner).
-            chown -R dns-tunnel:dns-tunnel {run_dir}
-            rm -f "$BUNDLE"
-
-            # Restart the BACKEND (sing-box loopback inbound) FIRST so the
-            # relay's forward-target is reachable when it starts.
-            systemctl enable {backend} >/dev/null 2>&1 || true
-            systemctl restart {backend}
-
-            # Then the relay itself.
-            systemctl enable {relay} >/dev/null 2>&1 || true
-            systemctl restart {relay}
-
-            # 8-second wait for BOTH units to settle.
-            for s in {backend} {relay}; do
-                ok=0
-                for i in 1 2 3 4 5 6 7 8; do
-                    state=$(systemctl is-active "$s" 2>/dev/null || true)
-                    if [ "$state" = "active" ]; then
-                        ok=1
-                        break
-                    fi
-                    sleep 1
-                done
-                if [ "$ok" != "1" ]; then
-                    echo "$s did not become active. Last 20 log lines:" >&2
-                    journalctl -u "$s" --no-pager -n 20 >&2 || true
-                    exit 1
-                fi
-            done
-        "#,
-            run_dir = NODE_RUN_DIR,
-            slipstream_env = SLIPSTREAM_CONFIG_PATH,
-            sb_config = SINGBOX_CONFIG_PATH,
-            backend = BACKEND_UNIT,
-            relay = RELAY_UNIT,
-        );
-        ssh.exec(&cmd).await?;
+        ssh.exec(&dns_tunnel_apply_script()).await?;
         Ok(())
     }
 
@@ -873,10 +798,147 @@ fn split_host_port(target: &str) -> Option<(String, u16)> {
     }
 }
 
+/// The bundle-unpack + atomic-swap + verify + ROLLBACK script run after the
+/// dns-tunnel deploy bundle has been uploaded to `…/.deploy-bundle.new`.
+///
+/// dns-tunnel is a TWO-unit kernel: the sing-box loopback BACKEND
+/// (`SINGBOX_CONFIG_PATH`) and the slipstream RELAY (`SLIPSTREAM_CONFIG_PATH`).
+/// The backend is (re)started before the relay because the relay's
+/// forward-target must be reachable when it comes up.
+///
+/// Neither `mv` nor `systemctl restart` validates RUNTIME conditions, so a
+/// bundle that unpacks cleanly can still crash-loop either unit (a port a
+/// co-tenant bound; a cert path the user can't read). The previous version
+/// `mv`'d both `.new → live` and, on a failed restart, left BOTH last-good
+/// configs gone with nothing to restore. This script snapshots BOTH live
+/// configs to `<live>.bak` BEFORE their swaps (each guarded on the live file
+/// existing — first deploy has none), and on ANY unit failing to become
+/// active restores BOTH `.bak`s and restarts BOTH units (backend-first) back
+/// to last-good. The `.bak`s are removed once both units are confirmed up.
+///
+/// Shell-correctness note on `set -e`: the failure path is reached by the
+/// `if [ "$ok" != "1" ]` test after the poll loop (each `is-active` is
+/// `|| true`), NOT by `set -e` aborting — so the restore block runs. Each
+/// restore step is `|| true`-guarded so one failing step can't short-circuit
+/// the rest before `exit 1`.
+fn dns_tunnel_apply_script() -> String {
+    format!(
+        r#"
+            set -eu
+
+            BUNDLE=/etc/dns-tunnel/.deploy-bundle.new
+            test -f "$BUNDLE"
+
+            # Unpack the bundle. Format documented in
+            # `crates/kernels/src/dns_tunnel.rs::BUNDLE_DELIMITER` (same
+            # as wgturn). Small awk splits on the marker line and writes
+            # each member into its declared path (atomic via mv).
+            awk '
+                BEGIN {{ path = ""; outfile = ""; }}
+                /^====FILE: .*====$/ {{
+                    if (outfile != "") {{ close(outfile); }}
+                    path = $0
+                    sub(/^====FILE: /, "", path)
+                    sub(/====$/, "", path)
+                    outfile = path ".new"
+                    next
+                }}
+                {{
+                    if (outfile != "") {{ print > outfile }}
+                }}
+            ' "$BUNDLE"
+
+            install -d -m 0750 {run_dir}
+
+            # Snapshot BOTH live configs so a runtime-failed restart can roll
+            # back. Each guarded on the live file existing (first deploy has
+            # none); -a preserves owner/mode.
+            if [ -f {slipstream_env} ]; then
+                cp -a {slipstream_env} {slipstream_env}.bak 2>/dev/null || true
+            fi
+            if [ -f {sb_config} ]; then
+                cp -a {sb_config} {sb_config}.bak 2>/dev/null || true
+            fi
+
+            # Move each ".new" sibling into place atomically. Files we
+            # know about: the slipstream env file + the sing-box JSON.
+            mv {slipstream_env}.new {slipstream_env}
+            chown dns-tunnel:dns-tunnel {slipstream_env}
+            chmod 0640 {slipstream_env}
+            mv {sb_config}.new {sb_config}
+            chown root:root {sb_config}
+            chmod 0644 {sb_config}
+            # Make the run dir + auto-generated cert/key reachable by the
+            # unprivileged relay user (cert/key may not exist yet — the
+            # binary generates them on first run, inheriting this owner).
+            chown -R dns-tunnel:dns-tunnel {run_dir}
+            rm -f "$BUNDLE"
+
+            # Restart the BACKEND (sing-box loopback inbound) FIRST so the
+            # relay's forward-target is reachable when it starts.
+            systemctl enable {backend} >/dev/null 2>&1 || true
+            systemctl restart {backend}
+
+            # Then the relay itself.
+            systemctl enable {relay} >/dev/null 2>&1 || true
+            systemctl restart {relay}
+
+            # 8-second wait for BOTH units to settle. On ANY unit failing,
+            # roll BOTH configs back to their snapshots and restart both
+            # (backend-first) so the node returns to its last-good state
+            # instead of crash-looping. Each restore step is `|| true`-
+            # guarded so the branch always reaches `exit 1`.
+            for s in {backend} {relay}; do
+                ok=0
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active "$s" 2>/dev/null || true)
+                    if [ "$state" = "active" ]; then
+                        ok=1
+                        break
+                    fi
+                    sleep 1
+                done
+                if [ "$ok" != "1" ]; then
+                    echo "$s did not become active. Last 20 log lines:" >&2
+                    journalctl -u "$s" --no-pager -n 20 >&2 || true
+                    if [ -f {slipstream_env}.bak ] || [ -f {sb_config}.bak ]; then
+                        echo "rolling back dns-tunnel to previous config" >&2
+                        [ -f {slipstream_env}.bak ] && mv {slipstream_env}.bak {slipstream_env} || true
+                        [ -f {sb_config}.bak ] && mv {sb_config}.bak {sb_config} || true
+                        systemctl restart {backend} || true
+                        systemctl restart {relay} || true
+                    fi
+                    exit 1
+                fi
+            done
+
+            # Both units up — drop the transient snapshots.
+            rm -f {slipstream_env}.bak {sb_config}.bak
+        "#,
+        run_dir = NODE_RUN_DIR,
+        slipstream_env = SLIPSTREAM_CONFIG_PATH,
+        sb_config = SINGBOX_CONFIG_PATH,
+        backend = BACKEND_UNIT,
+        relay = RELAY_UNIT,
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Drop `#`-comment lines from a rendered shell script so a doc/inline
+    /// comment that mentions a command token (e.g. "exit 1") can't be
+    /// mistaken for the actual command when the apply-script tests grep
+    /// for command ordering.
+    fn strip_comment_lines(script: &str) -> String {
+        script
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn id_returns_dns_tunnel() {
@@ -958,5 +1020,66 @@ mod tests {
         );
         assert_eq!(split_host_port("127.0.0.1"), None);
         assert_eq!(split_host_port("127.0.0.1:70000"), None);
+    }
+
+    #[test]
+    fn apply_script_snapshots_both_configs_before_swap() {
+        // Two-unit kernel: BOTH the slipstream env AND the sing-box JSON
+        // must be `cp -a`'d to `.bak` BEFORE their respective `mv .new →
+        // live` swaps, so a runtime-failed restart can roll either back.
+        let s = dns_tunnel_apply_script();
+        for live in [SLIPSTREAM_CONFIG_PATH, SINGBOX_CONFIG_PATH] {
+            let cp = s
+                .find(&format!("cp -a {live} {live}.bak"))
+                .unwrap_or_else(|| panic!("snapshot cp -a to .bak missing for {live}"));
+            let mv = s
+                .find(&format!("mv {live}.new {live}"))
+                .unwrap_or_else(|| panic!("atomic swap mv missing for {live}"));
+            assert!(cp < mv, "snapshot for {live} must precede its swap");
+        }
+    }
+
+    #[test]
+    fn apply_script_restores_both_configs_on_failure() {
+        // On ANY unit failing to become active, BOTH configs roll back and
+        // BOTH units restart (backend-first) before `exit 1`.
+        // Strip `#` comment lines first so a doc-comment mentioning
+        // "exit 1" can't be mistaken for the actual command.
+        let s = strip_comment_lines(&dns_tunnel_apply_script());
+        let restore_env = s
+            .find(&format!(
+                "mv {SLIPSTREAM_CONFIG_PATH}.bak {SLIPSTREAM_CONFIG_PATH}"
+            ))
+            .expect("slipstream restore mv missing");
+        let restore_sb = s
+            .find(&format!(
+                "mv {SINGBOX_CONFIG_PATH}.bak {SINGBOX_CONFIG_PATH}"
+            ))
+            .expect("sing-box restore mv missing");
+        let exit1 = s.find("exit 1").expect("failure exit missing");
+        assert!(restore_env < exit1 && restore_sb < exit1);
+        // Both units restarted back to good after the restore.
+        let tail = &s[restore_env.min(restore_sb)..exit1];
+        assert!(
+            tail.contains(&format!("systemctl restart {BACKEND_UNIT}")),
+            "backend must restart on the rollback branch"
+        );
+        assert!(
+            tail.contains(&format!("systemctl restart {RELAY_UNIT}")),
+            "relay must restart on the rollback branch"
+        );
+        // Restore steps `|| true`-guarded so the branch always hits exit 1.
+        assert!(tail.contains("|| true"));
+    }
+
+    #[test]
+    fn apply_script_cleans_up_baks_on_success() {
+        let s = dns_tunnel_apply_script();
+        assert!(
+            s.contains(&format!(
+                "rm -f {SLIPSTREAM_CONFIG_PATH}.bak {SINGBOX_CONFIG_PATH}.bak"
+            )),
+            "success path must remove both transient .bak snapshots: {s}"
+        );
     }
 }
