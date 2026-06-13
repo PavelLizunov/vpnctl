@@ -13,4 +13,5 @@ pub(crate) mod render;
 pub(crate) mod server;
 pub(crate) mod status;
 pub(crate) mod sub;
+pub(crate) mod update_kernels;
 pub(crate) mod user;

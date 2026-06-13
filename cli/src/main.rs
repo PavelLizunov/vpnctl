@@ -63,6 +63,24 @@ enum Cmd {
         #[arg(long)]
         key: Option<PathBuf>,
     },
+    /// Upgrade node kernel binaries to their version floor WITHOUT
+    /// rendering/applying config. Runs each declared kernel's
+    /// `ensure_installed` (the version-gated apt upgrade) only — it
+    /// never enters `apply_config`, so it bypasses the DG-1 UUID-removal
+    /// diff-guard and works on inventory-drift nodes where `deploy` is
+    /// blocked. The on-disk config is left untouched; only the kernel
+    /// binary (and the service apt restarts against it) moves.
+    UpdateKernels {
+        /// Server id to upgrade. Mutually exclusive with `--all`; exactly
+        /// one of the two must be given.
+        server: Option<String>,
+        /// Upgrade every server in the inventory.
+        #[arg(long)]
+        all: bool,
+        /// SSH private key path (default: ~/.ssh/id_ed25519).
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
     /// Print share links (vless://, tuic://, ...) for every server×protocol
     /// the user has been granted access to. Applies the same subscription
     /// policy as the live `/sub` endpoint (disabled user → empty;
@@ -162,6 +180,26 @@ enum MigrateCmd {
     FromBash(cmd::migrate::MigrateFromBashArgs),
 }
 
+/// Validate the `update-kernels` exactly-one-of(server, --all) contract
+/// and map it to an [`cmd::update_kernels::UpdateTarget`]. A positional
+/// `server` and `--all` are mutually exclusive, and at least one must be
+/// given — otherwise the command has no idea what to upgrade.
+fn resolve_update_target(
+    server: Option<String>,
+    all: bool,
+) -> anyhow::Result<cmd::update_kernels::UpdateTarget> {
+    match (server, all) {
+        (Some(_), true) => {
+            anyhow::bail!("pass either a server id or --all, not both")
+        }
+        (None, false) => {
+            anyhow::bail!("specify a server id or --all")
+        }
+        (Some(id), false) => Ok(cmd::update_kernels::UpdateTarget::One(id)),
+        (None, true) => Ok(cmd::update_kernels::UpdateTarget::All),
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -178,6 +216,10 @@ async fn main() -> std::process::ExitCode {
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
+        Cmd::UpdateKernels { server, all, key } => match resolve_update_target(server, all) {
+            Ok(target) => cmd::update_kernels::run(target, key, cli.db, cli.output).await,
+            Err(e) => Err(e),
+        },
         Cmd::Sub {
             user,
             qr,
@@ -308,6 +350,74 @@ mod tests {
                 cmd: AdminCmd::HashPassword { password },
             } => assert_eq!(password.as_deref(), Some("-secretpw")),
             other => panic!("expected `admin hash-password`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kernels_single_server_binds_positional() {
+        let cli = Cli::try_parse_from(["vpnctl", "update-kernels", "de"])
+            .expect("`update-kernels de` must parse");
+        match cli.cmd {
+            Cmd::UpdateKernels { server, all, key } => {
+                assert_eq!(server.as_deref(), Some("de"));
+                assert!(!all);
+                assert!(key.is_none());
+            }
+            other => panic!("expected `update-kernels`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kernels_all_flag_parses() {
+        let cli = Cli::try_parse_from(["vpnctl", "update-kernels", "--all"])
+            .expect("`update-kernels --all` must parse");
+        match cli.cmd {
+            Cmd::UpdateKernels { server, all, .. } => {
+                assert!(server.is_none());
+                assert!(all);
+            }
+            other => panic!("expected `update-kernels`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kernels_binds_key_flag() {
+        let cli = Cli::try_parse_from(["vpnctl", "update-kernels", "de", "--key", "/x"])
+            .expect("`update-kernels de --key /x` must parse");
+        match cli.cmd {
+            Cmd::UpdateKernels { server, key, .. } => {
+                assert_eq!(server.as_deref(), Some("de"));
+                assert_eq!(key, Some(PathBuf::from("/x")));
+            }
+            other => panic!("expected `update-kernels`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kernels_target_neither_is_rejected() {
+        // Clap parses `update-kernels` with no args (both optional); the
+        // run-side validation is what rejects "neither server nor --all".
+        let err = resolve_update_target(None, false)
+            .expect_err("neither server nor --all must be rejected");
+        assert!(err.to_string().contains("--all"), "got: {err}");
+    }
+
+    #[test]
+    fn update_kernels_target_both_is_rejected() {
+        let err = resolve_update_target(Some("de".into()), true)
+            .expect_err("server + --all must be rejected");
+        assert!(err.to_string().contains("not both"), "got: {err}");
+    }
+
+    #[test]
+    fn update_kernels_target_maps_single_and_all() {
+        match resolve_update_target(Some("de".into()), false).expect("single ok") {
+            cmd::update_kernels::UpdateTarget::One(id) => assert_eq!(id, "de"),
+            other => panic!("expected One, got {other:?}"),
+        }
+        match resolve_update_target(None, true).expect("all ok") {
+            cmd::update_kernels::UpdateTarget::All => {}
+            other => panic!("expected All, got {other:?}"),
         }
     }
 }
