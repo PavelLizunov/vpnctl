@@ -1,0 +1,53 @@
+[Unit]
+Description=vpnctl kernel-binary update (sing-box/caddy/amneziawg → version floor)
+Documentation=https://github.com/PavelLizunov/vpnctl
+# Order after the daemon so a concurrent vpnctld restart doesn't race the
+# per-node deploy. `After=` orders STARTUP only — once both are running this
+# oneshot can still fire while vpnctld is alive, which is fine: each node's
+# `vpnctl deploy` is content-aware/idempotent.
+After=vpnctld.service
+# Per-node SSH + apt need the network up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=user
+Group=user
+# Reads VPNCTLD_* (e.g. VPNCTLD_TRUSTED_PROXIES is irrelevant here, but the
+# deploy/SSH knobs and any future kernel-version floor overrides live here).
+EnvironmentFile=-/etc/vpnctl/vpnctld.env
+# Use the daemon DEPLOY key explicitly. This oneshot runs as `User=user`,
+# whose `~/.ssh/id_ed25519` is NOT the vpnctld deploy key — the deploy key
+# lives at /var/lib/vpnctl/.ssh/id_ed25519. `--key` is the #34-aware explicit
+# path (under sudo $HOME is /root, so any default-key fallback would resolve
+# to the wrong identity). Without it the per-node SSH fails publickey.
+ExecStart=/usr/local/bin/vpnctl update-kernels --all --key /var/lib/vpnctl/.ssh/id_ed25519
+# Budget: apt refresh + per-node SSH across the whole fleet. caddy is
+# content-aware (a no-op when the on-node binary already matches), but
+# tolerate a worst case where every kernel on every node needs a reinstall.
+TimeoutStartSec=900
+# Don't auto-restart on failure — the next weekly tick (or an operator
+# clicking Deploy in the Web UI) is the recovery path; journald surfaces it.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+# ── Sandbox / hardening ────────────────────────────────────────────
+# SSH-bearing posture: this oneshot SSHes (and scps kernel binaries) out to
+# every node, so it mirrors scripts/vpnctl-backup.service's LIGHTER profile
+# (which already does outbound ssh/scp), NOT scripts/vpnctl-geoip-update.service's
+# aggressive syscall filter. The /usr/bin/ssh subprocess needs MemoryDenyWriteExecute
+# and a restrictive SystemCallFilter OFF — geoip can afford them because it
+# only does an in-process HTTPS download. See the PR for the full rationale.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# known_hosts TOFU: the first SSH to a node writes its host key into
+# /var/lib/vpnctl/.ssh/known_hosts, so that one dir must stay writable.
+ReadWritePaths=/var/lib/vpnctl/.ssh
+ReadOnlyPaths=/var/lib/vpnctl /etc/vpnctl /opt/vpnctl
+PrivateTmp=true
+# Address families — outbound ssh over IPv4/IPv6 + unix sockets. No
+# AF_NETLINK / AF_PACKET needed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
