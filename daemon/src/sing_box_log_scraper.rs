@@ -218,15 +218,37 @@ fn extract_conn_id(line: &str) -> Option<(&str, &str)> {
     Some((id, after))
 }
 
-/// Parse the source IP and port from the "inbound connection
-/// from IP:port" suffix. Handles both forms sing-box emits:
-///   * IPv4 source: `83.97.108.34:55512`
-///   * IPv6 source: `[2a00:1450::1]:55512` (sing-box bracket-
-///     wraps IPv6 source addresses just like destinations)
+/// Parse the source IP and port from the inbound-accept suffix.
+///
+/// sing-box logs the source side in TWO marker forms depending on
+/// the transport of the inbound:
+///
+/// - stream / TCP (VLESS, Trojan): `inbound connection from <addr>`
+/// - packet / UDP (Hysteria2, TUIC): `inbound packet connection from <addr>`
+///
+/// Both carry the same `<addr>` shape, in either of:
+///
+/// - IPv4 source: `83.97.108.34:55512`
+/// - IPv6 source: `[2a00:1450::1]:55512` (sing-box bracket-wraps
+///   IPv6 source addresses just like destinations)
+///
+/// We match whichever marker occurs and advance past it; the
+/// address parsing below is shared. NM-11 follow-up: before this,
+/// only the stream marker matched, so UDP-only users (e.g. a
+/// hysteria2-only client) got no `(source_ip, port) → user` pair
+/// and showed "No live stats yet" despite their packet user-line
+/// being parsed fine by `extract_user`.
 fn extract_source(after_id: &str) -> Option<(&str, &str)> {
-    let marker = "inbound connection from ";
-    let idx = after_id.find(marker)?;
-    let tail = &after_id[idx + marker.len()..];
+    // The two markers are disjoint substrings (the packet form has
+    // "packet " where the stream form has "connection " right after
+    // "inbound "), so order doesn't affect correctness; probe the
+    // packet form first as the readable "more specific" branch.
+    let tail = if let Some(idx) = after_id.find("inbound packet connection from ") {
+        &after_id[idx + "inbound packet connection from ".len()..]
+    } else {
+        let idx = after_id.find("inbound connection from ")?;
+        &after_id[idx + "inbound connection from ".len()..]
+    };
     // Take up to the first whitespace; error-variant lines append
     // `: reason` AFTER the address, success lines end at EOL.
     let addr_end = tail
@@ -397,6 +419,29 @@ mod tests {
     }
 
     #[test]
+    fn extract_source_parses_packet_form() {
+        // UDP inbounds (hysteria2, tuic) log the source with an extra
+        // "packet " token: `inbound packet connection from <addr>`.
+        // Before the fix this returned None → no attribution for
+        // UDP-only users.
+        let after =
+            " inbound/hysteria2[hy2-in]: inbound packet connection from 136.169.158.27:11837";
+        let (ip, port) = extract_source(after).expect("must parse packet form");
+        assert_eq!(ip, "136.169.158.27");
+        assert_eq!(port, "11837");
+    }
+
+    #[test]
+    fn extract_source_still_parses_stream_form() {
+        // Regression guard: the TCP/stream marker must keep working
+        // after the packet-form branch was added.
+        let after = " inbound/vless[vless-in]: inbound connection from 83.97.108.34:55512";
+        let (ip, port) = extract_source(after).expect("must parse stream form");
+        assert_eq!(ip, "83.97.108.34");
+        assert_eq!(port, "55512");
+    }
+
+    #[test]
     fn extract_source_rejects_non_digit_port() {
         let after = " inbound/vless[vless-in]: inbound connection from 1.2.3.4:abc";
         assert!(extract_source(after).is_none());
@@ -543,6 +588,29 @@ INFO [12345 2s] inbound/vless[vless-in]: [first-user] inbound connection to 8.8.
         assert!(
             !m.contains_key(&("9.9.9.9".into(), "9000".into())),
             "duplicate replay source 9.9.9.9:9000 must NOT shadow the original"
+        );
+    }
+
+    // ── NM-11 follow-up: UDP (hysteria2/tuic) packet-form source ──
+
+    #[test]
+    fn parse_attribution_attributes_hysteria2_packet_user() {
+        // End-to-end proof of the fix. A hysteria2-only user logs BOTH
+        // halves in packet form under one conn_id: the source line
+        // (`inbound packet connection from <ip:port>`) + the post-auth
+        // user line (`[someuser] inbound packet connection to <dst>`).
+        // Before the fix the source half was dropped → NULL attribution
+        // (this is the `rectuspc` symptom observed live on server `cdn`).
+        let log = "\
++0000 2026-06-12 10:00:00 INFO [777 0ms] inbound/hysteria2[hy2-in]: inbound packet connection from 136.169.158.27:11837
++0000 2026-06-12 10:00:00 INFO [777 5ms] inbound/hysteria2[hy2-in]: [someuser] inbound packet connection to 8.8.8.8:443
+";
+        let m = parse_attribution(log);
+        assert_eq!(
+            m.get(&("136.169.158.27".into(), "11837".into()))
+                .map(|s| s.as_str()),
+            Some("someuser"),
+            "hysteria2 packet-form source+user must produce a (ip,port)→user entry"
         );
     }
 }
