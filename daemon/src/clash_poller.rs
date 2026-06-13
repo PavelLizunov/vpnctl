@@ -313,6 +313,9 @@ pub fn spawn_clash_poller(
                     "forgetting server (removed from inventory)"
                 );
                 engine.forget(&id);
+                // Mirror the leak guard for the cache's persistent
+                // attribution accumulator + last snapshot.
+                snapshot_cache.forget(&id);
             }
 
             for server in &servers {
@@ -406,31 +409,34 @@ async fn poll_one_server(
             std::collections::HashMap::new()
         }
     };
-    let attribution_hits = attribution.len();
-    // Phase 4c — store the full snapshot (per-connection detail)
-    // + the Phase 4d attribution map in the shared cache BEFORE
-    // we agregate. The cache feeds the server-detail page's
-    // «Live connections» drill-down.
-    snapshot_cache.store(server.id.clone(), snapshot.clone(), attribution);
-    if attribution_hits > 0 {
+    let scrape_hits = attribution.len();
+    // Phase 4c + attribution-persist fix — store the full snapshot
+    // (per-connection detail) + MERGE this tick's fresh scrape into
+    // the persistent per-server attribution accumulator, then prune
+    // it to the live connection set. `store_merged` does all three
+    // atomically under the cache write lock and returns the merged+
+    // pruned map for this tick's per-connection resolution.
+    //
+    // Why merge instead of replace: the scrape only sees the last
+    // `tail -n N` lines (~12 min on a busy node). A long-lived
+    // connection whose accept line has scrolled out of that window
+    // is ABSENT from `attribution` this tick — but it's still in
+    // clash-api's connection set, so an earlier tick's observation
+    // (kept in the accumulator) keeps it attributed. Pruning to the
+    // live set evicts closed connections so the map stays bounded
+    // and a later port-reuse can't inherit a stale user. The merged
+    // map is also what the «Live connections» drill-down reads.
+    let attribution_for_tick =
+        snapshot_cache.store_merged(server.id.clone(), snapshot.clone(), attribution);
+    if scrape_hits > 0 || !attribution_for_tick.is_empty() {
         tracing::debug!(
             target = "vpnctld::poller",
             server = %server.id.0,
-            attribution_entries = attribution_hits,
-            "sing-box log scrape attributed connections"
+            scrape_entries = scrape_hits,
+            merged_entries = attribution_for_tick.len(),
+            "sing-box log scrape merged into persistent attribution"
         );
     }
-
-    // Phase 4e — feed the log-derived attribution map into the
-    // diff engine so per-user deltas land with the correct
-    // user_id (NM-11 work-around). We borrow the just-stored
-    // entry from the cache to avoid cloning the map twice; if
-    // the cache store failed (poisoned RwLock) we fall through
-    // with an empty map = server-wide only delta this tick.
-    let attribution_for_tick: crate::sing_box_log_scraper::AttributionMap = snapshot_cache
-        .get(&server.id)
-        .map(|s| s.attribution.clone())
-        .unwrap_or_default();
 
     // Phase 5b — record «куда ходит этот юзер» pairs (one per
     // (resolved user_id, destination_label) seen in this tick).
