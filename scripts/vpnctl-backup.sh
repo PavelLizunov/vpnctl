@@ -61,8 +61,11 @@
 # -------------
 # * SQLite snapshot fails → exit 10 (likely DB corruption — operator
 #   should investigate before next tick).
-# * scp fails → exit 11 (network or 207-side issue — local snapshot
-#   stays in place for manual recovery).
+# * scp fails → exit 11 (network or 207-side issue — the encrypted
+#   local snapshot stays in place under BACKUP_DIR
+#   (/var/lib/vpnctl/backups by default) for manual recovery; the
+#   EXIT trap only ever wipes the scratch staging dir, never the
+#   deliverable archive).
 # * age fails → exit 12 (recipient key rotated or corrupted).
 # * Required path missing → exit 13 (install-time bug or path drift).
 # Any non-zero exit triggers the systemd unit's failure handling
@@ -90,6 +93,13 @@ IPTABLES_RULES=${IPTABLES_RULES:-/etc/iptables/rules.v4}
 TARGET_HOST=${TARGET_HOST:-user@192.168.0.207}
 TARGET_DIR=${TARGET_DIR:-/home/user/backups/vpnctl}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
+# Durable local archive directory. The final encrypted archive
+# (LOCAL_PATH) is written HERE — OUTSIDE the scratch WORK dir — so the
+# EXIT trap (which cleans ONLY scratch staging) can never delete the
+# deliverable. If the primary scp to 207 fails (exit 11) the local
+# archive survives here for manual recovery. Local copies are pruned
+# by the same RETENTION_DAYS as the primary store.
+BACKUP_DIR=${BACKUP_DIR:-/var/lib/vpnctl/backups}
 # Off-site target (Phase 5b). Default = `is` VPN node (Iceland), the
 # geographically + jurisdictionally most-distant from RU/EU. Override
 # OFFSITE_HOST="" to disable off-site push entirely.
@@ -107,12 +117,20 @@ TMPDIR=${TMPDIR:-/tmp}
 STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 WORK="${TMPDIR}/vpnctl-backup-${STAMP}"
 ARCHIVE_NAME="${STAMP}.tar.zst.age"
-LOCAL_PATH="${WORK}/${ARCHIVE_NAME}"
+# The deliverable lives in the DURABLE BACKUP_DIR, NOT in WORK. WORK
+# holds only scratch/staging (the plaintext .db snapshot, .tar, .tar.zst)
+# which the EXIT trap is safe to nuke. LOCAL_PATH must never sit under
+# WORK or the trap would wipe the only local copy on a scp failure.
+LOCAL_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] vpnctl-backup: $*" >&2; }
 fail() { log "FAIL: $*"; exit "${2:-1}"; }
 
 mkdir -p "$WORK"
+mkdir -p "$BACKUP_DIR"
+# Clean ONLY scratch staging on exit. The deliverable archive in
+# BACKUP_DIR is intentionally NOT covered — it must survive an scp
+# failure (exit 11) for manual recovery.
 trap 'rm -rf "$WORK"' EXIT
 
 ## ── 1. SQLite hot snapshot ──────────────────────────────────────────────
@@ -184,7 +202,7 @@ log "uploading to ${TARGET_HOST}:${TARGET_DIR}/"
 scp -q -o BatchMode=yes -o ConnectTimeout=10 \
     "$LOCAL_PATH" \
     "${TARGET_HOST}:${TARGET_DIR}/${ARCHIVE_NAME}" \
-    || fail "scp to ${TARGET_HOST} failed (network or auth)" 11
+    || fail "scp to ${TARGET_HOST} failed (network or auth); local archive kept at ${LOCAL_PATH} for manual recovery" 11
 
 ## ── 5. rotation on 207 ──────────────────────────────────────────────────
 log "rotating ${TARGET_DIR} (keep ${RETENTION_DAYS} days)"
@@ -219,6 +237,16 @@ if [ -n "${OFFSITE_HOST:-}" ]; then
 else
     log "off-site push disabled (OFFSITE_HOST empty)"
 fi
+
+## ── 7. rotation of the durable local store ──────────────────────────────
+# BACKUP_DIR now holds the deliverable across runs, so prune it on the
+# same RETENTION_DAYS as the primary 207 store. The archive written
+# THIS run has mtime ~now and is far inside the window, so it is never
+# pruned here. Non-fatal: a rotation failure must not lose the fresh
+# archive nor mask a successful upload.
+log "rotating local ${BACKUP_DIR} (keep ${RETENTION_DAYS} days)"
+find "$BACKUP_DIR" -maxdepth 1 -name '*.tar.zst.age' -mtime +"${RETENTION_DAYS}" -delete \
+    || log "WARN: local rotation failed (non-fatal — manual cleanup possible)"
 
 log "ok ${ARCHIVE_NAME}"
 exit 0
