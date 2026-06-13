@@ -3798,23 +3798,45 @@ impl SqliteInventory {
         let mut tx = self.pool.begin().await?;
         for (user_id, dest) in pairs {
             // Bound destination label to 200 chars (pathological
-            // hostnames don't blow up the row).
-            let dest_truncated = if dest.len() > 200 {
-                &dest[..200]
-            } else {
-                dest.as_str()
-            };
+            // hostnames don't blow up the row). Truncate on a CHAR
+            // boundary — `&dest[..200]` panics if byte 200 lands
+            // mid-codepoint (Cyrillic / emoji / IDN-as-UTF-8 SNI/Host
+            // labels), and that panic propagates uncaught all the way
+            // up `clash_poller::poll_one_server`, permanently aborting
+            // the whole poll task. `.chars().take(200)` is the repo
+            // idiom (cf. `daemon/src/handlers/sub.rs` accept_language)
+            // and is byte-identical to the old slice for ASCII.
+            let dest_truncated: String = dest.chars().take(200).collect();
+            // Pre-filter to existing users, SQL-side. The `user_id`
+            // comes from the log-scrape attribution map (a raw
+            // username), NOT validated against `users`. With
+            // `foreign_keys=ON` and the NOT NULL REFERENCES users(id)
+            // FK, an insert for a since-deleted user raises an FK error
+            // (code 787) that, under `?`, rolls back the WHOLE tx —
+            // losing EVERY user's destinations for this tick (one stale
+            // user poisons all, every tick, until it ages out of the
+            // logs). `INSERT OR IGNORE` does NOT help here: the IGNORE
+            // conflict algorithm does not suppress FK violations
+            // (verified empirically against sqlx). So we gate the
+            // insert on `WHERE EXISTS (… users …)` — the row for an
+            // unknown user is simply not inserted, the statement
+            // succeeds (0 rows affected), and the batch continues. The
+            // `INSERT … SELECT … WHERE EXISTS` form still drives the
+            // upsert: the SELECT yields the row only when the user
+            // exists, and the ON CONFLICT clause then handles the
+            // (user, dest, date) UNIQUE collision exactly as before.
             sqlx::query(
                 "INSERT INTO vpn_user_destinations
                     (user_id, destination_label, date, hit_count, last_seen)
-                 VALUES (?1, ?2, strftime('%Y-%m-%d', 'now'), 1,
-                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 SELECT ?1, ?2, strftime('%Y-%m-%d', 'now'), 1,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
                  ON CONFLICT(user_id, destination_label, date) DO UPDATE SET
                      hit_count = hit_count + 1,
                      last_seen = excluded.last_seen",
             )
             .bind(&user_id.0)
-            .bind(dest_truncated)
+            .bind(&dest_truncated)
             .execute(&mut *tx)
             .await?;
         }
@@ -5195,6 +5217,95 @@ mod tests {
                 .and_then(|v| v.get("address"))
                 .and_then(|v| v.as_str()),
             Some("1.2.3.4")
+        );
+        Ok(())
+    }
+
+    // ── Phase 5b destination-writer robustness ──────────────────────────
+
+    #[tokio::test]
+    async fn record_user_destinations_truncates_multibyte_label_without_panic() -> Result<()> {
+        // A destination label whose byte-200 lands mid-codepoint must
+        // NOT panic the writer (the old `&dest[..200]` slice did — and
+        // that panic propagates uncaught through `clash_poller`,
+        // permanently aborting the whole poll task). Build a label
+        // where byte 200 is inside a 4-byte emoji: leading ASCII 'a'
+        // (1 byte) + repeated 😀 (4 bytes each) → boundaries at 1+4k,
+        // and 200 ≡ 3 (mod 4) from offset 1 → NOT a char boundary.
+        let inv = fresh().await;
+        inv.add_user(&sample_user("alice")).await?;
+
+        let mut dest = String::from("a");
+        dest.push_str(&"😀".repeat(60)); // 1 + 240 = 241 bytes, 61 chars
+        assert!(dest.len() > 200, "label must exceed 200 bytes");
+        assert!(
+            !dest.is_char_boundary(200),
+            "byte 200 must land mid-codepoint to exercise the panic path",
+        );
+
+        // Must not panic.
+        inv.record_user_destinations(&[(UserId("alice".into()), dest.clone())])
+            .await?;
+
+        let rows = inv
+            .top_destinations_for_user(&UserId("alice".into()), 1, 10)
+            .await?;
+        assert_eq!(rows.len(), 1, "the valid pair must have landed");
+        let stored = &rows[0].destination_label;
+        // Stored truncated on a CHAR boundary (so it round-trips as
+        // valid UTF-8) and capped at ≤ 200 chars.
+        assert!(
+            stored.chars().count() <= 200,
+            "label capped at 200 chars, got {} chars",
+            stored.chars().count(),
+        );
+        assert!(
+            dest.starts_with(stored.as_str()),
+            "stored label must be a char-boundary prefix of the input",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn record_user_destinations_skips_unknown_user_without_aborting_batch() -> Result<()> {
+        // The user_id comes from the log-scrape attribution map (a raw
+        // username), NOT validated against `users`. A pair for a
+        // since-deleted user would raise an FK error and (under `?`)
+        // roll back the WHOLE tx, losing every user's destinations for
+        // the tick. The writer's `WHERE EXISTS (… users …)` pre-filter
+        // must skip ONLY the offending row; the valid pairs in the same
+        // batch must still land.
+        let inv = fresh().await;
+        inv.add_user(&sample_user("alice")).await?;
+        inv.add_user(&sample_user("bob")).await?;
+
+        let pairs = vec![
+            (UserId("alice".into()), "youtube.com:443".to_string()),
+            // "ghost" was never added → FK violation on insert.
+            (UserId("ghost".into()), "discord.com:443".to_string()),
+            (UserId("bob".into()), "telegram.org:443".to_string()),
+        ];
+
+        // No error must bubble — the batch is not rolled back.
+        inv.record_user_destinations(&pairs).await?;
+
+        let alice = inv
+            .top_destinations_for_user(&UserId("alice".into()), 1, 10)
+            .await?;
+        let bob = inv
+            .top_destinations_for_user(&UserId("bob".into()), 1, 10)
+            .await?;
+        let ghost = inv
+            .top_destinations_for_user(&UserId("ghost".into()), 1, 10)
+            .await?;
+
+        assert_eq!(alice.len(), 1, "alice's valid row must have landed");
+        assert_eq!(alice[0].destination_label, "youtube.com:443");
+        assert_eq!(bob.len(), 1, "bob's valid row must have landed");
+        assert_eq!(bob[0].destination_label, "telegram.org:443");
+        assert!(
+            ghost.is_empty(),
+            "the FK-violating ghost row must be skipped"
         );
         Ok(())
     }
