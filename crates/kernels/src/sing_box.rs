@@ -354,34 +354,7 @@ impl Kernel for SingBox {
         }
 
         ssh.upload("/etc/sing-box/config.json.new", config).await?;
-        // Атомарная замена + валидация перед перезагрузкой + ВЕРИФИКАЦИЯ
-        // что сервис реально поднялся. Без последнего блока deploy'и
-        // молча «succeed» когда sing-box crash-loop'ит (живой пример:
-        // permission denied на /var/log/sing-box.log на свежей ноде).
-        let cmd = r#"
-            set -eu
-            sing-box check -c /etc/sing-box/config.json.new
-            mv /etc/sing-box/config.json.new /etc/sing-box/config.json
-            chown sing-box:sing-box /etc/sing-box/config.json
-            chmod 0640 /etc/sing-box/config.json
-            systemctl reload-or-restart sing-box
-
-            # Wait up to 8 seconds for the service to settle. systemd's
-            # auto-restart back-off kicks in every 10s, so 8s is past the
-            # first attempt — if we're not "active" by then, we're in a
-            # crash loop.
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active sing-box || true)
-                [ "$state" = "active" ] && exit 0
-                sleep 1
-            done
-
-            # Bail with the most diagnostic output possible.
-            echo "sing-box did not become active. Last 20 log lines:" >&2
-            journalctl -u sing-box --no-pager -n 20 >&2 || true
-            exit 1
-        "#;
-        ssh.exec(cmd).await?;
+        ssh.exec(sing_box_apply_script()).await?;
         Ok(())
     }
 
@@ -422,6 +395,81 @@ impl Kernel for SingBox {
             uptime_seconds: None,
         })
     }
+}
+
+/// The atomic-swap + verify + ROLLBACK script run after the new sing-box
+/// config has been uploaded to `…/config.json.new`.
+///
+/// `sing-box check` only validates STATIC syntax — it can't see runtime
+/// failures (a log-file the service-user can't open — the live precedent
+/// quoted above; a port a co-tenant already bound; a missing cert path).
+/// So a config that passes `check` can still crash-loop the service. The
+/// previous version `mv`'d `.new → config.json` and, on a failed restart,
+/// left the node WORSE than before: the last-good config already gone,
+/// nothing to roll back to.
+///
+/// This script snapshots the live config to `config.json.bak` BEFORE the
+/// swap (only if a live config exists — a fresh node's first deploy has
+/// none), and on the is-active-failed branch restores the `.bak` and
+/// reload-or-restarts so the node returns to its last-good config instead
+/// of crash-looping. The `.bak` is removed on success.
+///
+/// Shell-correctness note on `set -e`: the failure branch is reached by
+/// FALLING THROUGH the poll loop (each `is-active` is `|| true`, so a
+/// failing probe never trips `set -e`), NOT by `set -e` aborting — so the
+/// restore block below the loop always runs. Inside the restore block,
+/// `[ -f … ]`, the restore `mv`, and `reload-or-restart` are individually
+/// `|| true`-guarded so one failing step can't short-circuit the rest
+/// before the final `exit 1`.
+fn sing_box_apply_script() -> &'static str {
+    // Атомарная замена + валидация перед перезагрузкой + ВЕРИФИКАЦИЯ
+    // что сервис реально поднялся, + откат к последнему рабочему конфигу.
+    // Без верификации deploy'и молча «succeed» когда sing-box crash-loop'ит
+    // (живой пример: permission denied на /var/log/sing-box.log на свежей
+    // ноде); без отката нода остаётся в crash-loop'е с уже стёртым
+    // прошлым-рабочим конфигом.
+    r#"
+            set -eu
+            sing-box check -c /etc/sing-box/config.json.new
+            # Snapshot the current live config so a runtime-failed restart
+            # can roll back. Only if a live config exists (first deploy has
+            # none); -a preserves owner/mode.
+            if [ -f /etc/sing-box/config.json ]; then
+                cp -a /etc/sing-box/config.json /etc/sing-box/config.json.bak 2>/dev/null || true
+            fi
+            mv /etc/sing-box/config.json.new /etc/sing-box/config.json
+            chown sing-box:sing-box /etc/sing-box/config.json
+            chmod 0640 /etc/sing-box/config.json
+            systemctl reload-or-restart sing-box
+
+            # Wait up to 8 seconds for the service to settle. systemd's
+            # auto-restart back-off kicks in every 10s, so 8s is past the
+            # first attempt — if we're not "active" by then, we're in a
+            # crash loop.
+            for i in 1 2 3 4 5 6 7 8; do
+                state=$(systemctl is-active sing-box || true)
+                if [ "$state" = "active" ]; then
+                    rm -f /etc/sing-box/config.json.bak
+                    exit 0
+                fi
+                sleep 1
+            done
+
+            # Failed to come up. Dump diagnostics, then ROLL BACK to the
+            # snapshot so the node returns to its last-good config instead of
+            # crash-looping on the new one. Each restore step is `|| true`-
+            # guarded so a failing step still reaches `exit 1`.
+            echo "sing-box did not become active. Last 20 log lines:" >&2
+            journalctl -u sing-box --no-pager -n 20 >&2 || true
+            if [ -f /etc/sing-box/config.json.bak ]; then
+                echo "rolling back to previous sing-box config" >&2
+                mv /etc/sing-box/config.json.bak /etc/sing-box/config.json || true
+                chown sing-box:sing-box /etc/sing-box/config.json || true
+                chmod 0640 /etc/sing-box/config.json || true
+                systemctl reload-or-restart sing-box || true
+            fi
+            exit 1
+        "#
 }
 
 /// Build the idempotent, ufw-guarded shell snippet that opens every
@@ -1018,5 +1066,69 @@ mod tests {
         // 443 still flagged; 999_999 silently skipped.
         let err = validate_config_excludes_ports(&cfg, &[443]).expect_err("443 collides");
         assert!(err.to_string().contains("443"));
+    }
+
+    #[test]
+    fn apply_script_snapshots_live_config_before_swap() {
+        // BEFORE the `mv .new → live`, the live config must be copied to
+        // a `.bak` (guarded on its existence — first deploy has none) so a
+        // runtime-failed restart can roll back. `cp -a` must precede the mv.
+        let s = sing_box_apply_script();
+        let cp = s
+            .find("cp -a /etc/sing-box/config.json /etc/sing-box/config.json.bak")
+            .expect("snapshot cp -a to .bak missing");
+        let mv = s
+            .find("mv /etc/sing-box/config.json.new /etc/sing-box/config.json")
+            .expect("atomic swap mv missing");
+        assert!(cp < mv, "snapshot must come BEFORE the atomic swap");
+        // Snapshot guarded on the live config existing (fresh node = none).
+        assert!(
+            s.contains("if [ -f /etc/sing-box/config.json ]; then"),
+            "snapshot must be guarded on the live config existing: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_restores_bak_on_is_active_failure() {
+        // On the is-active-failed branch (after the diagnostics dump,
+        // before `exit 1`) the script must restore the `.bak` back to the
+        // live path and reload-or-restart so the node returns to last-good.
+        let s = sing_box_apply_script();
+        let journal = s
+            .find("journalctl -u sing-box")
+            .expect("diagnostics dump missing");
+        let restore = s
+            .find("mv /etc/sing-box/config.json.bak /etc/sing-box/config.json")
+            .expect("restore mv from .bak missing");
+        let exit1 = s.rfind("exit 1").expect("failure exit missing");
+        assert!(
+            journal < restore && restore < exit1,
+            "restore must run on the failure branch, after diagnostics, before exit 1"
+        );
+        // The restore must reload-or-restart so the good config takes effect.
+        let restart_after_restore =
+            s[restore..exit1].contains("systemctl reload-or-restart sing-box");
+        assert!(
+            restart_after_restore,
+            "restore branch must reload-or-restart back to the good config"
+        );
+        // The restore must run even though an earlier command "failed":
+        // it's reached by falling through the poll loop, and each restore
+        // step is `|| true`-guarded so it can't short-circuit before exit 1.
+        assert!(
+            s[restore..exit1].contains("|| true"),
+            "restore steps must be `|| true`-guarded so the branch always reaches exit 1"
+        );
+    }
+
+    #[test]
+    fn apply_script_cleans_up_bak_on_success() {
+        // On the active branch the transient `.bak` must be removed so it
+        // doesn't accumulate across deploys.
+        let s = sing_box_apply_script();
+        assert!(
+            s.contains("rm -f /etc/sing-box/config.json.bak"),
+            "success path must clean up the .bak snapshot: {s}"
+        );
     }
 }

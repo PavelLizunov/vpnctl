@@ -521,78 +521,7 @@ UNIT
         // both systemd units. Atomic-rename + 8s is-active poll +
         // journalctl-on-fail pattern mirrors sing_box / amnezia_wg.
         ssh.upload("/etc/wgturn/.deploy-bundle.new", config).await?;
-        let iface = BACKEND_INTERFACE_NAME;
-        let cmd = format!(
-            r#"
-            set -eu
-
-            BUNDLE=/etc/wgturn/.deploy-bundle.new
-            test -f "$BUNDLE"
-
-            # Unpack the bundle. Format documented in
-            # `crates/kernels/src/wgturn.rs::BUNDLE_DELIMITER`. Parser
-            # is a small awk that splits on the marker line and writes
-            # each member into its declared path (atomic via mv).
-            awk '
-                BEGIN {{ path = ""; outfile = ""; }}
-                /^====FILE: .*====$/ {{
-                    # Flush previous file if any.
-                    if (outfile != "") {{ close(outfile); }}
-                    # Extract path between "====FILE: " and "===="
-                    path = $0
-                    sub(/^====FILE: /, "", path)
-                    sub(/====$/, "", path)
-                    outfile = path ".new"
-                    next
-                }}
-                {{
-                    if (outfile != "") {{ print > outfile }}
-                }}
-            ' "$BUNDLE"
-
-            # Move each ".new" sibling into place atomically. Files we
-            # know about: /etc/wgturn/server.conf and
-            # /etc/wireguard/{iface}.conf.
-            install -d -m 0755 /etc/wireguard
-            install -d -m 0755 /etc/wgturn
-            mv /etc/wgturn/server.conf.new /etc/wgturn/server.conf
-            chown wgturn:wgturn /etc/wgturn/server.conf
-            chmod 0640 /etc/wgturn/server.conf
-            mv /etc/wireguard/{iface}.conf.new /etc/wireguard/{iface}.conf
-            chown root:root /etc/wireguard/{iface}.conf
-            chmod 0600 /etc/wireguard/{iface}.conf
-            rm -f "$BUNDLE"
-
-            # Enable + restart the backend WG first (wgturn relay
-            # depends on it being reachable on 127.0.0.1:51821).
-            systemctl enable wg-quick@{iface} >/dev/null 2>&1 || true
-            systemctl restart wg-quick@{iface}
-
-            # Then the relay itself.
-            systemctl enable wgturn >/dev/null 2>&1 || true
-            systemctl restart wgturn
-
-            # 8-second wait for BOTH services to settle.
-            for s in wg-quick@{iface} wgturn; do
-                ok=0
-                for i in 1 2 3 4 5 6 7 8; do
-                    state=$(systemctl is-active "$s" 2>/dev/null || true)
-                    if [ "$state" = "active" ]; then
-                        ok=1
-                        break
-                    fi
-                    sleep 1
-                done
-                if [ "$ok" != "1" ]; then
-                    echo "$s did not become active. Last 20 log lines:" >&2
-                    journalctl -u "$s" --no-pager -n 20 >&2 || true
-                    exit 1
-                fi
-            done
-        "#,
-            iface = iface,
-        );
-        ssh.exec(&cmd).await?;
+        ssh.exec(&wgturn_apply_script()).await?;
         Ok(())
     }
 
@@ -638,12 +567,146 @@ UNIT
     }
 }
 
+/// The bundle-unpack + atomic-swap + verify + ROLLBACK script run after the
+/// wgturn deploy bundle has been uploaded to `…/.deploy-bundle.new`.
+///
+/// wgturn is a TWO-unit kernel: the loopback WireGuard BACKEND
+/// (`wg-quick@{iface}`, config `/etc/wireguard/{iface}.conf`) and the VK-TURN
+/// RELAY (`wgturn`, config `/etc/wgturn/server.conf`). The backend is
+/// (re)started first because the relay depends on it being reachable on
+/// `127.0.0.1:51821`.
+///
+/// Neither `mv` nor `systemctl restart` validates RUNTIME conditions, so a
+/// bundle that unpacks cleanly can still crash-loop either unit. The previous
+/// version `mv`'d both `.new → live` and, on a failed restart, left BOTH
+/// last-good configs gone with nothing to restore. This script snapshots BOTH
+/// live configs to `<live>.bak` BEFORE their swaps (each guarded on the live
+/// file existing — first deploy has none), and on ANY unit failing to become
+/// active restores BOTH `.bak`s and restarts BOTH units (backend-first) back
+/// to last-good. The `.bak`s are removed once both units are confirmed up.
+///
+/// Shell-correctness note on `set -e`: the failure path is reached by the
+/// `if [ "$ok" != "1" ]` test after the poll loop (each `is-active` is
+/// `|| true`), NOT by `set -e` aborting — so the restore block runs. Each
+/// restore step is `|| true`-guarded so one failing step can't short-circuit
+/// the rest before `exit 1`.
+fn wgturn_apply_script() -> String {
+    let iface = BACKEND_INTERFACE_NAME;
+    format!(
+        r#"
+            set -eu
+
+            BUNDLE=/etc/wgturn/.deploy-bundle.new
+            test -f "$BUNDLE"
+
+            # Unpack the bundle. Format documented in
+            # `crates/kernels/src/wgturn.rs::BUNDLE_DELIMITER`. Parser
+            # is a small awk that splits on the marker line and writes
+            # each member into its declared path (atomic via mv).
+            awk '
+                BEGIN {{ path = ""; outfile = ""; }}
+                /^====FILE: .*====$/ {{
+                    # Flush previous file if any.
+                    if (outfile != "") {{ close(outfile); }}
+                    # Extract path between "====FILE: " and "===="
+                    path = $0
+                    sub(/^====FILE: /, "", path)
+                    sub(/====$/, "", path)
+                    outfile = path ".new"
+                    next
+                }}
+                {{
+                    if (outfile != "") {{ print > outfile }}
+                }}
+            ' "$BUNDLE"
+
+            # Move each ".new" sibling into place atomically. Files we
+            # know about: /etc/wgturn/server.conf and
+            # /etc/wireguard/{iface}.conf.
+            install -d -m 0755 /etc/wireguard
+            install -d -m 0755 /etc/wgturn
+
+            # Snapshot BOTH live configs so a runtime-failed restart can roll
+            # back. Each guarded on the live file existing (first deploy has
+            # none); -a preserves owner/mode.
+            if [ -f /etc/wgturn/server.conf ]; then
+                cp -a /etc/wgturn/server.conf /etc/wgturn/server.conf.bak 2>/dev/null || true
+            fi
+            if [ -f /etc/wireguard/{iface}.conf ]; then
+                cp -a /etc/wireguard/{iface}.conf /etc/wireguard/{iface}.conf.bak 2>/dev/null || true
+            fi
+
+            mv /etc/wgturn/server.conf.new /etc/wgturn/server.conf
+            chown wgturn:wgturn /etc/wgturn/server.conf
+            chmod 0640 /etc/wgturn/server.conf
+            mv /etc/wireguard/{iface}.conf.new /etc/wireguard/{iface}.conf
+            chown root:root /etc/wireguard/{iface}.conf
+            chmod 0600 /etc/wireguard/{iface}.conf
+            rm -f "$BUNDLE"
+
+            # Enable + restart the backend WG first (wgturn relay
+            # depends on it being reachable on 127.0.0.1:51821).
+            systemctl enable wg-quick@{iface} >/dev/null 2>&1 || true
+            systemctl restart wg-quick@{iface}
+
+            # Then the relay itself.
+            systemctl enable wgturn >/dev/null 2>&1 || true
+            systemctl restart wgturn
+
+            # 8-second wait for BOTH services to settle. On ANY unit failing,
+            # roll BOTH configs back to their snapshots and restart both
+            # (backend-first) so the node returns to its last-good state
+            # instead of crash-looping. Each restore step is `|| true`-
+            # guarded so the branch always reaches `exit 1`.
+            for s in wg-quick@{iface} wgturn; do
+                ok=0
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active "$s" 2>/dev/null || true)
+                    if [ "$state" = "active" ]; then
+                        ok=1
+                        break
+                    fi
+                    sleep 1
+                done
+                if [ "$ok" != "1" ]; then
+                    echo "$s did not become active. Last 20 log lines:" >&2
+                    journalctl -u "$s" --no-pager -n 20 >&2 || true
+                    if [ -f /etc/wgturn/server.conf.bak ] || [ -f /etc/wireguard/{iface}.conf.bak ]; then
+                        echo "rolling back wgturn to previous config" >&2
+                        [ -f /etc/wgturn/server.conf.bak ] && mv /etc/wgturn/server.conf.bak /etc/wgturn/server.conf || true
+                        [ -f /etc/wireguard/{iface}.conf.bak ] && mv /etc/wireguard/{iface}.conf.bak /etc/wireguard/{iface}.conf || true
+                        systemctl restart wg-quick@{iface} || true
+                        systemctl restart wgturn || true
+                    fi
+                    exit 1
+                fi
+            done
+
+            # Both units up — drop the transient snapshots.
+            rm -f /etc/wgturn/server.conf.bak /etc/wireguard/{iface}.conf.bak
+        "#,
+        iface = iface,
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use vpnctl_core::{Server, ServerId, UserId};
+
+    /// Drop `#`-comment lines from a rendered shell script so a doc/inline
+    /// comment that mentions a command token (e.g. "exit 1") can't be
+    /// mistaken for the actual command when the apply-script tests grep
+    /// for command ordering.
+    fn strip_comment_lines(script: &str) -> String {
+        script
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     fn dummy_server() -> Server {
         Server {
@@ -892,6 +955,70 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_hexdigit()),
             "pin must be all hex: {WGTURN_CORE_PINNED_SHA}"
+        );
+    }
+
+    #[test]
+    fn apply_script_snapshots_both_configs_before_swap() {
+        // Two-unit kernel: BOTH the relay server.conf AND the backend
+        // wg-quick conf must be `cp -a`'d to `.bak` BEFORE their `mv .new
+        // → live` swaps so a runtime-failed restart can roll either back.
+        let s = wgturn_apply_script();
+        let iface = BACKEND_INTERFACE_NAME;
+        for live in [
+            "/etc/wgturn/server.conf".to_string(),
+            format!("/etc/wireguard/{iface}.conf"),
+        ] {
+            let cp = s
+                .find(&format!("cp -a {live} {live}.bak"))
+                .unwrap_or_else(|| panic!("snapshot cp -a to .bak missing for {live}"));
+            let mv = s
+                .find(&format!("mv {live}.new {live}"))
+                .unwrap_or_else(|| panic!("atomic swap mv missing for {live}"));
+            assert!(cp < mv, "snapshot for {live} must precede its swap");
+        }
+    }
+
+    #[test]
+    fn apply_script_restores_both_configs_on_failure() {
+        // On ANY unit failing to become active, BOTH configs roll back and
+        // BOTH units restart (backend-first) before `exit 1`.
+        // Strip `#` comment lines so a doc-comment mentioning "exit 1"
+        // can't be mistaken for the actual command.
+        let s = strip_comment_lines(&wgturn_apply_script());
+        let iface = BACKEND_INTERFACE_NAME;
+        let restore_relay = s
+            .find("mv /etc/wgturn/server.conf.bak /etc/wgturn/server.conf")
+            .expect("relay restore mv missing");
+        let restore_be = s
+            .find(&format!(
+                "mv /etc/wireguard/{iface}.conf.bak /etc/wireguard/{iface}.conf"
+            ))
+            .expect("backend restore mv missing");
+        let exit1 = s.find("exit 1").expect("failure exit missing");
+        assert!(restore_relay < exit1 && restore_be < exit1);
+        let tail = &s[restore_relay.min(restore_be)..exit1];
+        assert!(
+            tail.contains(&format!("systemctl restart wg-quick@{iface}")),
+            "backend must restart on the rollback branch"
+        );
+        assert!(
+            tail.contains("systemctl restart wgturn"),
+            "relay must restart on the rollback branch"
+        );
+        // Restore steps `|| true`-guarded so the branch always hits exit 1.
+        assert!(tail.contains("|| true"));
+    }
+
+    #[test]
+    fn apply_script_cleans_up_baks_on_success() {
+        let s = wgturn_apply_script();
+        let iface = BACKEND_INTERFACE_NAME;
+        assert!(
+            s.contains(&format!(
+                "rm -f /etc/wgturn/server.conf.bak /etc/wireguard/{iface}.conf.bak"
+            )),
+            "success path must remove both transient .bak snapshots: {s}"
         );
     }
 }
