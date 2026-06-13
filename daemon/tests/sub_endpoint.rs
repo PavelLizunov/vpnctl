@@ -821,3 +821,282 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         "post-ban response body must say 'token-ban', got {s:?}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Abuse-control hardening (fix/sub-gate-hardening)
+//
+//  Fix #1: the V2Ray-family render branch used to short-circuit to 200
+//  BEFORE the per-token ban check and the per-token rate-limit gate
+//  (those lived only in the sing-box arm). Since V2rayTun / v2rayNG /
+//  Shadowrocket are the dominant production clients, a token ban and the
+//  URL-sharing throttle were effectively no-ops for most traffic. The
+//  gates now run on the resolved user/token BEFORE dispatching on UA.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build a minimal seeded inventory + state with a tunable rate limiter,
+/// returning the inventory clone (for direct ban inserts / assertions),
+/// the state, and the user's `/sub` token. Mirrors the inline setup the
+/// other rate-limit tests duplicate, factored out for the new cases.
+async fn seed_with_limiter(
+    dir: &TempDir,
+    limiter: Arc<vpnctld::rate_limit::RateLimiter>,
+) -> (SqliteInventory, AppState, String) {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(TuicV5::new())).unwrap();
+
+    let server = Server {
+        id: ServerId("srv".into()),
+        address: "10.0.0.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("tuic-v5".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    let user = User {
+        id: UserId("alice".into()),
+        uuid: "uuid-alice".into(),
+        tuic_password: Some("pw-alice".into()),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let inv_clone = inv.clone();
+    let (state, _writer) = vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(reg), limiter);
+    (inv_clone, state, token)
+}
+
+/// Fix #1 — a TOKEN ban must be enforced even when the request carries a
+/// V2Ray-family UA. Before the fix, the v2ray branch returned a 200
+/// base64 subscription, completely bypassing `is_banned("token")`. Now a
+/// banned token + v2rayNG UA must come back 429 `token-ban`, NOT 200.
+#[tokio::test]
+async fn v2ray_branch_enforces_token_ban() {
+    use base64::Engine;
+    use std::time::Duration;
+    use vpnctld::rate_limit::RateLimiter;
+
+    let dir = TempDir::new().unwrap();
+    // Generous limiter so the bucket can NEVER be the thing that denies —
+    // we want to prove the BAN is what blocks the v2ray request.
+    let limiter = Arc::new(RateLimiter::new(100.0, 1.0, Duration::from_secs(60)));
+    let (inv, state, token) = seed_with_limiter(&dir, limiter).await;
+
+    // Pre-install a persistent token ban (as the escalation path would).
+    inv.add_ban(
+        "token",
+        &token,
+        vpnctld::rate_limit::DEFAULT_BAN_TTL_SECS,
+        "test: pre-banned token",
+    )
+    .await
+    .unwrap();
+
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .header("user-agent", "v2rayNG/1.9.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a v2ray-UA request for a banned token MUST be 429, not a 200 subscription"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        s.contains("token-ban"),
+        "v2ray-UA banned-token response must say 'token-ban', got {s:?}"
+    );
+    // And it must NOT have leaked a base64 subscription.
+    assert!(
+        !s.contains("vless://")
+            && base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .is_err(),
+        "v2ray-UA banned-token response must not be a base64 subscription, got {s:?}"
+    );
+}
+
+/// Fix #1 — the per-TOKEN rate-limit gate must also apply on the v2ray
+/// branch. With a 1-token bucket and no refill, the first v2ray-UA
+/// request succeeds (200) and the second must be throttled (429 `token`),
+/// rather than the bucket being ignored entirely on the v2ray path.
+#[tokio::test]
+async fn v2ray_branch_enforces_token_rate_limit() {
+    use std::time::Duration;
+    use vpnctld::rate_limit::RateLimiter;
+
+    let dir = TempDir::new().unwrap();
+    // capacity=1, refill=0 → exactly one v2ray request gets through.
+    let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
+    let (_inv, state, token) = seed_with_limiter(&dir, limiter).await;
+    let app = router(state);
+
+    // First v2ray-UA request: burns the single per-token token → 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .header("user-agent", "v2rayNG/1.9.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "first v2ray request must succeed within the burst"
+    );
+
+    // Second v2ray-UA request: per-token bucket empty → 429 `token`.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .header("user-agent", "v2rayNG/1.9.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "second v2ray request must be throttled by the per-token bucket"
+    );
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .expect("Retry-After header missing on v2ray per-token 429")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        retry_after.parse::<u64>().is_ok(),
+        "Retry-After must be a u64 second count, got {retry_after:?}"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        s.contains("rate limited") && s.contains("token"),
+        "v2ray-UA throttle must be a per-token 429, got {s:?}"
+    );
+}
+
+/// Fix #1 regression — the un-banned, under-limit v2ray happy path MUST
+/// still return a 200 base64 subscription after the restructure. This is
+/// the dominant production case; the gate move must not break it.
+#[tokio::test]
+async fn v2ray_branch_happy_path_still_returns_base64_subscription() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use std::time::Duration;
+    use vpnctld::rate_limit::RateLimiter;
+
+    let dir = TempDir::new().unwrap();
+    let limiter = Arc::new(RateLimiter::new(100.0, 1.0, Duration::from_secs(60)));
+    let (_inv, state, token) = seed_with_limiter(&dir, limiter).await;
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .header("user-agent", "v2rayNG/1.9.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let b64 = std::str::from_utf8(&body).unwrap();
+    let decoded = BASE64_STANDARD.decode(b64.trim()).unwrap();
+    let lines = std::str::from_utf8(&decoded).unwrap();
+    assert!(
+        lines.contains("vless://"),
+        "un-banned under-limit v2ray sub must carry the vless URI: {lines}"
+    );
+}
+
+/// Fix #1 — the existing sing-box token-ban behaviour must stay green:
+/// a banned token with a sing-box / default (no) UA still returns 429
+/// `token-ban`. This is the non-v2ray sibling of
+/// `v2ray_branch_enforces_token_ban`.
+#[tokio::test]
+async fn singbox_branch_still_enforces_token_ban() {
+    use std::time::Duration;
+    use vpnctld::rate_limit::RateLimiter;
+
+    let dir = TempDir::new().unwrap();
+    let limiter = Arc::new(RateLimiter::new(100.0, 1.0, Duration::from_secs(60)));
+    let (inv, state, token) = seed_with_limiter(&dir, limiter).await;
+    inv.add_ban(
+        "token",
+        &token,
+        vpnctld::rate_limit::DEFAULT_BAN_TTL_SECS,
+        "test: pre-banned token",
+    )
+    .await
+    .unwrap();
+
+    let app = router(state);
+    // No UA → falls through to the sing-box JSON path.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        s.contains("token-ban"),
+        "sing-box banned-token response must say 'token-ban', got {s:?}"
+    );
+}

@@ -267,6 +267,49 @@ impl RateLimiter {
             .remove(token);
     }
 
+    /// Clamp the consecutive-denial counter for `ip` down to
+    /// `K_DENIALS_TO_BAN - 1`. Called by the `/sub` handler when a ban
+    /// escalation at the `== K` crossing FAILED to write (`add_ban`
+    /// errored transiently). Without this the counter would already be
+    /// at `K` (the failing `try_acquire_ip` set it there), so the next
+    /// denial increments to `K + 1`, `K + 1 == K` is false, and the ban
+    /// is never retried until the counter happens to reset on a
+    /// successful acquire. Clamping back to `K - 1` makes the NEXT
+    /// denial land on `== K` again and re-attempt the escalation.
+    ///
+    /// Why `K - 1` and not `K`: the escalation gate is `== K` (a
+    /// deliberate choice — see the `sub.rs` comment — to avoid a
+    /// parallel-request duplicate-ban race). Leaving the counter at `K`
+    /// would make the next denial overshoot to `K + 1`. Setting it to
+    /// `K - 1` reproduces the exact pre-crossing state so the retry hits
+    /// `== K` cleanly without weakening the race-fix. If the key is
+    /// absent (counter already reset by a concurrent success), this is a
+    /// no-op — we never resurrect a counter that isn't there.
+    pub fn clamp_denials_ip(&self, ip: IpAddr) {
+        if let Some(count) = self
+            .denials_by_ip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&ip)
+        {
+            *count = K_DENIALS_TO_BAN.saturating_sub(1);
+        }
+    }
+
+    /// Per-token mirror of [`clamp_denials_ip`]. See that method's doc
+    /// for the full rationale (transient `add_ban` failure recovery
+    /// without breaking the `== K` race-fix).
+    pub fn clamp_denials_token(&self, token: &str) {
+        if let Some(count) = self
+            .denials_by_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(token)
+        {
+            *count = K_DENIALS_TO_BAN.saturating_sub(1);
+        }
+    }
+
     /// Drop bucket entries that haven't been touched in `idle_ttl`.
     /// Called periodically by the cleanup task in `app::build()`.
     /// Returns `(ip_dropped, token_dropped)` for telemetry.
@@ -430,6 +473,92 @@ mod tests {
         let (dropped_ip, _) = lim.cleanup();
         assert_eq!(dropped_ip, 0, "fresh bucket inside TTL must not be dropped");
         assert_eq!(lim.sizes().0, 1);
+    }
+
+    /// C3 regression guard. Drive the per-token denial counter up to
+    /// exactly `K`, then simulate a transient `add_ban` failure by
+    /// clamping the counter (what the handler now does on `add_ban`
+    /// error instead of leaving it at `K`). The NEXT denial must land
+    /// back on `== K` so the handler re-attempts the escalation —
+    /// rather than overshooting to `K + 1` and skipping the ban
+    /// forever until the counter resets.
+    #[test]
+    fn clamp_denials_token_makes_next_denial_rehit_k() {
+        // capacity=1, refill=0 → first acquire succeeds, every later
+        // acquire denies and bumps the counter by 1.
+        let lim = RateLimiter::new(1.0, 0.0, Duration::from_secs(60));
+        let tok = "leaked-url";
+        // Burn the single token.
+        assert!(lim.try_acquire_token(tok).is_ok());
+        // Deny K times → counter reaches exactly K on the K-th denial.
+        let mut last = 0;
+        for _ in 0..K_DENIALS_TO_BAN {
+            match lim.try_acquire_token(tok) {
+                Err((_, count)) => last = count,
+                Ok(()) => panic!("token bucket should be empty"),
+            }
+        }
+        assert_eq!(
+            last, K_DENIALS_TO_BAN,
+            "counter should be K after K denials"
+        );
+        // Simulate add_ban failure: handler clamps to K-1 instead of
+        // leaving the counter at K.
+        lim.clamp_denials_token(tok);
+        // The very next denial must re-hit == K (NOT K+1) so the
+        // escalation is retried.
+        match lim.try_acquire_token(tok) {
+            Err((_, count)) => assert_eq!(
+                count, K_DENIALS_TO_BAN,
+                "after clamp, the next denial must land on == K to retry the ban, got {count}"
+            ),
+            Ok(()) => panic!("token bucket should still be empty"),
+        }
+    }
+
+    /// Symmetric guard for the IP axis — same C3 recovery contract.
+    #[test]
+    fn clamp_denials_ip_makes_next_denial_rehit_k() {
+        let lim = RateLimiter::new(1.0, 0.0, Duration::from_secs(60));
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(lim.try_acquire_ip(ip).is_ok());
+        let mut last = 0;
+        for _ in 0..K_DENIALS_TO_BAN {
+            match lim.try_acquire_ip(ip) {
+                Err((_, count)) => last = count,
+                Ok(()) => panic!("ip bucket should be empty"),
+            }
+        }
+        assert_eq!(last, K_DENIALS_TO_BAN);
+        lim.clamp_denials_ip(ip);
+        match lim.try_acquire_ip(ip) {
+            Err((_, count)) => assert_eq!(
+                count, K_DENIALS_TO_BAN,
+                "after clamp, the next IP denial must re-hit == K, got {count}"
+            ),
+            Ok(()) => panic!("ip bucket should still be empty"),
+        }
+    }
+
+    /// Clamping a key that has no counter entry (already reset by a
+    /// concurrent successful acquire) is a no-op — it must not create
+    /// a phantom counter that would later mis-trigger an escalation.
+    #[test]
+    fn clamp_denials_on_absent_key_is_noop() {
+        let lim = RateLimiter::new(1.0, 0.0, Duration::from_secs(60));
+        lim.clamp_denials_token("never-seen");
+        // A fresh acquire on a full bucket succeeds and would have
+        // removed any counter; assert no spurious denial state leaked
+        // in by acquiring twice — first ok, second denies at count 1
+        // (not K-1+1).
+        assert!(lim.try_acquire_token("never-seen").is_ok());
+        match lim.try_acquire_token("never-seen") {
+            Err((_, count)) => assert_eq!(
+                count, 1,
+                "absent-key clamp must not seed the counter; first denial should be 1, got {count}"
+            ),
+            Ok(()) => panic!("second acquire should deny"),
+        }
     }
 
     #[tokio::test]

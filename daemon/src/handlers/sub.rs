@@ -205,20 +205,29 @@ pub(crate) async fn get(
                                 "audit row for rate.ban.add(ip) failed; ban already persisted"
                             );
                         }
-                        // Reset counter only on SUCCESSFUL ban write.
-                        // If add_ban errored, leave the counter at K
-                        // so the very next denial retries the
-                        // escalation immediately (instead of waiting
-                        // K more denials).
+                        // Reset the counter only on a SUCCESSFUL ban
+                        // write so it doesn't keep re-triggering the
+                        // escalation on every subsequent 429.
                         state.rate_limiter.reset_denials_ip(addr);
                     }
                     Err(e) => {
+                        // C3 fix (mirror of the token path below):
+                        // `try_acquire_ip` already bumped the counter
+                        // to K. If the ban write fails and we leave it
+                        // at K, the NEXT denial overshoots to K+1,
+                        // `K+1 == K` is false, and the escalation never
+                        // retries until the counter resets on a success.
+                        // Clamp back to K-1 so the next denial re-hits
+                        // `== K` and re-attempts the ban — preserving
+                        // the deliberate `== K` race-fix on the happy
+                        // path.
                         tracing::error!(
                             target = "vpnctld::sub",
                             ip = %ip_str,
                             error = %e,
-                            "add_ban(ip) failed; counter held at K, will retry on next denial"
+                            "add_ban(ip) failed; clamping denial counter to K-1 to retry on next denial"
                         );
+                        state.rate_limiter.clamp_denials_ip(addr);
                     }
                 }
             }
@@ -231,174 +240,213 @@ pub(crate) async fn get(
     // `vpn_router::is_vpn_client_ua` exactly so a UA that already
     // worked on the ninitux endpoint now also works on the legacy
     // `/sub/<token>` LAN fallback. Default (no UA / browser / sing-
-    // box / Hiddify) falls through to the JSON envelope path.
+    // box / Hiddify) renders the JSON envelope.
     let want_v2ray_subscription = ua
         .as_deref()
         .map(crate::handlers::vpn_router::is_vpn_client_ua_v2ray_family)
         .unwrap_or(false);
+
+    // ────────────────────────────────────────────────────────────────
+    // Per-TOKEN abuse gates — run BEFORE we dispatch into either the
+    // v2ray or the sing-box render branch.
+    //
+    // Why here and not inside each branch: the per-token ban check and
+    // the per-token rate-limit gate are SECURITY decisions that must
+    // apply to EVERY successful token resolve, regardless of which
+    // client UA pulled the URL. V2rayTun / v2rayNG / Shadowrocket are
+    // the dominant production clients; when these gates lived only in
+    // the sing-box arm, a token ban (including the auto-24h escalation)
+    // and the per-token URL-sharing throttle were no-ops for most
+    // traffic. Resolving the user ONCE up front and gating here closes
+    // that — the UA now only selects the RENDER format, never whether
+    // the abuse defenses run.
+    //
+    // Ordering mirrors the per-IP path above: 404 on unknown token
+    // (so probing is bounded by the per-IP gate, which already ran),
+    // then ban check, then bucket gate. The per-IP gate ordering is
+    // unchanged.
+    let user = match resolve_user(&state, &token).await {
+        Ok(user) => user,
+        Err(SubError::NotFound) => {
+            return (StatusCode::NOT_FOUND, "unknown token\n").into_response();
+        }
+        Err(SubError::Internal(msg)) => {
+            tracing::error!(target = "vpnctld::sub", error = %msg, "sub user resolve failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response();
+        }
+    };
+
+    // Per-token ban check (mirror of the per-IP path above).
+    match state.inv.is_banned("token", &token).await {
+        Ok(Some(secs)) => return rate_limited(secs, "token-ban"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            target = "vpnctld::sub",
+            error = %e,
+            "is_banned(token) failed; falling through to bucket"
+        ),
+    }
+
+    // Per-token gate runs only on successful resolve so the by_token
+    // map is bounded by user count, not by attacker creativity.
+    if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_token(&token) {
+        if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
+            let reason = format!("{denial_count} consecutive 429s on /sub");
+            match state
+                .inv
+                .add_ban(
+                    "token",
+                    &token,
+                    crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                    &reason,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::warn!(
+                        target = "vpnctld::sub",
+                        denials = denial_count,
+                        ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                        "escalated to 24h persistent ban after consecutive 429s"
+                    );
+                    if let Err(e) = state
+                        .inv
+                        .audit(
+                            "daemon",
+                            "rate.ban.add",
+                            Some(&token),
+                            Some(&serde_json::json!({
+                                "kind": "token",
+                                "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                                "reason": reason,
+                            })),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            target = "vpnctld::sub",
+                            error = %e,
+                            "audit row for rate.ban.add(token) failed; ban already persisted"
+                        );
+                    }
+                    state.rate_limiter.reset_denials_token(&token);
+                }
+                Err(e) => {
+                    // C3 fix: `try_acquire_token` already incremented
+                    // the denial counter to K, and on success above we
+                    // would reset it — but the ban write FAILED. If we
+                    // just left the counter at K, the NEXT denial would
+                    // bump it to K+1, `K+1 == K` is false, and the
+                    // escalation would never retry until the counter
+                    // happened to reset on a successful acquire. Clamp
+                    // it back to K-1 so the next denial re-hits `== K`
+                    // and re-attempts the ban. This preserves the
+                    // deliberate `== K` race-fix on the happy path and
+                    // only changes error-recovery.
+                    tracing::error!(
+                        target = "vpnctld::sub",
+                        error = %e,
+                        "add_ban(token) failed; clamping denial counter to K-1 to retry on next denial"
+                    );
+                    state.rate_limiter.clamp_denials_token(&token);
+                }
+            }
+        }
+        return rate_limited(retry, "token");
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Render branch — UA selects format ONLY. Both arms share the
+    // already-resolved `user` and the already-passed token gates above.
+    let (tls_ja3, tls_ja4) = peer_ip
+        .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
+        .unwrap_or((None, None));
+
     if want_v2ray_subscription {
-        match resolve_v2ray_subscription(&state, &token).await {
-            Ok(Some((user_id, body))) => {
+        match render_v2ray_subscription(&state, &user).await {
+            Ok((user_id, body)) => {
                 let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-                let (tls_ja3, tls_ja4) = peer_ip
-                    .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
-                    .unwrap_or((None, None));
                 let _ = crate::access_log::try_enqueue(
                     &state.access_log_tx,
                     crate::access_log::AccessLogRecord {
                         user_id,
-                        ip: ip.clone(),
-                        ua: ua.clone(),
+                        ip,
+                        ua,
                         status: 200,
                         bytes,
-                        accept_language: accept_language.clone(),
-                        http_version: http_version.clone(),
-                        device_class: device_class.clone(),
+                        accept_language,
+                        http_version,
+                        device_class,
                         geo_country: None,
                         geo_asn: None,
                         tls_ja3,
                         tls_ja4,
                     },
                 );
-                return (
+                (
                     StatusCode::OK,
                     [("content-type", "text/plain; charset=utf-8")],
                     body,
                 )
-                    .into_response();
+                    .into_response()
             }
-            Ok(None) => {}
-            Err(SubError::NotFound) => {
-                return (StatusCode::NOT_FOUND, "unknown token\n").into_response();
-            }
+            Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
             Err(SubError::Internal(msg)) => {
                 tracing::error!(target = "vpnctld::sub", error = %msg, "v2ray sub render failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response();
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
             }
         }
-    }
+    } else {
+        match render_singbox(&state, &user).await {
+            Ok((user_id, cfg)) => {
+                let body = cfg.to_string();
+                // 32-bit defensive — `body.len()` is `usize`; on a
+                // 32-bit build `as u64` would silently truncate if it
+                // ever exceeded 4 GiB (impossible for a sub-config, but
+                // the same defensive cast pattern is used in
+                // `log_sub_access` for the bytes bind, so keep symmetry).
+                let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
 
-    match resolve(&state, &token).await {
-        Ok((user_id, cfg)) => {
-            // Per-token ban check (mirror of the per-IP path above).
-            match state.inv.is_banned("token", &token).await {
-                Ok(Some(secs)) => return rate_limited(secs, "token-ban"),
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    target = "vpnctld::sub",
-                    error = %e,
-                    "is_banned(token) failed; falling through to bucket"
-                ),
+                // Bounded back-pressure (audit-fix Plan B / retroactive
+                // review #3 / security #2): hand the record to the
+                // dedicated writer task via a non-blocking `try_send`.
+                // Channel-full → record dropped + warn-log; channel-
+                // closed → error-log (writer crashed). Either way the
+                // HTTP response stays 200 — we never block on the log
+                // write and we never spawn an unbounded number of tasks.
+                // See `crate::access_log` module docs for the rationale.
+                // Track-1.4 — TLS fingerprint from nginx-forwarded
+                // headers, GATED by VPNCTLD_TRUSTED_PROXIES. peer_ip is
+                // the raw TCP peer (NOT the XFF-resolved one) since the
+                // trust gate keys on the immediate connection's source.
+                let _ = crate::access_log::try_enqueue(
+                    &state.access_log_tx,
+                    crate::access_log::AccessLogRecord {
+                        user_id,
+                        ip,
+                        ua,
+                        status: 200,
+                        bytes,
+                        accept_language,
+                        http_version,
+                        device_class,
+                        // GeoIP fields populated by writer task —
+                        // handler always sends None.
+                        geo_country: None,
+                        geo_asn: None,
+                        tls_ja3,
+                        tls_ja4,
+                    },
+                );
+
+                (StatusCode::OK, [("content-type", "application/json")], body).into_response()
             }
-
-            // Per-token gate runs only on successful resolve so the
-            // by_token map is bounded by user count.
-            if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_token(&token) {
-                if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
-                    let reason = format!("{denial_count} consecutive 429s on /sub");
-                    match state
-                        .inv
-                        .add_ban(
-                            "token",
-                            &token,
-                            crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                            &reason,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::warn!(
-                                target = "vpnctld::sub",
-                                denials = denial_count,
-                                ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                                "escalated to 24h persistent ban after consecutive 429s"
-                            );
-                            if let Err(e) = state
-                                .inv
-                                .audit(
-                                    "daemon",
-                                    "rate.ban.add",
-                                    Some(&token),
-                                    Some(&serde_json::json!({
-                                        "kind": "token",
-                                        "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                                        "reason": reason,
-                                    })),
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    target = "vpnctld::sub",
-                                    error = %e,
-                                    "audit row for rate.ban.add(token) failed; ban already persisted"
-                                );
-                            }
-                            state.rate_limiter.reset_denials_token(&token);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                target = "vpnctld::sub",
-                                error = %e,
-                                "add_ban(token) failed; counter held at K, will retry on next denial"
-                            );
-                        }
-                    }
-                }
-                return rate_limited(retry, "token");
+            Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
+            Err(SubError::Internal(msg)) => {
+                tracing::error!(target = "vpnctld::sub", error = %msg, "sub render failed");
+                // Don't leak internals to the user — generic 500.
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
             }
-
-            let body = cfg.to_string();
-            // 32-bit defensive — `body.len()` is `usize`; on a 32-bit
-            // build `as u64` would silently truncate if it ever exceeded
-            // 4 GiB (impossible for a sub-config, but the same defensive
-            // cast pattern is used in `log_sub_access` for the bytes
-            // bind, so keep symmetry).
-            let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-
-            // Bounded back-pressure (audit-fix Plan B / retroactive
-            // review #3 / security #2): hand the record to the
-            // dedicated writer task via a non-blocking `try_send`.
-            // Channel-full → record dropped + warn-log; channel-closed
-            // → error-log (writer crashed). Either way the HTTP
-            // response stays 200 — we never block on the log write
-            // and we never spawn an unbounded number of tasks. See
-            // `crate::access_log` module docs for the full rationale.
-            // Track-1.4 — TLS fingerprint from nginx-forwarded
-            // headers, GATED by VPNCTLD_TRUSTED_PROXIES. peer_ip is
-            // the raw TCP peer (NOT the XFF-resolved one) since the
-            // trust gate keys on the immediate connection's source.
-            // Stays None until an operator installs an nginx-side
-            // JA3/JA4 module (e.g. phuslu/nginx-ssl-fingerprint).
-            let (tls_ja3, tls_ja4) = peer_ip
-                .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
-                .unwrap_or((None, None));
-            let _ = crate::access_log::try_enqueue(
-                &state.access_log_tx,
-                crate::access_log::AccessLogRecord {
-                    user_id,
-                    ip,
-                    ua,
-                    status: 200,
-                    bytes,
-                    accept_language,
-                    http_version,
-                    device_class,
-                    // GeoIP fields populated by writer task — handler
-                    // always sends None.
-                    geo_country: None,
-                    geo_asn: None,
-                    tls_ja3,
-                    tls_ja4,
-                },
-            );
-
-            (StatusCode::OK, [("content-type", "application/json")], body).into_response()
-        }
-        Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
-        Err(SubError::Internal(msg)) => {
-            tracing::error!(target = "vpnctld::sub", error = %msg, "sub render failed");
-            // Don't leak internals to the user — generic 500.
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
         }
     }
 }
@@ -477,19 +525,15 @@ enum SubError {
 /// the same dispatch here means the legacy `/sub/<token>` URL
 /// works for both V2Ray-family clients AND sing-box/Hiddify.
 ///
-/// **Returns:** `Some(base64_body)` for v2ray-family UAs, `None`
-/// for everyone else (the caller then falls through to the sing-box
-/// JSON envelope path).
-async fn resolve_v2ray_subscription(
+/// **Returns:** the base64 subscription body for the resolved user.
+/// Takes an ALREADY-RESOLVED `&User` (not a token) — the handler runs
+/// the per-token ban + rate-limit gates on the resolved user BEFORE
+/// dispatching here, so this path can no longer skip those defenses
+/// (the original bug). Disabled users get an empty body.
+async fn render_v2ray_subscription(
     state: &AppState,
-    token: &str,
-) -> Result<Option<(UserId, String)>, SubError> {
-    let user = state
-        .inv
-        .find_user_by_sub_token(token)
-        .await
-        .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
-        .ok_or(SubError::NotFound)?;
+    user: &User,
+) -> Result<(UserId, String), SubError> {
     let user_id = user.id.clone();
     // Disabled-user check — same semantics as the JSON path: empty
     // body. V2Ray clients tolerate an empty subscription as
@@ -500,7 +544,7 @@ async fn resolve_v2ray_subscription(
             user = %user_id.0,
             "user is disabled — returning empty v2ray sub"
         );
-        return Ok(Some((user_id, String::new())));
+        return Ok((user_id, String::new()));
     }
     let servers = state
         .inv
@@ -528,7 +572,7 @@ async fn resolve_v2ray_subscription(
         let ctx = RenderCtx::new(server, &secrets);
         let per_server_user = state
             .inv
-            .user_with_per_server_uuid(&user, &server.id)
+            .user_with_per_server_uuid(user, &server.id)
             .await
             .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
         let visible_protocols = state
@@ -579,16 +623,31 @@ async fn resolve_v2ray_subscription(
     }
     let joined = links.join("\n");
     let body = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
-    Ok(Some((user_id, body)))
+    Ok((user_id, body))
 }
 
-async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubError> {
-    let user = state
+/// Resolve a `/sub` token to its `User`, mapping the "no such token"
+/// case to [`SubError::NotFound`] (404) and DB failures to
+/// [`SubError::Internal`] (500). Pulled out of the per-branch render
+/// functions so the handler can resolve the user ONCE, run the
+/// per-token ban + rate-limit gates on the result, and only THEN
+/// dispatch into either render branch. Both branches previously did
+/// this lookup independently, which is exactly why the token ban /
+/// throttle could be skipped on the v2ray path.
+async fn resolve_user(state: &AppState, token: &str) -> Result<User, SubError> {
+    state
         .inv
         .find_user_by_sub_token(token)
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
-        .ok_or(SubError::NotFound)?;
+        .ok_or(SubError::NotFound)
+}
+
+/// Render the sing-box JSON envelope for an ALREADY-RESOLVED user.
+/// Takes `&User` (not a token) because the handler resolves the user
+/// once up front and runs the per-token ban + rate-limit gates before
+/// dispatching here — see [`get`].
+async fn render_singbox(state: &AppState, user: &User) -> Result<(UserId, Value), SubError> {
     let user_id = user.id.clone();
 
     // B1.user — disabled-user soft mute (audit 2026-05-22, migration
@@ -648,7 +707,7 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
         // distinct per-server uuids.
         let per_server_user = state
             .inv
-            .user_with_per_server_uuid(&user, &server.id)
+            .user_with_per_server_uuid(user, &server.id)
             .await
             .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 
@@ -742,7 +801,7 @@ async fn resolve(state: &AppState, token: &str) -> Result<(UserId, Value), SubEr
         }
     }
 
-    let cfg = build_client_envelope(&user, outbounds, &tags);
+    let cfg = build_client_envelope(user, outbounds, &tags);
     Ok((user_id, cfg))
 }
 
