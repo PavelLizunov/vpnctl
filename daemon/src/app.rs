@@ -172,12 +172,19 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // module docs for the design rationale.
     let rate_limiter = Arc::new(RateLimiter::default());
 
+    // Phase E — wizard session store. Created here (not inline in the
+    // AppState literal) so the rate-limit cleanup task can share it
+    // and sweep expired sessions on its tick (Round-3 L1).
+    let wizard = Arc::new(WizardStore::new());
+
     // Periodic cleanup of idle bucket entries (otherwise the per-IP
     // map grows unbounded over time). 10-minute cadence is plenty —
-    // the idle TTL is 1 hour by default.
+    // the idle TTL is 1 hour by default. Also sweeps abandoned wizard
+    // sessions (their TTL is 10 min, matching this cadence).
     drop(spawn_rate_limit_cleanup(
         Arc::clone(&rate_limiter),
         inv.clone(),
+        Arc::clone(&wizard),
     ));
 
     // Phase C-4 — hourly inventory snapshot to /var/lib/vpnctl/backups
@@ -217,7 +224,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         registry,
         access_log_tx,
         rate_limiter,
-        wizard: Arc::new(WizardStore::new()),
+        wizard,
         snapshot_cache,
     };
     Ok(router(state))
@@ -269,9 +276,17 @@ pub fn make_app_state_with_rate_limiter(
 /// Sweeps both the in-memory bucket maps AND the persistent
 /// `sub_rate_bans` table (Phase Track-2 chunk 2 — expired bans
 /// would otherwise accumulate forever).
+///
+/// Also piggybacks the wizard-session sweep (Round-3 L1): abandoned
+/// add-server wizard sessions hold a plaintext root password and are
+/// otherwise only lazily purged on re-fetch — an id that's never
+/// re-fetched (operator closed the tab) would retain the secret until
+/// restart. The 10-min cadence here matches the wizard's 10-min TTL,
+/// so an abandoned session is evicted within ~one TTL of going stale.
 pub(crate) fn spawn_rate_limit_cleanup(
     limiter: Arc<RateLimiter>,
     inv: SqliteInventory,
+    wizard: Arc<WizardStore>,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::time::{MissedTickBehavior, interval};
 
@@ -294,6 +309,16 @@ pub(crate) fn spawn_rate_limit_cleanup(
                     ip_dropped = ip,
                     token_dropped = token,
                     "swept idle rate-limit buckets"
+                );
+            }
+            // Round-3 L1: evict abandoned wizard sessions past their
+            // TTL so plaintext root passwords don't linger in memory.
+            let wiz_dropped = wizard.sweep_expired();
+            if wiz_dropped > 0 {
+                tracing::debug!(
+                    target = "vpnctld::wizard",
+                    sessions_dropped = wiz_dropped,
+                    "swept expired wizard sessions"
                 );
             }
             match inv.purge_expired_bans().await {
@@ -564,6 +589,69 @@ pub(crate) fn spawn_backup_scheduler(
     spawn_backup_scheduler_with(inv, backup_dir, STARTUP_DELAY, TICK)
 }
 
+/// Outcome of the snapshot self-test gate that runs between mint and
+/// prune (Round-3 fix #3). Returned by [`decide_prune_after_verify`]
+/// so the verify-then-prune decision is unit-testable without an
+/// async runtime or a real SQLite snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifyGate {
+    /// Whether the freshly-minted snapshot is sound enough to prune
+    /// around. `false` keeps the prior good snapshots untouched this
+    /// tick.
+    pub prune_ok: bool,
+    /// Operator-facing reason the snapshot was rejected, for the audit
+    /// payload + warn log. `None` when the snapshot passed.
+    pub verify_err: Option<String>,
+}
+
+/// Decide whether to prune after self-testing a freshly-minted
+/// snapshot.
+///
+/// Pruning enforces retention by DELETING older snapshot files. The
+/// hazard fix #3 closes: if the newest snapshot is logically broken
+/// (e.g. minted while the DB was empty/truncated) we must NOT prune,
+/// or retention could eventually delete the last *good* snapshot and
+/// leave only bad ones.
+///
+/// Rules:
+///   * `verify` errored → the self-test could not even run (file
+///     missing, permission denied, OOM). Treat as not-prunable and
+///     surface the error.
+///   * `overall == Fail` → a hard integrity failure (empty
+///     sqlite_master, migration replay failed, zero users/servers).
+///     Do not prune; keep the prior good snapshot.
+///   * `overall == Ok | Warn` → prune. `Warn` covers benign cases
+///     (older/newer migration count, no grants yet, stale-by-a-few-
+///     hours) that don't mean the snapshot is unrestorable, so they
+///     must not block retention — otherwise a homelab that just
+///     hasn't granted anyone yet would never prune and fill the disk.
+pub(crate) fn decide_prune_after_verify(
+    verify: &std::result::Result<
+        vpnctl_inventory::SelfTestReport,
+        vpnctl_inventory::SqliteInventoryError,
+    >,
+) -> VerifyGate {
+    match verify {
+        Err(e) => VerifyGate {
+            prune_ok: false,
+            verify_err: Some(format!("self-test could not run: {e}")),
+        },
+        Ok(report) => match report.overall {
+            vpnctl_inventory::CheckStatus::Fail => VerifyGate {
+                prune_ok: false,
+                verify_err: Some(format!(
+                    "snapshot self-test FAILED ({} checks); prune skipped to preserve prior good snapshot",
+                    report.checks.len()
+                )),
+            },
+            vpnctl_inventory::CheckStatus::Ok | vpnctl_inventory::CheckStatus::Warn => VerifyGate {
+                prune_ok: true,
+                verify_err: None,
+            },
+        },
+    }
+}
+
 /// Parameterised variant — tests use it with tiny delays so the
 /// scheduler fires within the test's timeout window.
 pub(crate) fn spawn_backup_scheduler_with(
@@ -581,30 +669,61 @@ pub(crate) fn spawn_backup_scheduler_with(
         loop {
             tick.tick().await;
             let snapshot_result = vpnctl_inventory::snapshot_now(&inv, &backup_dir).await;
-            let prune_result = vpnctl_inventory::prune_snapshots(
-                &backup_dir,
-                vpnctl_inventory::Retention::default(),
-            );
+
+            // Round-3 fix #3: self-test the fresh snapshot BEFORE
+            // pruning. A snapshot that minted a file but is logically
+            // incomplete would otherwise be retained as good and the
+            // prune step could delete the prior, actually-good
+            // snapshot around it. Only prune once the new file passes
+            // (or warns benignly). On snapshot-mint failure there's no
+            // new file to verify and nothing trustworthy to prune
+            // around, so we skip prune too.
+            let verify_gate: Option<VerifyGate> = match snapshot_result.as_ref() {
+                Ok(path) => Some(decide_prune_after_verify(
+                    &vpnctl_inventory::verify_snapshot(path).await,
+                )),
+                Err(_) => None,
+            };
+
+            let should_prune = verify_gate.as_ref().map(|g| g.prune_ok).unwrap_or(false);
+            let verify_err: Option<String> =
+                verify_gate.as_ref().and_then(|g| g.verify_err.clone());
+
+            let prune_result = if should_prune {
+                Some(vpnctl_inventory::prune_snapshots(
+                    &backup_dir,
+                    vpnctl_inventory::Retention::default(),
+                ))
+            } else {
+                None
+            };
             let snapshot_path: Option<String> = snapshot_result
                 .as_ref()
                 .ok()
                 .map(|p| p.display().to_string());
             let snapshot_err: Option<String> =
                 snapshot_result.as_ref().err().map(|e| e.to_string());
-            let pruned: u64 = *prune_result.as_ref().unwrap_or(&0);
-            let prune_err: Option<String> = prune_result.as_ref().err().map(|e| e.to_string());
-            match (&snapshot_err, &prune_err) {
-                (None, None) => tracing::info!(
+            let pruned: u64 = prune_result
+                .as_ref()
+                .map(|r| *r.as_ref().unwrap_or(&0))
+                .unwrap_or(0);
+            let prune_err: Option<String> = prune_result
+                .as_ref()
+                .and_then(|r| r.as_ref().err().map(|e| e.to_string()));
+            match (&snapshot_err, &verify_err, &prune_err) {
+                (None, None, None) => tracing::info!(
                     target = "vpnctld::backup",
                     snapshot = snapshot_path.as_deref().unwrap_or(""),
                     pruned = pruned,
-                    "inv.db snapshot complete"
+                    "inv.db snapshot complete (self-test passed)"
                 ),
                 _ => tracing::warn!(
                     target = "vpnctld::backup",
                     snapshot_err = snapshot_err.as_deref().unwrap_or(""),
+                    verify_err = verify_err.as_deref().unwrap_or(""),
                     prune_err = prune_err.as_deref().unwrap_or(""),
-                    "inv.db snapshot or prune failed; will retry next tick"
+                    pruned = pruned,
+                    "inv.db snapshot did not fully succeed; prune may have been skipped — will retry next tick"
                 ),
             }
             // Audit (regardless of success — operator wants to see
@@ -619,6 +738,7 @@ pub(crate) fn spawn_backup_scheduler_with(
                         "trigger": "scheduler",
                         "snapshot_path": snapshot_path,
                         "snapshot_err": snapshot_err,
+                        "verify_err": verify_err,
                         "pruned": pruned,
                         "prune_err": prune_err,
                     })),
@@ -1335,5 +1455,89 @@ mod registry_drift_guard {
 
         assert_eq!(protos, want_protos, "daemon protocol registry drifted");
         assert_eq!(kernels, want_kernels, "daemon kernel registry drifted");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod backup_verify_gate_tests {
+    use super::decide_prune_after_verify;
+    use vpnctl_inventory::{CheckResult, CheckStatus, SelfTestReport, SqliteInventoryError};
+
+    /// Minimal report carrying just an `overall` status — the gate
+    /// only reads `overall` (+ `checks.len()` for the reason string).
+    fn report(overall: CheckStatus) -> SelfTestReport {
+        SelfTestReport {
+            snapshot_path: "/tmp/inv.db.test.bak".to_string(),
+            snapshot_size_bytes: 4096,
+            snapshot_age_seconds: Some(10),
+            schema_migrations_applied: 1,
+            user_count: if matches!(overall, CheckStatus::Fail) {
+                0
+            } else {
+                3
+            },
+            server_count: 2,
+            grant_count: 1,
+            users_with_sub_token: 3,
+            started_at: chrono::Utc::now(),
+            duration_ms: 5,
+            overall: overall.clone(),
+            checks: vec![CheckResult {
+                name: "synthetic",
+                status: overall,
+                detail: "test".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn backup_scheduler_skips_prune_on_failed_verify() {
+        // A snapshot whose self-test FAILS must not be pruned around,
+        // and the failure must surface (audit/log) so the operator
+        // sees why retention paused.
+        let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Fail)));
+        assert!(!gate.prune_ok, "FAIL verify must skip prune");
+        assert!(
+            gate.verify_err.is_some(),
+            "FAIL verify must surface an error string"
+        );
+    }
+
+    #[test]
+    fn backup_scheduler_skips_prune_when_verify_cannot_run() {
+        // verify_snapshot itself errored (file missing / OOM): we
+        // can't trust the new snapshot, so keep prior good ones.
+        let err: std::result::Result<SelfTestReport, SqliteInventoryError> =
+            Err(SqliteInventoryError::Invalid("stat snapshot: nope".into()));
+        let gate = decide_prune_after_verify(&err);
+        assert!(!gate.prune_ok, "un-runnable verify must skip prune");
+        let reason = gate.verify_err.expect("must carry a reason");
+        assert!(
+            reason.starts_with("self-test could not run:"),
+            "reason should be prefixed; got {reason:?}"
+        );
+        assert!(
+            reason.contains("stat snapshot: nope"),
+            "reason should include the underlying error; got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn backup_scheduler_prunes_on_passing_verify() {
+        // A clean self-test proceeds to prune exactly as before.
+        let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Ok)));
+        assert!(gate.prune_ok, "OK verify must prune");
+        assert!(gate.verify_err.is_none());
+    }
+
+    #[test]
+    fn backup_scheduler_prunes_on_warn_verify() {
+        // Warn is benign (no grants yet, older/newer migration count,
+        // slightly stale) — it must NOT block retention, or a fresh
+        // homelab would never prune and fill the disk.
+        let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Warn)));
+        assert!(gate.prune_ok, "WARN verify must still prune");
+        assert!(gate.verify_err.is_none());
     }
 }

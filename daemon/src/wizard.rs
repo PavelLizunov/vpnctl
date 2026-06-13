@@ -22,9 +22,21 @@
 //!
 //! TTL is 10 minutes — long enough for a deliberate operator filling
 //! out the form, short enough that an abandoned session times out
-//! before the Tweaks panel does. Lazy purge on access avoids a
-//! background sweep task for what is at most a handful of entries on
-//! a single-operator homelab.
+//! before the Tweaks panel does.
+//!
+//! Expiry is enforced two ways:
+//!   * **Lazy purge on access** — `get()` drops the entry it's asked
+//!     for if it has aged out. Cheap, but only fires for ids that are
+//!     re-fetched.
+//!   * **Periodic sweep** — `sweep_expired()` evicts ALL aged-out
+//!     entries regardless of whether anyone ever asks for them again.
+//!     This is the load-bearing one for the abandoned-session case:
+//!     an operator who pastes a root password on step 1 then closes
+//!     the tab leaves an id that is NEVER re-fetched, so lazy purge
+//!     alone would retain the plaintext password until daemon
+//!     restart. The sweep is wired into the existing rate-limit
+//!     cleanup tick in `app.rs` (10-min cadence ≈ the TTL), so an
+//!     abandoned session is gone within ~one TTL of going stale.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -124,6 +136,25 @@ impl WizardStore {
         }
     }
 
+    /// Evict every session older than [`SESSION_TTL`], returning the
+    /// number dropped. Unlike the lazy purge in [`get`], this fires
+    /// for ids that are NEVER re-fetched — the abandoned-wizard case
+    /// where an operator pastes a root password on step 1 then closes
+    /// the tab. Without it those entries (each holding a plaintext
+    /// root password) would live until daemon restart, well past the
+    /// TTL. Called on a timer from the rate-limit cleanup tick in
+    /// `app.rs`. Sweeps under the same lock the rest of the store
+    /// uses; on lock-poisoning it returns 0 (no panic — same
+    /// convention as `get` / `remove` / `len`).
+    pub fn sweep_expired(&self) -> usize {
+        let Ok(mut g) = self.inner.lock() else {
+            return 0;
+        };
+        let before = g.len();
+        g.retain(|_, s| s.created.elapsed() <= SESSION_TTL);
+        before - g.len()
+    }
+
     /// Number of currently-stored sessions. Used by integration tests
     /// to assert the store side-effect of step-1 submit; in
     /// production the lazy TTL purge keeps this bounded so it's
@@ -138,6 +169,18 @@ impl WizardStore {
     /// `len() == 0` checks).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Test-only: insert a session under `id` with a caller-supplied
+    /// `created` instant. Lets the sweep test backdate `created` past
+    /// the TTL deterministically (an [`Instant`] can't be moved into
+    /// the past, and sleeping 10 real minutes in a unit test is a
+    /// non-starter).
+    #[cfg(test)]
+    fn insert_at(&self, id: &str, session: WizardSession) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.insert(id.to_string(), session);
+        }
     }
 }
 
@@ -235,6 +278,58 @@ mod tests {
         store.remove(&id);
         assert!(store.get(&id).is_none());
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn wizard_store_periodic_sweep_evicts_expired() {
+        // The abandoned-session case: an entry that is NEVER re-fetched
+        // (operator closed the tab after pasting the root password)
+        // must still be evicted by the timer sweep once it ages past
+        // the TTL — lazy purge alone would retain the plaintext
+        // password until restart.
+        let store = WizardStore::new();
+
+        // One fresh session (within TTL) + one backdated well past it.
+        let fresh = store.insert("fresh.example".into(), "fresh-pw".into(), 22);
+        let stale_created = Instant::now()
+            .checked_sub(SESSION_TTL + Duration::from_secs(1))
+            .expect("test clock is far enough from boot to backdate by ~10 min");
+        store.insert_at(
+            "stale-id",
+            WizardSession {
+                address: "stale.example".into(),
+                root_password: "stale-root-secret".into(),
+                ssh_port: 2222,
+                created: stale_created,
+            },
+        );
+        assert_eq!(store.len(), 2, "both sessions present before sweep");
+
+        let dropped = store.sweep_expired();
+
+        assert_eq!(dropped, 1, "exactly the stale session is swept");
+        assert_eq!(store.len(), 1, "fresh session survives the sweep");
+        assert!(
+            store.get("stale-id").is_none(),
+            "stale session is gone after sweep"
+        );
+        assert!(
+            store.get(&fresh).is_some(),
+            "fresh session is still retrievable after sweep"
+        );
+
+        // The stale session's plaintext secret must no longer be in
+        // the map at all (the whole point of L1).
+        let leaked = store
+            .inner
+            .lock()
+            .unwrap()
+            .values()
+            .any(|s| s.root_password == "stale-root-secret");
+        assert!(
+            !leaked,
+            "swept session's root password is no longer retained"
+        );
     }
 
     #[test]
