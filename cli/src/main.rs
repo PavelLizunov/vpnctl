@@ -150,7 +150,8 @@ enum AdminCmd {
         /// Plaintext password. If omitted, read one line from stdin.
         /// Prefer stdin — passing on the command line leaves the
         /// password in shell history + `/proc/<pid>/cmdline`.
-        #[arg(long)]
+        /// Opaque value: allow a leading `-` instead of mis-parsing it as a flag.
+        #[arg(long, allow_hyphen_values = true)]
         password: Option<String>,
     },
 }
@@ -202,6 +203,111 @@ async fn main() -> std::process::ExitCode {
         Err(e) => {
             eprintln!("error: {e:#}");
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! clap-parse regression net for the leading-`-` footgun (bug #3).
+    //! URL-safe base64 secrets (what `crypto::gen_password` emits) legitimately
+    //! start with `-`/`_`. Without `allow_hyphen_values` clap rejects them with
+    //! a generic "unexpected argument" instead of binding the value, so the
+    //! operator can't even pass a freshly-minted secret. These tests assert the
+    //! opaque-value args accept a leading hyphen and bind it verbatim.
+
+    use super::*;
+
+    #[test]
+    fn server_secret_accepts_leading_hyphen_value() {
+        let cli = Cli::try_parse_from([
+            "vpnctl",
+            "server",
+            "secret",
+            "srv",
+            "tuic.password",
+            "-AbCdef",
+        ])
+        .expect("leading-`-` secret value must parse, not be mistaken for a flag");
+        match cli.cmd {
+            Cmd::Server {
+                cmd: cmd::server::ServerCmd::Secret { server, key, value },
+            } => {
+                assert_eq!(server, "srv");
+                assert_eq!(key, "tuic.password");
+                assert_eq!(value, "-AbCdef", "value must bind verbatim");
+            }
+            other => panic!("expected `server secret`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_add_accepts_leading_hyphen_tuic_password_and_uuid() {
+        let cli = Cli::try_parse_from([
+            "vpnctl",
+            "user",
+            "add",
+            "alex-laptop",
+            "--tuic-password",
+            "-_pw0",
+            "--uuid",
+            "-deadbeef",
+        ])
+        .expect("leading-`-` --tuic-password / --uuid must parse");
+        match cli.cmd {
+            Cmd::User {
+                cmd:
+                    cmd::user::UserCmd::Add {
+                        id,
+                        uuid,
+                        tuic_password,
+                        ..
+                    },
+            } => {
+                assert_eq!(id, "alex-laptop");
+                assert_eq!(tuic_password.as_deref(), Some("-_pw0"));
+                assert_eq!(uuid.as_deref(), Some("-deadbeef"));
+            }
+            other => panic!("expected `user add`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bootstrap_accepts_leading_hyphen_root_password() {
+        let cli = Cli::try_parse_from([
+            "vpnctl",
+            "bootstrap",
+            "node-01",
+            "--address",
+            "203.0.113.10",
+            "--root-password",
+            "-rootpw",
+        ])
+        .expect("leading-`-` --root-password must parse");
+        match cli.cmd {
+            Cmd::Bootstrap(args) => {
+                assert_eq!(args.root_password, "-rootpw");
+            }
+            other => panic!("expected `bootstrap`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admin_hash_password_accepts_leading_hyphen() {
+        let cli = Cli::try_parse_from([
+            "vpnctl",
+            "admin",
+            "hash-password",
+            "--password",
+            "-secretpw",
+        ])
+        .expect("leading-`-` --password must parse");
+        match cli.cmd {
+            Cmd::Admin {
+                cmd: AdminCmd::HashPassword { password },
+            } => assert_eq!(password.as_deref(), Some("-secretpw")),
+            other => panic!("expected `admin hash-password`, got {other:?}"),
         }
     }
 }

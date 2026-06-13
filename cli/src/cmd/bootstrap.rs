@@ -37,7 +37,8 @@ pub(crate) struct BootstrapArgs {
     /// Root password — used **once** to install our SSH key. Subsequent
     /// connects use the key. Pass via env to keep it out of shell history:
     /// `--root-password "$VPNCTL_ROOT_PW"`.
-    #[arg(long, env = "VPNCTL_ROOT_PW")]
+    /// Opaque value: allow a leading `-` instead of mis-parsing it as a flag.
+    #[arg(long, env = "VPNCTL_ROOT_PW", allow_hyphen_values = true)]
     pub root_password: String,
     #[arg(long, default_value_t = 22)]
     pub ssh_port: u16,
@@ -83,7 +84,14 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     let pub_path = match args.pubkey {
         Some(p) => p,
         None => {
-            let key_path = crate::cmd::deploy::resolve_key_path(args.key.clone())?;
+            // Only deriving the `.pub` sibling here, so resolve the path
+            // without the private-key existence check (the private key itself
+            // is validated below via `resolve_key_path`). When --key is given
+            // explicitly, honour it for the `.pub` derivation too.
+            let key_path = match args.key.clone() {
+                Some(p) => p,
+                None => crate::cmd::deploy::default_key_path()?,
+            };
             key_path.with_extension("pub")
         }
     };

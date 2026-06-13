@@ -190,10 +190,47 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Resolve the SSH private-key path for a command, validating that the
+/// *default* actually exists before we hand it to russh.
+///
+/// When the operator passes `--key` explicitly we trust them and return it
+/// as-is — a bad path then surfaces from the transport as usual. But when we
+/// fall back to the default `$HOME/.ssh/id_ed25519`, a missing file otherwise
+/// dies deep inside russh as an opaque `load key ... io error` with no hint of
+/// the real footgun: under `sudo`, `$HOME` is `/root`, so the default differs
+/// from the login shell's `~/.ssh/id_ed25519`. We pre-check `exists()` and emit
+/// an actionable error pointing at `--key` and the sudo/`$HOME` gotcha.
+///
+/// Shared by `deploy`, `status`, `bootstrap` (private-key load) and `migrate`.
+/// For call sites that only need the *path* (e.g. deriving the `.pub`
+/// sibling), use [`default_key_path`] to skip the existence check.
 pub(crate) fn resolve_key_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    resolve_key_path_inner(flag, default_key_path()?)
+}
+
+/// Inner resolver with the default path injected, so tests can exercise the
+/// missing-default branch without mutating the global `$HOME` env (the crate
+/// forbids `unsafe`, so `std::env::set_var` is off-limits).
+fn resolve_key_path_inner(flag: Option<PathBuf>, default: PathBuf) -> anyhow::Result<PathBuf> {
     if let Some(p) = flag {
+        // Explicit --key: trust the operator; let the transport surface a bad
+        // path. (We don't second-guess an intentional choice.)
         return Ok(p);
     }
+    if !default.exists() {
+        anyhow::bail!(
+            "default SSH key '{}' not found — pass --key <path> \
+             (note: under sudo $HOME is /root, so the default differs from your login shell)",
+            default.display()
+        );
+    }
+    Ok(default)
+}
+
+/// The default SSH private-key path (`$HOME/.ssh/id_ed25519`) without any
+/// existence check. Use [`resolve_key_path`] when the key will actually be
+/// loaded; this is only for deriving sibling paths (e.g. the `.pub` file).
+pub(crate) fn default_key_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve $HOME"))?;
     Ok(home.join(".ssh/id_ed25519"))
 }
@@ -212,9 +249,60 @@ mod tests {
     //! function the deploy path now calls (the deploy `run` itself needs a
     //! live node over SSH, so we test the secret-bootstrap seam directly).
 
+    use super::resolve_key_path_inner;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use vpnctl_core::{KernelId, ProtocolId, RenderCtx, Server, ServerId};
     use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
+
+    #[test]
+    fn resolve_key_path_default_missing_returns_actionable_error() {
+        // Point the *default* at a tempdir with NO `.ssh/id_ed25519` (mirrors
+        // the sudo `$HOME=/root` footgun). The default fallback must fail with
+        // an actionable error, not an opaque russh load error later.
+        let home = TempDir::new().unwrap();
+        let default = home.path().join(".ssh/id_ed25519");
+        assert!(!default.exists());
+
+        let err =
+            resolve_key_path_inner(None, default.clone()).expect_err("missing default must error");
+        let msg = err.to_string();
+        assert!(msg.contains("--key"), "error must point at --key: {msg}");
+        assert!(
+            msg.contains(&default.display().to_string()),
+            "error must name the missing path: {msg}"
+        );
+        assert!(
+            msg.contains("sudo") && msg.contains("/root"),
+            "error must carry the sudo/$HOME=/root hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_key_path_explicit_existing_key_is_ok() {
+        // An explicit --key to an existing file is returned verbatim, no error.
+        // (The injected default is intentionally bogus — an explicit --key must
+        // never even consult it.)
+        let dir = TempDir::new().unwrap();
+        let key = dir.path().join("my_key");
+        std::fs::write(&key, b"PRIVATE KEY").unwrap();
+        let got = resolve_key_path_inner(Some(key.clone()), PathBuf::from("/nonexistent/default"))
+            .expect("explicit existing key must be Ok");
+        assert_eq!(got, key);
+    }
+
+    #[test]
+    fn resolve_key_path_default_present_is_ok() {
+        // Default points at an existing file: resolves Ok with that path.
+        let home = TempDir::new().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let key = ssh.join("id_ed25519");
+        std::fs::write(&key, b"PRIVATE KEY").unwrap();
+
+        let got = resolve_key_path_inner(None, key.clone()).expect("present default must be Ok");
+        assert_eq!(got, key);
+    }
 
     fn server_with(protocols: &[&str]) -> Server {
         Server {
