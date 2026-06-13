@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
-use vpnctl_core::{KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId};
+use vpnctl_core::{KernelId, Protocol, RenderCtx, Server, ServerId, User, UserId};
 use vpnctl_protocols::{
     ANYTLS_PORT, AnyTls, Hysteria2, SS_2022_PORT, Shadowsocks2022, TROJAN_PORT, Trojan, TuicV5,
     VlessReality, WireGuard, render_client_conf_public,
