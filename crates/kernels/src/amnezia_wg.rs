@@ -53,6 +53,114 @@ impl AmneziaWg {
     }
 }
 
+/// Minimum acceptable `amneziawg-tools` package version (the dpkg
+/// `Version` field, queried via `dpkg-query`). `ensure_installed`
+/// installs/upgrades the AmneziaWG userspace tools when the node is
+/// ABSENT or BELOW this floor; it no-ops at/above.
+///
+/// History (same class as the sing-box gate in #27): before this floor
+/// the install was gated purely on PRESENCE (`if ! command -v
+/// awg-quick`), so once ANY `awg-quick` was on PATH `vpnctl deploy`
+/// never upgraded `amneziawg`/`amneziawg-tools` — the fleet would
+/// drift. The fix converges every node to ≥ floor on each deploy.
+///
+/// Why this value: the AmneziaVPN PPA publishes the userspace package
+/// as `1.0.20210914-0~<buildmeta>~ubuntu20.04.1` (the `awg`/`awg-quick`
+/// tools are the amneziawg fork of `wireguard-tools 1.0.20210914`).
+/// Debian version ordering makes `~` sort BEFORE end-of-string, so the
+/// PPA's `1.0.20210914-0~…` build compares LOWER than a bare
+/// `1.0.20210914`; gating on the bare upstream string (or on the
+/// volatile `-0~<buildmeta>` suffix) would spuriously reinstall on
+/// every deploy / every PPA rebuild. `1.0.20210913` is the upstream
+/// `1.0.20210914` line expressed one day below, so the real PPA build
+/// satisfies `dpkg --compare-versions … ge`, it is independent of the
+/// build suffix (no churn), and it still rejects genuinely-old tools.
+/// This is a MINIMUM, not an exact pin (the PPA candidate ≥ floor is
+/// acceptable), and it is operator-tunable: bump it when the PPA's
+/// upstream base moves past 1.0.20210914.
+const AMNEZIAWG_MIN_VERSION: &str = "1.0.20210913";
+
+/// Idempotent node-setup script run by [`AmneziaWg::ensure_installed`]
+/// on EVERY deploy (CLI `vpnctl deploy` and the daemon web/SSE paths
+/// both call `ensure_installed` before render/apply). Installs (or
+/// upgrades, when below [`AMNEZIAWG_MIN_VERSION`]) the AmneziaWG apt
+/// packages + their prereqs, provisions the config dir, and detects a
+/// DKMS/running-kernel mismatch.
+///
+/// Built once via `LazyLock`: only the version-gate floor (from
+/// [`AMNEZIAWG_MIN_VERSION`]) is interpolated; the rest is a static raw
+/// string. The composed script can be asserted directly in tests
+/// (`AMNEZIAWG_SETUP_SCRIPT.as_str()` yields `&str`), so the gate is
+/// covered without an SSH round-trip — same idiom as
+/// `sing_box::SING_BOX_SETUP_SCRIPT`.
+static AMNEZIAWG_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    // VERSION-AWARE INSTALL GATE (same class as sing_box #27).
+    // Install/upgrade only when the AmneziaWG userspace tools are
+    // ABSENT or BELOW AMNEZIAWG_MIN_VERSION; no-op at/above. `awg` /
+    // `awg-quick` expose only a brittle `wireguard-tools
+    // vX-amneziawg…` banner (see `status()`), so the comparison is on
+    // the dpkg PACKAGE version of `amneziawg-tools` — the node has
+    // dpkg, and `dpkg --compare-versions` does the compare. `$CUR` is
+    // quoted and may be EMPTY (package absent, or dpkg-query prints
+    // nothing): an empty version compares LOWER than any real floor,
+    // so `ge` fails and NEED=1 (install), the safe default. `|| NEED=1`
+    // keeps the non-zero compare from tripping `set -e`. The floor is a
+    // const — no injection. `apt-get install -y amneziawg
+    // amneziawg-tools` pulls the PPA CANDIDATE (≥ the floor).
+    format!(
+        r#"
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
+            NEED=0
+            if ! command -v awg-quick >/dev/null 2>&1; then
+                NEED=1
+            else
+                CUR=$(dpkg-query -W -f='${{Version}}' amneziawg-tools 2>/dev/null || true)
+                # Upgrade when the installed version is BELOW the floor.
+                dpkg --compare-versions "$CUR" ge "{min}" || NEED=1
+            fi
+            if [ "$NEED" = 1 ]; then
+                apt-get update -qq
+                # Lesson #2: linux-headers-amd64 is the meta — it
+                # tracks the LATEST shipped kernel, not the running one.
+                # Lesson #3: dirmngr is the missing piece for gpg
+                # --recv-keys to work.
+                apt-get install -y --no-install-recommends \
+                    curl gpg dirmngr ca-certificates iptables \
+                    linux-headers-amd64
+                install -d -m 0755 /usr/share/keyrings
+                # Lesson #1: manual keyring (apt-key is deprecated and
+                # add-apt-repository is broken on Debian 12).
+                gpg --keyserver hkp://keyserver.ubuntu.com:80 \
+                    --recv-keys 75C9DD72C799870E310542E24166F2C257290828
+                gpg --export 75C9DD72C799870E310542E24166F2C257290828 \
+                    > /usr/share/keyrings/amnezia.gpg
+                echo "deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" \
+                    > /etc/apt/sources.list.d/amnezia.list
+                apt-get update -qq
+                apt-get install -y amneziawg amneziawg-tools
+            fi
+            install -d -m 0700 /etc/amnezia/amneziawg
+            systemctl daemon-reload >/dev/null
+            command -v awg-quick
+            command -v awg
+            test -d /etc/amnezia/amneziawg
+            # Lesson #2: detect kernel mismatch BEFORE someone tries
+            # `awg-quick up` and gets a cryptic modprobe failure. The
+            # message tells the operator exactly what to do.
+            running_kernel=$(uname -r)
+            if [ ! -d "/lib/modules/${{running_kernel}}/updates/dkms" ] \
+                && ! lsmod | grep -q amneziawg; then
+                echo "WARNING: amneziawg DKMS module built for newer kernel" >&2
+                echo "than running ${{running_kernel}}. Reboot required." >&2
+                echo "After reboot: \`modprobe amneziawg && lsmod | grep amneziawg\`" >&2
+                exit 2
+            fi
+        "#,
+        min = AMNEZIAWG_MIN_VERSION,
+    )
+});
+
 /// Default AmneziaWG obfuscation parameters. **H1-H4 should be
 /// randomized per server at bootstrap time** — these literal
 /// defaults exist so render tests don't need RNG and so a
@@ -134,48 +242,11 @@ impl Kernel for AmneziaWg {
         // (`https://api.launchpad.net/1.0/~amnezia/+archive/ubuntu/ppa`
         // → `signing_key_fingerprint`). Pinned in this script — a
         // compromised keyserver can't substitute a different signer.
-        let script = r#"
-            set -eu
-            export DEBIAN_FRONTEND=noninteractive
-            if ! command -v awg-quick >/dev/null; then
-                apt-get update -qq
-                # Lesson #2: linux-headers-amd64 is the meta — it
-                # tracks the LATEST shipped kernel, not the running one.
-                # Lesson #3: dirmngr is the missing piece for gpg
-                # --recv-keys to work.
-                apt-get install -y --no-install-recommends \
-                    curl gpg dirmngr ca-certificates iptables \
-                    linux-headers-amd64
-                install -d -m 0755 /usr/share/keyrings
-                # Lesson #1: manual keyring (apt-key is deprecated and
-                # add-apt-repository is broken on Debian 12).
-                gpg --keyserver hkp://keyserver.ubuntu.com:80 \
-                    --recv-keys 75C9DD72C799870E310542E24166F2C257290828
-                gpg --export 75C9DD72C799870E310542E24166F2C257290828 \
-                    > /usr/share/keyrings/amnezia.gpg
-                echo "deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" \
-                    > /etc/apt/sources.list.d/amnezia.list
-                apt-get update -qq
-                apt-get install -y amneziawg amneziawg-tools
-            fi
-            install -d -m 0700 /etc/amnezia/amneziawg
-            systemctl daemon-reload >/dev/null
-            command -v awg-quick
-            command -v awg
-            test -d /etc/amnezia/amneziawg
-            # Lesson #2: detect kernel mismatch BEFORE someone tries
-            # `awg-quick up` and gets a cryptic modprobe failure. The
-            # message tells the operator exactly what to do.
-            running_kernel=$(uname -r)
-            if [ ! -d "/lib/modules/${running_kernel}/updates/dkms" ] \
-                && ! lsmod | grep -q amneziawg; then
-                echo "WARNING: amneziawg DKMS module built for newer kernel" >&2
-                echo "than running ${running_kernel}. Reboot required." >&2
-                echo "After reboot: \`modprobe amneziawg && lsmod | grep amneziawg\`" >&2
-                exit 2
-            fi
-        "#;
-        ssh.exec(script).await?;
+        //
+        // The script body (including the version-aware install gate) is
+        // built once in [`AMNEZIAWG_SETUP_SCRIPT`] so it can be asserted
+        // directly in tests without an SSH round-trip.
+        ssh.exec(AMNEZIAWG_SETUP_SCRIPT.as_str()).await?;
         Ok(())
     }
 
@@ -531,5 +602,68 @@ mod tests {
             .render_config(&ctx, &users, &[&wg as &dyn Protocol])
             .unwrap();
         assert_eq!(a, b, "render_config must be byte-stable across runs");
+    }
+
+    /// The AmneziaWG install must be gated on a MINIMUM VERSION, not on
+    /// bare presence. Before this gate, `if ! command -v awg-quick`
+    /// wrapped the apt install directly, so once ANY `awg-quick` was on
+    /// PATH `vpnctl deploy` never upgraded `amneziawg`/`amneziawg-tools`
+    /// (latent fleet skew, same class as sing-box #27). Mirrors
+    /// `sing_box::sing_box_setup_script_gates_install_on_min_version`.
+    #[test]
+    fn amneziawg_setup_gates_install_on_min_version() {
+        let s = AMNEZIAWG_SETUP_SCRIPT.as_str();
+        // The version comparison is present and uses the node's dpkg.
+        assert!(
+            s.contains("dpkg --compare-versions"),
+            "install must be gated on a dpkg version comparison, not bare presence: {s}"
+        );
+        // The comparison reads the dpkg package version (no brittle
+        // `awg --version` banner parsing).
+        assert!(
+            s.contains("dpkg-query -W -f='${Version}' amneziawg-tools"),
+            "the floor must compare against the dpkg amneziawg-tools package version: {s}"
+        );
+        // The declared floor is injected literally (no hard-coded copy).
+        assert!(
+            s.contains(AMNEZIAWG_MIN_VERSION),
+            "the AMNEZIAWG_MIN_VERSION floor ({AMNEZIAWG_MIN_VERSION}) must appear in the rendered script: {s}"
+        );
+        // …and it is the right-hand side of the `ge` comparison.
+        assert!(
+            s.contains(&format!("ge \"{AMNEZIAWG_MIN_VERSION}\"")),
+            "the floor must be the `ge` operand of the version compare: {s}"
+        );
+        // The bare-presence-only gate is GONE: the old wording wrapped
+        // the apt install directly in `if ! command -v awg-quick …; then`.
+        // Its absence proves the apt path is no longer skipped whenever
+        // any awg-quick is on PATH.
+        assert!(
+            !s.contains("if ! command -v awg-quick >/dev/null; then"),
+            "the bare-presence-only install gate must be gone: {s}"
+        );
+        // The apt install is now reached via the version-aware NEED gate.
+        assert!(
+            s.contains(r#"if [ "$NEED" = 1 ]; then"#),
+            "apt install must be reached via the version-aware NEED gate: {s}"
+        );
+        // The PPA repo/key setup and the package install are retained
+        // inside the gate (the bootstrap is otherwise UNCHANGED).
+        assert!(
+            s.contains("75C9DD72C799870E310542E24166F2C257290828")
+                && s.contains("ppa.launchpadcontent.net/amnezia/ppa/ubuntu")
+                && s.contains("apt-get install -y amneziawg amneziawg-tools"),
+            "PPA keyring/repo setup + apt install must be retained inside the gate: {s}"
+        );
+        // Fail-fast shell flags survive the refactor.
+        assert!(s.contains("set -eu"), "fail-fast shell flags: {s}");
+        // The post-install assertions and the DKMS/kernel-mismatch
+        // detection are untouched by the gate change.
+        assert!(
+            s.contains("command -v awg-quick")
+                && s.contains("command -v awg")
+                && s.contains("WARNING: amneziawg DKMS module built for newer kernel"),
+            "post-install assertions + kernel-mismatch detection must remain: {s}"
+        );
     }
 }
