@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Trojan — venerable TLS-mimic protocol. Predates REALITY, simpler
@@ -151,10 +152,14 @@ impl Protocol for Trojan {
         // `insecure` would break older clients silently.
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
+        // `host` is the URL authority host — IPv6 literals MUST be
+        // bracketed here (RFC 3986). `sni` is a bare TLS server-name,
+        // NOT a URL host, so it keeps the raw address.
         Ok(format!(
-            "trojan://{pw}@{addr}:{port}?sni={addr}&allowInsecure=1#{name}",
+            "trojan://{pw}@{host}:{port}?sni={sni}&allowInsecure=1#{name}",
             pw = pw,
-            addr = ctx.server.address,
+            host = host_for_url(&ctx.server.address),
+            sni = ctx.server.address,
             port = TROJAN_PORT,
             name = name,
         ))

@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Userinfo-safe set: everything that has a structural meaning in
@@ -109,7 +110,7 @@ impl Protocol for TuicV5 {
             "tuic://{uuid}:{pw}@{addr}:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#{name}",
             uuid = uuid,
             pw = pw,
-            addr = ctx.server.address,
+            addr = host_for_url(&ctx.server.address),
             name = name,
         ))
     }

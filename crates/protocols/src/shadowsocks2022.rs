@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Shadowsocks 2022 (AEAD-2022) — TCP-based proxy with a different
@@ -225,7 +226,7 @@ impl Protocol for Shadowsocks2022 {
             "ss://{method_enc}:{pw_enc}@{addr}:{port}/#{tag_enc}",
             method_enc = method_enc,
             pw_enc = pw_enc,
-            addr = ctx.server.address,
+            addr = host_for_url(&ctx.server.address),
             port = SS_2022_PORT,
             tag_enc = tag_enc,
         ))

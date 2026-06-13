@@ -7,6 +7,7 @@
 
 pub mod humanize;
 pub mod shell;
+pub mod url_host;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

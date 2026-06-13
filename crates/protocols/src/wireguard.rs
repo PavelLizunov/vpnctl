@@ -71,6 +71,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 #[derive(Debug, Default)]
@@ -284,7 +285,7 @@ impl Protocol for WireGuard {
             "interface": interface,
             "peer": {
                 "public_key": server_pub,
-                "endpoint": format!("{}:{listen_port}", ctx.server.address),
+                "endpoint": format!("{}:{listen_port}", host_for_url(&ctx.server.address)),
                 "allowed_ips": "0.0.0.0/0,::/0",
                 "persistent_keepalive": 25,
             },
@@ -467,7 +468,7 @@ fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     out.push_str(server_pub);
     out.push('\n');
     out.push_str("Endpoint = ");
-    out.push_str(&ctx.server.address);
+    out.push_str(&host_for_url(&ctx.server.address));
     out.push(':');
     out.push_str(&listen_port.to_string());
     out.push('\n');
