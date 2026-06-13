@@ -2067,8 +2067,10 @@ fn user_row(
 
 /// Query params for the user list: search + sort. Both optional;
 /// defaults preserve the historic alphabetic-by-id ordering.
-/// Sort kinds: "id" (default), "id-desc", "servers" (most grants
-/// first), "servers-desc" (least first). Search `q` is a case-
+/// Sort kinds: "id" (default), "id-desc", "servers" (fewest grants
+/// first, ascending), "servers-desc" (most grants first, descending).
+/// The bare name is ascending and `-desc` is descending, matching the
+/// id / id-desc convention. Search `q` is a case-
 /// insensitive substring match on user.id.0 — no fancy fuzzy
 /// matching, just enough to cut a 30+ user list down.
 #[derive(serde::Deserialize, Default, Debug)]
@@ -2127,8 +2129,8 @@ pub(crate) async fn users(
     let sort_kind = query.sort.as_deref().unwrap_or("id");
     match sort_kind {
         "id-desc" => pairs.sort_by(|a, b| b.1.id.0.cmp(&a.1.id.0)),
-        "servers" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
-        "servers-desc" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
+        "servers" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
+        "servers-desc" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
         _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)), // "id" default
     }
     // Helper to build a sort link that preserves the search.
@@ -2230,8 +2232,8 @@ pub(crate) async fn users(
                     };
                     (sort_link("id", crate::i18n::tr(lang, "id ↑", "id ↑")))
                     (sort_link("id-desc", crate::i18n::tr(lang, "id ↓", "id ↓")))
-                    (sort_link("servers", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
-                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
+                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
+                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
                 }
                 @if visible_users != total_users {
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
