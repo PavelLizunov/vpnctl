@@ -8550,6 +8550,199 @@ async fn admin_server_detail_shows_deploy_button() {
     );
 }
 
+/// "Update kernels" button (update-kernels PR2): the server-detail page
+/// shows the SSE-driven kernel-binary upgrade trigger with its OWN log
+/// pane (`update-kernels-log`, distinct from `deploy-log`). Copy-contract.
+#[tokio::test]
+async fn admin_server_detail_shows_update_kernels_button() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("ukb".into()),
+            address: "203.0.113.8".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/ukb").await;
+    assert!(
+        html.contains(r#"data-sse-url="/admin/servers/ukb/update-kernels/sse""#),
+        "update-kernels button must carry the per-server SSE trigger URL"
+    );
+    // Its OWN log pane — distinct from the deploy button's `deploy-log`.
+    assert!(
+        html.contains(r#"id="update-kernels-log""#),
+        "update-kernels needs its own live log pane (not deploy-log)"
+    );
+    assert!(
+        html.contains(r#"data-log="update-kernels-log""#),
+        "update-kernels button must point admin.js at its own log pane"
+    );
+    assert!(
+        html.contains("update kernels →") || html.contains("обновить ядра →"),
+        "update-kernels button label drifted"
+    );
+}
+
+/// Operator-action-policy contract (CLAUDE.md HARD rule): the
+/// update-kernels button's title / caption must NOT carry a bare
+/// `ssh root@…` operator instruction. It describes what the DAEMON does
+/// (apt upgrade + service restart), matching Deploy's allowed descriptive
+/// register — it must not read as a shell-on-node instruction-to-operator.
+#[tokio::test]
+async fn admin_server_detail_update_kernels_copy_has_no_ssh_operator_instruction() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("ukpolicy".into()),
+            address: "203.0.113.11".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/ukpolicy").await;
+    // No bare operator-facing `ssh root@…` instruction anywhere on the
+    // page (the page carries no ssh-instruction copy today; the new
+    // update-kernels block must not introduce one).
+    assert!(
+        !html.contains("ssh root@"),
+        "update-kernels copy must not instruct the operator to `ssh root@…` the node"
+    );
+}
+
+/// "Update all kernels" button (update-kernels PR2): the servers-list
+/// page shows the fleet-wide SSE trigger + its own log pane when ≥1
+/// server. Copy-contract.
+#[tokio::test]
+async fn admin_servers_renders_update_all_kernels_button() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers").await;
+    assert!(
+        html.contains(r#"data-sse-url="/admin/servers/update-kernels-all/sse""#),
+        "update-all-kernels button must carry the fleet-wide SSE trigger URL"
+    );
+    assert!(
+        html.contains(r#"id="update-kernels-log""#),
+        "update-all-kernels needs its own live log pane"
+    );
+    assert!(
+        html.contains("update all kernels →") || html.contains("обновить все ядра →"),
+        "update-all-kernels button label drifted"
+    );
+}
+
+/// Handler smoke: a cross-site `Sec-Fetch-Site` on the per-server
+/// update-kernels SSE route is refused with 403 (CSRF guard), mirroring
+/// the deploy SSE guard. A full stream needs a live node — the guard +
+/// not-found below are the daemon-side analog.
+#[tokio::test]
+async fn server_update_kernels_sse_cross_site_is_403() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("uksse".into()),
+            address: "203.0.113.12".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/uksse/update-kernels/sse")
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "cross-site update-kernels SSE trigger must be refused"
+    );
+}
+
+/// Handler smoke: the per-server update-kernels SSE route 404s for an
+/// unknown server id (server lookup runs after the same-origin guard).
+#[tokio::test]
+async fn server_update_kernels_sse_unknown_server_is_404() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/no-such/update-kernels/sse")
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("no such server"),
+        "404 body should name the missing server, got: {text}"
+    );
+}
+
+/// Handler smoke: the fleet-wide update-kernels-all SSE route refuses a
+/// cross-site `Sec-Fetch-Site` with 403, mirroring the deploy-all guard.
+#[tokio::test]
+async fn servers_update_kernels_all_sse_cross_site_is_403() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/update-kernels-all/sse")
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "cross-site update-kernels-all SSE trigger must be refused"
+    );
+}
+
 #[tokio::test]
 async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};

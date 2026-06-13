@@ -1941,6 +1941,32 @@ pub(crate) async fn servers(
                 pre id="deploy-log" hidden
                     style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
             }
+            // "Update all kernels" (update-kernels PR2) — upgrade ONLY the
+            // kernel binaries across the fleet (apt upgrade + service
+            // restart) without re-rendering any config. SSE-streamed via
+            // the same generic admin.js [data-sse-url]+[data-log] wiring;
+            // its OWN log pane (`update-kernels-log`) avoids colliding with
+            // `deploy-log`. Safe on inventory-drift nodes — never shrinks
+            // the live user set. Best-effort — a down node is reported,
+            // the rest still update.
+            div id="update-kernels-button" style="margin: 0 0 24px;" {
+                button type="button"
+                       data-sse-url="/admin/servers/update-kernels-all/sse"
+                       data-log="update-kernels-log"
+                       data-busy-label=(crate::i18n::tr(lang, "updating all kernels… (watch the log)", "обновляю все ядра… (смотри лог)"))
+                       data-retry-label=(crate::i18n::tr(lang, "retry update all", "повторить обновление всех"))
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Upgrade the kernel binaries on EVERY server (apt upgrade + service restart) without re-rendering any config. Run after a kernel release to roll the new binary across the fleet. The running config is left untouched, so this is safe even on a node whose inventory has drifted. Best-effort — a down node is reported, the rest still update.",
+                           "Обновить бинарники ядер на ВСЕХ серверах (apt upgrade + рестарт сервиса) без перерендера конфига. Запусти после релиза ядра, чтобы раскатать новый бинарь по флоту. Рабочий конфиг не трогается, поэтому безопасно даже на ноде с дрейфом инвентаря. Best-effort — упавшая нода отмечается, остальные обновляются.",
+                       ))
+                       style="padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (crate::i18n::tr(lang, "update all kernels →", "обновить все ядра →"))
+                    " (" (server_list.len()) ")"
+                }
+                pre id="update-kernels-log" hidden
+                    style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
+            }
         }
 
         @if server_list.is_empty() {
@@ -11377,6 +11403,147 @@ pub(crate) async fn servers_deploy_all_sse(
         .into_response()
 }
 
+/// `GET /admin/servers/{id}/update-kernels/sse` — EventSource endpoint
+/// that UPGRADES the kernel binaries on an existing server (update-kernels
+/// PR2). For each declared kernel it streams `status → install → done`
+/// running ONLY `ensure_installed` (apt upgrade + service restart) — it
+/// never renders or applies a config, so it works on inventory-drift nodes
+/// without entering the DG-1 UUID-removal guard. The heavy lifting is
+/// `wizard_bootstrap::run_update_kernels`, which ends in an `error` event
+/// when any kernel step failed.
+///
+/// EventSource can only issue GET, so this state-changing request can't
+/// ride the POST-only Origin CSRF middleware. Guard explicitly: reject a
+/// browser `Sec-Fetch-Site: cross-site` / non-same-origin (a `<img>`/
+/// prefetch CSRF attempt). Absent header = non-browser tooling (curl)
+/// which carries no ambient admin cookie to forge with, so it's allowed —
+/// same posture as the deploy + geoip SSE endpoints, plus basic-auth on
+/// the whole tree.
+pub(crate) async fn server_update_kernels_sse(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    // Same-origin guard for the state-changing GET.
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if sfs != "same-origin" && sfs != "none" {
+            return error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-origin update-kernels trigger refused (same-origin only)",
+            );
+        }
+    }
+
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let raw = crate::wizard_bootstrap::run_update_kernels(
+        server,
+        state.inv.clone(),
+        std::sync::Arc::clone(&state.registry),
+        key_path,
+    );
+    let mapped = raw.map(|ev| {
+        let name = match &ev {
+            crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",
+            crate::wizard_bootstrap::BootstrapEvent::Ok { .. } => "ok",
+            crate::wizard_bootstrap::BootstrapEvent::Error { .. } => "error",
+        };
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::update_kernels",
+                event_name = name,
+                error = %e,
+                "update-kernels SSE event serialisation failed — emitting placeholder"
+            );
+            format!(
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+            )
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
+/// `GET /admin/servers/update-kernels-all/sse` — EventSource that upgrades
+/// the kernel binaries on EVERY server in one streamed pass (the "Update
+/// all kernels" button). Same Sec-Fetch-Site same-origin guard + basic-
+/// auth as the single-server SSE update. Best-effort across the fleet —
+/// heavy lifting in `wizard_bootstrap::run_update_kernels_all`. The
+/// 3-segment path avoids the `{id}` clash — same trick as
+/// `deploy-all/sse`.
+pub(crate) async fn servers_update_kernels_all_sse(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
+
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if sfs != "same-origin" && sfs != "none" {
+            return error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-origin update-kernels trigger refused (same-origin only)",
+            );
+        }
+    }
+
+    let servers = match state.inv.list_servers().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let raw = crate::wizard_bootstrap::run_update_kernels_all(
+        servers,
+        state.inv.clone(),
+        std::sync::Arc::clone(&state.registry),
+        key_path,
+    );
+    let mapped = raw.map(|ev| {
+        let name = match &ev {
+            crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",
+            crate::wizard_bootstrap::BootstrapEvent::Ok { .. } => "ok",
+            crate::wizard_bootstrap::BootstrapEvent::Error { .. } => "error",
+        };
+        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
+            tracing::error!(
+                target = "vpnctld::update_kernels",
+                event_name = name,
+                error = %e,
+                "update-kernels-all SSE event serialisation failed — emitting placeholder"
+            );
+            format!(
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+            )
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
+    });
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send>,
+    > = Box::pin(mapped);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Phase 3c — Settings GeoIP «update now» SSE button.
 //
@@ -11855,6 +12022,39 @@ pub(crate) async fn server_detail(
                 ))
             }
             (crate::i18n::tr(lang, " · hoster ", " · хостер ")) b { (server.hoster) }
+        }
+
+        // "Update kernels" (update-kernels PR2) — upgrade ONLY the kernel
+        // binaries (apt upgrade + service restart) without touching the
+        // running config. Streamed via the same generic admin.js
+        // [data-sse-url]+[data-log] wiring as Deploy, but its OWN log pane
+        // (`update-kernels-log`) so it doesn't collide with `deploy-log`.
+        // Safe on inventory-drift nodes — it never re-renders the config,
+        // so it can't shrink the live user set.
+        div id="update-kernels-button" style="margin: 12px 0 18px;" {
+            button type="button"
+                   data-sse-url=(format!("/admin/servers/{}/update-kernels/sse", path_segment_encode(&server.id.0)))
+                   data-log="update-kernels-log"
+                   data-busy-label=(crate::i18n::tr(lang, "updating kernels… (watch the log)", "обновляю ядра… (смотри лог)"))
+                   data-retry-label=(crate::i18n::tr(lang, "retry update", "повторить обновление"))
+                   title=(crate::i18n::tr(
+                       lang,
+                       "Upgrade the kernel binaries only: streamed live, this probes each declared kernel's version, upgrades the package (apt upgrade), restarts the service, then probes the version again — before → after lands in the log below. The running config is left untouched, so this is safe to run on a node whose inventory has drifted. Re-clicking is safe — an already-current binary is a no-op.",
+                       "Обновить только бинарники ядер: с живым логом — снимает версию каждого объявленного ядра, обновляет пакет (apt upgrade), рестартует сервис и снимает версию снова — до → после появится в логе ниже. Рабочий конфиг не трогается, поэтому безопасно на ноде с дрейфом инвентаря. Повторный клик безопасен — уже актуальный бинарь = no-op.",
+                   ))
+                   style="padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (crate::i18n::tr(lang, "update kernels →", "обновить ядра →"))
+            }
+            // Live log pane — hidden until the operator clicks update.
+            pre id="update-kernels-log" hidden
+                style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
+            span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                (crate::i18n::tr(
+                    lang,
+                    "Upgrades the kernel binaries and restarts the service; the running config is untouched. Safe on a node whose inventory has drifted.",
+                    "Обновляет бинарники ядер и рестартует сервис; рабочий конфиг не трогается. Безопасно на ноде с дрейфом инвентаря.",
+                ))
+            }
         }
 
         // Hero: current state (live or empty-state)
