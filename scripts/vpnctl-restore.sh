@@ -79,23 +79,73 @@ if [ "$INTEGRITY" != "ok" ]; then
 fi
 
 # Quick sanity: row counts of the user-visible tables.
-USERS=$(sqlite3 "$INV" 'SELECT COUNT(*) FROM users' 2>/dev/null || echo "?")
-SERVERS=$(sqlite3 "$INV" 'SELECT COUNT(*) FROM servers' 2>/dev/null || echo "?")
-GRANTS=$(sqlite3 "$INV" 'SELECT COUNT(*) FROM grants' 2>/dev/null || echo "?")
-ACCESS=$(sqlite3 "$INV" 'SELECT COUNT(*) FROM sub_access_log' 2>/dev/null || echo "?")
+#
+# PRAGMA integrity_check above is STRUCTURAL only — it validates the
+# B-tree / page layout but says NOTHING about schema completeness. A
+# structurally-valid SQLite file with a whole table dropped passes
+# integrity_check cleanly. So we additionally probe each KNOWN/required
+# table with a COUNT(*) and treat a query error (missing table, etc.)
+# as a HARD failure: a backup missing `users`/`servers`/`grants`/…
+# is operationally useless and must NOT be reported as "verified".
+# (Mirrors the Rust self-test in crates/inventory/src/backup.rs, which
+# surfaces COUNT-query failures as distinct Fail checks.)
+#
+# Sentinel: ✗ marks a failed COUNT. We collect every failure so the
+# operator sees ALL missing tables in one pass, then exit non-zero.
+count_table() {
+    # echoes the row count, or "✗" on any query error (missing table,
+    # locked, malformed). Captures stderr so a real sqlite error is
+    # logged rather than silently swallowed.
+    local table=$1 out
+    if out=$(sqlite3 "$INV" "SELECT COUNT(*) FROM ${table}" 2>&1); then
+        printf '%s' "$out"
+    else
+        log "self-test: COUNT(*) on required table '${table}' failed: ${out}"
+        printf '%s' "✗"
+    fi
+}
+
+# KNOWN/required core tables. A snapshot missing any of these is not a
+# usable inventory backup. _sqlx_migrations is included because an
+# empty/absent migration ledger means the schema itself is suspect.
+REQUIRED_TABLES=(users servers grants sub_access_log _sqlx_migrations)
+MISSING=()
+declare -A COUNTS=()
+for t in "${REQUIRED_TABLES[@]}"; do
+    c=$(count_table "$t")
+    COUNTS["$t"]=$c
+    if [ "$c" = "✗" ]; then
+        MISSING+=("$t")
+    fi
+done
+
+USERS=${COUNTS[users]}
+SERVERS=${COUNTS[servers]}
+GRANTS=${COUNTS[grants]}
+ACCESS=${COUNTS[sub_access_log]}
+MIGRATIONS=${COUNTS[_sqlx_migrations]}
+
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    log "FAIL: restore NOT verified — required table(s) missing or unreadable: ${MISSING[*]}"
+    log "      PRAGMA integrity_check passed (structure ok) but the schema is"
+    log "      incomplete; this snapshot is NOT a usable inventory backup."
+    log "      scratch left for inspection: $WORK"
+    exit 69
+fi
 
 cat <<DONE
-✔ restore verified.
+✔ restore verified (structure + required tables present).
 
   archive:    $ARCHIVE
   scratch:    $WORK
   inv.db:     $INV (integrity_check ok)
 
   row counts:
-    users:           $USERS
-    servers:         $SERVERS
-    grants:          $GRANTS
-    sub_access_log:  $ACCESS
+    users:            $USERS
+    servers:          $SERVERS
+    grants:           $GRANTS
+    sub_access_log:   $ACCESS
+    _sqlx_migrations: $MIGRATIONS
 
 manual cut-over (read carefully — overwrites production inventory):
   sudo systemctl stop vpnctld
