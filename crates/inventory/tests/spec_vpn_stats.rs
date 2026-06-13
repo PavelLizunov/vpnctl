@@ -814,16 +814,27 @@ async fn phase5b_record_destinations_truncates_pathological_labels_to_200_chars(
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
-    let long = "x".repeat(500);
+    // Multibyte label: "中" is 3 bytes, so byte index 200 lands MID-codepoint.
+    // The pre-#32 `&dest[..200]` byte-slice would PANIC here; char-boundary
+    // truncation (`.chars().take(200)`) must not — this makes the test
+    // discriminating rather than tautological (an ASCII "x".repeat would cut
+    // cleanly at byte 200 and pass even against the buggy byte-slice).
+    let long = "中".repeat(250); // 750 bytes, 250 chars
+    assert!(
+        !long.is_char_boundary(200),
+        "test premise: byte 200 must be mid-codepoint"
+    );
     inv.record_user_destinations(&[(UserId("alice".into()), long)])
         .await
-        .unwrap();
+        .unwrap(); // must NOT panic
     let top = inv
         .top_destinations_for_user(&UserId("alice".into()), 7, 10)
         .await
         .unwrap();
     assert_eq!(top.len(), 1);
-    assert_eq!(top[0].destination_label.len(), 200);
+    // Truncated to 200 CHARS (not 200 bytes) on a valid char boundary.
+    assert_eq!(top[0].destination_label.chars().count(), 200);
+    assert_eq!(top[0].destination_label, "中".repeat(200));
 }
 
 #[tokio::test]
