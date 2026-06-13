@@ -35,6 +35,15 @@ fn server(id: &str) -> Server {
     }
 }
 
+/// Like `server`, but with an explicit Marzban-style traffic
+/// multiplier so the usage-coefficient weighting can be exercised.
+fn server_coeff(id: &str, usage_coefficient: f64) -> Server {
+    Server {
+        usage_coefficient,
+        ..server(id)
+    }
+}
+
 fn user(id: &str) -> User {
     User {
         id: UserId(id.to_string()),
@@ -1016,4 +1025,157 @@ async fn phase5c_purge_user_sessions_keeps_fresh_rows() {
         removed, 0,
         "fresh session must NOT be removed by 1-day purge"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Round-4 — usage_coefficient (Marzban traffic multiplier) is APPLIED to
+// traffic accounting. Previously stored/displayed but inert (×1 always).
+// ────────────────────────────────────────────────────────────────────────
+
+// user_traffic_this_month weights raw-tick bytes by the server's
+// usage_coefficient: N bytes on a ×2 node → 2N reported; ×1 node → N
+// (identity, no change for existing deployments).
+#[tokio::test]
+async fn user_traffic_this_month_applies_usage_coefficient() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
+    inv.add_server(&server_coeff("single", 1.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    // alice: 1_000_000 raw bytes on the ×2 node → 2_000_000 weighted.
+    inv.record_vpn_stats(
+        &ServerId("double".into()),
+        &[ud(Some("alice"), 600_000, 400_000, 1)],
+    )
+    .await
+    .unwrap();
+    // bob: 1_000_000 raw bytes on the ×1 node → 1_000_000 (identity).
+    inv.record_vpn_stats(
+        &ServerId("single".into()),
+        &[ud(Some("bob"), 600_000, 400_000, 1)],
+    )
+    .await
+    .unwrap();
+
+    let alice = inv
+        .user_traffic_this_month(&UserId("alice".into()))
+        .await
+        .unwrap();
+    let bob = inv
+        .user_traffic_this_month(&UserId("bob".into()))
+        .await
+        .unwrap();
+    assert_eq!(alice, 2_000_000, "1M raw bytes on a ×2 node counts as 2M");
+    assert_eq!(bob, 1_000_000, "×1 node is the identity — unchanged");
+}
+
+// users_traffic_vs_limit weights month-to-date usage by coefficient: a
+// user UNDER their raw-byte limit but OVER it once weighted is reported
+// at the weighted (over-limit) figure.
+#[tokio::test]
+async fn users_traffic_vs_limit_weights_by_coefficient() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // 1_500_000 raw bytes on a ×2 node → 3_000_000 weighted.
+    inv.record_vpn_stats(
+        &ServerId("double".into()),
+        &[ud(Some("alice"), 1_000_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+    // Limit = 2_000_000: raw usage (1.5M) is UNDER it, weighted (3M) is OVER.
+    inv.set_user_traffic_limit(&UserId("alice".into()), Some(2_000_000), Some(80))
+        .await
+        .unwrap();
+
+    let rows = inv.users_traffic_vs_limit().await.unwrap();
+    let alice = rows
+        .iter()
+        .find(|r| r.0.0 == "alice")
+        .expect("alice has a configured limit so she must appear");
+    let (_, used, lim, _) = alice;
+    assert_eq!(*lim, 2_000_000);
+    assert_eq!(*used, 3_000_000, "1.5M raw × coeff 2.0 = 3M weighted");
+    assert!(
+        *used > *lim,
+        "weighted usage must exceed the limit (raw bytes alone would not)"
+    );
+}
+
+// top_users_by_traffic ranks by COEFFICIENT-WEIGHTED bytes: a ×2 user
+// outranks an equal-raw-bytes ×1 user.
+#[tokio::test]
+async fn top_users_by_traffic_ranks_by_weighted_bytes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
+    inv.add_server(&server_coeff("single", 1.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    // Equal RAW bytes (1_000_000 each), but alice is on the ×2 node.
+    inv.record_vpn_stats(
+        &ServerId("double".into()),
+        &[ud(Some("alice"), 500_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+    inv.record_vpn_stats(
+        &ServerId("single".into()),
+        &[ud(Some("bob"), 500_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+
+    let top = inv.top_users_by_traffic(24, 10).await.unwrap();
+    assert_eq!(top.len(), 2);
+    assert_eq!(
+        top[0].0.0, "alice",
+        "alice (×2 → 2M weighted) must outrank bob (×1 → 1M) despite equal raw bytes"
+    );
+    assert_eq!(top[0].1, 2_000_000, "alice weighted total");
+    assert_eq!(top[1].0.0, "bob");
+    assert_eq!(top[1].1, 1_000_000, "bob ×1 identity");
+}
+
+// top_users_by_daily_traffic (vpn_user_daily path) is weighted the same
+// way as the raw-tick path: a ×2 user outranks an equal-raw-bytes ×1 user.
+#[tokio::test]
+async fn top_users_by_daily_traffic_ranks_by_weighted_bytes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
+    inv.add_server(&server_coeff("single", 1.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    inv.record_vpn_stats(
+        &ServerId("double".into()),
+        &[ud(Some("alice"), 500_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+    inv.record_vpn_stats(
+        &ServerId("single".into()),
+        &[ud(Some("bob"), 500_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let top = inv.top_users_by_daily_traffic(1, 10).await.unwrap();
+    assert_eq!(top.len(), 2);
+    assert_eq!(
+        top[0].0.0, "alice",
+        "alice (×2 → 2M) outranks bob (×1 → 1M) on the daily-rollup path too"
+    );
+    assert_eq!(top[0].1, 2_000_000);
+    assert_eq!(top[1].0.0, "bob");
+    assert_eq!(top[1].1, 1_000_000);
 }
