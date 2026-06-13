@@ -387,11 +387,15 @@ pub async fn restore_from(snapshot_path: &Path, db_path: &Path) -> Result<()> {
     // Pass 2: schema-version compatibility. Copy snapshot to a
     // sibling tmp (same FS as db_path, so the later rename is
     // atomic), open it RW, run the embedded migrator. Migrations
-    // are forward-only + idempotent — running them against a
-    // newer-or-current snapshot is a no-op; running against an
-    // older snapshot brings it up to current. If migration fails
-    // (incompatible schema, sqlx version mismatch, etc) we reject
-    // the restore BEFORE touching the live db_path.
+    // are forward-only: an OLDER-than-binary snapshot is upgraded
+    // forward to the current schema. A NEWER-than-binary snapshot
+    // (taken by a later binary with migrations this build doesn't
+    // know about) is REJECTED — sqlx 0.8 has no `set_ignore_missing`,
+    // so the migrator returns `VersionMissing` for the unknown
+    // applied versions and we treat it as schema-incompatible. If
+    // migration fails (VersionMissing, dirty/incompatible schema,
+    // sqlx version mismatch, etc) we reject the restore BEFORE
+    // touching the live db_path.
     let tmp_path = restore_tmp_path(db_path);
     if tmp_path.exists() {
         // Leftover from a previous aborted restore — clean up.

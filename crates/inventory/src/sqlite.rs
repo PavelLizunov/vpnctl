@@ -3180,11 +3180,25 @@ impl SqliteInventory {
     /// SQLite's `strftime('%Y-%m-01T00:00:00Z', 'now')` gives the
     /// month-start anchor; resets automatically on the 1st.
     pub async fn user_traffic_this_month(&self, id: &UserId) -> Result<u64> {
+        // Weight each tick's bytes by its server's `usage_coefficient`
+        // (Marzban-style per-node traffic multiplier) so traffic on a
+        // ×2 node counts double toward the monthly total. The REAL
+        // multiply is cast back to INTEGER so the column stays an i64
+        // for `try_get` (and the unit stays bytes). Default coeff 1.0
+        // (or a NULL via COALESCE) is the identity — pre-existing
+        // single-coefficient deployments see no change.
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
-             FROM vpn_connection_stats
-             WHERE user_id = ?1
-               AND ts >= strftime('%Y-%m-01T00:00:00Z', 'now')",
+            "SELECT CAST(
+                        COALESCE(
+                            SUM((s.upload_bytes + s.download_bytes)
+                                * COALESCE(sv.usage_coefficient, 1.0)),
+                            0
+                        ) AS INTEGER
+                    ) AS total
+             FROM vpn_connection_stats s
+             JOIN servers sv ON sv.id = s.server_id
+             WHERE s.user_id = ?1
+               AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')",
         )
         .bind(&id.0)
         .fetch_one(&self.pool)
@@ -3210,12 +3224,16 @@ impl SqliteInventory {
             "SELECT u.id,
                     COALESCE(u.traffic_alert_threshold_pct, 80) AS threshold,
                     u.monthly_bandwidth_limit_bytes AS lim,
-                    COALESCE(
-                        (SELECT SUM(s.upload_bytes + s.download_bytes)
-                         FROM vpn_connection_stats s
-                         WHERE s.user_id = u.id
-                           AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')),
-                        0
+                    CAST(
+                        COALESCE(
+                            (SELECT SUM((s.upload_bytes + s.download_bytes)
+                                        * COALESCE(sv.usage_coefficient, 1.0))
+                             FROM vpn_connection_stats s
+                             JOIN servers sv ON sv.id = s.server_id
+                             WHERE s.user_id = u.id
+                               AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')),
+                            0
+                        ) AS INTEGER
                     ) AS used
              FROM users u
              WHERE u.monthly_bandwidth_limit_bytes IS NOT NULL",
@@ -3266,12 +3284,21 @@ impl SqliteInventory {
         since_hours: u32,
         limit: u32,
     ) -> Result<Vec<(UserId, u64)>> {
+        // Weight each row's bytes by the source server's
+        // `usage_coefficient` before summing per-user, so a heavy user
+        // on a ×2 node ranks above an equal-raw-bytes user on a ×1
+        // node. The weighted SUM is REAL; CAST back to INTEGER so the
+        // result column stays an i64 (bytes). 1.0 (or NULL) is the
+        // identity → existing rankings unchanged.
         let rows = sqlx::query(
-            "SELECT user_id, SUM(upload_bytes + download_bytes) AS total
-             FROM vpn_connection_stats
-             WHERE user_id IS NOT NULL
-               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             GROUP BY user_id
+            "SELECT s.user_id AS user_id,
+                    CAST(SUM((s.upload_bytes + s.download_bytes)
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
+             FROM vpn_connection_stats s
+             JOIN servers sv ON sv.id = s.server_id
+             WHERE s.user_id IS NOT NULL
+               AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             GROUP BY s.user_id
              ORDER BY total DESC
              LIMIT ?2",
         )
@@ -3641,11 +3668,22 @@ impl SqliteInventory {
         limit: u32,
     ) -> Result<Vec<(UserId, u64)>> {
         let cutoff = format!("-{days} days");
+        // Weight each daily row by its server's `usage_coefficient`
+        // before the per-user sum, mirroring the raw-tick path so the
+        // heavy-users ranking is consistent whichever table feeds it.
+        // REAL product is CAST back to INTEGER (bytes, i64). 1.0/NULL
+        // is the identity.
         let rows = sqlx::query(
-            "SELECT user_id, COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
-             FROM vpn_user_daily
-             WHERE date >= strftime('%Y-%m-%d', 'now', ?1)
-             GROUP BY user_id
+            "SELECT d.user_id AS user_id,
+                    CAST(
+                        COALESCE(SUM((d.upload_bytes + d.download_bytes)
+                                     * COALESCE(sv.usage_coefficient, 1.0)), 0)
+                        AS INTEGER
+                    ) AS total
+             FROM vpn_user_daily d
+             JOIN servers sv ON sv.id = d.server_id
+             WHERE d.date >= strftime('%Y-%m-%d', 'now', ?1)
+             GROUP BY d.user_id
              ORDER BY total DESC
              LIMIT ?2",
         )
