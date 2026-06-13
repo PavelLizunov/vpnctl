@@ -259,10 +259,12 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
 pub fn spawn_health_monitor(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
     use tokio::time::{MissedTickBehavior, interval};
 
-    let interval_secs: u64 = std::env::var("VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_INTERVAL_SECS);
+    // `> 0` guard + warn-on-bad lives in `config::parse_positive_secs`:
+    // `interval(Duration::from_secs(0))` panics → monitor crash-loop.
+    let interval_secs = crate::config::parse_positive_secs(
+        "VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS",
+        DEFAULT_INTERVAL_SECS,
+    );
 
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(interval_secs));

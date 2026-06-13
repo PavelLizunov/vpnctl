@@ -64,11 +64,12 @@ pub fn spawn_dns_resolver(
 ) -> tokio::task::JoinHandle<()> {
     use tokio::time::{MissedTickBehavior, interval};
 
-    let interval_secs: u64 = std::env::var("VPNCTLD_DNS_RESOLVER_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&n: &u64| n > 0)
-        .unwrap_or(DEFAULT_INTERVAL_SECS);
+    // `> 0` guard + warn-on-bad lives in `config::parse_positive_secs`:
+    // `interval(Duration::from_secs(0))` panics → resolver crash-loop.
+    let interval_secs = crate::config::parse_positive_secs(
+        "VPNCTLD_DNS_RESOLVER_INTERVAL_SECS",
+        DEFAULT_INTERVAL_SECS,
+    );
 
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(interval_secs));

@@ -634,6 +634,15 @@ async fn write_deploy_audit(
     }
 }
 
+/// Operator-facing remediation for the verify-key phase, rendered into
+/// the browser via the SSE `Error` event. Operator-action-policy
+/// (CLAUDE.md HARD rule): NO `cat … on the node` / shell instruction —
+/// point at the product surfaces (restart the wizard, redeploy from the
+/// server page) instead. Extracted to a const so
+/// `verify_key_fail_copy_has_no_cat_on_node` can pin it without SSH.
+const VERIFY_KEY_FAIL_HINT: &str = "The deploy key push didn't take — \
+     restart the wizard or re-run deploy from the server page.";
+
 /// The 9-phase pipeline itself. Each phase sends one or more `Step`
 /// events; on failure it sends an `Error` and returns early. Helpers
 /// `send_step!` and `fail!` keep the call sites readable; both
@@ -774,9 +783,7 @@ async fn bootstrap_pipeline(
     if let Err(e) = ssh.exec("true").await {
         fail!(
             "verify-key",
-            "pubkey auth failed: {e}. \
-             Check the pubkey landed (cat ~/.ssh/authorized_keys on the node) \
-             and that sshd allows ed25519."
+            "pubkey auth failed: {e}. {VERIFY_KEY_FAIL_HINT}"
         );
     }
     send_step!("verify-key", "ok — pubkey auth confirmed.");
@@ -1571,6 +1578,28 @@ mod tests {
         assert!(
             stream.next().await.is_none(),
             "stream must close after the single already-running error"
+        );
+    }
+
+    /// Operator-action-policy (CLAUDE.md HARD rule): the verify-key
+    /// failure copy that renders into the operator's browser must NOT
+    /// instruct them to `cat … on the node` (or any shell-on-node).
+    /// Pins the rewritten remediation text.
+    #[test]
+    fn verify_key_fail_copy_has_no_cat_on_node() {
+        let hint = VERIFY_KEY_FAIL_HINT;
+        assert!(
+            !hint.contains("cat "),
+            "verify-key hint must not tell the operator to cat on the node: {hint}"
+        );
+        assert!(
+            !hint.contains("on the node"),
+            "verify-key hint must not reference running things on the node: {hint}"
+        );
+        // And it points at the compliant product surfaces.
+        assert!(
+            hint.contains("server page") || hint.contains("wizard"),
+            "verify-key hint must point at the wizard / server page: {hint}"
         );
     }
 }

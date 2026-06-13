@@ -8798,8 +8798,8 @@ fn alert_explainer(kind: &str, lang: crate::i18n::Locale) -> (&'static str, Opti
             ),
             Some(tr(
                 lang,
-                "SSH is unprotected against password guessing. On the node: systemctl restart fail2ban (deploy page can push it too).",
-                "SSH не защищён от перебора паролей. На ноде: systemctl restart fail2ban (или передеплой с страницы сервера).",
+                "SSH is unprotected against password guessing. Redeploy from the server page (re-installs fail2ban).",
+                "SSH не защищён от перебора паролей. Передеплой со страницы сервера (переставит fail2ban).",
             )),
         ),
         "server.fail2ban.up" => (
@@ -8835,8 +8835,8 @@ fn alert_explainer(kind: &str, lang: crate::i18n::Locale) -> (&'static str, Opti
             ),
             Some(tr(
                 lang,
-                "Log rotation isn't keeping up. Redeploy (re-installs the logrotate fragment) or truncate /var/log/sing-box.log on the node.",
-                "Ротация логов не справляется. Передеплой (переставит logrotate-фрагмент) или обрежь /var/log/sing-box.log на ноде.",
+                "Log rotation isn't keeping up. Redeploy from the server page (re-installs the logrotate fragment).",
+                "Ротация логов не справляется. Передеплой со страницы сервера (переставит logrotate-фрагмент).",
             )),
         ),
         "server.unreachable" => (
@@ -14701,5 +14701,67 @@ mod csv_tests {
         // Plain fields stay untouched.
         assert_eq!(csv_field("user.grant"), "user.grant");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod alert_explainer_policy_tests {
+    use super::alert_explainer;
+    use crate::i18n::Locale;
+
+    /// Operator-action-policy (CLAUDE.md HARD rule): the explainer copy
+    /// rendered into the operator's browser must NOT tell them to run
+    /// `ssh` / `systemctl` / `cat` / `truncate` *on the node*. The
+    /// product surface for remediation is the server page (redeploy) or
+    /// the hoster console — never a shell instruction. Mirrors the
+    /// contract-pin idiom of `classify_ssh_failure_recognises_permission_denied`.
+    ///
+    /// Every alert kind handled by `alert_explainer`, both locales.
+    const ALL_KINDS: &[&str] = &[
+        "sub_access.suspicious_local_ip",
+        "sub_access.suspicious_local_ip:alice", // per-user suffix path
+        "server.singbox.down",
+        "server.singbox.up",
+        "server.fail2ban.down",
+        "server.fail2ban.up",
+        "server.fail2ban.banned_self",
+        "server.disk.pressure",
+        "server.disk.recovered",
+        "server.mem.pressure",
+        "server.mem.recovered",
+        "server.singbox.log.too_big",
+        "server.unreachable",
+        "server.fingerprint.drift",
+    ];
+
+    /// Substrings that signal a shell instruction the operator is told
+    /// to run *themselves*. Spaced so we don't false-positive on prose
+    /// (e.g. `fail2ban-client unban` via the hoster console is allowed —
+    /// it's a recovery step, not a "ssh in and run this" instruction).
+    const FORBIDDEN: &[&str] = &["systemctl ", "truncate ", " cat ", "ssh "];
+
+    #[test]
+    fn alert_explainer_copy_has_no_operator_shell_instructions() {
+        for &kind in ALL_KINDS {
+            for lang in [Locale::En, Locale::Ru] {
+                let (title, hint) = alert_explainer(kind, lang);
+                let blob = format!("{title}\n{}", hint.unwrap_or(""));
+                for &needle in FORBIDDEN {
+                    assert!(
+                        !blob.contains(needle),
+                        "kind={kind} lang={lang:?} leaks operator shell instruction {needle:?}: {blob}"
+                    );
+                }
+                // Spot-pin the two rewritten kinds say the compliant thing.
+                if kind == "server.fail2ban.down" {
+                    assert!(
+                        blob.to_lowercase().contains("redeploy")
+                            || blob.to_lowercase().contains("передеплой"),
+                        "fail2ban.down must point at redeploy, got: {blob}"
+                    );
+                }
+            }
+        }
     }
 }

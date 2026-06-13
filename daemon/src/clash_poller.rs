@@ -270,10 +270,10 @@ pub fn spawn_clash_poller(
     /// Configurable via env var `VPNCTLD_POLL_INTERVAL_SECS` —
     /// useful for tests (short) or quiet seasons (long).
     const DEFAULT_INTERVAL_SECS: u64 = 5 * 60;
-    let interval_secs: u64 = std::env::var("VPNCTLD_POLL_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_INTERVAL_SECS);
+    // `> 0` guard + warn-on-bad lives in `config::parse_positive_secs`:
+    // `interval(Duration::from_secs(0))` panics → poller crash-loop.
+    let interval_secs =
+        crate::config::parse_positive_secs("VPNCTLD_POLL_INTERVAL_SECS", DEFAULT_INTERVAL_SECS);
 
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(interval_secs));
