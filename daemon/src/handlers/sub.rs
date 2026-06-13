@@ -71,10 +71,33 @@ pub(crate) async fn get(
     // resolution every client's IP collapses to nginx's peer
     // address → rate-limit single-bucket + per-user distinct-IP
     // counter = 1. `real_ip::resolve_real_ip` parses XFF ONLY when
-    // peer is in the trusted-proxy allowlist (LAN default
-    // 192.168.0.207, overridable via `VPNCTLD_TRUSTED_PROXIES`).
-    let real_peer_ip: Option<std::net::IpAddr> =
-        peer_ip.map(|p| crate::real_ip::resolve_real_ip(request.headers(), p));
+    // peer is in the trusted-proxy allowlist (overridable via
+    // `VPNCTLD_TRUSTED_PROXIES`).
+    //
+    // TWO resolvers, two purposes — mirrors `vpn_router::get_config`
+    // (the prod `/api/v1/app/config` endpoint, hardened in RL-1):
+    //
+    //   * `real_peer_ip` — LOGGING / observability IP. Leftmost-XFF
+    //     (`resolve_real_ip`). Intentionally the richer client value
+    //     for abuse-detection (geo, /16-clustering) per the CLAUDE.md
+    //     "Known gaps" note. Feeds `sub_access_log.ip` ONLY.
+    //   * `sec_peer_ip` — SECURITY-decision IP. Spoof-proof `X-Real-IP`
+    //     (`resolve_peer_real_ip`; nginx OVERWRITES it, a client can't
+    //     forge it). Used for the rate-limit bucket key AND the 24h
+    //     persistent-ban key. CWE-345 fix: nginx APPENDS to XFF
+    //     (`$proxy_add_x_forwarded_for`), so the leftmost-XFF value is
+    //     client-controlled — from a trusted-proxy position an attacker
+    //     could prepend an ARBITRARY victim IP to leftmost-XFF and get
+    //     that third party banned for 24h. Keying the ban on `X-Real-IP`
+    //     (the true immediate peer of nginx) closes that.
+    //
+    // Both fall back to the raw `peer` when the immediate peer is not a
+    // trusted proxy OR the header is absent/malformed, so the no-XFF /
+    // untrusted-peer cases are byte-identical to before this change.
+    let SubIps {
+        log_ip: real_peer_ip,
+        sec_ip: sec_peer_ip,
+    } = resolve_sub_ips(request.headers(), peer_ip);
     let ip = match real_peer_ip {
         Some(addr) => addr.to_string(),
         None => {
@@ -100,8 +123,10 @@ pub(crate) async fn get(
     // Phase Track-2 chunk 2: persistent ban check runs BEFORE the
     // bucket math — a banned IP is rejected without spending any
     // bucket tokens. The ban table is indexed on (kind, key,
-    // until_ts) so the lookup is sub-millisecond.
-    if let Some(addr) = real_peer_ip {
+    // until_ts) so the lookup is sub-millisecond. Keyed on the
+    // spoof-proof `sec_peer_ip` (X-Real-IP) so a third party can't be
+    // banned by prepending their IP to leftmost-XFF (CWE-345).
+    if let Some(addr) = sec_peer_ip {
         let ip_str = addr.to_string();
         match state.inv.is_banned("ip", &ip_str).await {
             Ok(Some(secs)) => return rate_limited(secs, "ip-ban"),
@@ -121,7 +146,12 @@ pub(crate) async fn get(
     // for free). Per-token gate runs AFTER the token resolves to
     // bound the by_token map size by the user count, not by attacker
     // creativity. Both gates issue HTTP 429 with `Retry-After`.
-    if let Some(addr) = real_peer_ip {
+    //
+    // Keyed on `sec_peer_ip` (spoof-proof X-Real-IP), NOT the
+    // leftmost-XFF `real_peer_ip` — both the bucket key and the
+    // escalated `add_ban` below must resist the leftmost-XFF
+    // victim-ban attack (CWE-345). Parity with `vpn_router::get_config`.
+    if let Some(addr) = sec_peer_ip {
         if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr) {
             // Phase Track-2 chunk 2: escalate to a persistent ban EXACTLY
             // when the denial counter crosses K. Using `==` (not `>=`)
@@ -370,6 +400,46 @@ pub(crate) async fn get(
             // Don't leak internals to the user — generic 500.
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
         }
+    }
+}
+
+/// The two client IPs the `/sub` handler resolves from one request:
+/// a richer LOGGING value and a spoof-proof SECURITY value. Split
+/// intentionally — see `resolve_sub_ips` and the inline rationale at
+/// the top of [`get`].
+struct SubIps {
+    /// Leftmost-XFF (`resolve_real_ip`). Observability ONLY —
+    /// `sub_access_log.ip`. Client-controllable behind the appending
+    /// nginx; never feeds a security decision.
+    log_ip: Option<std::net::IpAddr>,
+    /// Spoof-proof `X-Real-IP` (`resolve_peer_real_ip`). The rate-limit
+    /// bucket key AND the 24h persistent-ban key. nginx overwrites
+    /// `X-Real-IP`, so a client can't forge it (CWE-345 defense).
+    sec_ip: Option<std::net::IpAddr>,
+}
+
+/// Resolve both `/sub` IPs from the request, using the process-wide
+/// `VPNCTLD_TRUSTED_PROXIES` allowlist. Thin wrapper over
+/// [`resolve_sub_ips_with`] so the handler stays a one-liner; the
+/// `_with` form (trusted list lifted to a parameter) carries the
+/// testable logic — same split `real_ip.rs` uses to stay env-free
+/// under the workspace `unsafe_code = "forbid"` lint.
+fn resolve_sub_ips(headers: &header::HeaderMap, peer_ip: Option<std::net::IpAddr>) -> SubIps {
+    resolve_sub_ips_with(headers, peer_ip, crate::real_ip::trusted_proxies())
+}
+
+/// Pure inner helper for [`resolve_sub_ips`] — trusted list lifted to a
+/// parameter so tests exercise the spoof scenario without mutating the
+/// process env. Mirrors the security-vs-logging IP split in
+/// `vpn_router::get_config` exactly.
+fn resolve_sub_ips_with(
+    headers: &header::HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    trusted: &[std::net::IpAddr],
+) -> SubIps {
+    SubIps {
+        log_ip: peer_ip.map(|p| crate::real_ip::resolve_real_ip_with(headers, p, trusted)),
+        sec_ip: peer_ip.map(|p| crate::real_ip::resolve_peer_real_ip_with(headers, p, trusted)),
     }
 }
 
@@ -758,4 +828,117 @@ fn empty_singbox_config() -> Value {
             "auto_detect_interface": true
         }
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// A trusted reverse proxy (stand-in for nginx). The `_with`
+    /// resolvers honour XFF / X-Real-IP only when the immediate peer is
+    /// in this list — same trust gate as `real_ip.rs`.
+    const TRUSTED_PROXY: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 207));
+    /// The third-party VICTIM whose IP a malicious client prepends to
+    /// leftmost-XFF hoping to get it banned for 24h.
+    const VICTIM_IP: &str = "198.51.100.77";
+    /// The attacker's TRUE immediate peer — what nginx writes into
+    /// `X-Real-IP` (overwriting any client-supplied value).
+    const ATTACKER_IP: &str = "203.0.113.9";
+
+    /// The CWE-345 fix, pinned at the exact seam `sub.rs` keys its
+    /// security decisions on. A request from a trusted proxy carries a
+    /// spoofed leftmost-XFF (the victim) but an honest `X-Real-IP` (the
+    /// attacker). The SECURITY IP — which feeds BOTH the rate-limit
+    /// bucket and `add_ban` — must be the attacker's true IP, so a third
+    /// party can NEVER be banned by header injection. The LOGGING IP
+    /// keeps the richer leftmost-XFF (observability semantics unchanged).
+    #[test]
+    fn security_ip_resists_leftmost_xff_spoof_logging_ip_keeps_it() {
+        let mut h = HeaderMap::new();
+        // nginx appends $remote_addr → leftmost is the client-supplied
+        // (spoofed) victim; the trailing entry is the real peer.
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("{VICTIM_IP}, {ATTACKER_IP}")).unwrap(),
+        );
+        // nginx OVERWRITES X-Real-IP with the true peer ($remote_addr).
+        h.insert("x-real-ip", HeaderValue::from_static(ATTACKER_IP));
+
+        let ips = resolve_sub_ips_with(&h, Some(TRUSTED_PROXY), &[TRUSTED_PROXY]);
+
+        // Ban / rate-limit key = attacker's TRUE IP, never the victim.
+        assert_eq!(
+            ips.sec_ip.map(|i| i.to_string()).as_deref(),
+            Some(ATTACKER_IP),
+            "security IP (rate-limit bucket + 24h ban key) must be the spoof-proof \
+             X-Real-IP, NOT the client-controlled leftmost-XFF — else a third party \
+             gets banned via header injection (CWE-345)"
+        );
+        // The victim's IP must NOT be the thing that gets banned.
+        assert_ne!(
+            ips.sec_ip.map(|i| i.to_string()).as_deref(),
+            Some(VICTIM_IP),
+            "the spoofed victim IP must never become the ban/rate-limit key"
+        );
+        // Logging IP semantics preserved — still the leftmost-XFF.
+        assert_eq!(
+            ips.log_ip.map(|i| i.to_string()).as_deref(),
+            Some(VICTIM_IP),
+            "logging IP (sub_access_log) keeps the established richer leftmost-XFF \
+             value per CLAUDE.md 'Known gaps' — only the security decision moved"
+        );
+    }
+
+    /// No-XFF / no-X-Real-IP from a trusted proxy: both IPs fall back to
+    /// the raw peer. Guards that the split introduced no behaviour change
+    /// for ordinary direct requests.
+    #[test]
+    fn both_ips_fall_back_to_peer_when_no_headers() {
+        let h = HeaderMap::new();
+        let ips = resolve_sub_ips_with(&h, Some(TRUSTED_PROXY), &[TRUSTED_PROXY]);
+        assert_eq!(ips.sec_ip, Some(TRUSTED_PROXY));
+        assert_eq!(ips.log_ip, Some(TRUSTED_PROXY));
+    }
+
+    /// Untrusted immediate peer: every forwarding header is dropped on
+    /// the floor for BOTH IPs (an arbitrary external client can't spoof
+    /// either axis). This is the pre-existing spoof defense — the change
+    /// must not weaken it.
+    #[test]
+    fn untrusted_peer_ignores_all_forwarding_headers() {
+        let untrusted = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("{VICTIM_IP}, {ATTACKER_IP}")).unwrap(),
+        );
+        h.insert("x-real-ip", HeaderValue::from_static(ATTACKER_IP));
+        // Trusted list does NOT contain `untrusted`.
+        let ips = resolve_sub_ips_with(&h, Some(untrusted), &[TRUSTED_PROXY]);
+        assert_eq!(
+            ips.sec_ip,
+            Some(untrusted),
+            "untrusted peer's X-Real-IP must be ignored — raw peer is the key"
+        );
+        assert_eq!(
+            ips.log_ip,
+            Some(untrusted),
+            "untrusted peer's XFF must be ignored for logging too"
+        );
+    }
+
+    /// Missing ConnectInfo (oneshot test rigs, misconfigured make-service)
+    /// → both IPs are `None`, so the handler skips the per-IP ban + bucket
+    /// entirely (the `if let Some(addr)` guards). No panic, no key.
+    #[test]
+    fn no_peer_ip_yields_none_for_both() {
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static(ATTACKER_IP));
+        let ips = resolve_sub_ips_with(&h, None, &[TRUSTED_PROXY]);
+        assert_eq!(ips.sec_ip, None);
+        assert_eq!(ips.log_ip, None);
+    }
 }
