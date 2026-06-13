@@ -8357,7 +8357,7 @@ async fn admin_users_search_filters_by_id_substring() {
 }
 
 #[tokio::test]
-async fn admin_users_sort_servers_orders_by_grants_count_desc() {
+async fn admin_users_sort_servers_orders_by_grants_count_ascending() {
     use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -8404,16 +8404,28 @@ async fn admin_users_sort_servers_orders_by_grants_count_desc() {
         .grant(&UserId("bob".into()), &ServerId("s1".into()))
         .await
         .unwrap();
-    let app = router(s);
-    let html = fetch_html(app, "/admin/users?sort=servers").await;
-    // Find positions of the three user names in the body — alice
-    // (3 grants) MUST appear before bob (1) MUST appear before carol (0).
+
+    // `?sort=servers` is ASCENDING (bare name = ascending, matching the
+    // id / id-desc convention). Fewest grants first: carol(0) < bob(1)
+    // < alice(3).
+    let html = fetch_html(router(s.clone()), "/admin/users?sort=servers").await;
     let pos_alice = html.find(">alice<").expect("alice rendered");
     let pos_bob = html.find(">bob<").expect("bob rendered");
     let pos_carol = html.find(">carol<").expect("carol rendered");
     assert!(
+        pos_carol < pos_bob && pos_bob < pos_alice,
+        "sort=servers (ascending) must render carol<bob<alice; got positions a={pos_alice} b={pos_bob} c={pos_carol}"
+    );
+
+    // `?sort=servers-desc` is DESCENDING. Most grants first:
+    // alice(3) < bob(1) < carol(0).
+    let html_desc = fetch_html(router(s), "/admin/users?sort=servers-desc").await;
+    let pos_alice = html_desc.find(">alice<").expect("alice rendered");
+    let pos_bob = html_desc.find(">bob<").expect("bob rendered");
+    let pos_carol = html_desc.find(">carol<").expect("carol rendered");
+    assert!(
         pos_alice < pos_bob && pos_bob < pos_carol,
-        "sort=servers must render alice<bob<carol; got positions a={pos_alice} b={pos_bob} c={pos_carol}"
+        "sort=servers-desc (descending) must render alice<bob<carol; got positions a={pos_alice} b={pos_bob} c={pos_carol}"
     );
 }
 

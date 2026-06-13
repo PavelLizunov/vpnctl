@@ -1821,21 +1821,33 @@ impl SqliteInventory {
         // returning 0 rows we roll back via early-return + tx drop.
         let mut tx = self.pool.begin().await?;
 
-        let old_uuid: Option<String> =
+        // Fetch the grant row's presence AND its old client_uuid in one
+        // read. `grant_row` is `Some` iff the (user, server) grant exists
+        // — kept separate from `old_uuid` so a grant with a NULL
+        // client_uuid is distinguishable from a missing grant (both make
+        // `old_uuid` None). Needed below to tell «no grant» (error) apart
+        // from «same value, nothing to do» (silent no-op).
+        let grant_row =
             sqlx::query("SELECT client_uuid FROM grants WHERE user_id = ?1 AND server_id = ?2")
                 .bind(&user.0)
                 .bind(&server.0)
                 .fetch_optional(&mut *tx)
-                .await?
-                .and_then(|row| {
-                    row.try_get::<Option<String>, _>("client_uuid")
-                        .ok()
-                        .flatten()
-                });
+                .await?;
+        let grant_exists = grant_row.is_some();
+        let old_uuid: Option<String> = grant_row.and_then(|row| {
+            row.try_get::<Option<String>, _>("client_uuid")
+                .ok()
+                .flatten()
+        });
 
+        // `AND client_uuid IS NOT ?3` (NULL-safe) makes a same-value write
+        // match 0 rows, mirroring the no-op-suppression idiom in
+        // set_user_disabled / set_server_protocol_hidden: a write that
+        // doesn't change anything emits no audit row. The presence check
+        // below disambiguates the two 0-rows cases.
         let res = sqlx::query(
             "UPDATE grants SET client_uuid = ?3
-             WHERE user_id = ?1 AND server_id = ?2",
+             WHERE user_id = ?1 AND server_id = ?2 AND client_uuid IS NOT ?3",
         )
         .bind(&user.0)
         .bind(&server.0)
@@ -1843,13 +1855,20 @@ impl SqliteInventory {
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
-            // tx drops without commit → SELECT side-effect is rolled
-            // back (snapshot read had no side effect anyway, but the
-            // shape stays «atomic from caller's perspective»).
-            return Err(SqliteInventoryError::Invalid(format!(
-                "no grant for user={} server={}; cannot set client_uuid",
-                user.0, server.0
-            )));
+            if !grant_exists {
+                // tx drops without commit → SELECT side-effect is rolled
+                // back (snapshot read had no side effect anyway, but the
+                // shape stays «atomic from caller's perspective»).
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no grant for user={} server={}; cannot set client_uuid",
+                    user.0, server.0
+                )));
+            }
+            // Grant exists but already holds this exact client_uuid →
+            // idempotent no-op. Commit (read had no side effect) and skip
+            // the audit row so "one audit row per mutation" holds.
+            tx.commit().await?;
+            return Ok(());
         }
 
         // Audit row inside the same transaction. Note: the payload
@@ -3730,10 +3749,22 @@ impl SqliteInventory {
             .await?;
             Ok(existing_id)
         } else {
+            // Gate the INSERT on user existence, SQL-side (mirrors the
+            // #32 fix in `record_user_destinations`). `user_id` comes from
+            // the log-scrape attribution map (a raw username), NOT
+            // validated against `users`. `vpn_user_sessions.user_id` is
+            // NOT NULL REFERENCES users(id); with `foreign_keys=ON` an
+            // INSERT for a since-deleted user raises FK error 787. The
+            // caller loops per-user and logs+continues, so it's currently
+            // non-fatal, but it spams the warn-log every tick until the
+            // stale user ages out of the scrape. `INSERT … SELECT …
+            // WHERE EXISTS (… users …)` skips the unknown user cleanly:
+            // 0 rows inserted, no FK error, no log noise.
             let res = sqlx::query(
                 "INSERT INTO vpn_user_sessions
                     (user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
-                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                 SELECT ?1, ?2, ?3, ?3, ?4, ?5
+                 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)",
             )
             .bind(&user_id.0)
             .bind(&server_id.0)
@@ -3742,7 +3773,14 @@ impl SqliteInventory {
             .bind(i64::try_from(bytes_delta).unwrap_or(i64::MAX))
             .execute(&self.pool)
             .await?;
-            Ok(res.last_insert_rowid())
+            // 0 rows ⇒ unknown user, nothing inserted. Return 0 rather
+            // than `last_insert_rowid()`, which would otherwise echo a
+            // stale rowid from an earlier insert on this connection.
+            if res.rows_affected() == 0 {
+                Ok(0)
+            } else {
+                Ok(res.last_insert_rowid())
+            }
         }
     }
 
@@ -5306,6 +5344,135 @@ mod tests {
         assert!(
             ghost.is_empty(),
             "the FK-violating ghost row must be skipped"
+        );
+        Ok(())
+    }
+
+    // ── set_grant_client_uuid no-op audit suppression ───────────────────
+
+    #[tokio::test]
+    async fn set_grant_client_uuid_same_value_writes_no_audit_row() -> Result<()> {
+        // SQLite's rows_affected() counts matched-not-changed rows, so a
+        // plain `UPDATE … WHERE user=? AND server=?` re-writing the SAME
+        // uuid still passes the `>0` guard and emits a no-op
+        // `grant.set_client_uuid` audit row (old == new). The
+        // `AND client_uuid IS NOT ?` no-op gate must make a same-value
+        // write affect 0 rows and skip the audit, mirroring
+        // set_user_disabled / set_server_protocol_hidden.
+        let inv = fresh().await;
+        inv.add_server(&sample_server("srv")).await?;
+        inv.add_user(&sample_user("alice")).await?;
+        inv.grant(&UserId("alice".into()), &ServerId("srv".into()))
+            .await?;
+
+        let uuid = "11111111-1111-4111-8111-111111111111";
+        inv.set_grant_client_uuid(&UserId("alice".into()), &ServerId("srv".into()), uuid)
+            .await?;
+
+        let audit_after_first: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE action = 'grant.set_client_uuid'")
+                .fetch_one(inv.pool())
+                .await?;
+        assert_eq!(
+            audit_after_first.0, 1,
+            "first set must write exactly one audit row"
+        );
+
+        // Re-write the SAME value → no-op, no new audit row.
+        inv.set_grant_client_uuid(&UserId("alice".into()), &ServerId("srv".into()), uuid)
+            .await?;
+
+        let audit_after_second: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE action = 'grant.set_client_uuid'")
+                .fetch_one(inv.pool())
+                .await?;
+        assert_eq!(
+            audit_after_second.0, 1,
+            "re-writing the same client_uuid must NOT add a second audit row"
+        );
+
+        // A genuine change still audits (regression guard).
+        let uuid2 = "22222222-2222-4222-8222-222222222222";
+        inv.set_grant_client_uuid(&UserId("alice".into()), &ServerId("srv".into()), uuid2)
+            .await?;
+        let audit_after_change: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE action = 'grant.set_client_uuid'")
+                .fetch_one(inv.pool())
+                .await?;
+        assert_eq!(
+            audit_after_change.0, 2,
+            "a real value change must still emit an audit row"
+        );
+
+        // Setting client_uuid on a (user, server) with no grant must
+        // still error (the no-op gate must not mask the missing grant).
+        inv.add_user(&sample_user("bob")).await?;
+        let err = inv
+            .set_grant_client_uuid(&UserId("bob".into()), &ServerId("srv".into()), uuid)
+            .await;
+        assert!(
+            err.is_err(),
+            "setting client_uuid without a grant must still error"
+        );
+        Ok(())
+    }
+
+    // ── session_observe FK gate ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_observe_skips_unknown_user() -> Result<()> {
+        // user_id comes from the log-scrape attribution map (a raw
+        // username), NOT validated against `users`. With foreign_keys=ON
+        // and vpn_user_sessions.user_id NOT NULL REFERENCES users(id), an
+        // INSERT for a since-deleted user raises FK error 787. The
+        // `WHERE EXISTS (… users …)` gate must skip it cleanly: no error
+        // bubbles, no row inserted, and a valid user's session still
+        // records.
+        let inv = fresh().await;
+        inv.add_server(&sample_server("srv")).await?;
+        inv.add_user(&sample_user("alice")).await?;
+        let now = chrono::Utc::now();
+
+        // Unknown user → no FK error, nothing inserted (rowid 0 sentinel).
+        let ghost_id = inv
+            .session_observe(
+                &UserId("ghost".into()),
+                &ServerId("srv".into()),
+                now,
+                15,
+                0,
+                1,
+            )
+            .await?;
+        assert_eq!(ghost_id, 0, "unknown user must insert no session row");
+
+        let ghost_sessions = inv
+            .recent_sessions_for_user(&UserId("ghost".into()), 10)
+            .await?;
+        assert!(
+            ghost_sessions.is_empty(),
+            "no session row may exist for an unknown user"
+        );
+
+        // Valid user still records.
+        let alice_id = inv
+            .session_observe(
+                &UserId("alice".into()),
+                &ServerId("srv".into()),
+                now,
+                15,
+                0,
+                1,
+            )
+            .await?;
+        assert!(alice_id > 0, "a known user's session must record");
+        let alice_sessions = inv
+            .recent_sessions_for_user(&UserId("alice".into()), 10)
+            .await?;
+        assert_eq!(
+            alice_sessions.len(),
+            1,
+            "the known user's session must land"
         );
         Ok(())
     }
