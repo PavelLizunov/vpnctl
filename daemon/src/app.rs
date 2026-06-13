@@ -953,6 +953,22 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/deploy-all/sse",
             get(admin::servers_deploy_all_sse),
         )
+        // "Update kernels" (update-kernels PR2) — SSE-streamed kernel
+        // BINARY upgrade (ensure_installed only, no config render/apply),
+        // so it works on inventory-drift nodes without the DG-1 guard.
+        // Same-origin guarded in-handler.
+        .route(
+            "/admin/servers/{id}/update-kernels/sse",
+            get(admin::server_update_kernels_sse),
+        )
+        // "Update all kernels" — fleet-wide kernel binary upgrade in one
+        // streamed pass. 3-segment path — no clash with the {id} routes
+        // above (same trick as deploy-all/sse). Same-origin guarded
+        // in-handler.
+        .route(
+            "/admin/servers/update-kernels-all/sse",
+            get(admin::servers_update_kernels_all_sse),
+        )
         // Migration 0018: per-(server, protocol) hide flag + per-(user,
         // server, protocol) deny override. 4 POST handlers — server-
         // level chip is on /admin/servers/{id}; per-user grid is on
