@@ -121,10 +121,16 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
 /// carries literal `{`/`}` (logrotate fragment, fail2ban heredoc
 /// `${F2B_SSH_PORT}`) that must NOT pass through `format!`. UNCHANGED
 /// from before the version-gate refactor.
-const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-box ownership. Otherwise the
-    # service crash-loops with "open /var/log/sing-box.log:
+const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-box ownership ONLY IF ABSENT.
+    # Otherwise the service crash-loops with "open /var/log/sing-box.log:
     # permission denied" — observed live on the staging deploy.
-    install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
+    # CRITICAL: must be conditional. `install /dev/null <log>` replaces the
+    # file's inode; re-running it on an EXISTING log orphans sing-box's open
+    # fd (the live log goes 0-byte until the service restarts), silently
+    # breaking the log-scrape per-user attribution. ensure_installed runs on
+    # every deploy AND every `update-kernels` (which does NOT restart
+    # sing-box), so an unconditional re-create = fleet-wide attribution loss.
+    [ -f /var/log/sing-box.log ] || install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log
     chown -R sing-box:sing-box /etc/sing-box
     systemctl enable sing-box >/dev/null
     # Self-signed TLS cert/key shared by EVERY TLS-bearing inbound
@@ -797,6 +803,10 @@ mod tests {
         assert!(
             s.contains("install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log"),
             "log-file pre-create"
+        );
+        assert!(
+            s.contains("[ -f /var/log/sing-box.log ] || install -o sing-box -g sing-box -m 0640 /dev/null /var/log/sing-box.log"),
+            "log-file pre-create MUST be conditional (only-if-absent) — an unconditional `install /dev/null` re-create orphans sing-box's open log fd on every ensure_installed/update-kernels, breaking attribution"
         );
         assert!(
             s.contains("/etc/logrotate.d/sing-box"),
