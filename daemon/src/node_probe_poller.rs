@@ -853,6 +853,15 @@ async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) -
         serde_json::to_string(&v).ok()
     };
 
+    // PR-Q — serialise the on-node kernel versions as a JSON object
+    // (BTreeMap → deterministic key order). NULL when empty (old node /
+    // partial-probe tick) rather than `{}`.
+    let kernel_versions_json: Option<String> = if probe.kernel_versions.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&probe.kernel_versions).ok()
+    };
+
     let res = inv
         .record_node_health(
             &server.id,
@@ -865,6 +874,7 @@ async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) -
             probe.load_1min_x100,
             listening_json.as_deref(),
             probe.sing_box_log_bytes,
+            kernel_versions_json.as_deref(),
         )
         .await;
 

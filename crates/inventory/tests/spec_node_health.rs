@@ -60,6 +60,7 @@ async fn rec(
         l,
         ports,
         log_bytes,
+        None, // kernel_versions_json — covered by the dedicated PR-Q test
     )
     .await
     .expect("record_node_health");
@@ -391,6 +392,7 @@ async fn record_for_unknown_server_fails_fk() {
             Some(50),
             Some("[]"),
             Some(0),
+            None,
         )
         .await;
     assert!(
@@ -537,5 +539,68 @@ async fn listening_ports_json_roundtrips_verbatim() {
         r.listening_ports_json.as_deref(),
         Some(raw),
         "listening_ports_json must roundtrip byte-for-byte verbatim"
+    );
+}
+
+// 13. PR-Q: kernel_versions_json roundtrips verbatim; NULL stays NULL
+//     for old rows / partial probes (the nullable column is additive).
+#[tokio::test]
+async fn kernel_versions_json_roundtrips_and_nullable() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    // Row WITH versions.
+    let kv = r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#;
+    inv.record_node_health(
+        &ServerId("s1".into()),
+        Some(true),
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(kv),
+    )
+    .await
+    .unwrap();
+
+    let r = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .expect("one row");
+    assert_eq!(
+        r.kernel_versions_json.as_deref(),
+        Some(kv),
+        "kernel_versions_json must roundtrip verbatim"
+    );
+
+    // Row WITHOUT versions (partial probe / old node) → stays NULL.
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let latest = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .expect("one row");
+    assert_eq!(
+        latest.kernel_versions_json, None,
+        "a probe with no versions persists NULL, not an empty object"
     );
 }

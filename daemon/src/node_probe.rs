@@ -94,6 +94,17 @@ pub struct Probe {
     /// IP or fail2ban didn't report). Caller uses this verdict
     /// directly for the `server.fail2ban.banned_self` alert.
     pub fail2ban_self_banned: Option<bool>,
+
+    // ─── PR-Q — kernel software versions ─────────────────────────
+    /// On-node software versions keyed by kernel name, e.g.
+    /// `{"sing-box": "1.13.12", "caddy": "2.8.4"}`. `BTreeMap` so the
+    /// serialised JSON has deterministic key order (byte-stable
+    /// across runs). Empty when the probe captured no `VER` lines
+    /// (old node whose script predates the version capture, or a tick
+    /// where every version command failed) — the poller persists
+    /// `NULL` in that case rather than `{}`. Backs the admin UI's
+    /// drift-detail card.
+    pub kernel_versions: std::collections::BTreeMap<String, String>,
 }
 
 impl Probe {
@@ -196,6 +207,13 @@ if command -v fail2ban-client >/dev/null 2>&1; then
             for (i = 1; i <= n; i++) if (ips[i] != "") print "BAN " ips[i]
         }'
 fi
+# Kernel software versions. Busybox-safe, no outbound HTTP — the
+# version strings come from the binaries already installed on the node.
+# One "VER <name> <version>" line per kernel the probe could read. Used
+# by the admin UI's drift-detail card to compare on-node vs fleet-target.
+sb_ver=$(sing-box version 2>/dev/null | awk '/version/{print $NF; exit}')
+[ -n "$sb_ver" ] && echo "VER sing-box $sb_ver"
+command -v caddy >/dev/null 2>&1 && echo "VER caddy $(caddy version 2>/dev/null | awk '{print $1; exit}')"
 # Completion sentinel. Every `|| true` above can silently swallow
 # errors; without this line a totally-broken probe (no /proc, missing
 # `ss`, busybox stripped) returns empty stdout and the parser can't
@@ -356,6 +374,26 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
                     any_parsed = true;
                 }
             }
+            "VER" => {
+                // VER <kernel-name> <version>. Loose validation: a
+                // version captured from arbitrary on-node binaries is
+                // untrusted text rendered in the admin UI. Accept only
+                // a non-empty, whitespace-free token of bounded length
+                // (`parts.next()` already splits on whitespace, so the
+                // value is single-token; the length cap defends against
+                // a binary printing a banner instead of a version).
+                if let (Some(name), Some(ver)) = (parts.next(), parts.next())
+                    && parts.next().is_none()
+                    && !name.is_empty()
+                    && !ver.is_empty()
+                    && ver.len() <= 32
+                {
+                    probe
+                        .kernel_versions
+                        .insert(name.to_string(), ver.to_string());
+                    any_parsed = true;
+                }
+            }
             _ => continue,
         }
     }
@@ -403,6 +441,8 @@ PORT tcp 8443
 PORT udp 8388
 PORT udp 8443
 LOG_SB 308432
+VER sing-box 1.13.12
+VER caddy 2.8.4
 PROBE_OK
 ";
 
@@ -424,6 +464,16 @@ PROBE_OK
         assert_eq!(p.probe_source_ip, None);
         assert_eq!(p.fail2ban_banned_ips, None);
         assert_eq!(p.fail2ban_self_banned, None);
+        // PR-Q — VER lines populate the kernel-version map.
+        assert_eq!(
+            p.kernel_versions.get("sing-box").map(String::as_str),
+            Some("1.13.12")
+        );
+        assert_eq!(
+            p.kernel_versions.get("caddy").map(String::as_str),
+            Some("2.8.4")
+        );
+        assert_eq!(p.kernel_versions.len(), 2);
     }
 
     // ─── Phase G chunk 2 — banned-self detector parser ─────────
@@ -665,6 +715,66 @@ PROBE_OK
         assert!(matches!(err, ProbeError::ScriptDidNotComplete));
     }
 
+    // ─── PR-Q — kernel-version capture parser ──────────────────
+
+    #[test]
+    fn parses_kernel_versions_from_ver_lines() {
+        let raw = "\
+SVC sing-box active
+VER sing-box 1.13.12
+VER caddy 2.8.4
+PROBE_OK
+";
+        let p = parse_probe_output(raw).unwrap();
+        assert_eq!(
+            p.kernel_versions.get("sing-box").map(String::as_str),
+            Some("1.13.12")
+        );
+        assert_eq!(
+            p.kernel_versions.get("caddy").map(String::as_str),
+            Some("2.8.4")
+        );
+    }
+
+    #[test]
+    fn missing_ver_lines_yields_empty_map_not_error() {
+        // A probe with no VER lines is still a valid probe — the map is
+        // simply empty, NOT an error (old node / partial-probe tick).
+        let raw = "SVC sing-box active\nPROBE_OK\n";
+        let p = parse_probe_output(raw).unwrap();
+        assert!(
+            p.kernel_versions.is_empty(),
+            "no VER lines → empty map, not error"
+        );
+    }
+
+    #[test]
+    fn malformed_ver_lines_are_skipped() {
+        // Missing the version token, an empty value, extra trailing
+        // tokens (a banner instead of a bare version), and an
+        // over-32-char value are all rejected; only the well-formed
+        // line lands in the map.
+        let long = "x".repeat(33);
+        let raw = format!(
+            "\
+VER sing-box
+VER caddy 2.8.4 extra-banner-token
+VER bad {long}
+VER good 1.0.0
+PROBE_OK
+"
+        );
+        let p = parse_probe_output(&raw).unwrap();
+        assert_eq!(
+            p.kernel_versions.get("good").map(String::as_str),
+            Some("1.0.0")
+        );
+        assert!(!p.kernel_versions.contains_key("sing-box"));
+        assert!(!p.kernel_versions.contains_key("caddy"));
+        assert!(!p.kernel_versions.contains_key("bad"));
+        assert_eq!(p.kernel_versions.len(), 1);
+    }
+
     #[test]
     fn probe_script_pins_security_invariants() {
         // Doesn't curl anywhere (no exfil), uses standard tools only,
@@ -691,6 +801,17 @@ PROBE_OK
         assert!(
             PROBE_SCRIPT.contains("LC_ALL=C"),
             "pins fail2ban-client English output across non-C locales"
+        );
+        // PR-Q — kernel-version capture is busybox-safe (the no-curl /
+        // no-wget asserts above must continue to hold with VER lines
+        // present) and reads versions from on-node binaries.
+        assert!(
+            PROBE_SCRIPT.contains("sing-box version"),
+            "captures sing-box version for the drift-detail card"
+        );
+        assert!(
+            PROBE_SCRIPT.contains("VER sing-box"),
+            "emits a VER line the parser can pick up"
         );
     }
 }

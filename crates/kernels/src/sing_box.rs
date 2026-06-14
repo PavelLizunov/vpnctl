@@ -514,6 +514,26 @@ fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     Some(s)
 }
 
+/// Read helper: the set of user UUIDs declared in a *live* sing-box
+/// config, returned in sorted order (`BTreeSet`) for a deterministic
+/// caller-side diff render.
+///
+/// Used by the daemon's drift-detail card to compare the UUIDs the node
+/// is actually serving against the UUIDs inventory expects, so the
+/// operator can see *which* user accounts drifted, not just that a
+/// count differs. Parse failures (truncated SSH read, non-JSON blob)
+/// collapse to an empty set rather than an error — the card degrades to
+/// "no on-node users observed" instead of failing the whole page.
+///
+/// This is a pure read over already-parsed bytes: it adds no new
+/// kernel/protocol coupling, it just re-exposes the same extraction the
+/// pre-apply diff guard already does internally.
+pub fn live_config_user_uuids(config_bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    extract_user_uuids(config_bytes)
+        .map(|set| set.into_iter().collect())
+        .unwrap_or_default()
+}
+
 /// Extract every `uuid` value found in `inbounds[*].users[*]` of a
 /// sing-box JSON config. Tolerant of non-VLESS inbounds (which don't
 /// carry a `users` array) and of inbounds whose users use a different
@@ -988,6 +1008,34 @@ mod tests {
     fn extract_user_uuids_returns_err_on_invalid_json() {
         let bytes = b"not json".to_vec();
         assert!(extract_user_uuids(&bytes).is_err());
+    }
+
+    // ─── PR-Q — public drift-detail read helper ────────────────────
+
+    #[test]
+    fn live_config_user_uuids_returns_sorted_set() {
+        let cfg = serde_json::json!({
+            "inbounds": [
+                { "type": "vless", "users": [
+                    {"uuid": "ccc"},
+                    {"uuid": "aaa"},
+                    {"uuid": "bbb"},
+                ]},
+            ]
+        });
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let got = live_config_user_uuids(&bytes);
+        // BTreeSet iterates in sorted order.
+        let order: Vec<&String> = got.iter().collect();
+        assert_eq!(order, vec!["aaa", "bbb", "ccc"]);
+    }
+
+    #[test]
+    fn live_config_user_uuids_empty_on_unparseable_bytes() {
+        // Truncated SSH read / non-JSON blob collapses to empty set,
+        // NOT a panic or error — the drift card degrades gracefully.
+        assert!(live_config_user_uuids(b"not json").is_empty());
+        assert!(live_config_user_uuids(b"{}").is_empty());
     }
 
     #[test]

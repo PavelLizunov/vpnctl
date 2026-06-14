@@ -29,3 +29,9 @@ pub use wgturn::WgTurn;
 /// shape and would need their own validators if they ever need
 /// reserved-port enforcement.
 pub use sing_box::validate_config_excludes_ports;
+
+/// PR-Q read helper: the set of user UUIDs a live sing-box config
+/// declares (sorted). Re-exported here so the daemon's drift-detail
+/// card can compare on-node vs inventory-expected users. Pure read over
+/// already-fetched config bytes — no new kernel/protocol coupling.
+pub use sing_box::live_config_user_uuids;

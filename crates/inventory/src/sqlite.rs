@@ -182,6 +182,37 @@ pub struct SubAccessAggregates {
     pub first_seen: Option<DateTime<Utc>>,
 }
 
+/// PR-Q — "today so far" operational digest for the dashboard banner.
+/// Buckets the day's `audit_log` rows (since local-midnight UTC) into
+/// the three operator-relevant categories. Pure counts — the UI
+/// renders the copy ("3 users added, 2 grants changed, 1 deploy").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodayDigest {
+    /// `action = 'user.create'` rows today.
+    pub users_added: u64,
+    /// Grant mutations today (`*.grant` / `*.revoke`).
+    pub grants_changed: u64,
+    /// `action = 'server.deploy'` rows today.
+    pub deploys: u64,
+}
+
+/// PR-Q — user lifecycle facts for the user-detail header. `created_at`
+/// is the row from `users` (migration 0001); `last_sub_fetch` is the
+/// most recent real (non-egress) `sub_access_log` hit; `age_days` is
+/// derived from `created_at` to "now" so the UI doesn't re-implement
+/// the date math.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserLifecycle {
+    /// When the user row was created (from `users.created_at`).
+    pub created_at: DateTime<Utc>,
+    /// Most recent real `/sub` fetch, if any. `None` for a user who
+    /// has never fetched their subscription.
+    pub last_sub_fetch: Option<DateTime<Utc>>,
+    /// Whole days between `created_at` and now (floored, never
+    /// negative).
+    pub age_days: u64,
+}
+
 /// One row of `sub_rate_bans` (Phase Track-2 chunk 2). Persistent
 /// auto-bans for `/sub` abuse: after K consecutive 429s for the same
 /// (kind, key) the daemon writes a row valid for 24h.
@@ -333,6 +364,12 @@ pub struct NodeHealthRow {
     /// `LIKE '%/443%'` queries can grep without parsing.
     pub listening_ports_json: Option<String>,
     pub sing_box_log_bytes: Option<u64>,
+    /// PR-Q — on-node kernel versions as a JSON object, e.g.
+    /// `{"sing-box":"1.13.12","caddy":"2.8.4"}`. `None` for rows
+    /// written before the version capture landed, or partial-probe
+    /// ticks where no version command succeeded. Caller extracts the
+    /// key it cares about (`"sing-box"`) for the drift-detail card.
+    pub kernel_versions_json: Option<String>,
 }
 
 /// Phase H+ — rolling-window aggregate computed by
@@ -3315,6 +3352,277 @@ impl SqliteInventory {
         Ok(out)
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // PR-Q — informativeness query layer.
+    //
+    // Index-backed read aggregates that back the admin-UI dashboard /
+    // server-detail / user-detail informativeness cards. Each mirrors an
+    // existing method's style; weighting by `usage_coefficient` matches
+    // the #41 traffic-accounting convention. None of these mutate — no
+    // audit rows. EXPLAIN QUERY PLAN evidence is in the PR description.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// **Q-4a** — top traffic users restricted to ONE server. Same
+    /// `usage_coefficient`-weighted ranking as `top_users_by_traffic`
+    /// (#41 pattern) but with `AND s.server_id = ?`. Backs the
+    /// server-detail "heaviest users on this node" card. `user_id IS
+    /// NOT NULL` excludes the server-wide rollup rows.
+    pub async fn top_users_by_traffic_for_server(
+        &self,
+        server: &ServerId,
+        since_hours: u32,
+        limit: u32,
+    ) -> Result<Vec<(UserId, u64)>> {
+        let rows = sqlx::query(
+            "SELECT s.user_id AS user_id,
+                    CAST(SUM((s.upload_bytes + s.download_bytes)
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
+             FROM vpn_connection_stats s
+             JOIN servers sv ON sv.id = s.server_id
+             WHERE s.server_id = ?1
+               AND s.user_id IS NOT NULL
+               AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY s.user_id
+             ORDER BY total DESC
+             LIMIT ?3",
+        )
+        .bind(&server.0)
+        .bind(format!("-{since_hours} hours"))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let total: i64 = r.try_get("total")?;
+            out.push((UserId(uid), total.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// **Q-4b** — one user's traffic broken down per server. Returns
+    /// `(server_id, up_bytes, down_bytes)` summed over the window,
+    /// `usage_coefficient`-weighted like the other traffic queries.
+    /// Backs the user-detail "where this user's traffic lands" card.
+    pub async fn user_traffic_by_server(
+        &self,
+        user: &UserId,
+        since_hours: u32,
+    ) -> Result<Vec<(ServerId, u64, u64)>> {
+        let rows = sqlx::query(
+            "SELECT s.server_id AS server_id,
+                    CAST(SUM(s.upload_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_total,
+                    CAST(SUM(s.download_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_total
+             FROM vpn_connection_stats s
+             JOIN servers sv ON sv.id = s.server_id
+             WHERE s.user_id = ?1
+               AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY s.server_id
+             ORDER BY (up_total + down_total) DESC",
+        )
+        .bind(&user.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let sid: String = r.try_get("server_id")?;
+            let up: i64 = r.try_get("up_total")?;
+            let down: i64 = r.try_get("down_total")?;
+            out.push((ServerId(sid), up.max(0) as u64, down.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// **Q-4c** — audit timeline scoped to one server. Matches rows
+    /// where the server is the audit `target` OR where the JSON
+    /// `payload` carries a `server_id` field equal to `server_id`
+    /// (deploy/grant rows reference the server in the payload, not the
+    /// target). Newest-first. Reuses `row_to_audit_entry`.
+    pub async fn audit_for_server(&self, server_id: &str, limit: i64) -> Result<Vec<AuditEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, actor, action, target, payload
+             FROM audit_log
+             WHERE target = ?1
+                OR json_extract(payload, '$.server_id') = ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )
+        .bind(server_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    /// **Q-4d** — user lifecycle facts. `users.created_at` exists
+    /// (migration 0001) so this reads it directly + the most recent
+    /// real `/sub` fetch, and derives `age_days`. Backs the
+    /// user-detail header.
+    pub async fn user_lifecycle(&self, user: &UserId) -> Result<UserLifecycle> {
+        let row = sqlx::query(
+            "SELECT u.created_at AS created_at,
+                    (SELECT MAX(ts) FROM sub_access_log
+                     WHERE user_id = u.id AND is_vpn_egress = 0) AS last_sub_fetch
+             FROM users u
+             WHERE u.id = ?1",
+        )
+        .bind(&user.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let row =
+            row.ok_or_else(|| SqliteInventoryError::Invalid(format!("no such user: {}", user.0)))?;
+        let created_s: String = row.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_s)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| {
+                SqliteInventoryError::Invalid(format!(
+                    "users.created_at malformed: {created_s}: {e}"
+                ))
+            })?;
+        let last_s: Option<String> = row.try_get("last_sub_fetch")?;
+        let last_sub_fetch = last_s.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        });
+        // Floored whole days since creation; never negative (a clock
+        // skew that put created_at slightly in the future yields 0).
+        let age_days = (Utc::now() - created_at).num_days().max(0) as u64;
+        Ok(UserLifecycle {
+            created_at,
+            last_sub_fetch,
+            age_days,
+        })
+    }
+
+    /// **Q-4e** — newest `kernel_versions_json` per server across the
+    /// fleet. Returns the raw JSON string (caller extracts the
+    /// `"sing-box"` key); `None` for servers whose latest row predates
+    /// version capture or had no versions. Backs the dashboard
+    /// kernel-version fleet card. Served by `idx_node_health_server_ts`.
+    pub async fn kernel_versions_fleet(&self) -> Result<Vec<(ServerId, Option<String>)>> {
+        // Correlated subquery picks the newest ts per server; the outer
+        // row then reads that row's JSON. One row per server.
+        let rows = sqlx::query(
+            "SELECT nh.server_id AS server_id,
+                    nh.kernel_versions_json AS kernel_versions_json
+             FROM node_health nh
+             WHERE nh.ts = (SELECT MAX(nh2.ts)
+                            FROM node_health nh2
+                            WHERE nh2.server_id = nh.server_id)
+             ORDER BY nh.server_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let sid: String = r.try_get("server_id")?;
+            let json: Option<String> = r.try_get("kernel_versions_json")?;
+            out.push((ServerId(sid), json));
+        }
+        Ok(out)
+    }
+
+    /// **Q-4f** — unacked alerts grouped by `(kind, severity)`. Returns
+    /// `(kind, severity, count)`. Backs the dashboard "open alerts by
+    /// type" breakdown without pulling every alert row.
+    pub async fn alerts_by_kind_severity(&self) -> Result<Vec<(String, String, u64)>> {
+        let rows = sqlx::query(
+            "SELECT kind, severity, COUNT(*) AS n
+             FROM admin_alerts
+             WHERE acked_at IS NULL
+             GROUP BY kind, severity
+             ORDER BY n DESC, kind, severity",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let kind: String = r.try_get("kind")?;
+            let severity: String = r.try_get("severity")?;
+            let n: i64 = r.try_get("n")?;
+            out.push((kind, severity, n.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// **Q-4g** — "today so far" digest from `audit_log`. Counts rows
+    /// since UTC local-midnight, bucketed Rust-side into users added /
+    /// grants changed / deploys. Served by `idx_audit_ts`.
+    pub async fn today_digest(&self) -> Result<TodayDigest> {
+        // `'now','start of day'` is midnight UTC. We bucket Rust-side
+        // (rather than three SQL COUNTs) so adding a category later is a
+        // match-arm edit, not a new query.
+        let rows = sqlx::query(
+            "SELECT action, COUNT(*) AS n
+             FROM audit_log
+             WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'start of day')
+             GROUP BY action",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut digest = TodayDigest::default();
+        for r in rows {
+            let action: String = r.try_get("action")?;
+            let n: i64 = r.try_get("n")?;
+            let n = n.max(0) as u64;
+            if action == "user.create" {
+                digest.users_added += n;
+            } else if action.ends_with(".grant") || action.ends_with(".revoke") {
+                digest.grants_changed += n;
+            } else if action == "server.deploy" {
+                digest.deploys += n;
+            }
+        }
+        Ok(digest)
+    }
+
+    /// **Q-4h** — fleet-wide likely-shared-subscription summary. Groups
+    /// real (`is_vpn_egress = 0`) `sub_access_log` rows by user and
+    /// returns `(user_id, distinct_ips, distinct_asns, distinct_countries)`
+    /// for users whose distinct-ASN count is at least `min_asns` — the
+    /// "one URL fetched from many networks" signal. Reuses the distinct-
+    /// count column logic from `sub_access_aggregates_for_user`. Backs
+    /// the dashboard abuse-overview card.
+    pub async fn likely_shared_summary(
+        &self,
+        min_asns: u32,
+    ) -> Result<Vec<(UserId, u64, u64, u64)>> {
+        let rows = sqlx::query(
+            "SELECT user_id,
+                    COUNT(DISTINCT ip) AS distinct_ips,
+                    COUNT(DISTINCT CASE WHEN geo_asn IS NOT NULL THEN geo_asn END)
+                        AS distinct_asns,
+                    COUNT(DISTINCT CASE WHEN geo_country IS NOT NULL THEN geo_country END)
+                        AS distinct_countries
+             FROM sub_access_log
+             WHERE is_vpn_egress = 0
+             GROUP BY user_id
+             HAVING distinct_asns >= ?1
+             ORDER BY distinct_asns DESC, distinct_ips DESC",
+        )
+        .bind(i64::from(min_asns))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let ips: i64 = r.try_get("distinct_ips")?;
+            let asns: i64 = r.try_get("distinct_asns")?;
+            let countries: i64 = r.try_get("distinct_countries")?;
+            out.push((
+                UserId(uid),
+                ips.max(0) as u64,
+                asns.max(0) as u64,
+                countries.max(0) as u64,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Recent server-wide + per-user rows for one server in the
     /// look-back window. Newest-first. The server-detail UI uses
     /// the `user_id IS NULL` rows for the bandwidth sparkline and
@@ -4077,6 +4385,7 @@ impl SqliteInventory {
         load_1min_x100: Option<u32>,
         listening_ports_json: Option<&str>,
         sing_box_log_bytes: Option<u64>,
+        kernel_versions_json: Option<&str>,
     ) -> Result<()> {
         // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
@@ -4086,9 +4395,10 @@ impl SqliteInventory {
              (ts, server_id, sing_box_active, fail2ban_active,
               disk_used_mib, disk_total_mib,
               mem_available_mib, mem_total_mib,
-              load_1min_x100, listening_ports_json, sing_box_log_bytes)
+              load_1min_x100, listening_ports_json, sing_box_log_bytes,
+              kernel_versions_json)
              VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(&server_id.0)
         .bind(sb)
@@ -4100,6 +4410,7 @@ impl SqliteInventory {
         .bind(load_1min_x100.map(i64::from))
         .bind(listening_ports_json)
         .bind(sing_box_log_bytes.and_then(|n| i64::try_from(n).ok()))
+        .bind(kernel_versions_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -4116,7 +4427,8 @@ impl SqliteInventory {
             "SELECT ts, server_id, sing_box_active, fail2ban_active,
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
-                    load_1min_x100, listening_ports_json, sing_box_log_bytes
+                    load_1min_x100, listening_ports_json, sing_box_log_bytes,
+                    kernel_versions_json
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
@@ -4138,7 +4450,8 @@ impl SqliteInventory {
             "SELECT ts, server_id, sing_box_active, fail2ban_active,
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
-                    load_1min_x100, listening_ports_json, sing_box_log_bytes
+                    load_1min_x100, listening_ports_json, sing_box_log_bytes,
+                    kernel_versions_json
              FROM node_health
              WHERE server_id = ?1
              ORDER BY ts DESC
@@ -4805,6 +5118,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let load_i: Option<i64> = r.try_get("load_1min_x100")?;
     let ports: Option<String> = r.try_get("listening_ports_json")?;
     let log_b: Option<i64> = r.try_get("sing_box_log_bytes")?;
+    let kernel_versions: Option<String> = r.try_get("kernel_versions_json")?;
     Ok(NodeHealthRow {
         ts,
         server_id: ServerId(server_id),
@@ -4817,6 +5131,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         load_1min_x100: load_i.and_then(|n| u32::try_from(n).ok()),
         listening_ports_json: ports,
         sing_box_log_bytes: log_b.and_then(|n| u64::try_from(n).ok()),
+        kernel_versions_json: kernel_versions,
     })
 }
 
@@ -5047,6 +5362,40 @@ mod tests {
             row.map(|r| r.0).as_deref(),
             Some("idx_vcs_ts"),
             "migration 0032 must create idx_vcs_ts on vpn_connection_stats(ts)"
+        );
+        Ok(())
+    }
+
+    // 0033 (PR-Q): the additive nullable kernel-version column must
+    // exist on node_health AND the per-server audit expression index
+    // must exist, so `audit_for_server` gets a MULTI-INDEX OR plan
+    // instead of a full SCAN of the unbounded audit_log.
+    #[tokio::test]
+    async fn migration_0033_adds_column_and_audit_index() -> Result<()> {
+        let inv = fresh().await;
+        // New nullable column present (PRAGMA table_info lists it).
+        let cols: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM pragma_table_info('node_health') \
+             WHERE name = 'kernel_versions_json'",
+        )
+        .fetch_all(inv.pool())
+        .await?;
+        assert_eq!(
+            cols.len(),
+            1,
+            "0033 must add node_health.kernel_versions_json"
+        );
+        // New expression index present.
+        let idx: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_audit_payload_server'",
+        )
+        .fetch_optional(inv.pool())
+        .await?;
+        assert_eq!(
+            idx.map(|r| r.0).as_deref(),
+            Some("idx_audit_payload_server"),
+            "0033 must create idx_audit_payload_server on audit_log(json_extract(payload,'$.server_id'))"
         );
         Ok(())
     }
