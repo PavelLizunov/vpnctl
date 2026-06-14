@@ -544,6 +544,599 @@ fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Marku
     }
 }
 
+/// PR-Dash dash#5 — a subscription fetched from at least this many
+/// distinct ASNs is the "one share-link, many networks" signal that
+/// feeds the abuse-summary card. Picked once here so the threshold is
+/// a single constant edit. 3 ASNs ≈ home ISP + mobile carrier + a
+/// third network = a link that's left the household.
+const LIKELY_SHARED_MIN_ASNS: u32 = 3;
+
+/// Parse a dotted version string (`"1.13.12"`, leading `v` tolerated)
+/// into a comparable numeric tuple. Non-numeric / missing components
+/// read as 0, and we pad to three components so `"1.13"` sorts below
+/// `"1.13.1"`. Used by [`kernel_floor_rollup`] to find the fleet's
+/// highest sing-box version (the de-facto target) and flag any node
+/// below it. Returns `None` for an unparseable string (e.g. empty)
+/// so the caller can skip it rather than treat it as `0.0.0`.
+fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = raw.trim().trim_start_matches('v');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.split('.');
+    // The first component must exist and parse, else the string isn't
+    // a version we can reason about.
+    let major: u64 = parts.next()?.parse().ok()?;
+    let minor: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Extract the `"sing-box"` version from a server's
+/// `kernel_versions_json` blob (e.g. `{"sing-box":"1.13.12",…}`).
+/// Returns `None` for `None` JSON, malformed JSON, or a missing
+/// `sing-box` key. Shared by the fleet-at-a-glance version column
+/// (dash#1) and the kernel-floor rollup (dash#3).
+fn sing_box_version_of(kernel_versions_json: Option<&str>) -> Option<String> {
+    let raw = kernel_versions_json?;
+    let val: serde_json::Value = serde_json::from_str(raw).ok()?;
+    val.get("sing-box")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// PR-Dash dash#3 (SHARED — PR-Server reuses this on the per-server
+/// detail page) — fleet kernel-floor rollup.
+///
+/// Treats the **highest** sing-box version present anywhere in the
+/// fleet as the de-facto target (the "floor" the operator should pull
+/// everyone up to). Renders «sing-box N/M @ {floor} ✓ · K stale ⚠»
+/// where N = servers already at the floor, M = servers reporting any
+/// version, K = servers below it. When a fleet-wide kernel-update
+/// action exists it links there — for the dashboard (static, CSP: no
+/// inline JS) we link to /admin/servers where the SSE «update all
+/// kernels» button lives. Renders the empty-state line when no node
+/// has reported a version yet (quiet, no scary "0/0").
+///
+/// `kernel_versions` is `(ServerId, Option<kernel_versions_json>)` —
+/// exactly the shape `kernel_versions_fleet()` (Q-4e) returns, so both
+/// call sites pass it straight through.
+fn kernel_floor_rollup(
+    kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
+    // Collect (server, parsed-version) only for servers that report a
+    // sing-box version we can parse.
+    let mut versioned: Vec<(u64, u64, u64)> = Vec::new();
+    for (_, json) in kernel_versions {
+        if let Some(v) = sing_box_version_of(json.as_deref()) {
+            if let Some(tuple) = parse_version_tuple(&v) {
+                versioned.push(tuple);
+            }
+        }
+    }
+    let reporting = versioned.len();
+    let Some(floor) = versioned.iter().copied().max() else {
+        // No node reported a parseable version. Quiet empty-state.
+        return html! {
+            section id="kernel-rollup" style="margin-top: 28px;" {
+                div.ed-art-eyebrow { (t(lang, K::EyebrowKernelRollup)) }
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 6px 0 0;" {
+                    (t(lang, K::KernelRollupNoData))
+                }
+            }
+        };
+    };
+    let at_floor = versioned.iter().filter(|v| **v == floor).count();
+    let stale = reporting.saturating_sub(at_floor);
+    let floor_str = format!("{}.{}.{}", floor.0, floor.1, floor.2);
+    let all_current = stale == 0;
+
+    html! {
+        section id="kernel-rollup" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (t(lang, K::EyebrowKernelRollup)) }
+            p style="font-family: var(--serif); font-size: 15px; margin: 8px 0 0;" {
+                "sing-box "
+                b { (at_floor) "/" (reporting) }
+                " @ "
+                span.ed-mono { (floor_str) }
+                " "
+                @if all_current {
+                    span style="color: #2e7d32;" {
+                        "✓ " (t(lang, K::KernelRollupOnTarget))
+                    }
+                } @else {
+                    span style="color: var(--acc);" {
+                        "· " (stale) " " (t(lang, K::KernelRollupStale)) " ⚠"
+                    }
+                }
+            }
+            // When something is stale, point the operator at the place
+            // where the fleet-wide «update all kernels» action lives.
+            // The dashboard is static (CSP: no inline JS), so we LINK to
+            // /admin/servers rather than embed the SSE button here.
+            @if !all_current {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                    (tr(
+                        lang,
+                        "Some nodes trail the newest sing-box on the fleet. Roll the binary forward from ",
+                        "Часть нод отстаёт от самой свежей sing-box во флоте. Раскатать бинарь можно из раздела ",
+                    ))
+                    a href="/admin/servers" style="color: var(--ink);" {
+                        (tr(lang, "Servers", "Серверы"))
+                    }
+                    (tr(
+                        lang,
+                        " — the «update all kernels» action upgrades binaries without touching config.",
+                        " — действие «обновить все ядра» обновляет бинарники без правки конфига.",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// PR-Dash dash#1 — fleet-at-a-glance table. One row per server:
+/// sing-box up · disk% · mem% · active conns now · 24h traffic ·
+/// sing-box version · last-probe age. Every input is pre-loaded by the
+/// caller (the at-a-glance card adds NO new N+1 beyond the existing
+/// fleet-uptime loop). Empty cells render «—».
+///
+/// * `latest_health` — newest `node_health` row per server (disk/mem/
+///   up + probe ts), looked up in the same loop as fleet-uptime.
+/// * `active_conns` — live clash-api connection count per server from
+///   the in-memory snapshot cache (no DB round-trip).
+/// * `traffic_24h` — server-wide upload+download bytes over the last
+///   24h, weighted by `usage_coefficient`, summed from the already-
+///   loaded `recent_vpn_stats_fleet` rows.
+/// * `kernel_versions` — newest `kernel_versions_json` per server (the
+///   sing-box version column).
+#[allow(clippy::too_many_arguments)]
+fn dashboard_fleet_table(
+    servers: &[vpnctl_core::Server],
+    latest_health: &[(
+        vpnctl_core::ServerId,
+        Option<vpnctl_inventory::NodeHealthRow>,
+    )],
+    active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
+    traffic_24h: &std::collections::HashMap<vpnctl_core::ServerId, u64>,
+    kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if servers.is_empty() {
+        // No fleet yet — the dashboard metrics deck + the servers page
+        // already cover the "add a server" call-to-action; staying
+        // quiet here avoids a third empty table.
+        return html! {};
+    }
+    let now = chrono::Utc::now();
+    let dash = "—";
+    let th = |label: &str, right: bool| -> Markup {
+        let align = if right { "right" } else { "left" };
+        html! {
+            th style=(format!("text-align: {align}; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;")) {
+                (label)
+            }
+        }
+    };
+    html! {
+        section id="fleet-at-a-glance" style="margin-top: 28px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Fleet at a glance", "Флот одним взглядом"))
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "One row per server — sing-box state, disk and memory pressure, live connections, traffic over the last 24h, the on-node sing-box version and how fresh the last health probe is. Open a server for the full drill-in.",
+                    "Одна строка на сервер — состояние sing-box, нагрузка диска и памяти, живые подключения, трафик за 24ч, версия sing-box на ноде и свежесть последней проверки здоровья. Открой сервер для детального разбора.",
+                ))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        (th(tr(lang, "server", "сервер"), false))
+                        (th(tr(lang, "sing-box", "sing-box"), false))
+                        (th(tr(lang, "disk", "диск"), true))
+                        (th(tr(lang, "mem", "память"), true))
+                        (th(tr(lang, "conns now", "подкл."), true))
+                        (th(tr(lang, "traffic 24h", "трафик 24ч"), true))
+                        (th(tr(lang, "version", "версия"), true))
+                        (th(tr(lang, "last probe", "проверка"), true))
+                    }
+                }
+                tbody {
+                    @for s in servers {
+                        @let health = latest_health
+                            .iter()
+                            .find(|(id, _)| *id == s.id)
+                            .and_then(|(_, h)| h.as_ref());
+                        @let conns = active_conns
+                            .iter()
+                            .find(|(id, _)| *id == s.id)
+                            .and_then(|(_, c)| *c);
+                        @let kv = kernel_versions
+                            .iter()
+                            .find(|(id, _)| *id == s.id)
+                            .and_then(|(_, j)| sing_box_version_of(j.as_deref()));
+                        @let traffic = traffic_24h.get(&s.id).copied();
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 4px 8px;" {
+                                a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) style="color: var(--ink); text-decoration: none;" { (s.id.0) }
+                            }
+                            // sing-box up/down/unknown.
+                            td style="padding: 4px 8px;" {
+                                @match health.and_then(|h| h.sing_box_active) {
+                                    Some(true) => span style="color: #2e7d32;" { (tr(lang, "up", "работает")) },
+                                    Some(false) => span style="color: #c62828;" { (tr(lang, "down", "не работает")) },
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // disk %.
+                            td style="padding: 4px 8px; text-align: right;" {
+                                @match health.and_then(pct_disk) {
+                                    Some(p) => span style=(format!("color: {};", utilization_color(p))) { (p) "%" },
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // mem %.
+                            td style="padding: 4px 8px; text-align: right;" {
+                                @match health.and_then(pct_mem) {
+                                    Some(p) => span style=(format!("color: {};", utilization_color(p))) { (p) "%" },
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // active conns now.
+                            td style="padding: 4px 8px; text-align: right;" {
+                                @match conns {
+                                    Some(c) => (c),
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // 24h traffic.
+                            td style="padding: 4px 8px; text-align: right;" {
+                                @match traffic {
+                                    Some(b) => (humanize_bytes(b)),
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // sing-box version.
+                            td style="padding: 4px 8px; text-align: right;" {
+                                @match kv {
+                                    Some(v) => (v),
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                            // last-probe age.
+                            td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
+                                @match health.map(|h| h.ts) {
+                                    Some(ts) => (humanize_age(now - ts, lang)),
+                                    None => span style="color: var(--mute);" { (dash) },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// disk-used percentage from a health row, `None` when the probe
+/// didn't carry both numerator + denominator. Floors a `>100%` reading
+/// (impossible but defensive) at 100.
+fn pct_disk(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
+    let (used, total) = (h.disk_used_mib?, h.disk_total_mib?);
+    if total == 0 {
+        return None;
+    }
+    Some(((used.saturating_mul(100)) / total).min(100) as u8)
+}
+
+/// mem-USED percentage (`100 − available/total`) from a health row.
+/// `None` when the probe lacked the figures.
+fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
+    let (avail, total) = (h.mem_available_mib?, h.mem_total_mib?);
+    if total == 0 {
+        return None;
+    }
+    let free_pct = ((avail.saturating_mul(100)) / total).min(100) as u8;
+    Some(100u8.saturating_sub(free_pct))
+}
+
+/// Colour bucket for a *utilization* percentage (disk-used / mem-used),
+/// where HIGH is bad — distinct from `pct_color`, whose thresholds are
+/// tuned for uptime where HIGH is good. Green below 70% used, amber
+/// 70–89%, red at 90%+. Standard ops headroom convention so the
+/// at-a-glance table reads "is this node tight on resources?" correctly.
+fn utilization_color(used_pct: u8) -> &'static str {
+    match used_pct {
+        0..=69 => "#2e7d32",  // green — comfortable headroom
+        70..=89 => "#e6a23c", // amber — getting tight
+        _ => "#c62828",       // red — 90%+ used
+    }
+}
+
+/// Compact "how long ago" string for the last-probe column. Buckets to
+/// seconds / minutes / hours / days — the operator wants "is this
+/// stale?" at a glance, not millisecond precision. Negative durations
+/// (clock skew between probe write + render) clamp to «just now».
+fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
+    use crate::i18n::tr;
+    let secs = d.num_seconds();
+    if secs < 60 {
+        return tr(lang, "just now", "только что").to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{}{}", mins, tr(lang, "m ago", "м назад"));
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{}{}", hours, tr(lang, "h ago", "ч назад"));
+    }
+    let days = hours / 24;
+    format!("{}{}", days, tr(lang, "d ago", "д назад"))
+}
+
+/// PR-Dash dash#2 — real fleet traffic totals beside the activity
+/// chart. Sums upload + download bytes over the picked window
+/// (weighted by `usage_coefficient`) and the prior equal-length window,
+/// reporting the window total ↑↓ plus a Δ% vs the prior window. Reuses
+/// the already-loaded `recent_vpn_stats_fleet` rows — the caller passes
+/// rows for TWICE the window so this fn can split current vs prior
+/// Rust-side without a second query.
+///
+/// `coeffs` maps each server to its `usage_coefficient`; unknown
+/// servers default to 1.0.
+fn dashboard_fleet_traffic_totals(
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    coeffs: &std::collections::HashMap<vpnctl_core::ServerId, f64>,
+    window: VpnSparklineWindow,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use chrono::Utc;
+    let window_hours = (window.cells * window.bucket_hours) as i64;
+    let now = Utc::now();
+    let cur_start = now - chrono::Duration::hours(window_hours);
+    let prior_start = now - chrono::Duration::hours(window_hours * 2);
+
+    // Only the server-wide rows (user_id IS NULL) carry the full
+    // node traffic — per-user rows are a SUBSET of the same bytes, so
+    // summing both would double-count. Match `vpn_traffic_chart`'s
+    // intent: server-wide totals.
+    let weight = |sid: &vpnctl_core::ServerId| -> f64 { coeffs.get(sid).copied().unwrap_or(1.0) };
+    let mut cur_up = 0f64;
+    let mut cur_dn = 0f64;
+    let mut prior_total = 0f64;
+    for r in rows {
+        if r.user_id.is_some() {
+            continue;
+        }
+        let w = weight(&r.server_id);
+        let up = r.upload_bytes as f64 * w;
+        let dn = r.download_bytes as f64 * w;
+        if r.ts >= cur_start {
+            cur_up += up;
+            cur_dn += dn;
+        } else if r.ts >= prior_start {
+            prior_total += up + dn;
+        }
+    }
+    let cur_total = cur_up + cur_dn;
+    // Δ% vs the prior equal window. None when the prior window had no
+    // traffic (division by zero / "new baseline" — can't compute a
+    // meaningful percentage from zero).
+    let delta_pct: Option<i64> = if prior_total > 0.0 {
+        Some((((cur_total - prior_total) / prior_total) * 100.0).round() as i64)
+    } else {
+        None
+    };
+    let window_label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
+    };
+
+    html! {
+        div style="margin-top: 12px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;" {
+            div title=(tr(lang, "Upload bytes (client → server) summed across the fleet over the window, weighted by each server's usage coefficient.", "Upload-байты (клиент → сервер), суммированные по флоту за окно, с учётом коэффициента трафика каждого сервера.")) {
+                (status_tile(&format!("↑ {} {}", tr(lang, "upload", "отправка"), window_label), &humanize_bytes(cur_up as u64), "var(--ink)"))
+            }
+            div title=(tr(lang, "Download bytes (server → client) summed across the fleet over the window, weighted by each server's usage coefficient.", "Download-байты (сервер → клиент), суммированные по флоту за окно, с учётом коэффициента трафика каждого сервера.")) {
+                (status_tile(&format!("↓ {} {}", tr(lang, "download", "загрузка"), window_label), &humanize_bytes(cur_dn as u64), "var(--ink)"))
+            }
+            div title=(tr(lang, "Total traffic this window vs the previous equal-length window.", "Суммарный трафик за это окно против предыдущего окна такой же длины.")) {
+                @match delta_pct {
+                    Some(p) if p > 0 => (status_tile(tr(lang, "vs prior", "против пред."), &format!("+{p}%"), "#c62828")),
+                    Some(p) if p < 0 => (status_tile(tr(lang, "vs prior", "против пред."), &format!("{p}%"), "#2e7d32")),
+                    Some(_) => (status_tile(tr(lang, "vs prior", "против пред."), "0%", "var(--mute)")),
+                    None => (status_tile(tr(lang, "vs prior", "против пред."), "—", "var(--mute)")),
+                }
+            }
+        }
+    }
+}
+
+/// PR-Dash dash#4 — open-alerts breakdown by severity + kind. Replaces
+/// the count-only `dashboard_alerts_tile`: shows «critical N · warn M»
+/// plus the top alert kinds. Keeps the quiet-dashboard contract —
+/// renders nothing when there are zero unacked alerts. Links to
+/// /admin/alerts for the full feed.
+fn dashboard_alerts_breakdown(
+    by_kind_sev: &[(String, String, u64)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if by_kind_sev.is_empty() {
+        // Quiet dashboard — no unacked alerts, no card.
+        return html! {};
+    }
+    // Severity totals across all kinds.
+    let sev_total = |sev: &str| -> u64 {
+        by_kind_sev
+            .iter()
+            .filter(|(_, s, _)| s.eq_ignore_ascii_case(sev))
+            .map(|(_, _, n)| *n)
+            .fold(0u64, u64::saturating_add)
+    };
+    let critical = sev_total("critical");
+    let warn = sev_total("warning") + sev_total("warn");
+    let total: u64 = by_kind_sev
+        .iter()
+        .map(|(_, _, n)| *n)
+        .fold(0u64, u64::saturating_add);
+
+    // Top kinds by count — `alerts_by_kind_severity` already sorts
+    // DESC by count, but a kind can span severities, so re-aggregate
+    // per kind and take the top 3.
+    let mut per_kind: Vec<(String, u64)> = Vec::new();
+    for (kind, _, n) in by_kind_sev {
+        if let Some(entry) = per_kind.iter_mut().find(|(k, _)| k == kind) {
+            entry.1 = entry.1.saturating_add(*n);
+        } else {
+            per_kind.push((kind.clone(), *n));
+        }
+    }
+    per_kind.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    per_kind.truncate(3);
+
+    html! {
+        div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
+            div.ed-art-eyebrow { (tr(lang, "Homelab health · open alerts", "Здоровье homelab · открытые алерты")) }
+            p style="font-family: var(--serif); margin: 6px 0 0;" {
+                @if critical > 0 {
+                    span style="color: #c62828; font-weight: 600;" {
+                        (tr(lang, "critical ", "критич. ")) (critical)
+                    }
+                    " · "
+                }
+                @if warn > 0 {
+                    span style="color: var(--acc); font-weight: 600;" {
+                        (tr(lang, "warn ", "предупр. ")) (warn)
+                    }
+                    " · "
+                }
+                // If neither critical nor warn matched (e.g. only "info"
+                // severity), still surface the raw total so the operator
+                // isn't left with an empty headline.
+                @if critical == 0 && warn == 0 {
+                    b { (total) }
+                    (tr(lang, " open", " открытых"))
+                    " · "
+                }
+                a href="/admin/alerts" style="color: var(--ink);" {
+                    em { (tr(lang, "see the full feed →", "смотреть весь поток →")) }
+                }
+            }
+            // Top kinds line.
+            p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 8px 0 0;" {
+                (tr(lang, "top: ", "топ: "))
+                @for (i, (kind, n)) in per_kind.iter().enumerate() {
+                    @if i > 0 { " · " }
+                    (kind) " (" (n) ")"
+                }
+            }
+        }
+    }
+}
+
+/// PR-Dash dash#5 — abuse summary. Surfaces subs that look shared (one
+/// link fetched from many ASNs), per `likely_shared_summary` (Q-4h).
+/// «N likely-shared subs · top: {user} ({asns} ASNs)», each user
+/// links to their detail page. Renders nothing when no sub crosses the
+/// ASN threshold (quiet dashboard).
+fn dashboard_abuse_summary(
+    likely_shared: &[(vpnctl_core::UserId, u64, u64, u64)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if likely_shared.is_empty() {
+        return html! {};
+    }
+    let n = likely_shared.len();
+    html! {
+        div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
+            div.ed-art-eyebrow style="color: var(--acc);" {
+                (tr(lang, "Likely-shared subscriptions", "Похоже на расшаренные подписки"))
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+                b { (n) }
+                @if n == 1 {
+                    (tr(lang, " subscription was fetched from many networks", " подписку тянули из многих сетей"))
+                } @else {
+                    (tr(lang, " subscriptions were fetched from many networks", " подписок тянули из многих сетей"))
+                }
+                (tr(
+                    lang,
+                    " — a sub URL hitting several ASNs usually means the link left the household. Open a row to rotate the token or shape access.",
+                    " — URL подписки из нескольких ASN обычно значит, что ссылка ушла из дома. Открой строку, чтобы сменить токен или ограничить доступ.",
+                ))
+            }
+            ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
+                @for (uid, ips, asns, countries) in likely_shared {
+                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                          style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
+                            (uid.0)
+                        }
+                        span style="color: var(--mute);" {
+                            (asns) " " (tr(lang, "ASNs", "ASN"))
+                            " · " (ips) " " (tr(lang, "IPs", "IP"))
+                            " · " (countries) " " (tr(lang, "countries", "стран"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// PR-Dash dash#6 — "today so far" digest. «Today: N added · M grants
+/// changed · K deploys» from the audit log (Q-4g). Renders nothing
+/// when every count is zero (quiet dashboard). Sits near the metrics
+/// deck so it reads as a one-line "what changed today" banner.
+fn dashboard_today_digest(
+    digest: &vpnctl_inventory::TodayDigest,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if digest.users_added == 0 && digest.grants_changed == 0 && digest.deploys == 0 {
+        return html! {};
+    }
+    // Build the parts so the separators don't dangle when a count is 0.
+    html! {
+        div style="margin: 14px 0 0; padding: 10px 14px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper);" {
+            p style="font-family: var(--serif); font-size: 13px; margin: 0;" {
+                b { (tr(lang, "Today: ", "Сегодня: ")) }
+                @if digest.users_added > 0 {
+                    b { (digest.users_added) }
+                    @if digest.users_added == 1 {
+                        (tr(lang, " user added", " пользователь добавлен"))
+                    } @else {
+                        (tr(lang, " users added", " пользователей добавлено"))
+                    }
+                }
+                @if digest.grants_changed > 0 {
+                    @if digest.users_added > 0 { " · " }
+                    b { (digest.grants_changed) }
+                    (tr(lang, " grants changed", " доступов изменено"))
+                }
+                @if digest.deploys > 0 {
+                    @if digest.users_added > 0 || digest.grants_changed > 0 { " · " }
+                    b { (digest.deploys) }
+                    @if digest.deploys == 1 {
+                        (tr(lang, " deploy", " деплой"))
+                    } @else {
+                        (tr(lang, " deploys", " деплоев"))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Editorial timeline of the most recent audit entries. Empty inventory
 /// gets a deliberate "no activity yet" stub so the section never renders
 /// as a bare rule.
@@ -767,9 +1360,14 @@ pub(crate) async fn dashboard(
     // `?vpn_window=24h|7d|30d|all`.
     let window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
     let since_hours = window.cells * window.bucket_hours;
+    // PR-Dash dash#2 — pull TWICE the window so the real-traffic card
+    // can compute Δ% vs the prior equal-length window Rust-side (no
+    // second query). The chart below only buckets rows inside the
+    // visible window — older rows fall outside its `buckets_ago` range
+    // and are ignored — so the wider pull is free for the chart.
     let fleet_rows = state
         .inv
-        .recent_vpn_stats_fleet(since_hours)
+        .recent_vpn_stats_fleet(since_hours.saturating_mul(2))
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
@@ -809,13 +1407,9 @@ pub(crate) async fn dashboard(
         })
         .collect();
 
-    // Phase G — unacked infra alerts tile. Renders only when >0 so
-    // the dashboard stays calm during quiet times. Counted off
-    // `admin_alerts WHERE acked_at IS NULL` (single indexed SELECT).
-    let unacked_alerts = state.inv.unacked_alert_count().await.unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "unacked_alert_count failed");
-        0
-    });
+    // PR-Dash dash#4 replaced the count-only «unacked alerts» tile with
+    // the (kind, severity) breakdown loaded below — `unacked_alert_count`
+    // is no longer queried on the dashboard path.
 
     // Phase 4b — per-server live activity rollup for the dashboard
     // «VPN activity» tile. ONE call returns one entry per known
@@ -844,24 +1438,129 @@ pub(crate) async fn dashboard(
     // reuses the already-spec-tested per-server path; for ≤100
     // servers in a homelab the N+1 query cost is negligible.
     // Per-server detail page still gives drill-in.
-    let fleet_uptime = match state.inv.list_servers().await {
-        Ok(servers) => {
-            let mut rows: Vec<(
-                vpnctl_core::ServerId,
-                [Option<vpnctl_inventory::UptimeStat>; 3],
-            )> = Vec::with_capacity(servers.len());
-            for s in &servers {
-                let u24h = state.inv.uptime_for_server(&s.id, 24).await.ok();
-                let u7d = state.inv.uptime_for_server(&s.id, 24 * 7).await.ok();
-                let u30d = state.inv.uptime_for_server(&s.id, 24 * 30).await.ok();
-                rows.push((s.id.clone(), [u24h, u7d, u30d]));
-            }
-            rows
+    // PR-Dash dash#1 — server list reused by BOTH the fleet-uptime
+    // loop AND the new fleet-at-a-glance table. Loaded ONCE here so
+    // the at-a-glance card adds no second N+1 beyond the existing
+    // per-server uptime loop budget.
+    let server_list_fleet = state.inv.list_servers().await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet) failed");
+        Vec::new()
+    });
+
+    let fleet_uptime = {
+        let mut rows: Vec<(
+            vpnctl_core::ServerId,
+            [Option<vpnctl_inventory::UptimeStat>; 3],
+        )> = Vec::with_capacity(server_list_fleet.len());
+        for s in &server_list_fleet {
+            let u24h = state.inv.uptime_for_server(&s.id, 24).await.ok();
+            let u7d = state.inv.uptime_for_server(&s.id, 24 * 7).await.ok();
+            let u30d = state.inv.uptime_for_server(&s.id, 24 * 30).await.ok();
+            rows.push((s.id.clone(), [u24h, u7d, u30d]));
         }
-        Err(e) => {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet uptime) failed");
+        rows
+    };
+
+    // PR-Dash — newest kernel-versions JSON per server (Q-4e). Backs
+    // BOTH the fleet-at-a-glance "sing-box version" column (dash#1) AND
+    // the kernel-floor rollup card (dash#3). One grouped query.
+    let kernel_versions = state.inv.kernel_versions_fleet().await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "kernel_versions_fleet failed");
+        Vec::new()
+    });
+
+    // PR-Dash dash#1 — latest node-health snapshot per server, for the
+    // at-a-glance disk%/mem%/up/last-probe columns. Reuses the existing
+    // fleet loop budget (same `server_list_fleet`, no extra list query).
+    let latest_health_per_server = {
+        let mut out: Vec<(
+            vpnctl_core::ServerId,
+            Option<vpnctl_inventory::NodeHealthRow>,
+        )> = Vec::with_capacity(server_list_fleet.len());
+        for s in &server_list_fleet {
+            let h = state.inv.latest_node_health(&s.id).await.unwrap_or_else(|e| {
+                tracing::warn!(target = "vpnctld::admin", server = %s.id, error = %e, "latest_node_health failed");
+                None
+            });
+            out.push((s.id.clone(), h));
+        }
+        out
+    };
+
+    // PR-Dash dash#1 — "active conns now" per server, read from the
+    // in-memory clash-api snapshot cache (no DB round-trip). `None`
+    // when the poller has never reached the server.
+    let active_conns_now: Vec<(vpnctl_core::ServerId, Option<usize>)> = server_list_fleet
+        .iter()
+        .map(|s| {
+            let n = state
+                .snapshot_cache
+                .get(&s.id)
+                .map(|snap| snap.snapshot.connections.len());
+            (s.id.clone(), n)
+        })
+        .collect();
+
+    // PR-Dash dash#4 — open-alerts breakdown by (kind, severity) (Q-4f).
+    // Replaces the count-only tile. Keeps the quiet-dashboard contract:
+    // empty Vec ⇒ the card renders nothing.
+    let alerts_breakdown = state
+        .inv
+        .alerts_by_kind_severity()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "alerts_by_kind_severity failed");
             Vec::new()
+        });
+
+    // PR-Dash dash#5 — likely-shared-subscription summary (Q-4h). A
+    // sub fetched from ≥3 distinct ASNs is the "shared link" signal.
+    // Empty ⇒ card hidden.
+    let likely_shared = state
+        .inv
+        .likely_shared_summary(LIKELY_SHARED_MIN_ASNS)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "likely_shared_summary failed");
+            Vec::new()
+        });
+
+    // PR-Dash dash#6 — "today so far" digest from the audit log (Q-4g).
+    // All-zero ⇒ card hidden (quiet dashboard).
+    let today_digest = state.inv.today_digest().await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "today_digest failed");
+        vpnctl_inventory::TodayDigest::default()
+    });
+
+    // PR-Dash — per-server usage coefficients (for the weighted traffic
+    // sums in dash#1 + dash#2). Built from the already-loaded server
+    // list; no extra query.
+    let coeffs: std::collections::HashMap<vpnctl_core::ServerId, f64> = server_list_fleet
+        .iter()
+        .map(|s| (s.id.clone(), s.usage_coefficient))
+        .collect();
+
+    // PR-Dash dash#1 — fixed 24h server-wide traffic per server (the
+    // "traffic 24h" column is independent of the window picker).
+    // Summed Rust-side from the already-loaded `fleet_rows` (which span
+    // 2× the picked window ⊇ 24h for every window ≥ 24h; for narrower
+    // pulls we just sum whatever 24h subset is present), weighted by
+    // usage coefficient. Server-wide rows only (user_id IS NULL) so we
+    // don't double-count the per-user subset.
+    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = {
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+        let mut map: std::collections::HashMap<vpnctl_core::ServerId, u64> =
+            std::collections::HashMap::new();
+        for r in &fleet_rows {
+            if r.user_id.is_some() || r.ts < cutoff {
+                continue;
+            }
+            let w = coeffs.get(&r.server_id).copied().unwrap_or(1.0);
+            let bytes = (r.upload_bytes.saturating_add(r.download_bytes) as f64 * w) as u64;
+            let entry = map.entry(r.server_id.clone()).or_insert(0);
+            *entry = entry.saturating_add(bytes);
         }
+        map
     };
 
     let body = html! {
@@ -890,6 +1589,11 @@ pub(crate) async fn dashboard(
             ))
         }
         (dashboard_metrics(&stats, lang))
+        // PR-Dash dash#6 — "today so far" digest, near the metrics deck.
+        (dashboard_today_digest(&today_digest, lang))
+        // PR-Dash dash#1 — fleet-at-a-glance table, after the metrics
+        // deck and before the window picker.
+        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
         // 2026-05-23 — global time-window picker. ONE control
         // drives VPN activity + Heavy users + Fleet traffic chart.
         // Tabs use #timeframe anchor so click → scroll back to
@@ -913,8 +1617,16 @@ pub(crate) async fn dashboard(
                 })
             }
             (vpn_traffic_chart(&fleet_rows, window, lang))
+            // PR-Dash dash#2 — real ↑↓ totals + Δ% beside the chart.
+            (dashboard_fleet_traffic_totals(&fleet_rows, &coeffs, window, lang))
         }
-        (dashboard_alerts_tile(unacked_alerts, lang))
+        // PR-Dash dash#3 — kernel-floor rollup (shared helper).
+        (kernel_floor_rollup(&kernel_versions, lang))
+        // PR-Dash dash#4 — alerts breakdown (replaces the count-only
+        // tile). Quiet when there are no unacked alerts.
+        (dashboard_alerts_breakdown(&alerts_breakdown, lang))
+        // PR-Dash dash#5 — abuse summary (likely-shared subs).
+        (dashboard_abuse_summary(&likely_shared, lang))
         (dashboard_idle_users(&idle_users, lang))
         (dashboard_limit_alerts(&alerting, lang))
         (dashboard_heavy_users(&heavy_users, window, lang))
@@ -1067,9 +1779,6 @@ fn dashboard_fleet_uptime(
     }
 }
 
-/// Phase G — single-line alerts tile under the metric row. Renders
-/// only when there's at least one unacked alert; quiet dashboard stays
-/// quiet. Links to `/admin/alerts` for the full feed.
 /// Phase 4b — dashboard «VPN activity» tile. Sums per-server
 /// server-wide totals from `all_servers_live_activity(24)` and
 /// shows: total bytes, active conns now, per-server breakdown.
@@ -1184,32 +1893,10 @@ fn dashboard_vpn_activity(
     }
 }
 
-fn dashboard_alerts_tile(unacked: u64, lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::tr;
-    html! {
-        @if unacked > 0 {
-            div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
-                div.ed-art-eyebrow { (tr(lang, "Homelab health", "Здоровье homelab")) }
-                p style="font-family: var(--serif); margin: 6px 0 0;" {
-                    b { (unacked) }
-                    @if unacked == 1 {
-                        (tr(lang, " unacked alert", " непринятое уведомление"))
-                    } @else {
-                        (tr(lang, " unacked alerts", " непринятых уведомлений"))
-                    }
-                    " · "
-                    a href="/admin/alerts" style="color: var(--ink);" {
-                        em { (tr(
-                            lang,
-                            "see what the daemon's complaining about →",
-                            "посмотреть на что жалуется демон →",
-                        )) }
-                    }
-                }
-            }
-        }
-    }
-}
+// PR-Dash dash#4 — the count-only `dashboard_alerts_tile` was replaced
+// by `dashboard_alerts_breakdown` (defined above, near the other PR-Dash
+// cards), which renders the (kind, severity) breakdown from
+// `alerts_by_kind_severity` instead of a bare count.
 
 /// A2 (audit 2026-05-22) — «idle users» panel. Lists users whose
 /// most recent `/sub` or `/api/v1/app/config` hit is older than 30
