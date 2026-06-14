@@ -162,6 +162,15 @@ pub enum K {
     KernelRollupOnTarget, // "on target" / "на целевой" (one server at floor)
     KernelRollupStale,    // "stale" / "устаревших" (servers below floor)
     KernelRollupNoData,   // "no version data yet" empty-state line
+
+    // PR-Server informativeness cards on the server-detail page. Only
+    // the drift-detail headline earns a `K` entry: it's the highest-
+    // risk card (the only one that does a live SSH read), so pinning
+    // its eyebrow centrally — and extending the i18n RU walker with it
+    // — guards the operator-action-policy copy from drifting. The
+    // remaining PR-Server cards use inline `tr()` (one-off paragraph
+    // copy that appears exactly once).
+    EyebrowDriftDetail, // "Drift detail · on-node UUIDs" / RU
 }
 
 /// Inline-translation helper for the long tail of body copy that
@@ -278,6 +287,10 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         (Ru, KernelRollupNoData) => {
             "Версий с нод ещё нет — появятся на следующей проверке здоровья."
         }
+
+        // ── PR-Server drift-detail (server-detail page) ─────────────
+        (En, EyebrowDriftDetail) => "Drift detail · on-node UUIDs",
+        (Ru, EyebrowDriftDetail) => "Детальный дрейф · UUID на ноде",
     }
 }
 
@@ -389,6 +402,11 @@ mod tests {
             (K::BtnHide, "hide", "скрыть"),
             (K::BtnSave, "save", "сохранить"),
             (K::EyebrowServerAccess, "Server access", "Доступ к серверам"),
+            (
+                K::EyebrowDriftDetail,
+                "Drift detail · on-node UUIDs",
+                "Детальный дрейф · UUID на ноде",
+            ),
         ];
         for (k, en, ru) in pairs {
             assert_eq!(t(Locale::En, k), en, "EN mismatch for {k:?}");
