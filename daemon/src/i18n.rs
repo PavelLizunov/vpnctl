@@ -152,6 +152,16 @@ pub enum K {
     EyebrowAlertsLimit,
     EyebrowLiveStats,
     EyebrowTrustedFingerprint,
+
+    // PR-Dash informativeness cards. `KernelRollup*` back the shared
+    // `kernel_floor_rollup` helper (PR-Server reuses it on the server
+    // detail page), so they live in the central registry rather than
+    // inline `tr()` — a single source of truth keeps the two surfaces
+    // from drifting.
+    EyebrowKernelRollup,
+    KernelRollupOnTarget, // "on target" / "на целевой" (one server at floor)
+    KernelRollupStale,    // "stale" / "устаревших" (servers below floor)
+    KernelRollupNoData,   // "no version data yet" empty-state line
 }
 
 /// Inline-translation helper for the long tail of body copy that
@@ -254,6 +264,20 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         (Ru, EyebrowLiveStats) => "Живая статистика VPN · за 24ч",
         (En, EyebrowTrustedFingerprint) => "Trusted host fingerprint",
         (Ru, EyebrowTrustedFingerprint) => "Доверенный отпечаток хоста",
+
+        // ── PR-Dash kernel rollup (shared with the server detail page) ──
+        (En, EyebrowKernelRollup) => "Kernel rollup · sing-box",
+        (Ru, EyebrowKernelRollup) => "Версии ядер · sing-box",
+        (En, KernelRollupOnTarget) => "on target",
+        (Ru, KernelRollupOnTarget) => "на целевой",
+        (En, KernelRollupStale) => "stale",
+        (Ru, KernelRollupStale) => "устаревших",
+        (En, KernelRollupNoData) => {
+            "No on-node version data yet — versions land on the next health probe."
+        }
+        (Ru, KernelRollupNoData) => {
+            "Версий с нод ещё нет — появятся на следующей проверке здоровья."
+        }
     }
 }
 

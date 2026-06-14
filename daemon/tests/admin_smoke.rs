@@ -11418,6 +11418,13 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
         h.contains("Счётчики читаются напрямую из SQLite-инвентаря"),
         "dashboard deck must be translated"
     );
+    // PR-Dash — the kernel-rollup eyebrow always renders (its no-data
+    // empty-state appears even on a fresh, server-less fleet), so its
+    // RU arm is a reliable walker anchor for the new info cards.
+    assert!(
+        h.contains("Версии ядер · sing-box"),
+        "PR-Dash kernel-rollup eyebrow must be translated under ru"
+    );
 
     // Monitoring
     let h = fetch("/admin/monitoring").await;
@@ -12628,10 +12635,19 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
     // Pin the busy server's `<td>7</td>` row specifically so an
     // unrelated «7» in a sibling tile (page counter, server total
     // etc.) can't satisfy this assertion. Review-agent Phase 4b #7.
+    // PR-Dash: the fleet-at-a-glance table (above this tile) ALSO links
+    // /admin/servers/busy with a «conns now» cell sourced from the live
+    // snapshot cache (empty in this test → «—»), so scope the search to
+    // the VPN-activity section to keep hitting the active_now=7 row.
+    let activity_pos = html
+        .find("VPN activity · 24h")
+        .expect("VPN activity tile must render");
+    let activity_html = &html[activity_pos..];
     let busy_anchor = "href=\"/admin/servers/busy\"";
-    let busy_pos = html
-        .find(busy_anchor)
-        .expect("busy server link must render");
+    let busy_pos = activity_pos
+        + activity_html
+            .find(busy_anchor)
+            .expect("busy server link must render in the VPN-activity breakdown");
     let busy_row = &html[busy_pos..busy_pos.saturating_add(400)];
     assert!(
         busy_row.contains(">7<"),
@@ -15243,4 +15259,339 @@ async fn admin_server_delete_cascades_grants_and_audits() {
         Some(2),
         "audit payload must record the 2 grants removed"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-Dash — informativeness cards (fleet-at-a-glance, real traffic,
+//  kernel rollup, alerts breakdown, abuse summary, today digest).
+//
+//  The base `seed()` helper deliberately writes ZERO audit rows (several
+//  existing tests pin that contract — see `grants_via_real_handlers_
+//  mark_server_pending_deploy`). So rather than disturb it, the dashboard
+//  cards get their own opt-in signal seeder layered on top: a node_health
+//  row carrying `kernel_versions_json`, an admin_alert of a known
+//  (kind, severity), an audit row dated today, and a high-ASN sub_access
+//  pattern for a user. Each new test calls `seed()` then this.
+// ════════════════════════════════════════════════════════════════════
+
+/// Layer the dashboard-card signals onto an already-seeded inventory.
+/// Assumes `s0`/`u0` exist (call after `seed(.., n>=1, m>=1, ..)`).
+async fn seed_dashboard_signals(inv: &SqliteInventory) {
+    // dash#1 + dash#3 — node_health with on-node kernel versions, disk
+    // + mem so the at-a-glance row has real cells (not all «—»). s0 is
+    // the fleet-max sing-box version (1.13.12 = the floor/target).
+    inv.record_node_health(
+        &ServerId("s0".into()),
+        Some(true),  // sing_box_active = up
+        Some(true),  // fail2ban_active
+        Some(4096),  // disk_used_mib
+        Some(20480), // disk_total_mib  → 20% used
+        Some(2048),  // mem_available_mib
+        Some(8192),  // mem_total_mib   → 75% used
+        Some(120),   // load_1min_x100
+        Some(r#"["tcp/443","udp/8443"]"#),
+        Some(1_048_576),
+        Some(r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#),
+    )
+    .await
+    .unwrap();
+
+    // dash#4 — one admin_alert of a known (kind, severity) so the
+    // breakdown card has something to render.
+    inv.insert_alert(
+        "disk_pressure",
+        Some(&ServerId("s0".into())),
+        "critical",
+        "disk above 90% on s0",
+        None,
+    )
+    .await
+    .unwrap();
+
+    // dash#6 — an audit row dated today (the `audit()` helper stamps
+    // `ts` with `now`, which is >= today's local-midnight UTC). A
+    // `user.create` action buckets into `users_added`.
+    inv.audit("admin", "user.create", Some("u0"), None)
+        .await
+        .unwrap();
+
+    // dash#5 — high-ASN sub_access pattern: u0's subscription fetched
+    // from 3 distinct ASNs (≥ LIKELY_SHARED_MIN_ASNS=3) → "likely
+    // shared". `is_vpn_egress` defaults to 0 so these are real fetches.
+    for (ip, asn, cc) in [
+        ("203.0.113.10", "AS1111", "US"),
+        ("198.51.100.20", "AS2222", "DE"),
+        ("192.0.2.30", "AS3333", "RU"),
+    ] {
+        inv.log_sub_access_rich(
+            &UserId("u0".into()),
+            ip,
+            Some("curl/8.0"),
+            200,
+            1024,
+            None,
+            Some("HTTP/2"),
+            None,
+            Some(cc),
+            Some(asn),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// dash#1 — fleet-at-a-glance renders one row per server with the
+/// section eyebrow + the seeded sing-box version cell.
+#[tokio::test]
+async fn dashboard_fleet_table_renders_row_per_server() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+
+    assert!(
+        html.contains("Fleet at a glance"),
+        "fleet-at-a-glance eyebrow missing"
+    );
+    assert!(
+        html.contains(r#"id="fleet-at-a-glance""#),
+        "fleet-at-a-glance section anchor missing"
+    );
+    // Both seeded servers appear as drill-in links.
+    assert!(
+        html.contains("/admin/servers/s0") && html.contains("/admin/servers/s1"),
+        "every seeded server must get a row link"
+    );
+    // The seeded sing-box version shows in s0's version cell.
+    assert!(html.contains("1.13.12"), "s0 sing-box version cell missing");
+    // Disk% (20) and mem% (75) cells from the seeded health row.
+    assert!(html.contains("20%"), "s0 disk% cell missing");
+    assert!(html.contains("75%"), "s0 mem% cell missing");
+}
+
+/// dash#1 — empty fleet renders no at-a-glance table at all (the metrics
+/// deck + servers page already carry the "add a server" CTA).
+#[tokio::test]
+async fn dashboard_fleet_table_hidden_when_no_servers() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/").await;
+    assert!(
+        !html.contains("Fleet at a glance"),
+        "fleet-at-a-glance must stay hidden on an empty fleet"
+    );
+}
+
+/// dash#2 — real-traffic totals render the ↑↓ + vs-prior tiles beside
+/// the chart, inside the #vpn-traffic block.
+#[tokio::test]
+async fn dashboard_fleet_traffic_totals_render_beside_chart() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    // The vs-prior delta tile label is distinctive to dash#2.
+    assert!(
+        html.contains("vs prior"),
+        "dash#2 'vs prior' delta tile missing"
+    );
+    // The upload/download window tiles use the ↑/↓ glyphs.
+    assert!(
+        html.contains("↑ upload") && html.contains("↓ download"),
+        "dash#2 ↑↓ window tiles missing"
+    );
+}
+
+/// dash#3 — kernel rollup shows the fleet floor version + on-target
+/// state when every reporting node is at the floor.
+#[tokio::test]
+async fn dashboard_kernel_rollup_shows_version() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("Kernel rollup"),
+        "kernel-rollup eyebrow missing"
+    );
+    assert!(
+        html.contains(r#"id="kernel-rollup""#),
+        "kernel-rollup section anchor missing"
+    );
+    // Single node at 1.13.12 → "sing-box 1/1 @ 1.13.12 ✓ on target".
+    assert!(
+        html.contains("1.13.12"),
+        "kernel-rollup floor version missing"
+    );
+    assert!(
+        html.contains("on target"),
+        "kernel-rollup on-target verdict missing when all nodes at floor"
+    );
+}
+
+/// dash#3 — quiet empty-state when no node has reported a version.
+#[tokio::test]
+async fn dashboard_kernel_rollup_empty_state_when_no_versions() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Server exists but NO node_health row with kernel versions.
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("No on-node version data yet"),
+        "kernel-rollup must show the quiet no-data line"
+    );
+}
+
+/// dash#4 — alerts breakdown renders severity counts + the section
+/// when there's at least one unacked alert.
+#[tokio::test]
+async fn dashboard_alerts_breakdown_renders_severity() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("Homelab health · open alerts"),
+        "alerts-breakdown eyebrow missing"
+    );
+    // One critical alert seeded → "critical 1".
+    assert!(
+        html.contains("critical 1"),
+        "alerts-breakdown critical count missing"
+    );
+    // Top-kind line names the seeded kind.
+    assert!(
+        html.contains("disk_pressure"),
+        "alerts-breakdown top-kind line missing the seeded kind"
+    );
+}
+
+/// dash#4 — quiet-dashboard contract: no card when zero unacked alerts.
+#[tokio::test]
+async fn dashboard_alerts_breakdown_empty_when_none() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // no alerts seeded
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        !html.contains("Homelab health · open alerts"),
+        "alerts-breakdown must stay hidden with zero unacked alerts"
+    );
+}
+
+/// dash#5 — abuse summary lists the likely-shared user with an ASN count
+/// and a drill-in link.
+#[tokio::test]
+async fn dashboard_abuse_summary_lists_shared_user() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("Likely-shared subscriptions"),
+        "abuse-summary eyebrow missing"
+    );
+    assert!(
+        html.contains("/admin/users/u0"),
+        "abuse-summary must link the flagged user to their detail page"
+    );
+    // 3 distinct ASNs seeded → "3 ASNs".
+    assert!(html.contains("3 ASNs"), "abuse-summary ASN count missing");
+}
+
+/// dash#5 — hidden when no sub crosses the ASN threshold.
+#[tokio::test]
+async fn dashboard_abuse_summary_hidden_when_no_sharing() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // no sub_access rows
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        !html.contains("Likely-shared subscriptions"),
+        "abuse-summary must stay hidden when nothing is shared"
+    );
+}
+
+/// dash#6 — today digest renders the banner with the seeded counts.
+#[tokio::test]
+async fn dashboard_today_digest_renders_counts() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await; // 1 user.create audit row today
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(html.contains("Today:"), "today-digest banner missing");
+    assert!(
+        html.contains("user added"),
+        "today-digest must report the seeded user.create as 'user added'"
+    );
+}
+
+/// dash#6 — hidden on a quiet day (no audit activity today).
+#[tokio::test]
+async fn dashboard_today_digest_hidden_when_quiet() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // seed writes ZERO audit rows
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        !html.contains("Today:"),
+        "today-digest must stay hidden with no activity today"
+    );
+}
+
+/// Copy-contract — pin every new PR-Dash eyebrow/headline (EN) so a
+/// future copy edit has to update this test in lockstep. Mirrors
+/// `admin_frontend_section_headlines_match_voice`.
+#[tokio::test]
+async fn dashboard_info_cards_headlines_match_voice() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    for needle in [
+        "Fleet at a glance",            // dash#1
+        "vs prior",                     // dash#2
+        "Kernel rollup · sing-box",     // dash#3
+        "Homelab health · open alerts", // dash#4
+        "Likely-shared subscriptions",  // dash#5
+        "Today:",                       // dash#6
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-Dash headline drifted — missing: {needle:?}"
+        );
+    }
+}
+
+/// Copy-contract (RU) — pin the Russian arm of each new card so a
+/// half-translation can't ship. Extends the i18n RU walker's intent.
+#[tokio::test]
+async fn dashboard_info_cards_headlines_ru() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html_with_cookie(router(s), "/admin/", "vpnctl_lang=ru").await;
+    for needle in [
+        "Флот одним взглядом",                // dash#1
+        "против пред.",                       // dash#2
+        "Версии ядер · sing-box",             // dash#3
+        "Здоровье homelab · открытые алерты", // dash#4
+        "Похоже на расшаренные подписки",     // dash#5
+        "Сегодня:",                           // dash#6
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-Dash RU headline drifted — missing: {needle:?}"
+        );
+    }
 }
