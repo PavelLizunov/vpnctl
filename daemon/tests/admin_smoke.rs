@@ -11384,7 +11384,9 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     let s = state(&dir).await;
     // Seed a server so the server-detail page (the PR-Server cards'
     // surface) is reachable for the walker — it returns 404 otherwise.
-    seed(&s.inv, 1, 0, &[]).await;
+    // Seed a user too so the user-detail page (the PR-User cards'
+    // surface) is reachable for the same reason.
+    seed(&s.inv, 1, 1, &[]).await;
     let app = router(s);
 
     let fetch = |path: &'static str| {
@@ -11494,6 +11496,15 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     assert!(
         h.contains("Детальный дрейф · UUID на ноде"),
         "PR-Server drift-detail eyebrow must be translated under ru"
+    );
+
+    // User detail — PR-User cards. The presence badge (user#1) always
+    // renders (online or offline), so its RU eyebrow is a reliable
+    // walker anchor for the new user-detail surface.
+    let h = fetch("/admin/users/u0").await;
+    assert!(
+        h.contains("Присутствие"),
+        "PR-User presence eyebrow must be translated under ru"
     );
 }
 
@@ -16002,6 +16013,414 @@ async fn server_detail_info_cards_headlines_ru() {
         assert!(
             html.contains(needle),
             "PR-Server RU headline drifted — missing: {needle:?}"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-User — informativeness cards on the user-detail page.
+//  DOM + empty-state per card + copy-contract (EN + RU).
+// ════════════════════════════════════════════════════════════════════
+
+/// Build a clash-api connection with a controllable source IP/port —
+/// the attribution key the online badge reads.
+fn pr_user_conn(src_ip: &str, src_port: &str) -> vpnctld::clash_api::Connection {
+    vpnctld::clash_api::Connection {
+        id: format!("c-{src_ip}-{src_port}"),
+        upload: 10,
+        download: 20,
+        start: "2026-06-14T18:00:00Z".into(),
+        metadata: vpnctld::clash_api::ConnectionMeta {
+            network: "tcp".into(),
+            destination_ip: "1.2.3.4".into(),
+            destination_port: "443".into(),
+            source_ip: src_ip.into(),
+            source_port: src_port.into(),
+            host: String::new(),
+            user: None,
+        },
+    }
+}
+
+/// user#1 — with a snapshot seeded into the AppState's snapshot_cache
+/// that attributes a live connection to the user, the presence badge
+/// flips to the 🟢-online branch and names the server.
+#[tokio::test]
+async fn pr_user_online_badge_green_when_snapshot_attributes_connection() {
+    use std::collections::HashMap;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // s0, u0, granted
+
+    // Seed a snapshot on s0 with one connection attributed to u0.
+    let conn = pr_user_conn("9.9.9.9", "40000");
+    let snap = vpnctld::clash_api::Snapshot {
+        upload_total: conn.upload,
+        download_total: conn.download,
+        connections: vec![conn],
+    };
+    let mut attr: HashMap<(String, String), String> = HashMap::new();
+    attr.insert(("9.9.9.9".into(), "40000".into()), "u0".into());
+    s.snapshot_cache.store(ServerId("s0".into()), snap, attr);
+
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(html.contains("Presence"), "presence eyebrow missing");
+    assert!(
+        html.contains("🟢 "),
+        "online badge must show the green dot when a connection is attributed"
+    );
+    assert!(html.contains("online"), "online badge must read 'online'");
+    // The server the connection landed on is named.
+    assert!(html.contains("s0"), "online badge must name the server");
+    assert!(
+        !html.contains("offline"),
+        "must not show 'offline' when online"
+    );
+}
+
+/// user#1 — with NO snapshot in the cache the badge degrades to the
+/// offline branch. No panic on an empty cache.
+#[tokio::test]
+async fn pr_user_online_badge_offline_when_no_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // No snapshot stored — cache is empty.
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(html.contains("Presence"), "presence eyebrow missing");
+    assert!(
+        html.contains("offline"),
+        "badge must read 'offline' with an empty snapshot cache"
+    );
+    // Never connected (no sub-access history) → explicit copy.
+    assert!(
+        html.contains("never connected"),
+        "offline badge must say 'never connected' for a user with no history"
+    );
+    assert!(
+        !html.contains("🟢"),
+        "must not show the green dot when offline"
+    );
+}
+
+/// user#2 — empty-state (NM-11): no per-user VPN ticks → the explainer
+/// renders, not a blank card.
+#[tokio::test]
+async fn pr_user_traffic_by_server_empty_state_explains_nm11() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Traffic by server · last 24h"),
+        "traffic-by-server eyebrow missing"
+    );
+    assert!(
+        html.contains("No per-server traffic recorded"),
+        "NM-11 empty-state explainer missing"
+    );
+}
+
+/// user#2 — populated: a per-user VPN tick lands a per-server row.
+#[tokio::test]
+async fn pr_user_traffic_by_server_renders_per_server_rows() {
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 3_000_000,
+                download_bytes: 9_000_000,
+                active_connections: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Traffic by server · last 24h"),
+        "traffic-by-server eyebrow missing"
+    );
+    assert!(
+        !html.contains("No per-server traffic recorded"),
+        "empty-state must not render when there's data"
+    );
+    // s0 row present.
+    assert!(html.contains("s0"), "per-server row for s0 missing");
+}
+
+/// user#3 — with a monthly cap set + month-to-date usage, the section
+/// renders the progress bar copy AND the month-end projection.
+#[tokio::test]
+async fn pr_user_quota_renders_progress_and_projection_with_limit() {
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // 5 GiB cap.
+    s.inv
+        .set_user_traffic_limit(&UserId("u0".into()), Some(5_368_709_120), Some(80))
+        .await
+        .unwrap();
+    // Some month-to-date usage so the projection is non-zero.
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 500_000_000,
+                download_bytes: 500_000_000,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Traffic limit"),
+        "traffic-limit eyebrow missing"
+    );
+    // Progress copy from fmt_traffic_progress: "X / Y (Z%)".
+    assert!(
+        html.contains("5 GiB") || html.contains("5.0 GiB"),
+        "progress bar must show the configured cap"
+    );
+    // Projection line.
+    assert!(
+        html.contains("projected"),
+        "month-end projection line missing when a cap is set"
+    );
+    assert!(
+        html.contains("by month-end"),
+        "projection copy contract drifted"
+    );
+}
+
+/// user#3 — with NO cap set, the section shows just the usage + form,
+/// and NO projection line (projection is only meaningful with a cap).
+#[tokio::test]
+async fn pr_user_quota_no_limit_shows_form_no_projection() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Traffic limit"),
+        "traffic-limit eyebrow missing"
+    );
+    // The form is still present.
+    assert!(
+        html.contains(r#"name="limit_gib""#),
+        "limit form must still render with no cap"
+    );
+    // No projection line without a cap.
+    assert!(
+        !html.contains("by month-end"),
+        "projection must not render when no cap is set"
+    );
+}
+
+/// user#4 — a high-ASN-spread access pattern flips the sharing verdict
+/// to "likely shared".
+#[tokio::test]
+async fn pr_user_sharing_verdict_flags_likely_shared_on_asn_spread() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // Three fetches, each from a distinct ASN + country + /16 — the
+    // classic "subscription URL got shared across ISPs" pattern. The
+    // enrichment columns are set directly via the richer logger.
+    for (ip, cc, asn) in [
+        ("192.0.2.1", "US", "AS111 Alpha"),
+        ("203.0.113.7", "DE", "AS222 Beta"),
+        ("198.51.100.5", "FR", "AS333 Gamma"),
+    ] {
+        s.inv
+            .log_sub_access_rich(
+                &UserId("u0".into()),
+                ip,
+                Some("Hiddify/Android/2.5.0"),
+                200,
+                100,
+                None,
+                None,
+                None,
+                Some(cc),
+                Some(asn),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("Sharing verdict"),
+        "sharing-verdict eyebrow missing"
+    );
+    assert!(
+        html.contains("likely shared"),
+        "high-ASN-spread access must produce 'likely shared' verdict"
+    );
+    // The verdict line names the distinct counts.
+    assert!(html.contains("ASNs"), "verdict must report the ASN count");
+}
+
+/// user#5 — lifecycle section renders the created / last-seen / last-
+/// fetch / age facts.
+#[tokio::test]
+async fn pr_user_lifecycle_section_renders_facts() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(html.contains("Lifecycle"), "lifecycle eyebrow missing");
+    for label in ["created", "last seen", "last fetch", "age"] {
+        assert!(html.contains(label), "lifecycle label '{label}' missing");
+    }
+}
+
+/// user#6 — the live-VPN-stats section folds in a window picker scoped
+/// to THIS user's detail page (24h/7d/30d/all) so the trend is one
+/// click away.
+#[tokio::test]
+async fn pr_user_live_stats_folds_in_user_scoped_window_picker() {
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 1_000_000,
+                download_bytes: 2_000_000,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    // The window picker links are scoped to the user's detail page.
+    assert!(
+        html.contains("/admin/users/u0?vpn_window=7d"),
+        "window picker must offer a 7d link scoped to this user"
+    );
+    assert!(
+        html.contains("/admin/users/u0?vpn_window=30d"),
+        "window picker must offer a 30d link scoped to this user"
+    );
+    // The trend sub-heading renders when there's traffic.
+    assert!(
+        html.contains("traffic trend · "),
+        "folded sparkline trend heading missing"
+    );
+}
+
+/// user#7 — the UA-cluster section carries the additive geo + last-seen
+/// footer (country / ASN / last-seen) once the user has /sub history.
+#[tokio::test]
+async fn pr_user_ua_section_carries_geo_and_last_seen_footer() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .log_sub_access_rich(
+            &UserId("u0".into()),
+            "192.0.2.10",
+            Some("Hiddify/Android/2.5.0"),
+            200,
+            100,
+            None,
+            None,
+            None,
+            Some("US"),
+            Some("AS111 Alpha"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("UA fingerprint"),
+        "UA section must render with /sub history"
+    );
+    // Additive geo + last-seen footer labels.
+    assert!(
+        html.contains("countries · 30d"),
+        "UA geo footer (countries) missing"
+    );
+    assert!(html.contains("ASNs · 30d"), "UA geo footer (ASNs) missing");
+    assert!(html.contains("last seen "), "UA last-seen footer missing");
+}
+
+/// Copy-contract (EN) — pin every new PR-User headline so a rename has
+/// to update this test in the same PR.
+#[tokio::test]
+async fn pr_user_info_cards_headlines_en() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // Give the user /sub history so the UA + verdict cards render.
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "192.0.2.10",
+            Some("Hiddify/Android/2.5.0"),
+            200,
+            100,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    for needle in [
+        "Presence",                     // user#1
+        "Traffic by server · last 24h", // user#2
+        "Sharing verdict",              // user#4
+        "Lifecycle",                    // user#5
+        "Traffic limit",                // user#3
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-User EN headline drifted — missing: {needle:?}"
+        );
+    }
+}
+
+/// Copy-contract (RU) — pin the Russian arm of each new PR-User card.
+/// Extends the i18n RU walker coverage onto the user-detail page.
+#[tokio::test]
+async fn pr_user_info_cards_headlines_ru() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "192.0.2.10",
+            Some("Hiddify/Android/2.5.0"),
+            200,
+            100,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html_with_cookie(router(s), "/admin/users/u0", "vpnctl_lang=ru").await;
+    for needle in [
+        "Присутствие",                 // user#1
+        "Трафик по серверам · за 24ч", // user#2
+        "Вердикт по расшариванию",     // user#4
+        "Жизненный цикл",              // user#5
+        "Лимит трафика",               // user#3
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-User RU headline drifted — missing: {needle:?}"
         );
     }
 }
