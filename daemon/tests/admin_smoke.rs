@@ -11382,6 +11382,9 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     // PR has to update all 6 simultaneously.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
+    // Seed a server so the server-detail page (the PR-Server cards'
+    // surface) is reachable for the walker — it returns 404 otherwise.
+    seed(&s.inv, 1, 0, &[]).await;
     let app = router(s);
 
     let fetch = |path: &'static str| {
@@ -11482,6 +11485,15 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     assert!(
         h.contains("Здесь лежат настройки уровня всего демона"),
         "settings deck must be translated"
+    );
+
+    // Server detail — PR-Server cards. The drift-detail eyebrow always
+    // renders (default load shows the «check live drift» link), so its
+    // RU arm is a reliable walker anchor for the new server-detail cards.
+    let h = fetch("/admin/servers/s0").await;
+    assert!(
+        h.contains("Детальный дрейф · UUID на ноде"),
+        "PR-Server drift-detail eyebrow must be translated under ru"
     );
 }
 
@@ -15592,6 +15604,404 @@ async fn dashboard_info_cards_headlines_ru() {
         assert!(
             html.contains(needle),
             "PR-Dash RU headline drifted — missing: {needle:?}"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-Server — informativeness cards on the server-detail page.
+//  DOM + empty-state per card; the ?drift=live gating + policy-safe
+//  SSH-failure path; NM-11 empty-state; copy-contract EN + RU.
+// ════════════════════════════════════════════════════════════════════
+
+/// server#1 — DEFAULT page load (no ?drift=live) renders the
+/// «check live drift →» link and does NOT attempt any SSH. We can't
+/// directly assert «no SSH» from the integration boundary, but the
+/// node address is bogus (10.0.0.0) and the page MUST still return 200
+/// fast — a default load that tried SSH would block on ConnectTimeout.
+#[tokio::test]
+async fn server_detail_drift_detail_default_shows_check_link_no_ssh() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // server s0
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("Drift detail · on-node UUIDs"),
+        "drift-detail eyebrow missing on default load"
+    );
+    assert!(
+        html.contains("check live drift →"),
+        "default load must offer the [check live drift] link"
+    );
+    assert!(
+        html.contains("?drift=live#drift-detail"),
+        "the link must arm the ?drift=live opt-in"
+    );
+    // No live-read result copy on the default path.
+    assert!(
+        !html.contains("orphan uuids on node"),
+        "default load must NOT render live-read results"
+    );
+}
+
+/// server#1 — ?drift=live against an unreachable node (bogus address)
+/// renders the POLICY-SAFE empty-state and NEVER 500s. The empty-state
+/// copy must NOT instruct the operator to «ssh» the box.
+#[tokio::test]
+async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Address 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed
+    // unroutable, so the live read fails fast under the ≤6s timeout.
+    s.inv
+        .add_server(&Server {
+            id: ServerId("blackhole".into()),
+            address: "192.0.2.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/blackhole?drift=live").await;
+    // 200 (fetch_html asserts) + the policy-safe empty-state.
+    assert!(
+        html.contains("Couldn't read the live config"),
+        "armed live-read failure must render the policy-safe empty-state"
+    );
+    assert!(
+        html.contains("node unreachable or deploy key"),
+        "empty-state must name the real cause (unreachable / deploy key)"
+    );
+    // Operator-action-policy: the DRIFT-DETAIL card's empty-state must
+    // NEVER tell the operator to ssh the box. Scope the check to that
+    // section (the page-wide Deploy button legitimately mentions an
+    // automated «SSH into the node» it performs for the operator — a
+    // different, allowed string).
+    let drift_section = html
+        .split("Drift detail · on-node UUIDs")
+        .nth(1)
+        .unwrap_or("")
+        .split("Server traffic · ")
+        .next()
+        .unwrap_or("");
+    let lower = drift_section.to_lowercase();
+    assert!(
+        !lower.contains("ssh to the box")
+            && !lower.contains("ssh into")
+            && !lower.contains("run ssh"),
+        "policy violation: drift-detail empty-state must not instruct an SSH session"
+    );
+}
+
+/// server#3 — top-users card carries the NM-11 empty-state when no
+/// per-user traffic is attributed (the prod reality).
+#[tokio::test]
+async fn server_detail_top_users_renders_nm11_empty_state() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("Top users · last 24h"),
+        "top-users eyebrow missing"
+    );
+    assert!(
+        html.contains("NM-11"),
+        "empty top-users card must carry the NM-11 explainer"
+    );
+}
+
+/// server#3 — when per-user rows DO exist they render with a drill-in
+/// link to the user-detail page (and the NM-11 empty-state is gone).
+#[tokio::test]
+async fn server_detail_top_users_lists_users_with_links_when_present() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // s0, u0 granted
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 3_000_000,
+                download_bytes: 7_000_000,
+                active_connections: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains(r#"href="/admin/users/u0""#),
+        "top-users row must link to the user-detail page"
+    );
+    // Section present; the NM-11 empty-state must NOT show with data.
+    let top_section = html.split("Top users · last 24h").nth(1).unwrap_or("");
+    let next_section = top_section.split("TCP / UDP split").next().unwrap_or("");
+    assert!(
+        !next_section.contains("NM-11"),
+        "NM-11 empty-state must not render once per-user rows exist"
+    );
+}
+
+/// server#4 — per-server traffic sparkline renders with the window
+/// picker scoped to /admin/servers/{id} and the ↑↓ totals tiles.
+#[tokio::test]
+async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: None, // server-wide row
+                upload_bytes: 10_000_000,
+                download_bytes: 40_000_000,
+                active_connections: 12,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("Server traffic · "),
+        "server-traffic eyebrow missing"
+    );
+    assert!(
+        html.contains("↑ upload") && html.contains("↓ download"),
+        "server-traffic ↑↓ totals tiles missing"
+    );
+    // Window picker links scoped to THIS server.
+    assert!(
+        html.contains("/admin/servers/s0?vpn_window=7d"),
+        "window picker must be scoped to /admin/servers/s0"
+    );
+    // An <svg> sparkline rendered for the populated window.
+    let traffic = html.split("Server traffic · ").nth(1).unwrap_or("");
+    assert!(
+        traffic.contains("<svg"),
+        "populated window must render the sparkline svg"
+    );
+}
+
+/// server#4 — empty window renders the no-traffic empty-state, not a
+/// broken/blank chart.
+#[tokio::test]
+async fn server_detail_traffic_section_empty_state_when_no_stats() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // no vpn stats recorded
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("No traffic recorded in this window yet"),
+        "empty traffic window must render the empty-state copy"
+    );
+}
+
+/// server#5 — TCP/UDP split renders from the live snapshot with the
+/// «no per-protocol tag» caption + tiles.
+#[tokio::test]
+async fn server_detail_network_split_renders_from_snapshot() {
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let snap = Snapshot {
+        upload_total: 300,
+        download_total: 600,
+        connections: vec![
+            Connection {
+                id: "c1".into(),
+                upload: 100,
+                download: 200,
+                start: "2026-05-21T18:00:00Z".into(),
+                metadata: ConnectionMeta {
+                    network: "tcp".into(),
+                    destination_ip: "1.1.1.1".into(),
+                    destination_port: "443".into(),
+                    source_ip: "9.9.9.9".into(),
+                    source_port: "5000".into(),
+                    host: String::new(),
+                    user: None,
+                },
+            },
+            Connection {
+                id: "c2".into(),
+                upload: 50,
+                download: 100,
+                start: "2026-05-21T18:00:01Z".into(),
+                metadata: ConnectionMeta {
+                    network: "udp".into(),
+                    destination_ip: "1.1.1.1".into(),
+                    destination_port: "53".into(),
+                    source_ip: "9.9.9.9".into(),
+                    source_port: "5001".into(),
+                    host: String::new(),
+                    user: None,
+                },
+            },
+        ],
+    };
+    s.snapshot_cache.store(
+        ServerId("s0".into()),
+        snap,
+        std::collections::HashMap::new(),
+    );
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("TCP / UDP split"),
+        "network-split eyebrow missing"
+    );
+    assert!(
+        html.contains("clash-api carries no per-protocol tag"),
+        "network-split must carry the per-protocol caveat caption"
+    );
+}
+
+/// server#5 — empty-state when no snapshot exists for the server.
+#[tokio::test]
+async fn server_detail_network_split_empty_state_when_no_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // no snapshot cached
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("TCP / UDP split"),
+        "network-split eyebrow must render even with no snapshot"
+    );
+    assert!(
+        html.contains("No clash-api snapshot for this server yet"),
+        "network-split must render an empty-state when no snapshot"
+    );
+}
+
+/// server#7 — server-scoped audit timeline renders rows that reference
+/// this server (deploy/grant/etc), reusing the .ed-time component.
+#[tokio::test]
+async fn server_detail_audit_timeline_renders_server_scoped_rows() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    // An audit row targeting this server.
+    s.inv
+        .audit("admin", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("Audit timeline · this server"),
+        "server-audit eyebrow missing"
+    );
+    assert!(
+        html.contains("server.deploy"),
+        "server-scoped audit row must list the deploy action"
+    );
+    assert!(
+        html.contains("ed-time-row"),
+        "audit timeline must reuse the .ed-time editorial component"
+    );
+}
+
+/// server#7 — empty-state when no audit row references the server.
+#[tokio::test]
+async fn server_detail_audit_timeline_empty_state() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await; // seed writes no audit rows
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("No audit rows reference this server yet"),
+        "server-audit must render an empty-state with no rows"
+    );
+}
+
+/// server#2 — per-server kernel rollup renders the sing-box floor +
+/// on-target verdict from this node's kernel_versions_json.
+#[tokio::test]
+async fn server_detail_kernel_rollup_renders_version_for_this_node() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    s.inv
+        .record_node_health(
+            &ServerId("s0".into()),
+            Some(true),
+            Some(true),
+            Some(1000),
+            Some(10000),
+            Some(500),
+            Some(1000),
+            Some(100),
+            Some(r#"["tcp/443","udp/8443"]"#),
+            Some(1000),
+            Some(r#"{"sing-box":"1.13.12"}"#),
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains("Kernel rollup · sing-box"),
+        "per-server kernel-rollup eyebrow missing"
+    );
+    assert!(
+        html.contains("1.13.12"),
+        "kernel-rollup must show this node's sing-box version"
+    );
+    assert!(
+        html.contains("on target"),
+        "single node at its own floor reads on-target"
+    );
+}
+
+/// Copy-contract (EN) — pin every new PR-Server headline so a future
+/// copy edit has to update this test in lockstep.
+#[tokio::test]
+async fn server_detail_info_cards_headlines_match_voice() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    for needle in [
+        "Drift detail · on-node UUIDs", // server#1
+        "Kernel rollup · sing-box",     // server#2
+        "Top users · last 24h",         // server#3
+        "Server traffic · ",            // server#4
+        "TCP / UDP split",              // server#5
+        "Audit timeline · this server", // server#7
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-Server headline drifted — missing: {needle:?}"
+        );
+    }
+}
+
+/// Copy-contract (RU) — pin the Russian arm of each new PR-Server card
+/// so a half-translation can't ship. Extends the i18n RU walker.
+#[tokio::test]
+async fn server_detail_info_cards_headlines_ru() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html_with_cookie(router(s), "/admin/servers/s0", "vpnctl_lang=ru").await;
+    for needle in [
+        "Детальный дрейф · UUID на ноде", // server#1
+        "Версии ядер · sing-box",         // server#2
+        "Топ пользователей · за 24ч",     // server#3
+        "Трафик сервера · ",              // server#4
+        "Разбивка TCP / UDP",             // server#5
+        "Лента аудита · этот сервер",     // server#7
+    ] {
+        assert!(
+            html.contains(needle),
+            "PR-Server RU headline drifted — missing: {needle:?}"
         );
     }
 }

@@ -12359,10 +12359,38 @@ fn expected_ports_for_protocol(
     }
 }
 
+/// Query string for the server-detail page (PR-Server).
+///
+/// * `drift=live` — opt-in flag that arms the highest-risk card
+///   (server#1 drift-detail): a best-effort live SSH read of the
+///   node's `/etc/sing-box/config.json` to diff the on-node UUIDs
+///   against inventory. GATED so the DEFAULT page load stays fast —
+///   no SSH happens unless the operator clicks «check live drift».
+/// * `vpn_window` — shared window slug (`24h|7d|30d|all`) consumed by
+///   the per-server traffic sparkline's `window_picker_section`, same
+///   shape as the dashboard + user-detail pages.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct ServerDetailQuery {
+    #[serde(default)]
+    drift: Option<String>,
+    #[serde(default)]
+    vpn_window: Option<String>,
+}
+
+impl ServerDetailQuery {
+    /// True only for the explicit `?drift=live` opt-in. Any other
+    /// value (absent, `?drift=`, `?drift=foo`) keeps the live SSH
+    /// read disarmed — the default fast path.
+    fn drift_live(&self) -> bool {
+        matches!(self.drift.as_deref(), Some("live"))
+    }
+}
+
 pub(crate) async fn server_detail(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let sid = vpnctl_core::ServerId(server_id_str.clone());
@@ -12563,6 +12591,77 @@ pub(crate) async fn server_detail(
         .is_server_udp_pair_enabled(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // ── PR-Server informativeness cards ─────────────────────────────
+    // All three SQL-backed loads are best-effort: a query error logs +
+    // empty-states the relevant card rather than 500-ing the whole
+    // page (the rest of the server detail stays useful). Each is one
+    // indexed scan — no new N+1 (the drift-LIVE SSH read, the only
+    // expensive path, is gated behind `?drift=live` below).
+
+    // server#3 — top users by 24h traffic on THIS server (Q top-users).
+    // Currently empty in prod (NM-11: clash-api drops the per-user
+    // field upstream), so the section carries an explicit NM-11
+    // empty-state rather than rendering a blank card.
+    let top_users = state
+        .inv
+        .top_users_by_traffic_for_server(&sid, 24, 10)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "top_users_by_traffic_for_server failed");
+            Vec::new()
+        });
+
+    // server#4 — per-server traffic sparkline. Window slug picked from
+    // `?vpn_window=` (shared shape with dashboard + user-detail); rows
+    // are server-wide (`recent_vpn_stats_for_server`).
+    let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
+    let traffic_since_hours = traffic_window.cells * traffic_window.bucket_hours;
+    let traffic_rows = state
+        .inv
+        .recent_vpn_stats_for_server(&sid, traffic_since_hours)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "recent_vpn_stats_for_server failed");
+            Vec::new()
+        });
+
+    // server#7 — server-scoped audit timeline (Q audit-for-server).
+    let server_audit = state
+        .inv
+        .audit_for_server(&sid.0, 20)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "audit_for_server failed");
+            Vec::new()
+        });
+
+    // server#2 — kernel-floor rollup scoped to THIS server. Reuses the
+    // SHARED `kernel_floor_rollup` (PR-Dash) with a single-element
+    // slice — `latest` already carries this node's newest
+    // `kernel_versions_json` (no extra query).
+    let server_kernel_versions: Vec<(vpnctl_core::ServerId, Option<String>)> = vec![(
+        sid.clone(),
+        latest.as_ref().and_then(|h| h.kernel_versions_json.clone()),
+    )];
+
+    // server#1 — drift-detail (live on-node UUIDs). HIGHEST RISK: the
+    // ONLY card that reaches out over SSH, so it's gated behind the
+    // explicit `?drift=live` opt-in. Without the flag the default page
+    // load does ZERO SSH and renders a «[check live drift →]» link.
+    //
+    // When armed, the live read is best-effort with a hard ≤6s
+    // timeout: any failure (node down, key not authorised, parse
+    // error) collapses to `None` → the section renders a policy-safe
+    // empty-state, NEVER a 500. The inventory UUID set comes from
+    // `users` (already loaded; `.uuid` resolves COALESCE(client_uuid,
+    // users.uuid)) so an orphan = a UUID the node serves that no
+    // granted user accounts for.
+    let drift_live: Option<DriftLiveResult> = if query.drift_live() {
+        Some(load_drift_live(&server, &users, &all_users).await)
+    } else {
+        None
+    };
 
     // Compute drift: declared vs observed ports.
     let observed: std::collections::BTreeSet<(String, u16)> = latest
@@ -12773,14 +12872,40 @@ pub(crate) async fn server_detail(
         // source IPs with user correlation + TCP/UDP split).
         (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
 
-        // Declared vs observed drift
+        // Declared vs observed drift (port-level — fast, probe-derived)
         (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
+
+        // server#1 (PR-Server) — drift DETAIL: which on-node UUIDs the
+        // node serves that inventory doesn't account for. Default load
+        // renders a «[check live drift →]» link (no SSH); `?drift=live`
+        // arms a best-effort live read of the node's sing-box config.
+        (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
+
+        // server#4 (PR-Server) — per-server traffic 24h/7d sparkline.
+        // Window-scoped to /admin/servers/{id}; reuses sparkline_svg.
+        (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
+
+        // server#3 (PR-Server) — top users on this server (24h). Carries
+        // the NM-11 empty-state since prod per-user attribution is NULL.
+        (server_detail_top_users_section(&top_users, lang))
+
+        // server#5 (PR-Server) — TCP/UDP split from the live clash-api
+        // snapshot (clash has no per-protocol tag, only network).
+        (server_detail_network_split_section(last_server_snap.as_deref(), lang))
+
+        // server#7 (PR-Server) — server-scoped audit timeline (last 20).
+        (server_detail_audit_section(&server_audit, lang))
 
         // Kernels — multi-kernel runtime selection. Mirrors the
         // Protocols section right below; same enable/disable shape.
         // Adding wireguard support to a node that today runs only
         // sing-box now means: enable amneziawg kernel here →
         // enable wireguard protocol below → `vpnctl deploy`.
+        // server#2 (PR-Server) — kernel-floor rollup for THIS node
+        // (sing-box version + ✓/stale) renders just above the kernel
+        // enable/disable list; the `update kernels →` button already
+        // lives at the top of the page (adjacent to Deploy).
+        (kernel_floor_rollup(&server_kernel_versions, lang))
         (server_detail_kernels_section(&server, &state.registry, lang))
 
         // Enabled protocols — checkbox list of every registered protocol
@@ -15196,6 +15321,504 @@ fn user_detail_per_protocol_grid(
     }
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  PR-Server — informativeness cards for the server-detail page.
+//
+//  All seven cards reuse existing helpers (status_tile, sparkline_svg,
+//  window_picker_section, humanize_bytes, summarize_audit_payload,
+//  action_kind, .ed-time, kernel_floor_rollup) — no parallel styling.
+//  Bilingual via tr() / t(). The only card that does I/O is server#1
+//  (live SSH read, gated behind ?drift=live, best-effort, never 500).
+// ════════════════════════════════════════════════════════════════════
+
+/// One resolved orphan UUID for the server#1 drift-detail card: a
+/// UUID the node serves that no granted user accounts for. `name`
+/// is `Some(user_id)` when the orphan UUID DOES map to a known user
+/// (e.g. a user whose grant was revoked but whose UUID still lives in
+/// the node config) and `None` when it maps to nothing in inventory
+/// (a likely service account / hand-added UUID).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanUuid {
+    uuid: String,
+    /// Resolved inventory user id, if the UUID matches a known user.
+    name: Option<String>,
+}
+
+/// Outcome of a `?drift=live` attempt. `Ok` carries the diff; `Err`
+/// carries a short, policy-safe reason string the card renders into
+/// its empty-state. The reason NEVER says «ssh to the box» — it says
+/// the config couldn't be read (node unreachable or deploy key).
+#[derive(Debug, Clone)]
+enum DriftLiveResult {
+    /// Live read + parse succeeded — `orphans` are on-node UUIDs not
+    /// in inventory (resolved to a user name where possible).
+    Ok { orphans: Vec<OrphanUuid> },
+    /// Live read failed (timeout, node down, key not authorised, parse
+    /// error). The card degrades to a policy-safe empty-state.
+    Unavailable,
+}
+
+/// Pure diff for server#1 — given the set of UUIDs the NODE serves and
+/// the inventory `users` (whose `.uuid` already resolves
+/// COALESCE(client_uuid, users.uuid)), return the orphans: UUIDs on the
+/// node that are NOT in the inventory grant set. Each orphan is
+/// resolved to a user id when the UUID matches a known global user
+/// uuid (revoked-but-still-on-node case), else left unresolved.
+///
+/// Extracted as a free function so the test suite can pin the
+/// orphan-detection semantics directly without standing up SSH.
+fn compute_orphan_uuids(
+    node_uuids: &std::collections::BTreeSet<String>,
+    granted_users: &[vpnctl_core::User],
+    all_users: &[vpnctl_core::User],
+) -> Vec<OrphanUuid> {
+    // Inventory UUID set for THIS server = the resolved uuid of every
+    // granted user. A node UUID present here is accounted-for.
+    let inventory_uuids: std::collections::BTreeSet<&str> =
+        granted_users.iter().map(|u| u.uuid.as_str()).collect();
+    // Reverse map from any KNOWN user's global uuid → user id, so an
+    // orphan can still be named if it belongs to a user who simply
+    // lost their grant (the dangerous revoke case the operator most
+    // wants to see).
+    let uuid_to_user: std::collections::HashMap<&str, &str> = all_users
+        .iter()
+        .map(|u| (u.uuid.as_str(), u.id.0.as_str()))
+        .collect();
+
+    node_uuids
+        .iter()
+        .filter(|u| !inventory_uuids.contains(u.as_str()))
+        .map(|u| OrphanUuid {
+            uuid: u.clone(),
+            name: uuid_to_user.get(u.as_str()).map(|s| s.to_string()),
+        })
+        .collect()
+}
+
+/// server#1 — best-effort LIVE read of the node's sing-box config over
+/// SSH, with a hard ≤6s timeout. EVERY failure mode (transport error,
+/// node down, key not authorised, non-UTF-8, parse error, or the
+/// outer tokio timeout) collapses to `DriftLiveResult::Unavailable` so
+/// the caller can render a policy-safe empty-state — this function
+/// NEVER returns an error and NEVER panics.
+///
+/// `granted_users` is `users_for_server(sid)` (the inventory set for
+/// the diff — a node UUID present here is accounted-for). `all_users`
+/// is the full inventory user list (already loaded by the handler) so
+/// a revoked-but-on-node orphan can still be NAMED instead of showing
+/// as «unresolved».
+async fn load_drift_live(
+    server: &vpnctl_core::Server,
+    granted_users: &[vpnctl_core::User],
+    all_users: &[vpnctl_core::User],
+) -> DriftLiveResult {
+    use crate::ssh_subprocess::SubprocessSshTransport;
+    use vpnctl_core::SshTransport;
+
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let transport = SubprocessSshTransport::new(
+        server.address.clone(),
+        server.ssh_user.clone(),
+        key_path,
+    )
+    .port(server.ssh_port)
+    // Hard wall-clock cap — keep the armed path snappy even when the
+    // node is black-holed (the transport already sets ConnectTimeout=10
+    // + ServerAlive keepalives, but we want ≤6s end-to-end here).
+    .timeout(std::time::Duration::from_secs(6));
+
+    // Outer guard belt-and-suspenders against a wedged child the
+    // transport's own timeout somehow misses — 7s leaves a 1s margin.
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        transport.read_file("/etc/sing-box/config.json"),
+    )
+    .await;
+
+    let bytes = match read {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => {
+            tracing::info!(
+                target = "vpnctld::admin",
+                server = %server.id,
+                error = %e,
+                "drift=live: live config read failed (best-effort)"
+            );
+            return DriftLiveResult::Unavailable;
+        }
+        Err(_elapsed) => {
+            tracing::info!(
+                target = "vpnctld::admin",
+                server = %server.id,
+                "drift=live: live config read timed out (best-effort)"
+            );
+            return DriftLiveResult::Unavailable;
+        }
+    };
+
+    // Parse the on-node UUIDs (pub helper; parse failure → empty set,
+    // which we treat as «no on-node users observed» rather than orphan
+    // noise). The diff is against the granted set; naming uses the full
+    // user list so a revoked user's lingering UUID is still labelled.
+    let node_uuids = vpnctl_kernels::live_config_user_uuids(&bytes);
+    let orphans = compute_orphan_uuids(&node_uuids, granted_users, all_users);
+    DriftLiveResult::Ok { orphans }
+}
+
+/// server#1 — drift-detail card. Two modes:
+///
+/// * `armed == false` (default page load): renders a «[check live
+///   drift →]» link anchored to `?drift=live`. NO SSH happened.
+/// * `armed == true` (`?drift=live`): renders the orphan list from the
+///   best-effort live read, or a policy-safe empty-state on any
+///   failure. The empty-state copy NEVER instructs the operator to
+///   «ssh to the box» — per operator-action-policy it says the config
+///   couldn't be read (node unreachable or deploy key).
+fn server_detail_drift_detail_section(
+    server: &vpnctl_core::Server,
+    drift_live: Option<&DriftLiveResult>,
+    armed: bool,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        section id="drift-detail" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (t(lang, K::EyebrowDriftDetail)) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "The port-level drift above compares declared protocols to listening sockets. This card goes deeper — it reads the node's live sing-box config and lists UUIDs the node still serves that no granted user accounts for (a revoked user whose UUID lingers, or a service account). It's a live SSH read, so it runs only on demand.",
+                    "Дрейф по портам выше сравнивает заявленные протоколы со слушающими сокетами. Эта карточка копает глубже — читает живой конфиг sing-box на ноде и показывает UUID, которые нода всё ещё обслуживает, но за которыми не стоит ни один выданный доступ (отозванный юзер, чей UUID завис, или сервисный аккаунт). Это живое SSH-чтение, поэтому запускается только по запросу.",
+                ))
+            }
+            @if !armed {
+                // Default fast path — link to arm the live read. No SSH
+                // was attempted on this render.
+                p style="font-family: var(--mono); font-size: 12px; margin: 8px 0;" {
+                    a href=(format!("/admin/servers/{sid_enc}?drift=live#drift-detail"))
+                      style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                        (tr(lang, "check live drift →", "проверить живой дрейф →"))
+                    }
+                }
+                p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 4px 0 0;" {
+                    (tr(
+                        lang,
+                        "Skipped by default so the page loads fast — no node is contacted until you click.",
+                        "По умолчанию пропускается ради быстрой загрузки — пока не нажмёшь, нода не опрашивается.",
+                    ))
+                }
+            } @else {
+                @match drift_live {
+                    Some(DriftLiveResult::Ok { orphans }) if !orphans.is_empty() => {
+                        div style="margin-top: 6px; padding: 10px 12px; border: 1px solid var(--acc); background: var(--paper);" {
+                            div style="font-family: var(--mono); font-size: 10px; color: var(--acc); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px;" {
+                                (tr(lang, "orphan uuids on node", "осиротевшие uuid на ноде"))
+                            }
+                            ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                                @for o in orphans {
+                                    li style="padding: 2px 0; border-bottom: 1px dotted var(--rule);" {
+                                        span.ed-mono { (o.uuid) }
+                                        " — "
+                                        @match &o.name {
+                                            Some(name) => {
+                                                span style="color: var(--ink); font-style: italic; font-family: var(--serif);" {
+                                                    (tr(lang, "maps to user ", "соответствует юзеру "))
+                                                }
+                                                a href=(format!("/admin/users/{}", path_segment_encode(name)))
+                                                  style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                                                    (name)
+                                                }
+                                            }
+                                            None => {
+                                                span style="color: var(--mute); font-style: italic; font-family: var(--serif);" {
+                                                    (tr(lang, "(unresolved — likely service account)", "(не определён — вероятно сервисный аккаунт)"))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 8px 0 0;" {
+                                (tr(
+                                    lang,
+                                    "A redeploy re-renders the config from inventory and removes any UUID inventory doesn't expect.",
+                                    "Redeploy перерендерит конфиг из инвентаря и уберёт любой UUID, которого инвентарь не ждёт.",
+                                ))
+                            }
+                        }
+                    }
+                    Some(DriftLiveResult::Ok { .. }) => {
+                        // Read succeeded, no orphans — clean state.
+                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 6px;" {
+                            (tr(
+                                lang,
+                                "Live config read OK — every UUID the node serves maps to a granted user. No orphans.",
+                                "Живой конфиг прочитан — каждый UUID на ноде соответствует выданному доступу. Сирот нет.",
+                            ))
+                        }
+                    }
+                    _ => {
+                        // Unavailable / None — policy-safe empty-state.
+                        // NO «ssh to the box» instruction.
+                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 6px;" {
+                            (tr(
+                                lang,
+                                "Couldn't read the live config (node unreachable or deploy key not authorised on it). Nothing was changed; try again after the node is back, or run a deploy which re-pushes the config anyway.",
+                                "Не удалось прочитать живой конфиг (нода недоступна или deploy-ключ на ней не авторизован). Ничего не менялось; попробуй снова когда нода вернётся, либо запусти deploy — он всё равно перезальёт конфиг.",
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// server#3 — top users by 24h traffic on THIS server. Reuses
+/// humanize_bytes + links each user to /admin/users/{id}. Carries the
+/// NM-11 empty-state (prod per-user attribution is NULL upstream —
+/// clash-api drops the user field), so an empty `rows` renders an
+/// explainer instead of a blank card.
+fn server_detail_top_users_section(
+    rows: &[(vpnctl_core::UserId, u64)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    html! {
+        section id="top-users" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (tr(lang, "Top users · last 24h", "Топ пользователей · за 24ч")) }
+            @if rows.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                    (tr(
+                        lang,
+                        "No per-user traffic attributed on this server yet. Per-user attribution is NULL upstream — clash-api drops the user field (NM-11); see the dashboard note. Server-wide totals still work in the traffic chart below.",
+                        "Трафик по пользователям на этом сервере пока не атрибутирован. Атрибуция per-user пустая на уровне upstream — clash-api убирает поле user (NM-11); см. заметку на дашборде. Серверные итоги всё равно работают в графике трафика ниже.",
+                    ))
+                }
+            } @else {
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-top: 8px;" {
+                    thead {
+                        tr style="border-bottom: 1px solid var(--ink);" {
+                            th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (tr(lang, "user", "пользователь"))
+                            }
+                            th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (tr(lang, "traffic (up+down)", "трафик (вверх+вниз)"))
+                            }
+                        }
+                    }
+                    tbody {
+                        @for (uid, bytes) in rows {
+                            tr style="border-bottom: 1px dotted var(--rule);" {
+                                td style="padding: 5px 8px;" {
+                                    a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                                      style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                                        (uid.0)
+                                    }
+                                }
+                                td style="padding: 5px 8px; text-align: right; color: var(--ink);" {
+                                    (humanize_bytes(*bytes))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// server#4 — per-server traffic sparkline (24h / 7d / 30d / all).
+/// Reuses sparkline_svg + a window_picker_section scoped to
+/// /admin/servers/{id}. The rows are server-wide
+/// (recent_vpn_stats_for_server); we bucket them into the window's
+/// cells and feed the per-cell up+down totals to the sparkline. The
+/// ↑↓ summary tiles show the window totals.
+fn server_detail_traffic_section(
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    window: VpnSparklineWindow,
+    server_id: &vpnctl_core::ServerId,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let base_url = format!("/admin/servers/{}", path_segment_encode(&server_id.0));
+    let window_label = match lang {
+        crate::i18n::Locale::En => window.label_en,
+        crate::i18n::Locale::Ru => window.label_ru,
+    };
+
+    // Window totals for the ↑↓ tiles.
+    let mut total_up: u64 = 0;
+    let mut total_dn: u64 = 0;
+    for r in rows {
+        total_up = total_up.saturating_add(r.upload_bytes);
+        total_dn = total_dn.saturating_add(r.download_bytes);
+    }
+
+    // Bucket into the window's cells (newest cell rightmost). Each row
+    // carries a ts; index = how many bucket-widths back from now. Out-
+    // of-range rows are clamped into the oldest cell.
+    let now = chrono::Utc::now();
+    let bucket_secs = i64::from(window.bucket_hours) * 3600;
+    let cells = window.cells as usize;
+    let mut series: Vec<f64> = vec![0.0; cells];
+    // Guard against a degenerate window (cells == 0): `cells - 1` would
+    // underflow a usize and the indexed write would panic. Every window
+    // in VPN_SPARKLINE_WINDOWS has cells > 0 today, but this keeps the
+    // card best-effort if that ever changes.
+    if bucket_secs > 0 && cells > 0 {
+        for r in rows {
+            let age_secs = (now - r.ts).num_seconds().max(0);
+            let back = (age_secs / bucket_secs) as usize;
+            // back==0 → newest cell (last index); clamp old rows into
+            // the oldest cell (index 0).
+            let idx = (cells - 1).saturating_sub(back.min(cells - 1));
+            let bytes = r.upload_bytes.saturating_add(r.download_bytes);
+            series[idx] += bytes as f64;
+        }
+    }
+    let has_data = series.iter().any(|v| *v > 0.0);
+
+    html! {
+        section id="server-traffic" style="margin-top: 28px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Server traffic · ", "Трафик сервера · ")) (window_label)
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 4px;" {
+                (tr(
+                    lang,
+                    "Server-wide upload+download from clash-api 5-min ticks, bucketed across the window. Pick a window below — the sparkline + totals update together.",
+                    "Серверный upload+download с 5-минутных тиков clash-api, разложенный по окну. Выбери окно ниже — спарклайн и итоги обновятся вместе.",
+                ))
+            }
+            (window_picker_section(&base_url, window.slug, lang))
+            div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 12px 0 6px;" {
+                (status_tile(tr(lang, "↑ upload", "↑ отдано"), &humanize_bytes(total_up), "var(--ink)"))
+                (status_tile(tr(lang, "↓ download", "↓ принято"), &humanize_bytes(total_dn), "var(--ink)"))
+            }
+            @if has_data {
+                (sparkline_svg(&series, 720, 90))
+            } @else {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0;" {
+                    (tr(
+                        lang,
+                        "No traffic recorded in this window yet. The clash-api poller fills this once the node reports samples.",
+                        "В этом окне трафик ещё не записан. Поллер clash-api наполнит график как только нода начнёт отдавать сэмплы.",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// server#5 — TCP/UDP split from the live clash-api snapshot. Reuses
+/// status_tile + humanize_bytes + the shared `network_breakdown`. The
+/// caption is explicit that clash-api carries no per-protocol tag,
+/// only the network kind — this card is re-scoped from the original
+/// «per-protocol» idea for exactly that reason. Cheap (no DB).
+fn server_detail_network_split_section(
+    server_snap: Option<&crate::snapshot_cache::ServerSnapshot>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use crate::snapshot_cache::network_breakdown;
+    html! {
+        section id="network-split" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (tr(lang, "TCP / UDP split", "Разбивка TCP / UDP")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "From the latest clash-api snapshot. clash-api carries no per-protocol tag, only network — so this splits by transport (TCP vs UDP), not by VLESS/TUIC/etc.",
+                    "Из последнего снимка clash-api. clash-api не несёт тег протокола, только network — поэтому разбивка по транспорту (TCP против UDP), а не по VLESS/TUIC/и т.п.",
+                ))
+            }
+            @match server_snap {
+                Some(snap) => {
+                    @let nb = network_breakdown(&snap.snapshot);
+                    div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;" {
+                        (status_tile(
+                            tr(lang, "tcp", "tcp"),
+                            &format!("{} · {}", nb.tcp_conns, humanize_bytes(nb.tcp_bytes)),
+                            "var(--ink)",
+                        ))
+                        (status_tile(
+                            tr(lang, "udp", "udp"),
+                            &format!("{} · {}", nb.udp_conns, humanize_bytes(nb.udp_bytes)),
+                            "var(--ink)",
+                        ))
+                        (status_tile(
+                            tr(lang, "other", "иные"),
+                            &format!("{} · {}", nb.other_conns, humanize_bytes(nb.other_bytes)),
+                            "var(--ink)",
+                        ))
+                    }
+                }
+                None => {
+                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                        (tr(
+                            lang,
+                            "No clash-api snapshot for this server yet. The poller fires every 5 minutes; refresh after the next tick.",
+                            "Снимка clash-api по этому серверу ещё нет. Поллер запускается каждые 5 минут; обнови после следующего тика.",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// server#7 — server-scoped audit timeline (last 20). Reuses
+/// `summarize_audit_payload` + `action_kind` + the `.ed-time` editorial
+/// component — byte-identical row shape to the dashboard + global audit
+/// timeline, just filtered to rows that reference THIS server.
+fn server_detail_audit_section(
+    rows: &[vpnctl_inventory::AuditEntry],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    html! {
+        section id="server-audit" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (tr(lang, "Audit timeline · this server", "Лента аудита · этот сервер")) }
+            @if rows.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                    (tr(
+                        lang,
+                        "No audit rows reference this server yet — deploy / grant / revoke actions will start filling this stream.",
+                        "Записей аудита по этому серверу пока нет — действия deploy / выдать / отозвать начнут наполнять эту ленту.",
+                    ))
+                }
+            } @else {
+                div.ed-time {
+                    @for e in rows {
+                        div.ed-time-row {
+                            span.ed-time-row__t { (format_msk_iso(e.ts)) }
+                            span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
+                                (e.action)
+                            }
+                            span.ed-time-row__tgt {
+                                @match &e.target {
+                                    Some(t) => (t),
+                                    None => "—",
+                                }
+                            }
+                            span.ed-time-row__pl {
+                                (tr(lang, "by ", "автор: ")) (e.actor)
+                                @if let Some(p) = &e.payload {
+                                    @let summary = summarize_audit_payload(p);
+                                    @if !summary.is_empty() {
+                                        " · " span.ed-mono { (summary) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
     observed: &std::collections::BTreeSet<(String, u16)>,
@@ -15565,6 +16188,86 @@ mod helper_tests {
         assert_eq!(
             enrich_destination_label("www.microsoft.com:443", &cache),
             "www.microsoft.com:443"
+        );
+    }
+
+    // ── server#1 (PR-Server) drift-detail orphan diff ───────────────
+    fn user(id: &str, uuid: &str) -> vpnctl_core::User {
+        vpnctl_core::User {
+            id: vpnctl_core::UserId(id.into()),
+            uuid: uuid.into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        }
+    }
+
+    fn uuid_set(uuids: &[&str]) -> std::collections::BTreeSet<String> {
+        uuids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn compute_orphan_uuids_flags_on_node_uuid_absent_from_inventory() {
+        // Node serves alice's + a stray UUID; inventory grants only
+        // alice. The stray is the orphan; alice is accounted-for.
+        let alice = user("alice", "uuid-alice");
+        let granted = vec![alice.clone()];
+        let all = vec![alice];
+        let node = uuid_set(&["uuid-alice", "uuid-stray"]);
+        let orphans = compute_orphan_uuids(&node, &granted, &all);
+        assert_eq!(orphans.len(), 1, "exactly one orphan expected");
+        assert_eq!(orphans[0].uuid, "uuid-stray");
+        assert_eq!(
+            orphans[0].name, None,
+            "a UUID in no known user must be unresolved"
+        );
+    }
+
+    #[test]
+    fn compute_orphan_uuids_names_a_revoked_user_still_on_node() {
+        // bob lost his grant (not in `granted`) but is still a known
+        // user AND his UUID lingers on the node → orphan, NAMED bob.
+        let alice = user("alice", "uuid-alice");
+        let bob = user("bob", "uuid-bob");
+        let granted = vec![alice.clone()];
+        let all = vec![alice, bob];
+        let node = uuid_set(&["uuid-alice", "uuid-bob"]);
+        let orphans = compute_orphan_uuids(&node, &granted, &all);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].uuid, "uuid-bob");
+        assert_eq!(
+            orphans[0].name.as_deref(),
+            Some("bob"),
+            "a revoked-but-known user must resolve to their id"
+        );
+    }
+
+    #[test]
+    fn compute_orphan_uuids_empty_when_node_matches_inventory() {
+        let alice = user("alice", "uuid-alice");
+        let granted = vec![alice.clone()];
+        let all = vec![alice];
+        let node = uuid_set(&["uuid-alice"]);
+        assert!(
+            compute_orphan_uuids(&node, &granted, &all).is_empty(),
+            "no orphan when every on-node UUID is granted"
+        );
+    }
+
+    #[test]
+    fn compute_orphan_uuids_ignores_inventory_uuid_not_on_node() {
+        // A granted user whose UUID is NOT on the node is NOT an orphan
+        // (orphan = on-node-not-in-inventory, the one-directional diff).
+        let alice = user("alice", "uuid-alice");
+        let granted = vec![alice.clone()];
+        let all = vec![alice];
+        let node = uuid_set(&[]); // node serves nothing
+        assert!(
+            compute_orphan_uuids(&node, &granted, &all).is_empty(),
+            "inventory-only UUIDs must never count as orphans"
         );
     }
 }
