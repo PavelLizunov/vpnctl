@@ -976,6 +976,7 @@ mod tests {
             load_1min_x100: None,
             listening_ports_json: None,
             sing_box_log_bytes: log_b,
+            kernel_versions_json: None,
         }
     }
 

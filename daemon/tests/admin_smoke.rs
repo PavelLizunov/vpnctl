@@ -7106,6 +7106,7 @@ async fn admin_server_detail_with_probe_renders_kpis() {
             Some(4),
             Some(r#"["tcp/443","tcp/8388","udp/8388","udp/8443"]"#),
             Some(308_432),
+            None,
         )
         .await
         .unwrap();
@@ -7157,6 +7158,7 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
             Some(10),
             Some(r#"["tcp/22","tcp/443","udp/8444"]"#),
             Some(1000),
+            None,
         )
         .await
         .unwrap();
@@ -13146,6 +13148,7 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
                 Some(50),    // load_1min_x100
                 Some("[\"tcp/443\",\"udp/8443\"]"),
                 Some(1024 * 1024),
+                None,
             )
             .await
             .unwrap();
@@ -13288,6 +13291,7 @@ async fn dashboard_fleet_uptime_section_renders_with_probe_data() {
                     Some(50),
                     Some("[\"tcp/443\"]"),
                     Some(1024 * 1024),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -13372,6 +13376,7 @@ async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
                 Some(50),
                 Some("[\"tcp/443\"]"),
                 Some(1024 * 1024),
+                None,
             )
             .await
             .unwrap();
@@ -13632,6 +13637,7 @@ async fn scan_once_auto_resolves_paired_alert_on_recovery() {
                 Some(1),
                 None,
                 Some(1024),
+                None,
             )
             .await
             .unwrap();
