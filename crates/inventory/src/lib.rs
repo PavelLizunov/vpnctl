@@ -33,5 +33,5 @@ pub use sqlite::{
     SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn,
     SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, UaCluster, UptimeStat,
     UserLifecycle, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow,
-    VpnUserSessionRow,
+    VpnUserSessionRow, VpnUserSourceIpRow,
 };

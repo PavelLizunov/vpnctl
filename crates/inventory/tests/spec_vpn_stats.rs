@@ -1251,3 +1251,217 @@ async fn attribution_stall_servers_ignores_rows_outside_window() {
         "rows at/after the window edge must be excluded; got {stalled:?}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// vpn_user_source_ips (2026-06-14) — per-user × source-IP tracking.
+// Mirrors the vpn_user_destinations spec above.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn source_ips_increment_hit_count_on_repeat() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    // Tick 1: two IPs.
+    inv.record_user_source_ips(&[
+        (UserId("alice".into()), "1.2.3.4".into()),
+        (UserId("alice".into()), "5.6.7.8".into()),
+    ])
+    .await
+    .unwrap();
+    // Tick 2: first IP again + a new one.
+    inv.record_user_source_ips(&[
+        (UserId("alice".into()), "1.2.3.4".into()),
+        (UserId("alice".into()), "9.9.9.9".into()),
+    ])
+    .await
+    .unwrap();
+    let top = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 20)
+        .await
+        .unwrap();
+    assert_eq!(top.len(), 3, "three distinct IPs total");
+    let a = top
+        .iter()
+        .find(|r| r.source_ip == "1.2.3.4")
+        .expect("1.2.3.4 present");
+    assert_eq!(a.hit_count, 2, "two ticks → 2 hits");
+    let b = top
+        .iter()
+        .find(|r| r.source_ip == "5.6.7.8")
+        .expect("5.6.7.8 present");
+    assert_eq!(b.hit_count, 1);
+}
+
+#[tokio::test]
+async fn top_source_ips_orders_by_hits_desc() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    // A=3, B=1, C=2 hits → expect A, C, B.
+    for _ in 0..3 {
+        inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.1".into())])
+            .await
+            .unwrap();
+    }
+    inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.2".into())])
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.3".into())])
+            .await
+            .unwrap();
+    }
+    let top = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    let ips: Vec<&str> = top.iter().map(|r| r.source_ip.as_str()).collect();
+    assert_eq!(ips, vec!["10.0.0.1", "10.0.0.3", "10.0.0.2"]);
+}
+
+#[tokio::test]
+async fn source_ips_skip_empty_ip_and_unknown_user() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    // Empty IP (real user) → skipped; unknown user (real IP) →
+    // FK-guarded skip; the one valid pair survives.
+    inv.record_user_source_ips(&[
+        (UserId("alice".into()), String::new()),
+        (UserId("ghost".into()), "1.1.1.1".into()),
+        (UserId("alice".into()), "2.2.2.2".into()),
+    ])
+    .await
+    .unwrap();
+    let alice = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(alice.len(), 1, "only the non-empty IP for a real user");
+    assert_eq!(alice[0].source_ip, "2.2.2.2");
+    let ghost = inv
+        .top_source_ips_for_user(&UserId("ghost".into()), 7, 10)
+        .await
+        .unwrap();
+    assert!(ghost.is_empty(), "unknown user must never get a row");
+}
+
+#[tokio::test]
+async fn source_ips_dont_leak_across_users() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+    inv.record_user_source_ips(&[(UserId("alice".into()), "1.1.1.1".into())])
+        .await
+        .unwrap();
+    inv.record_user_source_ips(&[(UserId("bob".into()), "2.2.2.2".into())])
+        .await
+        .unwrap();
+    let alice = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(alice.len(), 1);
+    assert_eq!(alice[0].source_ip, "1.1.1.1");
+    let bob = inv
+        .top_source_ips_for_user(&UserId("bob".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].source_ip, "2.2.2.2");
+}
+
+#[tokio::test]
+async fn purge_user_source_ips_keeps_todays_rows() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.record_user_source_ips(&[(UserId("alice".into()), "1.1.1.1".into())])
+        .await
+        .unwrap();
+    // 30-day retention must not touch today's row.
+    let removed = inv.purge_user_source_ips_older_than(30).await.unwrap();
+    assert_eq!(removed, 0, "today's rows are within a 30-day window");
+    let top = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(top.len(), 1, "row survives the retention sweep");
+}
+
+// geo_labels_for_ips — newest NON-NULL geo wins; un-asked IPs absent.
+#[tokio::test]
+async fn geo_labels_for_ips_picks_newest_nonnull_geo() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    // 1.2.3.4: an enriched row, then a later NULL-geo row — the
+    // lookup must still surface DE (newest row WITH geo).
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "1.2.3.4",
+        None,
+        200,
+        0,
+        None,
+        None,
+        None,
+        Some("DE"),
+        Some("AS3320 DTAG"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "1.2.3.4",
+        None,
+        200,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    inv.log_sub_access_rich(
+        &UserId("alice".into()),
+        "9.9.9.9",
+        None,
+        200,
+        0,
+        None,
+        None,
+        None,
+        Some("US"),
+        Some("AS15169 Google"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let map = inv
+        .geo_labels_for_ips(&["1.2.3.4".into(), "9.9.9.9".into(), "8.8.8.8".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        map.get("1.2.3.4"),
+        Some(&(Some("DE".to_string()), Some("AS3320 DTAG".to_string()))),
+        "newest non-NULL geo wins over a later un-enriched row"
+    );
+    assert_eq!(
+        map.get("9.9.9.9"),
+        Some(&(Some("US".to_string()), Some("AS15169 Google".to_string())))
+    );
+    assert!(
+        !map.contains_key("8.8.8.8"),
+        "an IP with no sub_access_log rows is absent from the map"
+    );
+}

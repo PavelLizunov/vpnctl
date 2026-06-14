@@ -3742,6 +3742,28 @@ pub(crate) async fn user_detail(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_device_fingerprint failed");
             vpnctl_inventory::SubDeviceFp::default()
         });
+    // «Source IPs» (2026-06-14) — per-(user, source_ip) activity over
+    // the last 7 days from the persisted `vpn_user_source_ips` counter,
+    // then a best-effort GeoIP label lookup for exactly those IPs (geo
+    // is an IP attribute, so the lookup is user-independent). Both
+    // degrade to an empty table on failure — the page still renders.
+    const SOURCE_IPS_WINDOW_DAYS: u32 = 7;
+    const SOURCE_IPS_LIMIT: u32 = 20;
+    let source_ips = state
+        .inv
+        .top_source_ips_for_user(&uid, SOURCE_IPS_WINDOW_DAYS, SOURCE_IPS_LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "top_source_ips_for_user failed");
+            Vec::new()
+        });
+    let source_ip_geo = {
+        let ips: Vec<String> = source_ips.iter().map(|r| r.source_ip.clone()).collect();
+        state.inv.geo_labels_for_ips(&ips).await.unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "geo_labels_for_ips failed");
+            std::collections::HashMap::new()
+        })
+    };
     // PR-User user#5 — lifecycle facts (Q-4d). created_at +
     // last_sub_fetch + age_days. On failure compose a defensible
     // fallback from the user's own created_at so the section still
@@ -5012,6 +5034,14 @@ pub(crate) async fn user_detail(
         // have rendered a second, duplicate picker).
         (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
         (user_top_destinations_section(&state, &uid, lang).await)
+
+        // ── Source IPs (2026-06-14) — «откуда» counterpart to the
+        // «куда» destinations table: per-client-IP activity grounded
+        // in real VPN connections, GeoIP-labelled + reserved-range
+        // classified (the «проработай (неизвестно)» + «разбей трафик
+        // по IP» deliverable). Pre-fetched above.
+        (user_source_ips_section(&source_ips, &source_ip_geo, lang))
+
         (user_sessions_section(&state, &uid, lang).await)
 
         // ── PR-User user#5 — lifecycle facts ─────────────────────
@@ -5412,6 +5442,71 @@ fn format_origin_ts(raw: &str) -> String {
     }
 }
 
+/// Classify a reserved / non-routable IP into a short human label so a
+/// NULL GeoIP country reads as «private/LAN» or «loopback» instead of
+/// the uninformative «(unknown)». For a self-hosted box, most of the
+/// «(unknown)» origin rows are the homelab's OWN LAN / loopback /
+/// CGNAT addresses hitting the /sub endpoint — labelling them makes
+/// the operator instantly see «that's my infra, not a shared URL».
+///
+/// Returns `None` for an ordinary routable public IP (where
+/// «(unknown)» genuinely means «GeoIP has no record») and for an
+/// unparseable string. Ranges: RFC1918 private, RFC6598 CGNAT
+/// (100.64/10), loopback, link-local (169.254/16, fe80::/10), ULA
+/// (fc00::/7), unspecified.
+fn classify_reserved_ip(ip: &str) -> Option<&'static str> {
+    use std::net::IpAddr;
+    match ip.parse::<IpAddr>().ok()? {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            if v4.is_loopback() {
+                Some("loopback")
+            } else if v4.is_private() {
+                Some("private/LAN")
+            } else if o[0] == 100 && (o[1] & 0xc0) == 0x40 {
+                // 100.64.0.0/10 — carrier-grade NAT (RFC6598).
+                Some("CGNAT")
+            } else if v4.is_link_local() {
+                Some("link-local")
+            } else if v4.is_unspecified() {
+                Some("unspecified")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                Some("loopback")
+            } else if v6.is_unspecified() {
+                Some("unspecified")
+            } else {
+                let seg = v6.segments();
+                if (seg[0] & 0xfe00) == 0xfc00 {
+                    // fc00::/7 — unique local address (RFC4193).
+                    Some("private/ULA")
+                } else if (seg[0] & 0xffc0) == 0xfe80 {
+                    // fe80::/10 — link-local.
+                    Some("link-local")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Fallback cell for a source IP whose GeoIP country/ASN came back
+/// NULL: render the reserved-range class when the IP is non-routable,
+/// else the generic `unknown` marker. Shared by the «Subscription
+/// origins · By IP» table and the «Source IPs» traffic section so both
+/// treat «(unknown)» identically.
+fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
+    match classify_reserved_ip(ip) {
+        Some(cls) => html! { em style="color: var(--mute);" { (cls) } },
+        None => html! { em style="color: var(--mute);" { (unknown) } },
+    }
+}
+
 /// abuse-origins — "Subscription origins" section (anchor `#origins`).
 /// The actionable WHO-is-sharing view: three compact tables (by
 /// country / by ISP / by IP) + a rough device-count line, all over the
@@ -5565,18 +5660,110 @@ fn user_subscription_origins_section(
                             td style=(format!("{ORIGINS_TD} color: var(--soft);")) {
                                 @match row.country.as_deref() {
                                     Some(c) if !c.is_empty() => (c),
-                                    _ => em style="color: var(--mute);" { (unknown) },
+                                    _ => (ip_geo_fallback(&row.ip, unknown)),
                                 }
                             }
                             td style=(format!("{ORIGINS_TD} color: var(--soft); overflow-wrap: anywhere;")) {
                                 @match row.asn.as_deref() {
                                     Some(a) if !a.is_empty() => (a),
-                                    _ => em style="color: var(--mute);" { (unknown) },
+                                    _ => (ip_geo_fallback(&row.ip, unknown)),
                                 }
                             }
                             td style=(format!("{ORIGINS_TD} text-align: right; color: var(--ink);")) { (row.fetches) }
                             td style=(format!("{ORIGINS_TD} color: var(--soft); white-space: nowrap;")) { (format_origin_ts(&row.first_seen)) }
                             td style=(format!("{ORIGINS_TD} color: var(--soft); white-space: nowrap;")) { (format_origin_ts(&row.last_seen)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// «Source IPs» — the source-IP counterpart to «Top destinations».
+/// Per-(user, source_ip) activity over the last 7 days from the
+/// persisted `vpn_user_source_ips` hit-counter (one hit per 5-min
+/// clash tick the user had a live connection from that IP), GeoIP-
+/// enriched (`geo`: ip → (country, asn)) and reserved-range-classified
+/// so a NULL GeoIP country reads as «private/LAN» not «(unknown)».
+///
+/// This is the «разбей трафик по IP внутри пользователя» view —
+/// grounded in ACTUAL VPN connections, not /sub URL fetches (which
+/// the «Subscription origins» tables cover). Activity-weighted (hits
+/// = ticks-alive) rather than byte-weighted, by deliberate design:
+/// per-IP byte deltas would need diff-engine state per (user, ip,
+/// conn) tuple (see migration 0034). Many distinct PUBLIC IPs or
+/// countries here is the strongest grounded sharing signal.
+///
+/// Pure render — `rows` and `geo` are pre-fetched in `user_detail`.
+fn user_source_ips_section(
+    rows: &[vpnctl_inventory::VpnUserSourceIpRow],
+    geo: &std::collections::HashMap<String, (Option<String>, Option<String>)>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let unknown = tr(lang, "(unknown)", "(неизвестно)");
+    // Distinct routable (public) IPs — the sharing-signal headline.
+    // Reserved/LAN/CGNAT addresses don't count toward «sharing».
+    let distinct_public = rows
+        .iter()
+        .filter(|r| classify_reserved_ip(&r.source_ip).is_none())
+        .count();
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Source IPs · last 7 days", "Source IP · 7 дней")) }
+        @if rows.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                (tr(
+                    lang,
+                    "No source-IP history yet. The poller records one hit per (client IP, 5-min tick) a connection was attributed to this user — wait for the next clash-api scrape, or the user simply hasn't connected.",
+                    "Истории по source IP ещё нет. Поллер пишет один hit на (клиентский IP, 5-мин тик), в котором соединение отнесено к этому юзеру — подожди следующий скрейп clash-api, либо юзер просто не подключался.",
+                ))
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "Which client IPs this user actually connected FROM (real VPN connections, not /sub fetches), over the last 7 days. Activity-weighted: hits = 5-min ticks the IP was live, not bytes. Private / LAN / CGNAT addresses are labelled rather than left as «(unknown)». Many distinct public IPs or countries = the strongest grounded sharing signal.",
+                    "С каких клиентских IP юзер реально подключался (реальные VPN-соединения, не обращения к /sub) за 7 дней. Взвешено активностью: hits = 5-мин тики, в которых IP был живой, не байты. Приватные / LAN / CGNAT адреса подписаны, а не оставлены как «(неизвестно)». Много разных публичных IP или стран = самый достоверный сигнал расшаривания.",
+                ))
+            }
+            p style="font-family: var(--mono); font-size: 12.5px; color: var(--ink); margin: 0 0 14px;" {
+                "≈ " b { (distinct_public) } " "
+                (tr(lang, "distinct public IPs · 7d", "уник. публичных IP · 7д"))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "source ip", "source ip")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country / ISP", "страна / ISP")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}"))
+                           title=(tr(lang, "Number of 5-min clash ticks where this user had a live connection from this IP. Not bytes, not connection count — activity time.", "Число 5-мин тиков clash, в которых у юзера было живое соединение с этого IP. Не байты и не число соединений — время активности.")) {
+                            (tr(lang, "hits · 7d", "hits · 7д"))
+                        }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "last seen", "последний раз")) }
+                    }
+                }
+                tbody {
+                    @for r in rows {
+                        @let (country, asn) = geo.get(&r.source_ip).cloned().unwrap_or((None, None));
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style=(format!("{ORIGINS_TD} color: var(--ink); overflow-wrap: anywhere;")) { (r.source_ip) }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft); overflow-wrap: anywhere;")) {
+                                @match country.as_deref() {
+                                    Some(c) if !c.is_empty() => {
+                                        (c)
+                                        @if let Some(a) = asn.as_deref() {
+                                            @if !a.is_empty() {
+                                                span style="color: var(--mute);" { " · " (a) }
+                                            }
+                                        }
+                                    }
+                                    _ => (ip_geo_fallback(&r.source_ip, unknown)),
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--ink); font-weight: 500;")) { (r.hit_count) }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft); white-space: nowrap;")) { (format_msk(r.last_seen)) }
                         }
                     }
                 }
@@ -16953,6 +17140,43 @@ mod helper_tests {
         // (UDP / ICMP-style flows with no port metadata) stay as raw IPs.
         assert_eq!(extract_ip_from_label("1.2.3.4"), Some("1.2.3.4"));
         assert_eq!(extract_ip_from_label("10.0.0.1"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn classify_reserved_ip_labels_private_and_special_ranges() {
+        // RFC1918 private.
+        assert_eq!(classify_reserved_ip("192.168.0.207"), Some("private/LAN"));
+        assert_eq!(classify_reserved_ip("10.1.2.3"), Some("private/LAN"));
+        assert_eq!(classify_reserved_ip("172.16.5.5"), Some("private/LAN"));
+        // Loopback.
+        assert_eq!(classify_reserved_ip("127.0.0.1"), Some("loopback"));
+        assert_eq!(classify_reserved_ip("::1"), Some("loopback"));
+        // RFC6598 carrier-grade NAT (100.64/10) — the 100.120.2.214
+        // case from the real main-brat origins table.
+        assert_eq!(classify_reserved_ip("100.64.0.1"), Some("CGNAT"));
+        assert_eq!(classify_reserved_ip("100.120.2.214"), Some("CGNAT"));
+        assert_eq!(classify_reserved_ip("100.127.255.255"), Some("CGNAT"));
+        // 100.128.x is OUTSIDE 100.64/10 → public, not CGNAT.
+        assert_eq!(classify_reserved_ip("100.128.0.1"), None);
+        // Link-local.
+        assert_eq!(classify_reserved_ip("169.254.1.1"), Some("link-local"));
+        assert_eq!(classify_reserved_ip("fe80::1"), Some("link-local"));
+        // IPv6 ULA.
+        assert_eq!(classify_reserved_ip("fc00::1"), Some("private/ULA"));
+        assert_eq!(classify_reserved_ip("fd12:3456::1"), Some("private/ULA"));
+    }
+
+    #[test]
+    fn classify_reserved_ip_returns_none_for_public_and_garbage() {
+        // Ordinary routable public IPs → None (genuine "(unknown)"
+        // when GeoIP has no record).
+        assert_eq!(classify_reserved_ip("8.8.8.8"), None);
+        assert_eq!(classify_reserved_ip("83.97.108.34"), None);
+        assert_eq!(classify_reserved_ip("2606:4700:4700::1111"), None);
+        // Unparseable strings must never panic — just None.
+        assert_eq!(classify_reserved_ip(""), None);
+        assert_eq!(classify_reserved_ip("not-an-ip"), None);
+        assert_eq!(classify_reserved_ip("999.999.999.999"), None);
     }
 
     #[test]

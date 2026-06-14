@@ -372,6 +372,21 @@ pub struct VpnUserDestinationRow {
     pub last_seen: DateTime<Utc>,
 }
 
+/// One row in `vpn_user_source_ips` (2026-06-14) — per-(user,
+/// source_ip, date) hit counter. The source-IP counterpart to
+/// [`VpnUserDestinationRow`]: answers «from which client IP did this
+/// user connect, and how often» on /admin/users/<id>. NOT a byte
+/// counter — `hit_count` is incremented per clash-poll tick where the
+/// (user, source_ip) pair had at least one live connection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VpnUserSourceIpRow {
+    pub user_id: UserId,
+    pub source_ip: String,
+    pub date: String,
+    pub hit_count: u64,
+    pub last_seen: DateTime<Utc>,
+}
+
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
 /// date) aggregated traffic + peak conns. Long-term retention
 /// counterpart to the rolling 30-day `vpn_connection_stats`.
@@ -4593,6 +4608,163 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
+    /// Bulk-record (user, source_ip) pairs observed in the current
+    /// clash-poll tick. The source-IP counterpart to
+    /// [`record_user_destinations`](Self::record_user_destinations):
+    /// each call atomically UPSERTs per-pair rows for TODAY's UTC date
+    /// — `hit_count += 1`, `last_seen = now`. Pairs are de-duplicated
+    /// by the caller (one tick = one hit per pair, regardless of how
+    /// many connections share the (user, source_ip)). Empty IPs must
+    /// be filtered by the caller — they're meaningless to classify.
+    ///
+    /// Uses the same `INSERT … SELECT … WHERE EXISTS (users)` guard as
+    /// the destinations writer: a since-deleted user (the user_id comes
+    /// from the unvalidated log-scrape attribution map) is silently
+    /// skipped instead of raising an FK error that would roll back the
+    /// whole tick's batch (#32-class bug).
+    pub async fn record_user_source_ips(&self, pairs: &[(UserId, String)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (user_id, ip) in pairs {
+            // Defensive: skip empty IPs even if the caller didn't.
+            if ip.is_empty() {
+                continue;
+            }
+            // Bound to 45 chars — the max textual IPv6 length
+            // (incl. an IPv4-mapped tail). `.chars().take()` avoids a
+            // mid-codepoint slice panic (defensive; IPs are ASCII).
+            let ip_truncated: String = ip.chars().take(45).collect();
+            sqlx::query(
+                "INSERT INTO vpn_user_source_ips
+                    (user_id, source_ip, date, hit_count, last_seen)
+                 SELECT ?1, ?2, strftime('%Y-%m-%d', 'now'), 1,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
+                 ON CONFLICT(user_id, source_ip, date) DO UPDATE SET
+                     hit_count = hit_count + 1,
+                     last_seen = excluded.last_seen",
+            )
+            .bind(&user_id.0)
+            .bind(&ip_truncated)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Top source IPs for one user across the last `days` days, sorted
+    /// by total hits DESC. Used by the user-detail «Source IPs»
+    /// section. Mirrors
+    /// [`top_destinations_for_user`](Self::top_destinations_for_user).
+    pub async fn top_source_ips_for_user(
+        &self,
+        user_id: &UserId,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<VpnUserSourceIpRow>> {
+        let cutoff = format!("-{days} days");
+        let rows = sqlx::query(
+            "SELECT user_id, source_ip, date, hit_count, last_seen
+             FROM (
+                SELECT user_id, source_ip,
+                       MAX(date)        AS date,
+                       SUM(hit_count)   AS hit_count,
+                       MAX(last_seen)   AS last_seen
+                FROM vpn_user_source_ips
+                WHERE user_id = ?1
+                  AND date >= strftime('%Y-%m-%d', 'now', ?2)
+                GROUP BY user_id, source_ip
+             )
+             ORDER BY hit_count DESC, last_seen DESC
+             LIMIT ?3",
+        )
+        .bind(&user_id.0)
+        .bind(&cutoff)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_user_source_ip).collect()
+    }
+
+    /// Purge source-IP rows older than `days`. Wired into the hourly
+    /// retention task at the standard 30-day default.
+    pub async fn purge_user_source_ips_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM vpn_user_source_ips
+             WHERE date < strftime('%Y-%m-%d', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Best-effort GeoIP label lookup for a set of IPs, drawn from the
+    /// most-recent `sub_access_log` row that carried geo for each IP.
+    /// Geo is an attribute of the IP itself (operator-independent), so
+    /// this deliberately does NOT filter by user — a source IP seen in
+    /// VPN traffic is enriched from ANY user's /sub fetch that resolved
+    /// it. Returns `ip -> (country_opt, asn_opt)`; an IP absent from
+    /// the map (or mapping to (None, None)) simply has no GeoIP record
+    /// and the caller falls back to the reserved-range classifier.
+    ///
+    /// Mirrors the dynamic-IN-clause shape of
+    /// [`users_for_source_ips`](Self::users_for_source_ips) (sqlx has
+    /// no array binding). Bounded by the caller's IP-list length.
+    pub async fn geo_labels_for_ips(
+        &self,
+        ips: &[String],
+    ) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
+        use std::collections::HashMap;
+        if ips.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ips.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // For each IP, take the geo from its newest row that actually
+        // carried a country or ASN (older rows may predate the GeoIP
+        // enrichment migration and have NULLs). `MAX(ts)` over the
+        // non-NULL-geo subset via a correlated pick: group by IP and
+        // take the geo associated with the latest qualifying ts.
+        let sql = format!(
+            "SELECT s.ip AS ip, s.geo_country AS country, s.geo_asn AS asn
+             FROM sub_access_log s
+             JOIN (
+                SELECT ip, MAX(ts) AS mts
+                FROM sub_access_log
+                WHERE ip IN ({placeholders})
+                  AND (geo_country IS NOT NULL OR geo_asn IS NOT NULL)
+                GROUP BY ip
+             ) j ON j.ip = s.ip AND j.mts = s.ts
+             -- Re-assert non-NULL geo on the OUTER row too: when an
+             -- enriched and an un-enriched row for the same IP share
+             -- the max ts (sub-ms inserts), the join would otherwise
+             -- also match the NULL row and a HashMap overwrite could
+             -- non-deterministically blank the geo.
+             WHERE s.geo_country IS NOT NULL OR s.geo_asn IS NOT NULL"
+        );
+        let mut q = sqlx::query(&sql);
+        for ip in ips {
+            q = q.bind(ip);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut out: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        for r in rows {
+            let ip: String = r.try_get("ip")?;
+            let country: Option<String> = r.try_get("country")?;
+            let asn: Option<String> = r.try_get("asn")?;
+            // A later duplicate (same ip, same mts tie) just overwrites
+            // with equivalent geo — harmless; the join already pinned
+            // the newest qualifying ts.
+            out.insert(ip, (country, asn));
+        }
+        Ok(out)
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // Phase 5a-2 — reverse-DNS (PTR) cache for destination IPs.
     //
@@ -5536,6 +5708,29 @@ fn row_to_user_destination(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDestinat
     Ok(VpnUserDestinationRow {
         user_id: UserId(user_id),
         destination_label,
+        date,
+        hit_count: hits.max(0) as u64,
+        last_seen,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_user_source_ip(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserSourceIpRow> {
+    let user_id: String = r.try_get("user_id")?;
+    let source_ip: String = r.try_get("source_ip")?;
+    let date: String = r.try_get("date")?;
+    let hits: i64 = r.try_get("hit_count")?;
+    let last_seen_s: String = r.try_get("last_seen")?;
+    let last_seen = DateTime::parse_from_rfc3339(&last_seen_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!(
+                "vpn_user_source_ips.last_seen malformed: {last_seen_s}: {e}"
+            ))
+        })?;
+    Ok(VpnUserSourceIpRow {
+        user_id: UserId(user_id),
+        source_ip,
         date,
         hit_count: hits.max(0) as u64,
         last_seen,
