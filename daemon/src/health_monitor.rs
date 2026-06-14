@@ -488,6 +488,13 @@ pub async fn scan_once(
             "check_fingerprint_drift failed; fingerprint pass skipped this tick"
         );
     }
+    if let Err(e) = check_attribution_stall(inv, &servers).await {
+        tracing::warn!(
+            target = "vpnctld::health_monitor",
+            error = %e,
+            "check_attribution_stall failed; attribution pass skipped this tick"
+        );
+    }
     Ok(())
 }
 
@@ -934,6 +941,112 @@ pub async fn check_user_traffic_limits(
     Ok(())
 }
 
+/// Detect + alert on per-user attribution STALL (2026-06-14). Fires
+/// `server.attribution.stalled` (warning, server-scoped) when a node has
+/// live connections but the clash poll attributed ZERO users over the
+/// recent window — the silent signature of an orphaned sing-box log fd or
+/// a persistently failing log scrape (both hit prod: the logrotate orphan,
+/// then the `install /dev/null` ensure_installed orphan). Auto-resolves
+/// (`ack_open_alerts`) the moment attribution returns. Mirrors the
+/// `check_user_traffic_limits` fire/resolve idiom + per-server `(kind,
+/// server_id)` dedup.
+///
+/// Thresholds: a 15-minute window (≥3 poll ticks at the 5-min cadence) so a
+/// transient one-tick gap right after a sing-box restart does NOT fire; a
+/// 5-connection floor so a near-idle node isn't flagged.
+pub async fn check_attribution_stall(
+    inv: &SqliteInventory,
+    servers: &[vpnctl_core::Server],
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    const KIND: &str = "server.attribution.stalled";
+    const WINDOW_MINUTES: u32 = 15;
+    const MIN_ACTIVE: u32 = 5;
+
+    let stalled = inv
+        .attribution_stall_servers(WINDOW_MINUTES, MIN_ACTIVE)
+        .await?;
+    let stalled: std::collections::HashSet<&str> = stalled.iter().map(|s| s.0.as_str()).collect();
+
+    for server in servers {
+        let sid = &server.id;
+        if !stalled.contains(sid.0.as_str()) {
+            // Not stalled → auto-resolve any open alert for this server.
+            match inv.ack_open_alerts(KIND, Some(sid)).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::health_monitor",
+                    server = %sid.0,
+                    acked = n,
+                    "auto-recovered server.attribution.stalled — attribution resumed"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::health_monitor",
+                    server = %sid.0,
+                    error = %e,
+                    "auto-recovery ack failed for server.attribution.stalled"
+                ),
+            }
+            continue;
+        }
+        // Stalled — fire (idempotent: insert_alert_if_no_unacked dedups on
+        // the (kind, server_id) pair; a no-op while the alert is open).
+        let summary = format!(
+            "per-user attribution stalled on {} — connections are active but the sing-box log scrape attributed 0 users for \u{2265}{WINDOW_MINUTES}m (likely an orphaned sing-box log fd; per-user stats + abuse views go blank for this node until the log is reopened)",
+            sid.0
+        );
+        let payload = serde_json::json!({
+            "server_id": sid.0,
+            "window_minutes": WINDOW_MINUTES,
+            "min_active": MIN_ACTIVE,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        match inv
+            .insert_alert_if_no_unacked(KIND, Some(sid), "warning", &summary, Some(&payload_str))
+            .await
+        {
+            Ok(Some(alert_id)) => {
+                tracing::info!(
+                    target = "vpnctld::health_monitor",
+                    alert_id,
+                    server = %sid.0,
+                    "fired server.attribution.stalled alert"
+                );
+                if let Err(e) = inv
+                    .audit(
+                        "vpnctld",
+                        "alert.fire",
+                        Some(&sid.0),
+                        Some(&serde_json::json!({
+                            "alert_id": alert_id,
+                            "kind": KIND,
+                            "severity": "warning",
+                            "summary": summary,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        alert_id,
+                        server = %sid.0,
+                        error = %e,
+                        "alert.fire audit row failed for server.attribution.stalled"
+                    );
+                }
+                crate::node_probe_poller::push_alert(inv, KIND, "warning", &summary).await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                target = "vpnctld::health_monitor",
+                server = %sid.0,
+                error = %e,
+                "insert server.attribution.stalled alert failed"
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// Format a byte count as «GiB with one decimal» for short alert
 /// summaries. `1610612736 → "1.5 GiB"`. Used by C3 traffic-limit
 /// alerts; not exported because the formatting is specific to that
@@ -1300,6 +1413,81 @@ mod tests {
         assert!(
             unacked_after.is_empty(),
             "tick 2 must auto-ack the open alert; got: {unacked_after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_attribution_stall_fires_then_auto_recovers() {
+        // The silent-attribution-break detector. Tick 1: a node has 10
+        // live connections but the scrape attributed ZERO users (the
+        // orphaned-log-fd signature) → one warning. Tick 2: attribution
+        // returns (a real user shows up) → the open warning auto-acks.
+        let (_dir, inv) = fresh_inv().await;
+        let de = vpnctl_core::Server {
+            id: ServerId("de".into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&de).await.unwrap();
+        inv.add_user(&user_with_id("alice")).await.unwrap();
+        let servers = vec![de.clone()];
+
+        // Tick 1 — server-wide row only (user_id NULL), 10 active conns.
+        inv.record_vpn_stats(
+            &ServerId("de".into()),
+            &[vpnctl_inventory::VpnStatsDelta {
+                user_id: None,
+                upload_bytes: 1000,
+                download_bytes: 2000,
+                active_connections: 10,
+            }],
+        )
+        .await
+        .unwrap();
+        check_attribution_stall(&inv, &servers).await.unwrap();
+        let fired: Vec<_> = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none() && a.kind == "server.attribution.stalled")
+            .collect();
+        assert_eq!(
+            fired.len(),
+            1,
+            "tick 1: a node with conns but 0 attributed users must fire exactly one stall alert; got {fired:?}"
+        );
+
+        // Tick 2 — a real user is now attributed → no longer stalled.
+        inv.record_vpn_stats(
+            &ServerId("de".into()),
+            &[vpnctl_inventory::VpnStatsDelta {
+                user_id: Some(UserId("alice".into())),
+                upload_bytes: 10,
+                download_bytes: 20,
+                active_connections: 3,
+            }],
+        )
+        .await
+        .unwrap();
+        check_attribution_stall(&inv, &servers).await.unwrap();
+        let still_open: Vec<_> = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none() && a.kind == "server.attribution.stalled")
+            .collect();
+        assert!(
+            still_open.is_empty(),
+            "tick 2: attribution resumed → the open stall alert must auto-ack; got {still_open:?}"
         );
     }
 

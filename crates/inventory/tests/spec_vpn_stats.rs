@@ -1190,3 +1190,64 @@ async fn top_users_by_daily_traffic_ranks_by_weighted_bytes() {
     assert_eq!(top[1].0.0, "bob");
     assert_eq!(top[1].1, 1_000_000);
 }
+
+// attribution_stall_servers: a server is "stalled" iff, within the
+// window, its MAX(active_connections) >= min_active AND it attributed
+// ZERO distinct users (every stats row had a NULL user_id). Servers with
+// at least one attributed user, or below the active floor, are excluded.
+#[tokio::test]
+async fn attribution_stall_servers_flags_only_active_unattributed_nodes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    for s in ["stall", "ok", "idle"] {
+        inv.add_server(&server(s)).await.unwrap();
+    }
+    inv.add_user(&user("alice")).await.unwrap();
+
+    // "stall": 10 active conns, only a server-wide (NULL-user) row → 0
+    // attributed users. This is the silent-break signature.
+    inv.record_vpn_stats(&ServerId("stall".into()), &[ud(None, 1000, 2000, 10)])
+        .await
+        .unwrap();
+    // "ok": same 10 active conns, but a real user IS attributed → healthy.
+    inv.record_vpn_stats(
+        &ServerId("ok".into()),
+        &[ud(None, 1000, 2000, 10), ud(Some("alice"), 5, 5, 3)],
+    )
+    .await
+    .unwrap();
+    // "idle": 0 attributed users, but only 2 active conns (< floor of 5)
+    // → a near-idle node must NOT be flagged.
+    inv.record_vpn_stats(&ServerId("idle".into()), &[ud(None, 10, 10, 2)])
+        .await
+        .unwrap();
+
+    let stalled = inv.attribution_stall_servers(60, 5).await.unwrap();
+    let ids: Vec<&str> = stalled.iter().map(|s| s.0.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["stall"],
+        "only the active-but-unattributed node must be flagged; got {ids:?}"
+    );
+}
+
+// attribution_stall_servers honours the time window: rows older than the
+// window are ignored entirely, so a node whose only (unattributed) rows
+// fall outside the window is NOT flagged.
+#[tokio::test]
+async fn attribution_stall_servers_ignores_rows_outside_window() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("stall")).await.unwrap();
+    inv.record_vpn_stats(&ServerId("stall".into()), &[ud(None, 1000, 2000, 10)])
+        .await
+        .unwrap();
+
+    // A 0-minute window excludes the just-written row (ts <= now), so the
+    // node falls out of the candidate set.
+    let stalled = inv.attribution_stall_servers(0, 5).await.unwrap();
+    assert!(
+        stalled.is_empty(),
+        "rows at/after the window edge must be excluded; got {stalled:?}"
+    );
+}

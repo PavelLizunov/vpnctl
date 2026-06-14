@@ -3928,6 +3928,43 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
+    /// Detect per-user attribution STALL per server (2026-06-14 — backs the
+    /// `server.attribution.stalled` health alert). A server is "stalled"
+    /// when, over the recent window, it has live connections (server-wide
+    /// rows show `active_connections >= min_active`) but ZERO distinct
+    /// attributed users — the clash poll lands server-wide totals while the
+    /// sing-box log scrape attributed nobody. This is the signature of an
+    /// orphaned sing-box log fd (live log 0-byte) or a persistently failing
+    /// scrape — exactly the silent break that hit prod twice (logrotate
+    /// orphan, then the `install /dev/null` ensure_installed orphan).
+    ///
+    /// `window_minutes` spans multiple poll ticks so the transient one-tick
+    /// blip right after a sing-box restart does NOT flag. Index-backed by
+    /// `idx_vcs_ts` (ts range) + a small GROUP BY.
+    pub async fn attribution_stall_servers(
+        &self,
+        window_minutes: u32,
+        min_active: u32,
+    ) -> Result<Vec<ServerId>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT server_id
+             FROM vpn_connection_stats
+             WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             GROUP BY server_id
+             HAVING MAX(active_connections) >= ?2
+                AND COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id END) = 0",
+        )
+        .bind(format!("-{window_minutes} minutes"))
+        .bind(i64::from(min_active))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ServerId(r.get::<String, _>("server_id")))
+            .collect())
+    }
+
     /// **Fleet-wide raw stats** (2026-05-23 — backs the dashboard's
     /// multi-window traffic chart). Same row shape as the per-
     /// server/per-user variants but with no `WHERE` filter on the
