@@ -4454,7 +4454,7 @@ impl SqliteInventory {
                     kernel_versions_json
              FROM node_health
              WHERE server_id = ?1
-             ORDER BY ts DESC
+             ORDER BY ts DESC, rowid DESC
              LIMIT 1",
         )
         .bind(&server_id.0)
