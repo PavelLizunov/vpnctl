@@ -430,7 +430,8 @@ impl Kernel for DnsTunnel {
             .exec("command -v sing-box >/dev/null 2>&1 && echo present || echo absent")
             .await?;
 
-        if slipstream_needs_reinstall(&digest, &node_sha) || !slipstream_present(&singbox) {
+        let binary_changed = slipstream_needs_reinstall(&digest, &node_sha);
+        if binary_changed || !slipstream_present(&singbox) {
             // ── amd64 arch guard. ─────────────────────────────────────
             // The cache binary is a static amd64 build (DNS-TUNNEL.md
             // §6). Installing it on a non-amd64 node would write a
@@ -471,6 +472,25 @@ impl Kernel for DnsTunnel {
         // apply_config has run — that's why both units are
         // enabled+started by apply_config, not here.
         ssh.exec(&runtime_provision_script()).await?;
+
+        // update-kernels gap fix (2026-06-14): `ensure_installed` only
+        // UPLOADS the new binary — the restart that makes it take effect
+        // lives in `apply_config`. So an `update-kernels` run (which calls
+        // ONLY `ensure_installed`, no config re-apply) would atomically
+        // swap the file but leave slipstream running the OLD inode, i.e.
+        // the "upgrade" silently does nothing until the next full deploy.
+        // When we actually changed the binary AND the relay is already up
+        // (an upgrade — NOT a fresh install, where the unit is started
+        // later by apply_config once its config exists), restart it so the
+        // new binary is live. The `is-active` guard makes this a no-op on
+        // a first install. `|| true` so a stopped/absent unit isn't a hard
+        // error.
+        if binary_changed {
+            ssh.exec(
+                "systemctl is-active --quiet dns-tunnel && systemctl restart dns-tunnel || true",
+            )
+            .await?;
+        }
         Ok(())
     }
 
