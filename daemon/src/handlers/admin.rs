@@ -3669,6 +3669,67 @@ pub(crate) async fn user_detail(
     const ABUSE_HEAT_THRESHOLD: u64 = 5;
     let heat_24h = ips_24h >= ABUSE_HEAT_THRESHOLD;
 
+    // PR-User user#2 — per-server traffic split over the last 24h
+    // (Q-4b). One query. Failure → empty Vec, which renders the NM-11
+    // empty-state explainer rather than a blank card.
+    let traffic_by_server = state
+        .inv
+        .user_traffic_by_server(&uid, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_traffic_by_server failed");
+            Vec::new()
+        });
+    // PR-User user#4 — UA clusters over the last 24h, fetched here for
+    // the sharing-verdict line. `ua_clusters_section` (the per-UA
+    // table) keeps its own self-contained query so it stays usable for
+    // any future caller; this small bounded query (one window, ≤a few
+    // UA rows) is the cost of a consolidated verdict that can't drift
+    // from the table's thresholds.
+    let ua_clusters = state.inv.ua_clusters_for_user(&uid, 24).await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "ua_clusters_for_user (verdict) failed");
+        Vec::new()
+    });
+    // PR-User user#5 — lifecycle facts (Q-4d). created_at +
+    // last_sub_fetch + age_days. On failure compose a defensible
+    // fallback from the user's own created_at so the section still
+    // renders (created_at is always present for an existing user).
+    let lifecycle = state.inv.user_lifecycle(&uid).await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_lifecycle failed");
+        vpnctl_inventory::UserLifecycle {
+            created_at: chrono::Utc::now(),
+            last_sub_fetch: access_aggregates.last_seen,
+            age_days: 0,
+        }
+    });
+    // PR-User user#1 — online-now presence. Walk the in-memory
+    // snapshot cache across the granted servers PLUS the full
+    // inventory (a connection can land on a server before the grant is
+    // reflected, and the cache is cheap to read). Dedup the id set so
+    // we don't double-count a server present in both lists.
+    let presence_server_ids: Vec<vpnctl_core::ServerId> = {
+        let mut seen: HashSet<vpnctl_core::ServerId> = HashSet::new();
+        let mut out = Vec::new();
+        for s in servers.iter().chain(all_servers.iter()) {
+            if seen.insert(s.id.clone()) {
+                out.push(s.id.clone());
+            }
+        }
+        out
+    };
+    // PR-User user#1 — render the presence badge here (it does an
+    // async cache + fallback-query read, which the maud `html!` block
+    // below can't `.await`). Cheap: in-memory cache reads + at most one
+    // bounded `users_for_source_ips` query.
+    let online_badge = user_online_badge(
+        &state,
+        &uid,
+        &presence_server_ids,
+        access_aggregates.last_seen,
+        lang,
+    )
+    .await;
+
     let body = html! {
         div.ed-art-eyebrow {
             a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
@@ -3680,6 +3741,11 @@ pub(crate) async fn user_detail(
         p.ed-art-deck {
             "uuid " span.ed-mono { (user.uuid) }
         }
+
+        // PR-User user#1 — online-now presence badge, directly under
+        // the user header so «is this person connected right now» is
+        // the first thing the operator sees.
+        (online_badge)
 
         // 2026-05-23 quickfix follow-up — pending-deploy banner.
         // Surfaces servers whose running config doesn't yet include
@@ -4861,29 +4927,37 @@ pub(crate) async fn user_detail(
             }
         }
 
-        // ── UA fingerprint (Phase Track-4) ──────────────────────
-        (ua_clusters_section(&state, &uid, lang).await)
+        // ── PR-User user#4 — sharing-evidence verdict ────────────
+        // ONE consolidated verdict line above the per-UA evidence
+        // table, folding the 30-day access spread with the UA-cluster
+        // /16 spread (reusing the Track-4 ua_verdict thresholds).
+        (user_sharing_verdict_section(&access_aggregates, &ua_clusters, lang))
 
-        // 2026-05-23 — global time-window picker. Drives the Live
-        // VPN stats chart below (and any future time-series blocks
-        // on user-detail). Single picker keeps Pavel's mental
-        // model «pick once, all charts re-render».
-        (window_picker_section(
-            &format!("/admin/users/{}", path_segment_encode(&uid.0)),
-            pick_vpn_sparkline_window(query.vpn_window.as_deref()).slug,
-            lang,
-        ))
+        // ── UA fingerprint (Phase Track-4) + user#7 geo footer ───
+        (ua_clusters_section(&state, &uid, &access_aggregates, lang).await)
 
-        // ── Live VPN stats (Track-3 chunk 3) ────────────────────
+        // ── PR-User user#2 — traffic split by server (24h) ───────
+        (user_detail_traffic_by_server_section(&traffic_by_server, lang))
+
+        // ── Live VPN stats (Track-3 chunk 3) + user#6 trend ──────
+        // The window picker (24h/7d/30d/all) is now folded INTO this
+        // section — it re-fetches the picked window's rows once and
+        // drives both the compact `sparkline_svg` trend and the full
+        // chart, so the previous page-level picker is gone (it would
+        // have rendered a second, duplicate picker).
         (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
         (user_top_destinations_section(&state, &uid, lang).await)
         (user_sessions_section(&state, &uid, lang).await)
 
+        // ── PR-User user#5 — lifecycle facts ─────────────────────
+        (user_lifecycle_section(&lifecycle, access_aggregates.last_seen, lang))
+
         // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
         // Show current month-to-date usage + the configured cap
-        // (if any) + an inline form to change both. Re-runs the
-        // usage query so the page-after-redirect immediately
-        // reflects new limits.
+        // (if any) + an inline form to change both, plus the user#3
+        // month-end projection when a cap is set. Re-runs the usage
+        // query so the page-after-redirect immediately reflects new
+        // limits.
         (user_traffic_limit_section(&state, &uid, lang).await)
 
         // B1.user (audit 2026-05-22) — soft suspend. Banner +
@@ -4966,6 +5040,365 @@ pub(crate) async fn user_detail(
     Ok(shell("users", &theme, &accent, lang, body))
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  PR-User — informativeness cards for the user-detail page.
+//
+//  All seven cards reuse existing helpers (status_tile, sparkline_svg,
+//  window_picker_section, humanize_bytes, fmt_traffic_progress,
+//  format_msk_iso, ua_verdict) — no parallel styling. Bilingual via
+//  tr() / t(). The only card that touches process state outside one
+//  SQL query is user#1 (the online-now badge), and that read is
+//  in-memory only — it walks the already-populated `snapshot_cache`
+//  across the granted servers, never an extra DB round-trip or SSH.
+// ════════════════════════════════════════════════════════════════════
+
+/// user#1 — online-now presence badge. Walks `state.snapshot_cache`
+/// across every server in `server_ids` (in production the granted set
+/// joined with the full inventory; tests pass whatever they seeded),
+/// counting the live clash-api connections whose `(source_ip,
+/// source_port)` attribution resolves to `uid`. When the per-connection
+/// attribution map misses (NM-11: the sing-box log scrape window may
+/// have scrolled past a long-lived connection's accept line), we fall
+/// back to `users_for_source_ips` — the same sourceIP-to-user_id join
+/// the «Live connections» drill-down uses — over the unattributed
+/// source IPs only, so a covered user still lights up green.
+///
+/// 🟢 online → "N conns on {server(s)}". Offline → "last seen {Xh
+/// ago}" from `sub_access_aggregates_for_user.last_seen` (passed in as
+/// `last_seen` so we don't re-query). Cheap: in-memory map reads +, at
+/// most, one bounded `users_for_source_ips` query for the IPs the
+/// in-memory map couldn't resolve.
+async fn user_online_badge(
+    state: &AppState,
+    uid: &vpnctl_core::UserId,
+    server_ids: &[vpnctl_core::ServerId],
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::{K, t, tr};
+    // Per-server live connection count attributed to this user, plus
+    // the set of (server, source_ip) pairs the in-memory attribution
+    // map could NOT resolve — candidates for the sourceIP fallback.
+    let mut conns_per_server: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    // Unresolved source IPs → the servers they appeared on (so the
+    // fallback can credit the right server when a join succeeds).
+    let mut unresolved: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for sid in server_ids {
+        let Some(snap) = state.snapshot_cache.get(sid) else {
+            continue;
+        };
+        for c in &snap.snapshot.connections {
+            let key = (c.metadata.source_ip.clone(), c.metadata.source_port.clone());
+            match snap.attribution.get(&key) {
+                Some(attr_uid) if attr_uid.as_str() == uid.0.as_str() => {
+                    *conns_per_server.entry(sid.0.clone()).or_insert(0) += 1;
+                }
+                Some(_) => {
+                    // Attributed to a DIFFERENT user — never this one.
+                }
+                None => {
+                    // Unattributed — defer to the sourceIP join below.
+                    if !c.metadata.source_ip.is_empty() {
+                        unresolved
+                            .entry(c.metadata.source_ip.clone())
+                            .or_default()
+                            .push(sid.0.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: resolve the unattributed source IPs via the same
+    // sub_access_log sourceIP → user_id join the drill-down uses. One
+    // bounded query over the distinct unresolved IPs (skipped entirely
+    // when the in-memory map already covered everything).
+    if !unresolved.is_empty() {
+        let ips: Vec<String> = unresolved.keys().cloned().collect();
+        match state.inv.users_for_source_ips(&ips, 7).await {
+            Ok(map) => {
+                for (ip, candidates) in &map {
+                    // The join returns (user, hits) ordered hits-DESC;
+                    // the top candidate is the most-likely owner. Credit
+                    // the user only when THEY are that top candidate.
+                    let owner_is_user = candidates
+                        .first()
+                        .map(|(u, _)| u.0.as_str() == uid.0.as_str())
+                        .unwrap_or(false);
+                    if owner_is_user {
+                        if let Some(servers) = unresolved.get(ip) {
+                            for s in servers {
+                                *conns_per_server.entry(s.clone()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "users_for_source_ips (online badge fallback) failed");
+            }
+        }
+    }
+
+    let total_conns: u32 = conns_per_server.values().copied().sum();
+    let online = total_conns > 0;
+
+    html! {
+        div.ed-art-eyebrow style="margin-top: 18px;" { (t(lang, K::EyebrowPresence)) }
+        @if online {
+            @let server_count = conns_per_server.len();
+            @let server_list = conns_per_server
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            p style="font-family: var(--mono); font-size: 13px; margin: 4px 0 0; color: var(--ink);" {
+                "🟢 "
+                b { (tr(lang, "online", "онлайн")) }
+                " · " (total_conns) " "
+                @if total_conns == 1 { (tr(lang, "conn", "соединение")) }
+                @else { (tr(lang, "conns", "соединений")) }
+                " "
+                @if server_count == 1 { (tr(lang, "on ", "на ")) }
+                @else { (tr(lang, "across ", "на ")) }
+                span.ed-mono { (server_list) }
+            }
+            p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 4px 0 0;" {
+                (tr(
+                    lang,
+                    "Live from each node's clash-api snapshot (≤5 min old), attributed by source IP — sing-box doesn't carry the username (NM-11), so a connection whose IP we've never seen on a /sub fetch stays uncounted.",
+                    "Из снэпшота clash-api каждой ноды (не старше 5 мин), атрибуция по source IP — sing-box не передаёт имя юзера (NM-11), поэтому соединение с IP, который мы не видели при запросе /sub, не учитывается.",
+                ))
+            }
+        } @else {
+            p style="font-family: var(--mono); font-size: 13px; margin: 4px 0 0; color: var(--mute);" {
+                (tr(lang, "offline", "офлайн"))
+                " · "
+                @match last_seen {
+                    Some(ts) => {
+                        @let ago = humanize_since(ts, lang);
+                        (tr(lang, "last seen ", "последний раз ")) (ago)
+                    }
+                    None => (tr(lang, "never connected", "ни разу не подключался")),
+                }
+            }
+        }
+    }
+}
+
+/// Compact «X ago» for the presence badge — whole-unit granularity
+/// (minutes / hours / days) is enough for «when was this user last
+/// active». Clamps a future timestamp (clock skew) to «just now».
+fn humanize_since(ts: chrono::DateTime<chrono::Utc>, lang: crate::i18n::Locale) -> String {
+    use crate::i18n::tr;
+    let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
+    if secs < 60 {
+        tr(lang, "just now", "только что").to_string()
+    } else if secs < 3600 {
+        format!("{}{}", secs / 60, tr(lang, "m ago", "м назад"))
+    } else if secs < 86_400 {
+        format!("{}{}", secs / 3600, tr(lang, "h ago", "ч назад"))
+    } else {
+        format!("{}{}", secs / 86_400, tr(lang, "d ago", "д назад"))
+    }
+}
+
+/// user#2 — traffic split by server. Per-server up/down over the last
+/// 24h from `user_traffic_by_server(uid, 24)`. NM-11 empty-state: per-
+/// connection clash attribution is NULL upstream, so this table only
+/// has data once the poller's `record_vpn_stats` has written per-user
+/// rows — until then we render an explainer, not a blank card.
+fn user_detail_traffic_by_server_section(
+    rows: &[(vpnctl_core::ServerId, u64, u64)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Traffic by server · last 24h", "Трафик по серверам · за 24ч")) }
+        @if rows.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                (tr(
+                    lang,
+                    "No per-server traffic recorded for this user in the last 24h. The split fills in once the clash-api poller has written at least one per-user tick — sing-box's clash-api carries the source IP but not the username (NM-11), so attribution lands a snapshot behind the connection. A blank table here means the user hasn't been seen connected yet, not an error.",
+                    "Трафика по серверам у этого юзера за 24ч нет. Разбивка заполнится, как только поллер clash-api запишет хотя бы один per-user тик — clash-api sing-box передаёт source IP, но не имя юзера (NM-11), поэтому атрибуция отстаёт на снэпшот. Пустая таблица здесь значит, что юзера ещё не видели подключённым, а не ошибку.",
+                ))
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                (tr(
+                    lang,
+                    "Per-server upload / download over the last 24h, weighted by each node's usage coefficient. Sums the clash-api per-tick deltas attributed to this user.",
+                    "Upload / download по каждому серверу за 24ч, взвешенные коэффициентом нагрузки ноды. Сумма per-тик дельт clash-api, отнесённых к этому юзеру.",
+                ))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "server", "сервер"))
+                        }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "uploaded", "отправлено"))
+                        }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "downloaded", "принято"))
+                        }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                            (tr(lang, "total", "всего"))
+                        }
+                    }
+                }
+                tbody {
+                    @for (sid, up, dn) in rows {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding: 5px 8px; color: var(--ink);" {
+                                a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) style="color: var(--ink); text-decoration: none;" { (sid.0) }
+                            }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*up)) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*dn)) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink); font-weight: 500;" { (humanize_bytes(up.saturating_add(*dn))) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// user#4 — one consolidated sharing-evidence verdict line. Folds the
+/// 30-day `sub_access_aggregates_for_user` spread (distinct IPs / ASNs
+/// / countries) with the UA-cluster `/16` spread (reusing the exact
+/// `ua_verdict` thresholds from card #7 / Track-4 so the two surfaces
+/// can't disagree). Renders ONE sentence — "likely shared" when either
+/// signal trips, "looks single-user" otherwise — above the detailed
+/// per-UA table so the operator gets the headline before the evidence.
+fn user_sharing_verdict_section(
+    aggregates: &vpnctl_inventory::SubAccessAggregates,
+    ua_clusters: &[vpnctl_inventory::UaCluster],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    // ASN spread is the strongest single-query signal (a sub URL
+    // fetched from ≥3 distinct ASNs left one human's device fleet).
+    // Mirror the dashboard's likely-shared threshold.
+    const SHARED_ASN_THRESHOLD: u64 = 3;
+    // Reuse the Track-4 UA heuristic verbatim: any UA cluster whose
+    // /16 spread trips `ua_verdict` → LikelyShared counts as evidence.
+    let ua_shared = ua_clusters.iter().any(|c| {
+        matches!(
+            ua_verdict(c.distinct_ips, c.distinct_slash16),
+            UaVerdict::LikelyShared
+        )
+    });
+    let asn_shared = aggregates.distinct_asns >= SHARED_ASN_THRESHOLD;
+    let likely_shared = ua_shared || asn_shared;
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Sharing verdict", "Вердикт по расшариванию")) }
+        @if likely_shared {
+            p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--acc);" {
+                b { (tr(lang, "Verdict: likely shared", "Вердикт: вероятно расшарен")) }
+                " — "
+                (aggregates.distinct_ips) (tr(lang, " IPs", " IP"))
+                " / " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN"))
+                " / " (aggregates.distinct_countries) (tr(lang, " countries", " стран"))
+                @if ua_shared {
+                    (tr(lang, " / UA spread across ISPs", " / UA-разброс по ISP"))
+                }
+            }
+        } @else {
+            p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--soft);" {
+                (tr(lang, "Verdict: looks single-user", "Вердикт: похоже на одного юзера"))
+                " — "
+                (aggregates.distinct_ips) (tr(lang, " IPs", " IP"))
+                " / " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN"))
+                " / " (aggregates.distinct_countries) (tr(lang, " countries", " стран"))
+            }
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 4px 0 0;" {
+            (tr(
+                lang,
+                "Heuristic over the 30-day /sub access window — a subscription fetched from many ASNs / countries, or a single User-Agent spread across many ISP /16 networks, has probably escaped past one human. Not authoritative; cross-check the per-IP timeline below before acting.",
+                "Эвристика по 30-дневному окну обращений к /sub — подписка, которую тянут из многих ASN / стран, или один User-Agent, расползшийся по разным ISP /16, скорее всего ушла за пределы одного человека. Не приговор; сверься с таймлайном по IP ниже прежде чем что-то делать.",
+            ))
+        }
+    }
+}
+
+/// user#5 — lifecycle facts: created · last seen · last fetch · age.
+/// `lifecycle` is Q-4d (`user_lifecycle`), carrying created_at,
+/// last_sub_fetch and age_days. `last_seen` is the most recent activity
+/// of any kind, sourced from `sub_access_aggregates_for_user.last_seen`
+/// (passed in to avoid a re-query). Renders timestamps via the shared
+/// `format_msk_iso`.
+fn user_lifecycle_section(
+    lifecycle: &vpnctl_inventory::UserLifecycle,
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Lifecycle", "Жизненный цикл")) }
+        div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 10px 0 0; font-family: var(--serif);" {
+            div title=(tr(lang, "When this user row was created (users.created_at).", "Когда создана запись пользователя (users.created_at).")) {
+                div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                    (format_msk_iso(lifecycle.created_at))
+                }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (tr(lang, "created", "создан"))
+                }
+            }
+            div title=(tr(lang, "Most recent activity of any kind seen for this user (last /sub fetch or VPN tick).", "Последняя любая активность юзера (последнее обращение /sub или VPN-тик).")) {
+                @match last_seen {
+                    Some(ts) => {
+                        div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                            (format_msk_iso(ts))
+                        }
+                    }
+                    None => {
+                        div style="font-size: 16px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
+                            (tr(lang, "never", "никогда"))
+                        }
+                    }
+                }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (tr(lang, "last seen", "последний раз"))
+                }
+            }
+            div title=(tr(lang, "Most recent real (non-egress) /sub subscription fetch.", "Последнее реальное (не-egress) обращение к подписке /sub.")) {
+                @match lifecycle.last_sub_fetch {
+                    Some(ts) => {
+                        div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                            (format_msk_iso(ts))
+                        }
+                    }
+                    None => {
+                        div style="font-size: 16px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
+                            (tr(lang, "never", "никогда"))
+                        }
+                    }
+                }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (tr(lang, "last fetch", "последнее обращение"))
+                }
+            }
+            div title=(tr(lang, "Whole days since the user row was created.", "Целых дней с момента создания записи юзера.")) {
+                div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                    (lifecycle.age_days) " " (tr(lang, "days", "дн"))
+                }
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    (tr(lang, "age", "возраст"))
+                }
+            }
+        }
+    }
+}
+
 /// Phase Track-4 — UA fingerprint heuristic. Renders one row per
 /// distinct User-Agent that has hit this user's `/sub` URL in the
 /// last 24h, with a "likely roaming" / "likely shared URL" label.
@@ -4978,9 +5411,16 @@ pub(crate) async fn user_detail(
 ///
 /// On inventory error returns a small "(unavailable)" nudge instead
 /// of failing the whole page.
+///
+/// user#7 (PR-User) — additive geo + last-seen footer. `UaCluster`
+/// carries no per-row geo (the heuristic only needs IP/16 spread), so
+/// the country / ASN / last-seen columns are summarised once below the
+/// table from the user's 30-day `sub_access_aggregates_for_user`
+/// (passed in to avoid a re-query). The per-UA table is unchanged.
 async fn ua_clusters_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
+    aggregates: &vpnctl_inventory::SubAccessAggregates,
     lang: crate::i18n::Locale,
 ) -> Markup {
     let clusters = match state.inv.ua_clusters_for_user(uid, 24).await {
@@ -5042,6 +5482,28 @@ async fn ua_clusters_section(
                         td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (c.distinct_slash16) }
                         td style=(verdict.style()) { (verdict.label()) }
                     }
+                }
+            }
+        }
+        // user#7 — devices/UA geo + last-seen summary. Additive footer
+        // under the per-UA table: country / ASN spread + the user's most
+        // recent /sub fetch, all from the 30-day aggregates (no extra
+        // query). Gives the operator the «where from / how long ago»
+        // context the per-UA /16 spread can't.
+        div style="display: flex; flex-wrap: wrap; gap: 28px; padding: 12px 0 0; font-family: var(--serif); font-size: 12px; color: var(--mute);" {
+            span title=(crate::i18n::tr(lang, "Distinct ISO country codes the subscription was fetched from over the last 30 days (GeoIP).", "Уникальных ISO-кодов стран, из которых тянули подписку за 30 дней (GeoIP).")) {
+                span.ed-mono style="color: var(--ink);" { (aggregates.distinct_countries) }
+                " " (crate::i18n::tr(lang, "countries · 30d", "стран · 30д"))
+            }
+            span title=(crate::i18n::tr(lang, "Distinct ASN / ISP labels over the last 30 days (GeoIP-ASN).", "Уникальных ASN / ISP за 30 дней (GeoIP-ASN).")) {
+                span.ed-mono style="color: var(--ink);" { (aggregates.distinct_asns) }
+                " " (crate::i18n::tr(lang, "ASNs · 30d", "ASN · 30д"))
+            }
+            span title=(crate::i18n::tr(lang, "Most recent /sub fetch (any IP).", "Последнее обращение к /sub (любой IP).")) {
+                (crate::i18n::tr(lang, "last seen ", "последний раз "))
+                @match aggregates.last_seen {
+                    Some(ts) => span.ed-mono style="color: var(--ink);" { (format_msk_iso(ts)) },
+                    None => em { (crate::i18n::tr(lang, "never", "никогда")) },
                 }
             }
         }
@@ -5254,6 +5716,41 @@ fn x_axis_tick_label(t: chrono::DateTime<chrono::Utc>, bucket_hours: u32) -> Str
         "%b %Y"
     };
     t.with_timezone(&display_tz()).format(fmt).to_string()
+}
+
+/// user#6 — per-cell (upload + download) byte totals for the compact
+/// `sparkline_svg` trend folded into `live_vpn_stats_section`. Buckets
+/// `rows` into `window.cells` cells of `window.bucket_hours` each,
+/// newest cell on the right — identical bucketing to `vpn_traffic_chart`
+/// so the sparkline and the full chart can't disagree. Returns one f64
+/// per cell (bytes); an all-zero series means «no traffic in window»
+/// and the caller skips rendering the sparkline.
+fn vpn_traffic_trend_series(
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    window: VpnSparklineWindow,
+) -> Vec<f64> {
+    use chrono::{DurationRound, TimeDelta, Utc};
+    let cells = window.cells as usize;
+    let bucket_seconds = window.bucket_hours as i64 * 3600;
+    let now = match Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) {
+        Ok(t) => t,
+        Err(_) => return vec![0.0; cells],
+    };
+    let mut per_cell: Vec<u64> = vec![0; cells];
+    for r in rows {
+        let row_t = match r.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let buckets_ago = now.signed_duration_since(row_t).num_seconds() / bucket_seconds;
+        if !(0..cells as i64).contains(&buckets_ago) {
+            continue;
+        }
+        let idx = (cells as i64 - 1 - buckets_ago) as usize;
+        per_cell[idx] =
+            per_cell[idx].saturating_add(r.upload_bytes.saturating_add(r.download_bytes));
+    }
+    per_cell.into_iter().map(|v| v as f64).collect()
 }
 
 /// PowerBI / Tableau-style stacked bar chart for VPN traffic.
@@ -5551,6 +6048,45 @@ fn fmt_traffic_progress(used: u64, limit: u64) -> String {
     )
 }
 
+/// user#3 — straight-line month-end traffic projection. Extrapolates
+/// `used` (month-to-date bytes) to a full-month estimate assuming the
+/// rest of the month matches the daily average so far:
+/// `used / day_of_month × days_in_month`.
+///
+/// Returns `None` when `used == 0` (nothing to project — the «0»
+/// projection is noise, not signal) so the caller can skip the line.
+/// `day_of_month` is calendar-1-based and therefore never 0, but the
+/// `.max(1)` guard makes the division provably panic-free regardless
+/// of any future clock-skew bug. Saturating arithmetic throughout.
+fn project_month_end(used: u64) -> Option<u64> {
+    use chrono::Datelike;
+    if used == 0 {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    let day = u64::from(now.day()).max(1); // 1..=31, guarded
+    let days_in_month = u64::from(days_in_month(now.year(), now.month()));
+    // used / day × days_in_month, computed in u128 to avoid an
+    // intermediate overflow on a multi-TiB month, then saturated back.
+    let projected = (u128::from(used) * u128::from(days_in_month)) / u128::from(day);
+    Some(projected.min(u128::from(u64::MAX)) as u64)
+}
+
+/// Calendar days in `(year, month)`. Handles leap Februaries. Returns
+/// 30 for an out-of-range month (defensive — `chrono::Month` is always
+/// 1..=12 in practice, but the fallback keeps the projection finite).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 30,
+    }
+}
+
 /// Per-user traffic-limit section on the user-detail page. Shows
 /// the month-to-date total + the configured limit (if any) + an
 /// inline form to change both. Operator can set a cap even when
@@ -5607,6 +6143,29 @@ async fn user_traffic_limit_section(
                 @let _ = over_limit;
                 div style="height: 8px; background: var(--rule); margin-bottom: 16px; overflow: hidden;" {
                     div style=(format!("height: 100%; width: {bar_pct}%; background: {bar_fill};")) {}
+                }
+                // user#3 — straight-line month-end projection. «If the
+                // rest of the month looks like the part so far»:
+                // used / day-of-month × days-in-month. Guards the
+                // day-of-month == 0 impossibility (calendar days are
+                // 1-based; the guard is belt-and-suspenders so a future
+                // clock bug can't divide by zero). Only meaningful with
+                // a cap set, so it lives in this arm.
+                @if let Some(projected) = project_month_end(used) {
+                    @let proj_pct = ((projected as u128 * 100) / lim as u128).min(999) as u32;
+                    @let proj_over = proj_pct >= 100;
+                    p style="font-family: var(--mono); font-size: 12px; margin: 0 0 14px; color: var(--mute);" {
+                        (tr(lang, "projected ", "прогноз "))
+                        span style=(if proj_over { "color: var(--acc); font-weight: 600;" } else { "color: var(--ink);" }) {
+                            (humanize_bytes(projected))
+                        }
+                        (tr(lang, " by month-end (", " к концу месяца ("))
+                        (proj_pct) (tr(lang, "% of cap)", "% лимита)"))
+                        @if proj_over {
+                            " · "
+                            (tr(lang, "on track to exceed the cap", "по тренду превысит лимит"))
+                        }
+                    }
                 }
             }
             _ => {
@@ -5931,6 +6490,28 @@ async fn live_vpn_stats_section(
             (status_tile("uploaded", &humanize_bytes(total_up), "var(--ink)"))
             (status_tile("downloaded", &humanize_bytes(total_dn), "var(--ink)"))
             (status_tile("peak conns", &peak_conns.to_string(), "var(--ink)"))
+        }
+        // user#6 — 7d/30d traffic trend folded in here. A
+        // `window_picker_section` scoped to THIS user's detail page lets
+        // the operator widen the window (24h / 7d / 30d / all) without a
+        // separate query — the section already re-fetched `rows` at the
+        // picked window above, so the compact `sparkline_svg` below just
+        // re-buckets those same rows into per-cell (up+down) totals. The
+        // full PowerBI-style chart still renders below; this is the
+        // at-a-glance shape so a 30-day trend is one click away.
+        (window_picker_section(
+            &format!("/admin/users/{}", path_segment_encode(&uid.0)),
+            window.slug,
+            lang,
+        ))
+        @let trend = vpn_traffic_trend_series(&rows, window);
+        @if trend.iter().any(|&v| v > 0.0) {
+            div style="margin: 6px 0 18px;" {
+                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "traffic trend · ", "тренд трафика · ")) (window_label)
+                }
+                (sparkline_svg(&trend, 720, 60))
+            }
         }
         @if !per_server.is_empty() {
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {

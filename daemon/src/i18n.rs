@@ -171,6 +171,14 @@ pub enum K {
     // remaining PR-Server cards use inline `tr()` (one-off paragraph
     // copy that appears exactly once).
     EyebrowDriftDetail, // "Drift detail · on-node UUIDs" / RU
+
+    // PR-User informativeness cards on the user-detail page. The
+    // online-now badge (user#1) always renders — 🟢-online or
+    // offline-with-last-seen — so its eyebrow is the reliable RU-walker
+    // anchor for the new user-detail surface, mirroring why
+    // `EyebrowDriftDetail` earns a central entry on the server page. The
+    // other six PR-User cards use inline `tr()` (one-off copy each).
+    EyebrowPresence, // "Presence" / "Присутствие"
 }
 
 /// Inline-translation helper for the long tail of body copy that
@@ -291,6 +299,10 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         // ── PR-Server drift-detail (server-detail page) ─────────────
         (En, EyebrowDriftDetail) => "Drift detail · on-node UUIDs",
         (Ru, EyebrowDriftDetail) => "Детальный дрейф · UUID на ноде",
+
+        // ── PR-User presence badge (user-detail page) ───────────────
+        (En, EyebrowPresence) => "Presence",
+        (Ru, EyebrowPresence) => "Присутствие",
     }
 }
 
@@ -407,6 +419,7 @@ mod tests {
                 "Drift detail · on-node UUIDs",
                 "Детальный дрейф · UUID на ноде",
             ),
+            (K::EyebrowPresence, "Presence", "Присутствие"),
         ];
         for (k, en, ru) in pairs {
             assert_eq!(t(Locale::En, k), en, "EN mismatch for {k:?}");
