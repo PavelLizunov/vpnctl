@@ -438,47 +438,58 @@ async fn poll_one_server(
         );
     }
 
-    // Phase 5b — record «куда ходит этот юзер» pairs (one per
-    // (resolved user_id, destination_label) seen in this tick).
-    // Dedupe at tick level: ONE hit per (user, dest) regardless
-    // of how many connections share the pair, since the table
-    // is hit-COUNT-per-tick, not connection-count.
-    let dest_pairs: Vec<(vpnctl_core::UserId, String)> = {
-        let mut dedup: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-        for c in &snapshot.connections {
-            let user = c.metadata.user.as_deref().or_else(|| {
-                attribution_for_tick
-                    .get(&(c.metadata.source_ip.clone(), c.metadata.source_port.clone()))
-                    .map(|s| s.as_str())
-            });
-            if let Some(user_id) = user {
-                let label = if !c.metadata.host.is_empty() {
-                    if c.metadata.destination_port.is_empty() {
-                        c.metadata.host.clone()
-                    } else {
-                        format!("{}:{}", c.metadata.host, c.metadata.destination_port)
-                    }
-                } else if !c.metadata.destination_ip.is_empty() {
-                    if c.metadata.destination_port.is_empty() {
-                        c.metadata.destination_ip.clone()
-                    } else {
-                        format!(
-                            "{}:{}",
-                            c.metadata.destination_ip, c.metadata.destination_port
-                        )
-                    }
-                } else {
-                    continue;
-                };
-                dedup.insert((user_id.to_string(), label));
-            }
+    // Phase 5b — record «куда ходит» (destination) AND «откуда
+    // подключается» (source IP) pairs for this tick (one per resolved
+    // (user_id, X) seen). Dedupe at tick level: ONE hit per (user, X)
+    // regardless of how many connections share the pair, since both
+    // tables are hit-COUNT-per-tick, not connection-count. Built in
+    // one pass over the snapshot — the user resolution is shared.
+    let mut dest_dedup: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut ip_dedup: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for c in &snapshot.connections {
+        let user = c.metadata.user.as_deref().or_else(|| {
+            attribution_for_tick
+                .get(&(c.metadata.source_ip.clone(), c.metadata.source_port.clone()))
+                .map(|s| s.as_str())
+        });
+        let Some(user_id) = user else { continue };
+        // Source IP — recorded independently of whether the
+        // destination resolved: an attributed connection always has a
+        // client IP worth classifying. Empty source IPs are dropped
+        // (nothing to geo-locate / classify).
+        if !c.metadata.source_ip.is_empty() {
+            ip_dedup.insert((user_id.to_string(), c.metadata.source_ip.clone()));
         }
-        dedup
-            .into_iter()
-            .map(|(u, l)| (vpnctl_core::UserId(u), l))
-            .collect()
-    };
+        let label = if !c.metadata.host.is_empty() {
+            if c.metadata.destination_port.is_empty() {
+                c.metadata.host.clone()
+            } else {
+                format!("{}:{}", c.metadata.host, c.metadata.destination_port)
+            }
+        } else if !c.metadata.destination_ip.is_empty() {
+            if c.metadata.destination_port.is_empty() {
+                c.metadata.destination_ip.clone()
+            } else {
+                format!(
+                    "{}:{}",
+                    c.metadata.destination_ip, c.metadata.destination_port
+                )
+            }
+        } else {
+            continue;
+        };
+        dest_dedup.insert((user_id.to_string(), label));
+    }
+    let dest_pairs: Vec<(vpnctl_core::UserId, String)> = dest_dedup
+        .into_iter()
+        .map(|(u, l)| (vpnctl_core::UserId(u), l))
+        .collect();
+    let source_ip_pairs: Vec<(vpnctl_core::UserId, String)> = ip_dedup
+        .into_iter()
+        .map(|(u, ip)| (vpnctl_core::UserId(u), ip))
+        .collect();
     if !dest_pairs.is_empty() {
         if let Err(e) = inv.record_user_destinations(&dest_pairs).await {
             tracing::warn!(
@@ -486,6 +497,16 @@ async fn poll_one_server(
                 server = %server.id.0,
                 error = %e,
                 "record_user_destinations failed (will retry next tick)"
+            );
+        }
+    }
+    if !source_ip_pairs.is_empty() {
+        if let Err(e) = inv.record_user_source_ips(&source_ip_pairs).await {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %e,
+                "record_user_source_ips failed (will retry next tick)"
             );
         }
     }
