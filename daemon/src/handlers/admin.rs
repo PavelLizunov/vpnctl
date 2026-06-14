@@ -1052,10 +1052,19 @@ fn dashboard_abuse_summary(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    if likely_shared.is_empty() {
+    // abuse-origins defensive guard: the inventory query already
+    // excludes NULL / empty `user_id` (the deleted-user blank-row bug),
+    // but skip any empty id here too so this render can NEVER emit a
+    // nameless link to `/admin/users/`. Belt-and-braces — a future
+    // query change can't reintroduce the blank row on this surface.
+    let rows: Vec<&(vpnctl_core::UserId, u64, u64, u64)> = likely_shared
+        .iter()
+        .filter(|(uid, _, _, _)| !uid.0.is_empty())
+        .collect();
+    if rows.is_empty() {
         return html! {};
     }
-    let n = likely_shared.len();
+    let n = rows.len();
     html! {
         div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
             div.ed-art-eyebrow style="color: var(--acc);" {
@@ -1075,9 +1084,12 @@ fn dashboard_abuse_summary(
                 ))
             }
             ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-                @for (uid, ips, asns, countries) in likely_shared {
+                @for (uid, ips, asns, countries) in &rows {
                     li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
+                        // Link to the user's "Subscription origins"
+                        // section (#origins, abuse-origins) so one click
+                        // jumps straight to the who-is-sharing breakdown.
+                        a href=(format!("/admin/users/{}#origins", path_segment_encode(&uid.0)))
                           style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
                             (uid.0)
                         }
@@ -3690,6 +3702,46 @@ pub(crate) async fn user_detail(
         tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "ua_clusters_for_user (verdict) failed");
         Vec::new()
     });
+    // abuse-origins — "Subscription origins" breakdown over the same
+    // 30-day window the access cards use. Four grouped, index-backed
+    // reads (country / ASN / IP / device-fingerprint), each excluding
+    // VPN-egress + NULL-user rows. Failure on any one degrades only that
+    // table to its empty-state (the page still renders).
+    const ORIGINS_WINDOW_DAYS: u32 = 30;
+    const ORIGINS_ASN_LIMIT: u32 = 10;
+    const ORIGINS_IP_LIMIT: u32 = 15;
+    let origins_by_country = state
+        .inv
+        .sub_access_by_country(&uid, ORIGINS_WINDOW_DAYS)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_country failed");
+            Vec::new()
+        });
+    let origins_by_asn = state
+        .inv
+        .sub_access_by_asn(&uid, ORIGINS_WINDOW_DAYS, ORIGINS_ASN_LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_asn failed");
+            Vec::new()
+        });
+    let origins_by_ip = state
+        .inv
+        .sub_access_by_ip(&uid, ORIGINS_WINDOW_DAYS, ORIGINS_IP_LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_ip failed");
+            Vec::new()
+        });
+    let origins_device_fp = state
+        .inv
+        .sub_access_device_fingerprint(&uid, ORIGINS_WINDOW_DAYS)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_device_fingerprint failed");
+            vpnctl_inventory::SubDeviceFp::default()
+        });
     // PR-User user#5 — lifecycle facts (Q-4d). created_at +
     // last_sub_fetch + age_days. On failure compose a defensible
     // fallback from the user's own created_at so the section still
@@ -4933,6 +4985,19 @@ pub(crate) async fn user_detail(
         // /16 spread (reusing the Track-4 ua_verdict thresholds).
         (user_sharing_verdict_section(&access_aggregates, &ua_clusters, lang))
 
+        // ── abuse-origins — "Subscription origins" (#origins) ────
+        // WHO is sharing: country / ISP / IP breakdown + a rough
+        // device-count line. Anchored so the dashboard likely-shared
+        // card links straight here. Sits below the verdict (the
+        // headline) and above the per-UA table (the /16 evidence).
+        (user_subscription_origins_section(
+            &origins_by_country,
+            &origins_by_asn,
+            &origins_by_ip,
+            &origins_device_fp,
+            lang,
+        ))
+
         // ── UA fingerprint (Phase Track-4) + user#7 geo footer ───
         (ua_clusters_section(&state, &uid, &access_aggregates, lang).await)
 
@@ -5325,6 +5390,197 @@ fn user_sharing_verdict_section(
                 "Heuristic over the 30-day /sub access window — a subscription fetched from many ASNs / countries, or a single User-Agent spread across many ISP /16 networks, has probably escaped past one human. Not authoritative; cross-check the per-IP timeline below before acting.",
                 "Эвристика по 30-дневному окну обращений к /sub — подписка, которую тянут из многих ASN / стран, или один User-Agent, расползшийся по разным ISP /16, скорее всего ушла за пределы одного человека. Не приговор; сверься с таймлайном по IP ниже прежде чем что-то делать.",
             ))
+        }
+    }
+}
+
+/// Shared table-header `<th>` style for the origins breakdown tables —
+/// matches the per-fetch sub-access table + UA-cluster table so the
+/// three "Subscription origins" tables read as one block.
+const ORIGINS_TH: &str = "padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;";
+/// Shared body-cell `<td>` style.
+const ORIGINS_TD: &str = "padding: 5px 8px;";
+
+/// Reformat an ISO-8601 (UTC) timestamp string from the inventory
+/// origins methods (`first_seen` / `last_seen`) into the operator's MSK
+/// display string via `format_msk_iso`. Returns the raw string verbatim
+/// if it doesn't parse (defensive — never panics, never hides a row).
+fn format_origin_ts(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => format_msk_iso(dt.with_timezone(&chrono::Utc)),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// abuse-origins — "Subscription origins" section (anchor `#origins`).
+/// The actionable WHO-is-sharing view: three compact tables (by
+/// country / by ISP / by IP) + a rough device-count line, all over the
+/// 30-day non-egress `/sub` access window. Linked from the dashboard
+/// likely-shared card. Renders an empty-state when the user has no
+/// external (non-egress) fetches at all.
+///
+/// Pure render — every input is pre-fetched in `user_detail` (one
+/// grouped query each, no N+1). Bilingual via `tr`; timestamps via
+/// `format_origin_ts` → `format_msk_iso`.
+fn user_subscription_origins_section(
+    by_country: &[vpnctl_inventory::SubOriginCountry],
+    by_asn: &[vpnctl_inventory::SubOriginAsn],
+    by_ip: &[vpnctl_inventory::SubOriginIp],
+    device_fp: &vpnctl_inventory::SubDeviceFp,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let unknown = tr(lang, "(unknown)", "(неизвестно)");
+    // "No external fetches" is the union signal — if there are no
+    // non-egress rows, all three breakdowns are empty.
+    let empty = by_country.is_empty() && by_asn.is_empty() && by_ip.is_empty();
+
+    html! {
+        div.ed-rule {}
+        // The anchor lives on the eyebrow so `#origins` lands the
+        // viewport at the section heading.
+        div.ed-art-eyebrow id="origins" {
+            (tr(lang, "Subscription origins", "Источники подписки"))
+        }
+        @if empty {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
+                (tr(
+                    lang,
+                    "No external subscription fetches recorded — nothing to break down by country, ISP or IP yet.",
+                    "Внешних обращений к подписке не записано — пока нечего разбивать по странам, ISP или IP.",
+                ))
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                (tr(
+                    lang,
+                    "Where this one subscription URL was fetched from over the last 30 days — real client IPs only (VPN-egress excluded). Many countries / ISPs / IPs for a single subscription is the clearest who-is-sharing signal.",
+                    "Откуда тянули этот один URL подписки за последние 30 дней — только реальные клиентские IP (VPN-egress исключён). Много стран / ISP / IP на одну подписку — самый явный сигнал, что ссылку расшарили.",
+                ))
+            }
+
+            // Device-count line — a sharing signal on its own.
+            // «≈N devices (M UA · K TLS-fingerprints)». N is the max of
+            // the device_class / UA / JA4 distinct counts (the best
+            // proxy we have), with UA + JA4 broken out so the operator
+            // sees what fed the estimate.
+            @let approx_devices = device_fp
+                .distinct_device_classes
+                .max(device_fp.distinct_uas)
+                .max(device_fp.distinct_ja4);
+            p style="font-family: var(--mono); font-size: 12.5px; color: var(--ink); margin: 0 0 16px;" {
+                "≈ " b { (approx_devices) } " "
+                (tr(lang, "devices", "устройств"))
+                " "
+                span style="color: var(--mute);" {
+                    "(" (device_fp.distinct_uas) " " (tr(lang, "UA", "UA"))
+                    " · " (device_fp.distinct_ja4) " " (tr(lang, "TLS-fingerprints", "TLS-отпечатков")) ")"
+                }
+            }
+
+            // ── By country ───────────────────────────────────────────
+            div.ed-art-eyebrow style="margin-top: 4px;" {
+                (tr(lang, "By country", "По странам"))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country", "страна")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "fetches", "обращений")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "distinct IPs", "уник. IP")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "distinct ASNs", "уник. ASN")) }
+                    }
+                }
+                tbody {
+                    @for row in by_country {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style=(format!("{ORIGINS_TD} color: var(--ink);")) {
+                                @match row.country.as_deref() {
+                                    Some(c) if !c.is_empty() => (c),
+                                    _ => em style="color: var(--mute);" { (unknown) },
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--ink);")) { (row.fetches) }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--soft);")) { (row.ips) }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--soft);")) { (row.asns) }
+                        }
+                    }
+                }
+            }
+
+            // ── By ISP ───────────────────────────────────────────────
+            div.ed-art-eyebrow {
+                (tr(lang, "By ISP", "По провайдерам"))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "ASN / ISP", "ASN / ISP")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country", "страна")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "fetches", "обращений")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "distinct IPs", "уник. IP")) }
+                    }
+                }
+                tbody {
+                    @for row in by_asn {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style=(format!("{ORIGINS_TD} color: var(--ink); overflow-wrap: anywhere;")) {
+                                @match row.asn.as_deref() {
+                                    Some(a) if !a.is_empty() => (a),
+                                    _ => em style="color: var(--mute);" { (unknown) },
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft);")) {
+                                @match row.country.as_deref() {
+                                    Some(c) if !c.is_empty() => (c),
+                                    _ => em style="color: var(--mute);" { (unknown) },
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--ink);")) { (row.fetches) }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--soft);")) { (row.ips) }
+                        }
+                    }
+                }
+            }
+
+            // ── By IP ────────────────────────────────────────────────
+            div.ed-art-eyebrow {
+                (tr(lang, "By IP", "По IP"))
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                thead {
+                    tr style="border-bottom: 1px solid var(--ink);" {
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "ip", "ip")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country", "страна")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "ASN / ISP", "ASN / ISP")) }
+                        th style=(format!("text-align: right; {ORIGINS_TH}")) { (tr(lang, "fetches", "обращений")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "first seen", "впервые")) }
+                        th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "last seen", "последний раз")) }
+                    }
+                }
+                tbody {
+                    @for row in by_ip {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style=(format!("{ORIGINS_TD} color: var(--ink); overflow-wrap: anywhere;")) { (row.ip) }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft);")) {
+                                @match row.country.as_deref() {
+                                    Some(c) if !c.is_empty() => (c),
+                                    _ => em style="color: var(--mute);" { (unknown) },
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft); overflow-wrap: anywhere;")) {
+                                @match row.asn.as_deref() {
+                                    Some(a) if !a.is_empty() => (a),
+                                    _ => em style="color: var(--mute);" { (unknown) },
+                                }
+                            }
+                            td style=(format!("{ORIGINS_TD} text-align: right; color: var(--ink);")) { (row.fetches) }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft); white-space: nowrap;")) { (format_origin_ts(&row.first_seen)) }
+                            td style=(format!("{ORIGINS_TD} color: var(--soft); white-space: nowrap;")) { (format_origin_ts(&row.last_seen)) }
+                        }
+                    }
+                }
+            }
         }
     }
 }

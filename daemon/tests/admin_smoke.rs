@@ -2130,6 +2130,12 @@ async fn admin_frontend_section_headlines_match_voice() {
             && detail.contains("scripts/import_from_subscription_server.py"),
         "user-detail legacy-fallback copy drifted (no-device_id branch)"
     );
+    // abuse-origins — pin the "Subscription origins" headline (EN) so a
+    // copy edit has to update this contract in lockstep.
+    assert!(
+        detail.contains("Subscription origins"),
+        "user-detail 'Subscription origins' section headline drifted"
+    );
 }
 
 /// Empty-state contract: when there are no users (or no servers), the
@@ -11506,6 +11512,13 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
         h.contains("Присутствие"),
         "PR-User presence eyebrow must be translated under ru"
     );
+    // abuse-origins — the "Subscription origins" section eyebrow always
+    // renders on user-detail (empty-state included), so its RU arm is a
+    // reliable walker anchor for the new origins surface.
+    assert!(
+        h.contains("Источники подписки"),
+        "abuse-origins 'Subscription origins' eyebrow must be translated under ru"
+    );
 }
 
 #[tokio::test]
@@ -15539,6 +15552,234 @@ async fn dashboard_abuse_summary_hidden_when_no_sharing() {
     assert!(
         !html.contains("Likely-shared subscriptions"),
         "abuse-summary must stay hidden when nothing is shared"
+    );
+}
+
+/// abuse-origins — the dashboard likely-shared card links each flagged
+/// user to their `#origins` section (the new who-is-sharing breakdown).
+#[tokio::test]
+async fn dashboard_abuse_summary_links_to_origins_anchor() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("/admin/users/u0#origins"),
+        "abuse-summary user link must anchor to the #origins section"
+    );
+}
+
+/// abuse-origins — the deleted-user blank-row bug. Seeding a NULL-user
+/// (since-deleted) sub_access pattern that crosses the ASN threshold must
+/// NOT surface a nameless row in the dashboard abuse card (the
+/// `user_id IS NOT NULL` fix in `likely_shared_summary`).
+#[tokio::test]
+async fn dashboard_abuse_summary_omits_deleted_user_blank_row() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // Seed a high-ASN pattern for a soon-to-be-deleted user.
+    s.inv
+        .add_user(&User {
+            id: UserId("ghost".into()),
+            uuid: "00000000-0000-0000-0000-deadbeefdead".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    for (ip, asn, cc) in [
+        ("203.0.113.40", "AS4444", "US"),
+        ("198.51.100.50", "AS5555", "DE"),
+        ("192.0.2.60", "AS6666", "FR"),
+    ] {
+        s.inv
+            .log_sub_access_rich(
+                &UserId("ghost".into()),
+                ip,
+                Some("curl/8.0"),
+                200,
+                1024,
+                None,
+                None,
+                None,
+                Some(cc),
+                Some(asn),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    // Remove the user — the inventory pool runs with foreign_keys ON, so
+    // the `ON DELETE SET NULL` (migration 0004) NULLs user_id on every
+    // one of ghost's sub_access_log rows while keeping the forensic rows.
+    s.inv.remove_user(&UserId("ghost".into())).await.unwrap();
+
+    let html = fetch_html(router(s), "/admin/").await;
+    // No nameless link to the user index (the blank-row symptom).
+    assert!(
+        !html.contains(r#"href="/admin/users/#origins""#)
+            && !html.contains(r#"href="/admin/users/""#),
+        "abuse card must not render a blank-name (deleted-user) link"
+    );
+    // And specifically the deleted user's id must not appear in a link.
+    assert!(
+        !html.contains("/admin/users/ghost"),
+        "a deleted user must not be flagged in the abuse card"
+    );
+    // With ONLY deleted-user rows, the whole card stays hidden.
+    assert!(
+        !html.contains("Likely-shared subscriptions"),
+        "abuse card must stay hidden when the only high-ASN pattern is a deleted user"
+    );
+}
+
+/// abuse-origins — empty-state: a user with no external (non-egress)
+/// fetches still renders the "Subscription origins" eyebrow + the
+/// no-data copy, never a bare rule.
+#[tokio::test]
+async fn admin_user_detail_origins_empty_state() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains(r#"id="origins""#),
+        "origins anchor must always render"
+    );
+    assert!(
+        html.contains("Subscription origins"),
+        "origins eyebrow must render even when empty"
+    );
+    assert!(
+        html.contains("No external subscription fetches recorded"),
+        "origins empty-state copy missing"
+    );
+}
+
+/// abuse-origins — a multi-ASN / multi-country / multi-IP pattern for a
+/// user renders all three breakdown tables with the seeded values, the
+/// device-count line, and the per-table sub-eyebrows.
+#[tokio::test]
+async fn admin_user_detail_origins_renders_country_isp_ip_breakdown() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    // Three countries, three ISPs, three IPs, two device classes.
+    let rows = [
+        (
+            "203.0.113.10",
+            "US",
+            "AS8359 MTS PJSC",
+            "Hiddify",
+            "Hiddify/1",
+        ),
+        ("198.51.100.20", "DE", "AS3320 DTAG", "v2rayNG", "v2rayNG/2"),
+        (
+            "192.0.2.30",
+            "RU",
+            "AS12389 Rostelecom",
+            "Hiddify",
+            "Hiddify/3",
+        ),
+    ];
+    for (ip, cc, asn, dev, ua) in rows {
+        s.inv
+            .log_sub_access_rich(
+                &UserId("u0".into()),
+                ip,
+                Some(ua),
+                200,
+                512,
+                None,
+                Some("HTTP/2"),
+                Some(dev),
+                Some(cc),
+                Some(asn),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+
+    // Section + per-table sub-eyebrows.
+    assert!(
+        html.contains("Subscription origins"),
+        "section eyebrow missing"
+    );
+    assert!(
+        html.contains("By country"),
+        "by-country sub-eyebrow missing"
+    );
+    assert!(html.contains("By ISP"), "by-ISP sub-eyebrow missing");
+    assert!(html.contains("By IP"), "by-IP sub-eyebrow missing");
+
+    // Country codes show in the by-country table.
+    for cc in ["US", "DE", "RU"] {
+        assert!(
+            html.contains(cc),
+            "country {cc} missing from origins breakdown"
+        );
+    }
+    // ISP labels render verbatim (the descriptive geo_asn string).
+    assert!(
+        html.contains("AS8359 MTS PJSC"),
+        "ISP label must render in the by-ISP table"
+    );
+    // Each IP renders in the by-IP table.
+    for ip in ["203.0.113.10", "198.51.100.20", "192.0.2.30"] {
+        assert!(html.contains(ip), "IP {ip} missing from by-IP table");
+    }
+    // Device-count line: two distinct device classes + a UA breakout.
+    assert!(
+        html.contains("devices"),
+        "device-count line missing from origins section"
+    );
+    // No empty-state when rows are present.
+    assert!(
+        !html.contains("No external subscription fetches recorded"),
+        "empty-state must NOT render when origin rows exist"
+    );
+}
+
+/// abuse-origins — egress-only history yields the empty-state (egress
+/// rows are excluded from every breakdown).
+#[tokio::test]
+async fn admin_user_detail_origins_empty_state_when_only_egress() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // s0's address is 10.0.0.0 (see `seed`); a fetch from that IP is
+    // flagged is_vpn_egress by the migration-0021 trigger.
+    s.inv
+        .log_sub_access_rich(
+            &UserId("u0".into()),
+            "10.0.0.0",
+            Some("Hiddify/1"),
+            200,
+            512,
+            None,
+            None,
+            Some("Hiddify"),
+            Some("DE"),
+            Some("AS1 Egress"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains("No external subscription fetches recorded"),
+        "egress-only history must render the origins empty-state"
     );
 }
 

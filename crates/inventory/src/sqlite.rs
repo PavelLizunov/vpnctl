@@ -182,6 +182,86 @@ pub struct SubAccessAggregates {
     pub first_seen: Option<DateTime<Utc>>,
 }
 
+/// One row of the per-user "Subscription origins · by country" breakdown
+/// (abuse-origins PR). Built from `sub_access_by_country`, which groups a
+/// user's real (`is_vpn_egress = 0`, non-NULL `user_id`) `sub_access_log`
+/// rows by `geo_country`. The operator reads this to answer «from how
+/// many countries — and how many distinct IPs/ISPs in each — was this
+/// one subscription fetched».
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubOriginCountry {
+    /// ISO country code from GeoIP. `None` for rows GeoIP couldn't
+    /// resolve (the UI renders "(unknown)").
+    pub country: Option<String>,
+    /// Total non-egress fetches from this country in the window.
+    pub fetches: u64,
+    /// Distinct client IPs from this country.
+    pub ips: u64,
+    /// Distinct ASN labels seen from this country.
+    pub asns: u64,
+}
+
+/// One row of the per-user "Subscription origins · by ISP" breakdown
+/// (abuse-origins PR). Built from `sub_access_by_asn`, grouping by the
+/// descriptive `geo_asn` string (e.g. "AS8359 MTS PJSC"). Top-N by
+/// fetch count — the operator sees which networks the link is being
+/// pulled from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubOriginAsn {
+    /// Full ASN / ISP label from GeoIP-ASN. `None` for unresolved rows.
+    pub asn: Option<String>,
+    /// A representative country code for this ASN (MAX over the group —
+    /// most ASNs sit in one country, so this is informative without a
+    /// second grouping dimension). `None` when unresolved.
+    pub country: Option<String>,
+    /// Total non-egress fetches from this ASN in the window.
+    pub fetches: u64,
+    /// Distinct client IPs from this ASN.
+    pub ips: u64,
+}
+
+/// One row of the per-user "Subscription origins · by IP" breakdown
+/// (abuse-origins PR). Built from `sub_access_by_ip`, grouping by the
+/// raw client `ip`. Top-N by most-recent activity — the operator sees
+/// the actual devices/locations sharing the link, newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubOriginIp {
+    /// The client source IP (never NULL — it's `NOT NULL` in schema).
+    pub ip: String,
+    /// Country code GeoIP last associated with this IP. `None` when
+    /// unresolved.
+    pub country: Option<String>,
+    /// ASN / ISP label GeoIP last associated with this IP. `None` when
+    /// unresolved.
+    pub asn: Option<String>,
+    /// Total non-egress fetches from this IP in the window.
+    pub fetches: u64,
+    /// ISO-8601 (UTC) timestamp of the earliest fetch from this IP in
+    /// the window. Same string format `log_sub_access` writes; the
+    /// renderer parses + reformats via `format_msk_iso`.
+    pub first_seen: String,
+    /// ISO-8601 (UTC) timestamp of the most recent fetch from this IP.
+    pub last_seen: String,
+}
+
+/// Rough distinct-device proxy for one user over the origins window
+/// (abuse-origins PR). Built from `sub_access_device_fingerprint`,
+/// counting `DISTINCT` device_class / tls_ja4 / ua over the real
+/// (non-egress, non-NULL-user) rows. Higher distinct counts than a
+/// household's device count is a sharing signal — surfaced as a single
+/// "≈N devices" line on the user-detail page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubDeviceFp {
+    /// Distinct non-NULL `device_class` values (parsed client family).
+    pub distinct_device_classes: u64,
+    /// Distinct non-NULL `tls_ja4` fingerprints — the sharpest device
+    /// signal when nginx forwards JA4 (often 0 until that's wired).
+    pub distinct_ja4: u64,
+    /// Distinct non-NULL `ua` strings — a coarser device proxy that's
+    /// always populated.
+    pub distinct_uas: u64,
+}
+
 /// PR-Q — "today so far" operational digest for the dashboard banner.
 /// Buckets the day's `audit_log` rows (since local-midnight UTC) into
 /// the three operator-relevant categories. Pure counts — the UI
@@ -3587,6 +3667,16 @@ impl SqliteInventory {
     /// "one URL fetched from many networks" signal. Reuses the distinct-
     /// count column logic from `sub_access_aggregates_for_user`. Backs
     /// the dashboard abuse-overview card.
+    ///
+    /// **abuse-origins fix:** `sub_access_log.user_id` is nullable
+    /// (`ON DELETE SET NULL`, migration 0004) — rows from since-deleted
+    /// users carry a NULL `user_id` and were silently folded into a
+    /// single blank-name group, which the dashboard then rendered as a
+    /// nameless row aggregating every deleted user. The
+    /// `AND user_id IS NOT NULL AND user_id != ''` predicate drops that
+    /// forensic group from this per-user view (the `!= ''` arm is
+    /// defensive — no path writes an empty id, but it costs nothing and
+    /// guarantees the card never links to `/admin/users/`).
     pub async fn likely_shared_summary(
         &self,
         min_asns: u32,
@@ -3600,6 +3690,8 @@ impl SqliteInventory {
                         AS distinct_countries
              FROM sub_access_log
              WHERE is_vpn_egress = 0
+               AND user_id IS NOT NULL
+               AND user_id != ''
              GROUP BY user_id
              HAVING distinct_asns >= ?1
              ORDER BY distinct_asns DESC, distinct_ips DESC",
@@ -3621,6 +3713,196 @@ impl SqliteInventory {
             ));
         }
         Ok(out)
+    }
+
+    // ── abuse-origins: per-user "Subscription origins" breakdown ───────
+    //
+    // Four grouped, index-backed reads behind the user-detail
+    // "Subscription origins" section. Every one scopes to ONE user's
+    // real client fetches:
+    //   * `user_id = ?1`     — this user only,
+    //   * `is_vpn_egress = 0` — exclude rows where the src IP is one of
+    //                           our own VPN servers (full-tunnel egress),
+    //   * `ts > <days-ago>`   — bound the window.
+    // The partial index `idx_sub_access_log_user_id_real (user_id, id DESC)
+    // WHERE is_vpn_egress = 0` covers the `user_id = ?1 AND
+    // is_vpn_egress = 0` prefix, so SQLite seeks instead of scanning.
+    // NULL `user_id` (since-deleted users) is excluded for free by the
+    // `user_id = ?1` equality (SQL `=` never matches NULL).
+
+    /// abuse-origins — group this user's real `/sub` fetches by GeoIP
+    /// country over the last `days`. One row per distinct `geo_country`
+    /// (NULL countries collapse into one `None` group), ordered by fetch
+    /// count DESC. Backs the "by country" table of the origins section.
+    pub async fn sub_access_by_country(
+        &self,
+        user: &UserId,
+        days: u32,
+    ) -> Result<Vec<SubOriginCountry>> {
+        let rows = sqlx::query(
+            "SELECT geo_country AS country,
+                    COUNT(*)                                                AS fetches,
+                    COUNT(DISTINCT ip)                                      AS ips,
+                    COUNT(DISTINCT CASE WHEN geo_asn IS NOT NULL THEN geo_asn END) AS asns
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND is_vpn_egress = 0
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY geo_country
+             ORDER BY fetches DESC",
+        )
+        .bind(&user.0)
+        .bind(format!("-{days} days"))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let country: Option<String> = r.try_get("country")?;
+            let fetches: i64 = r.try_get("fetches")?;
+            let ips: i64 = r.try_get("ips")?;
+            let asns: i64 = r.try_get("asns")?;
+            out.push(SubOriginCountry {
+                country,
+                fetches: fetches.max(0) as u64,
+                ips: ips.max(0) as u64,
+                asns: asns.max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// abuse-origins — group this user's real `/sub` fetches by GeoIP
+    /// ASN / ISP over the last `days`, returning the top `limit` by fetch
+    /// count. `country` is a representative `MAX(geo_country)` for the
+    /// group (most ASNs sit in one country). Backs the "by ISP" table.
+    pub async fn sub_access_by_asn(
+        &self,
+        user: &UserId,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<SubOriginAsn>> {
+        let rows = sqlx::query(
+            "SELECT geo_asn AS asn,
+                    MAX(geo_country)   AS country,
+                    COUNT(*)           AS fetches,
+                    COUNT(DISTINCT ip) AS ips
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND is_vpn_egress = 0
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY geo_asn
+             ORDER BY fetches DESC
+             LIMIT ?3",
+        )
+        .bind(&user.0)
+        .bind(format!("-{days} days"))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let asn: Option<String> = r.try_get("asn")?;
+            let country: Option<String> = r.try_get("country")?;
+            let fetches: i64 = r.try_get("fetches")?;
+            let ips: i64 = r.try_get("ips")?;
+            out.push(SubOriginAsn {
+                asn,
+                country,
+                fetches: fetches.max(0) as u64,
+                ips: ips.max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// abuse-origins — group this user's real `/sub` fetches by source
+    /// IP over the last `days`, returning the top `limit` by most-recent
+    /// activity (`MAX(ts)` DESC). `country` / `asn` are the
+    /// representative `MAX(…)` for the IP (one IP usually maps to one
+    /// network). `first_seen` / `last_seen` are ISO-8601 strings the
+    /// renderer reformats via `format_msk_iso`. Backs the "by IP" table.
+    pub async fn sub_access_by_ip(
+        &self,
+        user: &UserId,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<SubOriginIp>> {
+        let rows = sqlx::query(
+            "SELECT ip,
+                    MAX(geo_country) AS country,
+                    MAX(geo_asn)     AS asn,
+                    COUNT(*)         AS fetches,
+                    MIN(ts)          AS first_seen,
+                    MAX(ts)          AS last_seen
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND is_vpn_egress = 0
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             GROUP BY ip
+             ORDER BY last_seen DESC
+             LIMIT ?3",
+        )
+        .bind(&user.0)
+        .bind(format!("-{days} days"))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let ip: String = r.try_get("ip")?;
+            let country: Option<String> = r.try_get("country")?;
+            let asn: Option<String> = r.try_get("asn")?;
+            let fetches: i64 = r.try_get("fetches")?;
+            let first_seen: String = r.try_get("first_seen")?;
+            let last_seen: String = r.try_get("last_seen")?;
+            out.push(SubOriginIp {
+                ip,
+                country,
+                asn,
+                fetches: fetches.max(0) as u64,
+                first_seen,
+                last_seen,
+            });
+        }
+        Ok(out)
+    }
+
+    /// abuse-origins — rough distinct-device proxy for this user over the
+    /// last `days`. Counts `DISTINCT` non-NULL `device_class`, `tls_ja4`,
+    /// and `ua` across the user's real (`is_vpn_egress = 0`) rows. A
+    /// distinct-device count well above a household's device count is a
+    /// sharing signal. One round-trip, all three counts in one row.
+    pub async fn sub_access_device_fingerprint(
+        &self,
+        user: &UserId,
+        days: u32,
+    ) -> Result<SubDeviceFp> {
+        let row = sqlx::query(
+            "SELECT
+                COUNT(DISTINCT device_class) AS distinct_device_classes,
+                COUNT(DISTINCT tls_ja4)      AS distinct_ja4,
+                COUNT(DISTINCT ua)           AS distinct_uas
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND is_vpn_egress = 0
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+        )
+        .bind(&user.0)
+        .bind(format!("-{days} days"))
+        .fetch_one(&self.pool)
+        .await?;
+        // `COUNT(DISTINCT col)` already ignores NULLs in SQLite, so a
+        // user whose rows have NULL device_class / ja4 contributes 0
+        // there — exactly the "unknown, don't claim a device" semantics
+        // we want.
+        let distinct_device_classes: i64 = row.try_get("distinct_device_classes")?;
+        let distinct_ja4: i64 = row.try_get("distinct_ja4")?;
+        let distinct_uas: i64 = row.try_get("distinct_uas")?;
+        Ok(SubDeviceFp {
+            distinct_device_classes: distinct_device_classes.max(0) as u64,
+            distinct_ja4: distinct_ja4.max(0) as u64,
+            distinct_uas: distinct_uas.max(0) as u64,
+        })
     }
 
     /// Recent server-wide + per-user rows for one server in the

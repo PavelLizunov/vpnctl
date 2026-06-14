@@ -619,3 +619,78 @@ async fn q4h_excludes_vpn_egress_rows() {
         "2 distinct real countries (egress excluded)"
     );
 }
+
+#[tokio::test]
+async fn q4h_excludes_deleted_user_null_rows_no_blank_row() {
+    // abuse-origins bug fix: `sub_access_log.user_id` is nullable
+    // (`ON DELETE SET NULL`, migration 0004). Rows from since-deleted
+    // users carry NULL user_id; `GROUP BY user_id` folded them into one
+    // blank group the dashboard rendered as a nameless row. The added
+    // `AND user_id IS NOT NULL AND user_id != ''` predicate must drop
+    // that group entirely.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("ghost")).await.unwrap();
+
+    // Seed enough distinct ASNs that, if the NULL group were counted, it
+    // would cross even a high threshold.
+    for (ip, asn, country) in [
+        ("1.1.1.1", "AS111 A", "US"),
+        ("2.2.2.2", "AS222 B", "DE"),
+        ("3.3.3.3", "AS333 C", "FR"),
+        ("4.4.4.4", "AS444 D", "NL"),
+    ] {
+        inv.log_sub_access_rich(
+            &UserId("ghost".into()),
+            ip,
+            Some("Hiddify"),
+            200,
+            100,
+            None,
+            None,
+            None,
+            Some(country),
+            Some(asn),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Delete the user via raw SQL (no public delete_user yet) with FK
+    // enforcement ON so the CASCADE→SET NULL rule fires, NULLing user_id
+    // on every one of ghost's rows.
+    let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&raw)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = 'ghost'")
+        .execute(&raw)
+        .await
+        .unwrap();
+    // Sanity: the rows survived with NULL user_id.
+    let null_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sub_access_log WHERE user_id IS NULL")
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+    assert_eq!(null_rows, 4, "deleted-user rows must survive with NULL id");
+    raw.close().await;
+
+    // The summary must NOT surface a blank-name row for the NULL group,
+    // even at threshold 1 (which any real user with 1 ASN would hit).
+    let flagged = inv.likely_shared_summary(1).await.unwrap();
+    assert!(
+        flagged.is_empty(),
+        "NULL-user (deleted) rows must not produce a blank likely-shared \
+         row; got {flagged:?}"
+    );
+    assert!(
+        flagged.iter().all(|(uid, _, _, _)| !uid.0.is_empty()),
+        "no flagged user may have an empty id"
+    );
+}
