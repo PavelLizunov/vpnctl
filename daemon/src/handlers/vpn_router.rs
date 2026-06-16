@@ -143,6 +143,16 @@ const VPN_CLIENT_KEYWORDS: &[&str] = &[
     "matsuri",
     "sagernet",
     "karing",
+    // 2026-06-16 (Pavel: «Happ пишет json-error»). Happ (happ.su) is a
+    // sing-box-based iOS/Android/desktop client whose UA lowercases to
+    // contain `happ` (e.g. «Happ/1.6.0 (iPhone; iOS 18.0)»). Without an
+    // entry it fell through to the `render_singbox` JSON branch and Happ —
+    // which imports a subscription URL as the universal base64 share-link
+    // list, NOT a raw sing-box config — choked with a JSON parse error.
+    // Routing it to the base64 path fixes import. Happ runs sing-box core,
+    // so it is intentionally NOT in `V2RAY_CORE_NO_SINGBOX_TRANSPORTS` —
+    // it still receives the hysteria2/tuic/anytls entries (e.g. Latvia HY2).
+    "happ",
 ];
 
 fn is_vpn_client_ua(ua: &str) -> bool {
@@ -1029,6 +1039,10 @@ mod tests {
             // the v2rayN-shaped prefix.
             "V2rayTun/2.3.1 CFNetwork/1568 Darwin/24.1.0",
             "v2raytun/2.3.1 (linux probe)",
+            // 2026-06-16 — Happ added (was falling through to the raw
+            // sing-box JSON branch → «json-error» on import).
+            "Happ/1.6.0 (iPhone; iOS 18.0)",
+            "happ/2.0 (Android)",
         ] {
             assert!(is_vpn_client_ua(ua), "expected VPN client: {ua}");
         }
@@ -1070,6 +1084,8 @@ mod tests {
             "Hiddify/1.5.3",
             "sing-box/1.10.0",
             "Karing/1.0.0",
+            // Happ runs sing-box core → keeps hysteria2/tuic/anytls.
+            "Happ/1.6.0 (iPhone; iOS 18.0)",
             "some-unknown-client/1.0",
         ] {
             assert!(
