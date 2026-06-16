@@ -77,11 +77,17 @@ fn vless_happy_path_byte_equal_with_bash_scripts() {
     //   $ grep get-vless.sh vless://...
     //   vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision
     //                                   &security=reality&sni=www.microsoft.com
-    //                                   &fp=chrome&pbk=${REALITY_PUBLIC}
+    //                                   &fp=randomized&pbk=${REALITY_PUBLIC}
     //                                   &sid=${SHORT_ID}&type=tcp#${USERNAME}
     // Honours CLAUDE.md "Migration from bash — seamless preservation"
     // requirement: phones holding bash-issued vless:// links keep
     // working byte-for-byte after the vpnctl cutover.
+    //
+    // ONE intentional deviation from the bash byte-equality: `fp` is
+    // `randomized`, not the bash `chrome` literal. RU DPI began
+    // fingerprinting the static Chrome uTLS ClientHello (2026-06-16) and
+    // resetting REALITY; `randomized` evades it. See
+    // `vless_reality.rs::REALITY_UTLS_FP`. Every other byte stays pinned.
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -89,7 +95,7 @@ fn vless_happy_path_byte_equal_with_bash_scripts() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
     );
 }
 
@@ -105,7 +111,7 @@ fn vless_fragment_percent_encodes_space_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
     );
 }
 

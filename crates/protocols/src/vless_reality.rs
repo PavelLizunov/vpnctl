@@ -18,6 +18,19 @@ const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b'@')
     .add(b':');
 
+/// uTLS ClientHello fingerprint the client mimics for the REALITY handshake.
+///
+/// Was `"chrome"` (matched legacy `get-vless.sh`). Switched to `"randomized"`
+/// on 2026-06-16: RU mobile/broadband DPI (TSPU) began fingerprinting the
+/// fixed Chrome uTLS ClientHello and RST-resetting REALITY sessions — clients
+/// that emit it (v2rayTun/Xray, Streisand/sing-box) stopped connecting while
+/// Shadowrocket (its own ClientHello) kept working. Field-confirmed with
+/// multiviruss: same is/REALITY config failed on `fp=chrome`, connected on
+/// `fp=randomized`. `randomized` makes each handshake a fresh randomized
+/// ClientHello, defeating the static-fingerprint rule. Validated against
+/// sing-box 1.13.12 (`sing-box check`) and Xray-core 26.3.27 (both accept it).
+const REALITY_UTLS_FP: &str = "randomized";
+
 /// VLESS + REALITY на TCP:443.
 ///
 /// **Stateless**: ключи REALITY и SNI приходят через [`RenderCtx::secrets`]
@@ -153,7 +166,7 @@ impl Protocol for VlessReality {
             "tls": {
                 "enabled": true,
                 "server_name": sni,
-                "utls": { "enabled": true, "fingerprint": "chrome" },
+                "utls": { "enabled": true, "fingerprint": REALITY_UTLS_FP },
                 "reality": {
                     "enabled": true,
                     "public_key": public_key,
@@ -178,7 +191,9 @@ impl Protocol for VlessReality {
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         // Parameter order + included params are pinned to match the
         // legacy bash `vpn-control/scripts/get-vless.sh` byte-for-byte:
-        //   `?encryption=none&flow=xtls-rprx-vision&security=reality&sni=...&fp=chrome&pbk=...&sid=...&type=tcp`
+        //   `?encryption=none&flow=xtls-rprx-vision&security=reality&sni=...&fp=<REALITY_UTLS_FP>&pbk=...&sid=...&type=tcp`
+        // (the `fp` value is no longer the bash `chrome` literal — see
+        // `REALITY_UTLS_FP` for the 2026-06-16 DPI-evasion switch.)
         // (caught by Pavel's methodology check on db3998c — comparison
         // against the actual bash script showed mine was missing
         // `encryption=none` AND used a different param order, both
@@ -191,9 +206,10 @@ impl Protocol for VlessReality {
         // alternate port substitutes in. Byte-equality test stays green
         // because it uses the default secrets (no listen_port override).
         Ok(format!(
-            "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp#{name}",
+            "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp={fp}&pbk={pbk}&sid={sid}&type=tcp#{name}",
             uuid = user.uuid,
             addr = host_for_url(&ctx.server.address),
+            fp = REALITY_UTLS_FP,
             pbk = public_key,
             sid = short_id,
             sni = sni,
