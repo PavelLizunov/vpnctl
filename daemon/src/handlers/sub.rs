@@ -363,7 +363,7 @@ pub(crate) async fn get(
         .unwrap_or((None, None));
 
     if want_v2ray_subscription {
-        match render_v2ray_subscription(&state, &user).await {
+        match render_v2ray_subscription(&state, &user, ua.as_deref()).await {
             Ok((user_id, body)) => {
                 let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
                 let _ = crate::access_log::try_enqueue(
@@ -533,6 +533,7 @@ enum SubError {
 async fn render_v2ray_subscription(
     state: &AppState,
     user: &User,
+    ua: Option<&str>,
 ) -> Result<(UserId, String), SubError> {
     let user_id = user.id.clone();
     // Disabled-user check — same semantics as the JSON path: empty
@@ -551,7 +552,19 @@ async fn render_v2ray_subscription(
         .servers_for_user(&user.id)
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
-    let mut links: Vec<String> = Vec::new();
+    // Whether THIS client can parse the sing-box-only transports
+    // (Hysteria2 / TUIC / AnyTLS). V2Ray/Xray-core clients (V2rayTun,
+    // v2rayN/NG) can't, and a leading `hysteria2://` entry breaks their
+    // whole import — so they get VLESS-family only. Unknown/sing-box UAs
+    // stay permissive. 2026-06-16 fix.
+    let client_singbox = ua
+        .map(crate::handlers::vpn_router::client_supports_singbox_transports)
+        .unwrap_or(true);
+    // Split by capability so VLESS-family (universally parsed) is always
+    // emitted FIRST — a client that chokes on a trailing sing-box entry
+    // has, by then, already imported the configs everyone supports.
+    let mut core_links: Vec<String> = Vec::new();
+    let mut singbox_links: Vec<String> = Vec::new();
     for server in &servers {
         // Auto-suppress (migration 0030): skip a server the health
         // monitor flagged unreachable (per-server opt-in); auto-restores
@@ -591,22 +604,26 @@ async fn render_v2ray_subscription(
             };
             match proto.share_link(&ctx, &per_server_user) {
                 Ok(link) => {
-                    // V2Ray-family clients only understand a subset
-                    // of share-link schemes. WireGuard's
-                    // `wireguard://?conf=…` and wgturn's
-                    // `wgturn://…` would be silently dropped at
-                    // best, crash the parser at worst.
+                    // V2Ray-family clients only understand a subset of
+                    // share-link schemes. WireGuard's `wireguard://?conf=…`
+                    // and wgturn's `wgturn://…` would be silently dropped
+                    // at best, crash the parser at worst — so neither
+                    // bucket takes them. The sing-box-only transports go
+                    // to `singbox_links` and are emitted only to clients
+                    // that can parse them (see `client_singbox`).
                     if link.starts_with("vless://")
                         || link.starts_with("vmess://")
                         || link.starts_with("trojan://")
                         || link.starts_with("ss://")
                         || link.starts_with("ssr://")
-                        || link.starts_with("tuic://")
-                        || link.starts_with("hysteria2://")
+                    {
+                        core_links.push(link);
+                    } else if link.starts_with("hysteria2://")
                         || link.starts_with("hy2://")
+                        || link.starts_with("tuic://")
                         || link.starts_with("anytls://")
                     {
-                        links.push(link);
+                        singbox_links.push(link);
                     }
                 }
                 Err(e) => {
@@ -621,7 +638,12 @@ async fn render_v2ray_subscription(
             }
         }
     }
-    let joined = links.join("\n");
+    // VLESS-family first; append the sing-box transports only for
+    // clients that can parse them.
+    if client_singbox {
+        core_links.extend(singbox_links);
+    }
+    let joined = core_links.join("\n");
     let body = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
     Ok((user_id, body))
 }

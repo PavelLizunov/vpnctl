@@ -159,6 +159,30 @@ pub(crate) fn is_vpn_client_ua_v2ray_family(ua: &str) -> bool {
     VPN_CLIENT_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// V2Ray/Xray-core clients in the v2ray family that do NOT speak the
+/// sing-box-only transports (Hysteria2 / TUIC / AnyTLS). Emitting a
+/// `hysteria2://` / `tuic://` / `anytls://` share-link to one of these
+/// breaks its whole subscription import — the user sees the supported
+/// (VLESS) configs vanish too. 2026-06-16 (Pavel): V2rayTun stopped
+/// importing VLESS once a `hysteria2://` entry led the list, while the
+/// cdn Hysteria2 + the de/is/nl VLESS were all server-healthy. Sing-box-
+/// core clients (Streisand, NekoBox, Shadowrocket, Hiddify, …) parse
+/// these fine and keep the full set. `v2rayn` is a substring of
+/// `v2rayng`, so the two share one entry; `v2raytun` is NOT (`tu` breaks
+/// the match), hence its own.
+const V2RAY_CORE_NO_SINGBOX_TRANSPORTS: &[&str] = &["v2raytun", "v2rayn"];
+
+/// True when the client's UA can parse the sing-box-only transports
+/// (Hysteria2 / TUIC / AnyTLS) in a base64 share-link subscription.
+/// Permissive by default (an unknown / sing-box-core UA → true); returns
+/// false only for the known V2Ray/Xray-core denylist above.
+pub(crate) fn client_supports_singbox_transports(ua: &str) -> bool {
+    let lower = ua.to_ascii_lowercase();
+    !V2RAY_CORE_NO_SINGBOX_TRANSPORTS
+        .iter()
+        .any(|kw| lower.contains(kw))
+}
+
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1003,6 +1027,39 @@ mod tests {
             "",
         ] {
             assert!(!is_vpn_client_ua(ua), "expected non-VPN-client: {ua}");
+        }
+    }
+
+    #[test]
+    fn singbox_transport_capability_excludes_v2ray_core_clients() {
+        // V2Ray/Xray-core clients can't parse hysteria2/tuic/anytls —
+        // they must NOT receive those share-links (a leading hysteria2://
+        // entry breaks their whole VLESS import). 2026-06-16 fix.
+        for ua in [
+            "V2rayTun/2.3.1 CFNetwork/1568 Darwin/24.1.0",
+            "v2raytun/ios",
+            "v2rayN/6.62",
+            "v2rayNG/1.9.0",
+        ] {
+            assert!(
+                !client_supports_singbox_transports(ua),
+                "v2ray-core client must NOT get sing-box transports: {ua}"
+            );
+        }
+        // Sing-box-core clients (and unknown UAs) keep the full set.
+        for ua in [
+            "Streisand/42 CFNetwork/3860 Darwin",
+            "NekoBox/1.3.7",
+            "Shadowrocket/2.2.62 CFNetwork/1568 Darwin/24.1.0",
+            "Hiddify/1.5.3",
+            "sing-box/1.10.0",
+            "Karing/1.0.0",
+            "some-unknown-client/1.0",
+        ] {
+            assert!(
+                client_supports_singbox_transports(ua),
+                "sing-box-core / unknown client must keep sing-box transports: {ua}"
+            );
         }
     }
 
