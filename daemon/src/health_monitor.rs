@@ -495,6 +495,13 @@ pub async fn scan_once(
             "check_attribution_stall failed; attribution pass skipped this tick"
         );
     }
+    if let Err(e) = check_sub_fetch_without_traffic(inv).await {
+        tracing::warn!(
+            target = "vpnctld::health_monitor",
+            error = %e,
+            "check_sub_fetch_without_traffic failed; sub-stall pass skipped this tick"
+        );
+    }
     Ok(())
 }
 
@@ -1047,6 +1054,129 @@ pub async fn check_attribution_stall(
     Ok(())
 }
 
+/// Detect + alert on per-user «subscription fetched but no traffic followed»
+/// (2026-06-16). Fires `user.sub_no_traffic:<id>` (warning, not server-scoped)
+/// when a previously-active user re-fetched their `/sub` subscription ≥GRACE
+/// ago but has had ZERO attributed traffic since — the silent signature of an
+/// issued config that no longer connects. The `fp=chrome` DPI breakage was
+/// exactly this shape: clients re-imported the sub and failed to dial, with
+/// NO server-side error to catch. Auto-resolves the moment traffic returns
+/// (or the fetch ages past the lookback and the user leaves the violation
+/// set). Mirrors `check_attribution_stall`'s fire/resolve idiom + the
+/// per-user `user.traffic_limit` dedup-via-kind-suffix pattern.
+///
+/// Thresholds: GRACE 45m (a just-fetched user is still importing/setting up;
+/// no traffic by 45m is the real signal, not impatience), LOOKBACK 6h (only
+/// recent re-imports are actionable), ACTIVE 7d (regression gate — flag
+/// known-good users who broke, not brand-new never-connected ones).
+pub async fn check_sub_fetch_without_traffic(
+    inv: &SqliteInventory,
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    const KIND_PREFIX: &str = "user.sub_no_traffic:";
+    const GRACE_MINUTES: u32 = 45;
+    const LOOKBACK_MINUTES: u32 = 360;
+    const ACTIVE_DAYS: u32 = 7;
+
+    let firing = inv
+        .sub_fetch_without_traffic_users(GRACE_MINUTES, LOOKBACK_MINUTES, ACTIVE_DAYS)
+        .await?;
+    let firing_ids: std::collections::HashSet<&str> =
+        firing.iter().map(|u| u.user_id.0.as_str()).collect();
+
+    // Auto-resolve sweep: ack any OPEN alert whose subject is no longer in
+    // violation (traffic resumed, or the fetch aged out of the lookback).
+    // The subject universe here is "users holding an open alert of this
+    // kind", not the full user list — symmetric with the attribution-stall
+    // recovery branch but keyed off the kind suffix.
+    let open_subjects = inv.open_alert_subjects_with_kind_prefix(KIND_PREFIX).await?;
+    for uid in &open_subjects {
+        if firing_ids.contains(uid.as_str()) {
+            continue;
+        }
+        let kind = format!("{KIND_PREFIX}{uid}");
+        match inv.ack_open_alerts(&kind, None).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                target = "vpnctld::health_monitor",
+                user = %uid,
+                acked = n,
+                "auto-resolved user.sub_no_traffic — traffic resumed or fetch aged out"
+            ),
+            Err(e) => tracing::warn!(
+                target = "vpnctld::health_monitor",
+                user = %uid,
+                error = %e,
+                "auto-resolve ack failed for user.sub_no_traffic"
+            ),
+        }
+    }
+
+    // Fire (idempotent: insert_alert_if_no_unacked dedups on the (kind, NULL)
+    // pair — a no-op while the alert is open).
+    for u in &firing {
+        let kind = format!("{KIND_PREFIX}{}", u.user_id.0);
+        let last_seen = u.last_traffic.as_deref().unwrap_or("never");
+        let summary = format!(
+            "user {} re-fetched their subscription {}m ago but has sent no traffic since (last traffic: {}) — their issued config may no longer connect",
+            u.user_id.0, u.fetch_age_minutes, last_seen
+        );
+        let payload = serde_json::json!({
+            "user_id": u.user_id.0,
+            "last_fetch": u.last_fetch,
+            "last_traffic": u.last_traffic,
+            "fetch_age_minutes": u.fetch_age_minutes,
+            "grace_minutes": GRACE_MINUTES,
+            "lookback_minutes": LOOKBACK_MINUTES,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        match inv
+            .insert_alert_if_no_unacked(&kind, None, "warning", &summary, Some(&payload_str))
+            .await
+        {
+            Ok(Some(alert_id)) => {
+                tracing::info!(
+                    target = "vpnctld::health_monitor",
+                    alert_id,
+                    user = %u.user_id.0,
+                    fetch_age_minutes = u.fetch_age_minutes,
+                    "fired user.sub_no_traffic alert"
+                );
+                if let Err(e) = inv
+                    .audit(
+                        "vpnctld",
+                        "alert.fire",
+                        Some(&u.user_id.0),
+                        Some(&serde_json::json!({
+                            "alert_id": alert_id,
+                            "kind": kind,
+                            "severity": "warning",
+                            "summary": summary,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target = "vpnctld::health_monitor",
+                        alert_id,
+                        user = %u.user_id.0,
+                        error = %e,
+                        "alert.fire audit row failed for user.sub_no_traffic"
+                    );
+                }
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                target = "vpnctld::health_monitor",
+                user = %u.user_id.0,
+                error = %e,
+                "insert user.sub_no_traffic alert failed"
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// Format a byte count as «GiB with one decimal» for short alert
 /// summaries. `1610612736 → "1.5 GiB"`. Used by C3 traffic-limit
 /// alerts; not exported because the formatting is specific to that
@@ -1488,6 +1618,50 @@ mod tests {
         assert!(
             still_open.is_empty(),
             "tick 2: attribution resumed → the open stall alert must auto-ack; got {still_open:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_sub_fetch_without_traffic_resolves_stale_open_alert() {
+        // The per-user resolve sweep: an open `user.sub_no_traffic:<id>`
+        // alert whose subject is no longer in violation (here: no sub fetches
+        // exist at all → empty firing set) must auto-ack on the next tick.
+        // Exercises check_sub_fetch_without_traffic →
+        // open_alert_subjects_with_kind_prefix → ack_open_alerts end-to-end.
+        // (The FIRE path needs past-dated sub_access_log + stats rows, which
+        // the inventory crate covers directly in
+        // `sub_fetch_without_traffic_flags_regression_then_clears`.)
+        let (_dir, inv) = fresh_inv().await;
+        inv.insert_alert_if_no_unacked(
+            "user.sub_no_traffic:ghost",
+            None,
+            "warning",
+            "stale",
+            None,
+        )
+        .await
+        .unwrap();
+        let open_before = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none() && a.kind == "user.sub_no_traffic:ghost")
+            .count();
+        assert_eq!(open_before, 1, "alert is open before the sweep");
+
+        check_sub_fetch_without_traffic(&inv).await.unwrap();
+
+        let open_after = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.acked_at.is_none() && a.kind == "user.sub_no_traffic:ghost")
+            .count();
+        assert_eq!(
+            open_after, 0,
+            "a stale open sub-stall alert must auto-resolve when its user is no longer in violation"
         );
     }
 

@@ -109,6 +109,26 @@ pub struct AccessBucket {
     pub distinct_ips: u64,
 }
 
+/// One user flagged by [`SqliteInventory::sub_fetch_without_traffic_users`]
+/// (2026-06-16). The user pulled their `/sub` subscription `fetch_age_minutes`
+/// ago (between the grace floor and the lookback ceiling), was actively
+/// passing traffic *before* that fetch, yet has had ZERO attributed traffic
+/// *since* — the silent signature of a subscription whose freshly-issued
+/// config no longer connects (e.g. the 2026-06-16 `fp=chrome` DPI breakage:
+/// clients re-imported the sub and then silently failed to dial, with no
+/// server-side error to catch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubFetchStallUser {
+    pub user_id: UserId,
+    /// ISO-8601 UTC of the most recent real (non-egress, status 200) fetch.
+    pub last_fetch: String,
+    /// ISO-8601 UTC of the user's last attributed traffic, if any. Always
+    /// BEFORE `last_fetch` by construction — that gap IS the violation.
+    pub last_traffic: Option<String>,
+    /// Whole minutes between `last_fetch` and now (for the alert summary).
+    pub fetch_age_minutes: i64,
+}
+
 /// One row of `sub_access_log` (Phase Track-1) — emitted by the daemon
 /// every time `/sub/<token>` is hit, after the token has been resolved.
 /// The token itself is never stored, only the resolved `user_id`, so a
@@ -3980,6 +4000,111 @@ impl SqliteInventory {
             .collect())
     }
 
+    /// Users whose freshly-fetched subscription produced no traffic
+    /// (2026-06-16 — backs `health_monitor::check_sub_fetch_without_traffic`).
+    ///
+    /// Returns previously-active users (had attributed traffic within
+    /// `active_days` BEFORE the fetch) whose MOST-RECENT real `/sub` fetch is
+    /// between `grace_minutes` and `lookback_minutes` ago AND who have had
+    /// ZERO attributed traffic SINCE that fetch. This is the silent signature
+    /// of a subscription whose issued config no longer dials (the `fp=chrome`
+    /// DPI breakage, a protocol-visibility regression, a broken share-link):
+    /// the client re-imports and then never connects, with no server error.
+    ///
+    /// - `grace_minutes`: a just-fetched user is still importing/setting up;
+    ///   don't flag until the fetch is at least this old (no traffic by now is
+    ///   the real signal, not impatience).
+    /// - `lookback_minutes`: only RECENT re-imports are actionable; also
+    ///   bounds how long a never-recovering user keeps re-firing.
+    /// - `active_days`: the "was working before" gate — restricts to a
+    ///   regression (a known-good user broke), not a brand-new user who never
+    ///   connected (their failure is a setup problem, not our regression).
+    ///
+    /// `julianday(replace(t,'Z',''))` strips the trailing `Z` because the
+    /// Debian-12 SQLite (3.40) predates 3.42's native `Z` parsing — without
+    /// it `julianday` returns NULL and `fetch_age_minutes` is bogus. The
+    /// window-boundary comparisons stay as lexicographic string `<=`/`>=`
+    /// against `strftime(...Z)` output, matching every other query here.
+    pub async fn sub_fetch_without_traffic_users(
+        &self,
+        grace_minutes: u32,
+        lookback_minutes: u32,
+        active_days: u32,
+    ) -> Result<Vec<SubFetchStallUser>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "WITH last_fetch AS (
+                 SELECT user_id, MAX(ts) AS t
+                 FROM sub_access_log
+                 WHERE user_id IS NOT NULL AND is_vpn_egress = 0 AND status = 200
+                 GROUP BY user_id
+             )
+             SELECT lf.user_id AS user_id,
+                    lf.t        AS last_fetch,
+                    (SELECT MAX(c.ts) FROM vpn_connection_stats c
+                       WHERE c.user_id = lf.user_id
+                         AND (c.upload_bytes > 0 OR c.download_bytes > 0)) AS last_traffic,
+                    CAST((julianday('now') - julianday(replace(lf.t, 'Z', ''))) * 24 * 60
+                         AS INTEGER) AS age_min
+             FROM last_fetch lf
+             WHERE lf.t <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+               AND lf.t >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+               AND NOT EXISTS (
+                   SELECT 1 FROM vpn_connection_stats c
+                   WHERE c.user_id = lf.user_id AND c.ts >= lf.t
+                     AND (c.upload_bytes > 0 OR c.download_bytes > 0))
+               AND EXISTS (
+                   SELECT 1 FROM vpn_connection_stats c2
+                   WHERE c2.user_id = lf.user_id
+                     AND c2.ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
+                     AND c2.ts < lf.t
+                     AND (c2.upload_bytes > 0 OR c2.download_bytes > 0))
+             ORDER BY lf.t ASC",
+        )
+        .bind(format!("-{grace_minutes} minutes"))
+        .bind(format!("-{lookback_minutes} minutes"))
+        .bind(format!("-{active_days} days"))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SubFetchStallUser {
+                user_id: UserId(r.get::<String, _>("user_id")),
+                last_fetch: r.get::<String, _>("last_fetch"),
+                last_traffic: r.get::<Option<String>, _>("last_traffic"),
+                fetch_age_minutes: r.get::<i64, _>("age_min"),
+            })
+            .collect())
+    }
+
+    /// Distinct subject ids carried in the `kind` suffix of currently-OPEN
+    /// (`acked_at IS NULL`) `admin_alerts` whose kind starts with `prefix`.
+    /// Backs the per-user fire/resolve loops (kind shape
+    /// `user.sub_no_traffic:<id>`): the caller fires for users in violation
+    /// and acks the open alerts whose subject is no longer in that set.
+    /// Returns the part AFTER `prefix` (the bare id).
+    ///
+    /// Matched with `substr(kind,1,len) = prefix` rather than `LIKE prefix||'%'`
+    /// because the prefix contains `_`, a LIKE single-char wildcard — an exact
+    /// substr compare avoids accidental over-matching.
+    pub async fn open_alert_subjects_with_kind_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        use sqlx::Row;
+        let plen = i64::try_from(prefix.chars().count()).unwrap_or(0);
+        let rows = sqlx::query(
+            "SELECT DISTINCT substr(kind, ?1 + 1) AS subject
+             FROM admin_alerts
+             WHERE acked_at IS NULL AND substr(kind, 1, ?1) = ?2",
+        )
+        .bind(plen)
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("subject"))
+            .collect())
+    }
+
     /// **Fleet-wide raw stats** (2026-05-23 — backs the dashboard's
     /// multi-window traffic chart). Same row shape as the per-
     /// server/per-user variants but with no `WHERE` filter on the
@@ -5857,6 +5982,110 @@ mod tests {
         let inv = fresh().await;
         // If we can list servers without error, migration ran.
         assert!(inv.list_servers().await?.is_empty());
+        Ok(())
+    }
+
+    // sub_fetch_without_traffic_users — the «subscription updated but no
+    // traffic followed» detector query (2026-06-16). Raw inserts with
+    // explicit `ts` offsets because the public record helpers stamp `now`.
+    #[tokio::test]
+    async fn sub_fetch_without_traffic_flags_regression_then_clears() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("s1")).await?;
+        for u in ["oleg", "newbie", "healthy", "justfetched"] {
+            inv.add_user(&sample_user(u)).await?;
+        }
+
+        // A real (non-egress) `/sub` fetch `mins_ago` in the past. IP differs
+        // from the server address (1.2.3.4) so the is_vpn_egress trigger
+        // leaves the row at 0.
+        async fn fetch(inv: &SqliteInventory, uid: &str, mins_ago: i64) {
+            sqlx::query(
+                "INSERT INTO sub_access_log
+                    (ts, user_id, ip, ua, status, bytes, is_vpn_egress)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now',?1), ?2,
+                         '198.51.100.7', 'Happ/1', 200, 900, 0)",
+            )
+            .bind(format!("-{mins_ago} minutes"))
+            .bind(uid)
+            .execute(&inv.pool)
+            .await
+            .unwrap();
+        }
+        // Attributed traffic at an explicit strftime offset ("-2 days",
+        // "-5 minutes", "+0 minutes").
+        async fn traffic(inv: &SqliteInventory, uid: &str, offset: &str) {
+            sqlx::query(
+                "INSERT INTO vpn_connection_stats
+                    (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now',?1), 's1', ?2, 1000, 2000, 1)",
+            )
+            .bind(offset)
+            .bind(uid)
+            .execute(&inv.pool)
+            .await
+            .unwrap();
+        }
+
+        // oleg — FIRES: active 2d ago, fetched 60m ago, silent since.
+        fetch(&inv, "oleg", 60).await;
+        traffic(&inv, "oleg", "-2 days").await;
+        // newbie — NO fire: fetched but never had any traffic (setup problem,
+        // not a regression).
+        fetch(&inv, "newbie", 60).await;
+        // healthy — NO fire: active before AND traffic 5m ago (after fetch).
+        fetch(&inv, "healthy", 60).await;
+        traffic(&inv, "healthy", "-2 days").await;
+        traffic(&inv, "healthy", "-5 minutes").await;
+        // justfetched — NO fire: fetched only 10m ago, still inside the grace.
+        fetch(&inv, "justfetched", 10).await;
+        traffic(&inv, "justfetched", "-2 days").await;
+
+        let flagged = inv.sub_fetch_without_traffic_users(45, 360, 7).await?;
+        let ids: Vec<&str> = flagged.iter().map(|u| u.user_id.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["oleg"],
+            "only the previously-active, past-grace, silent-since-fetch user fires"
+        );
+        assert!(flagged[0].last_traffic.is_some(), "last_traffic populated");
+        assert!(
+            flagged[0].fetch_age_minutes >= 45,
+            "age past grace: {}",
+            flagged[0].fetch_age_minutes
+        );
+
+        // Resolve: oleg now passes traffic AFTER the fetch → drops out.
+        traffic(&inv, "oleg", "+0 minutes").await;
+        let after = inv.sub_fetch_without_traffic_users(45, 360, 7).await?;
+        assert!(after.is_empty(), "oleg clears once traffic resumes: {after:?}");
+        Ok(())
+    }
+
+    // open_alert_subjects_with_kind_prefix — backs the per-user auto-resolve
+    // sweep. Must return only UNACKED subjects of the EXACT prefix.
+    #[tokio::test]
+    async fn open_alert_subjects_filters_by_prefix_and_unacked() -> Result<()> {
+        let inv = fresh().await;
+        inv.insert_alert_if_no_unacked("user.sub_no_traffic:oleg", None, "warning", "s", None)
+            .await?;
+        inv.insert_alert_if_no_unacked("user.sub_no_traffic:masha", None, "warning", "s", None)
+            .await?;
+        // different prefix — must be ignored even though it's open.
+        inv.insert_alert_if_no_unacked("user.traffic_limit:bob", None, "warning", "s", None)
+            .await?;
+        // ack masha → must drop from the open set.
+        inv.ack_open_alerts("user.sub_no_traffic:masha", None).await?;
+
+        let mut subs = inv
+            .open_alert_subjects_with_kind_prefix("user.sub_no_traffic:")
+            .await?;
+        subs.sort();
+        assert_eq!(
+            subs,
+            vec!["oleg".to_string()],
+            "only the open, exact-prefix subject (suffix stripped) is returned"
+        );
         Ok(())
     }
 
