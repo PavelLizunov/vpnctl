@@ -239,8 +239,24 @@ fn render_vless_uri(
     let pbk_e = utf8_percent_encode(pbk, NINITUX_QUOTE);
     let sni_e = utf8_percent_encode(sni, NINITUX_QUOTE);
     let sid_e = utf8_percent_encode(sid, NINITUX_QUOTE);
+    // `fp=randomized` (was `fp=chrome` until 2026-06-16).
+    //
+    // 2026-06-16 (Pavel + multiviruss/chachkamuti): V2rayTun, Streisand and
+    // Happ stopped connecting to REALITY while Shadowrocket and Android
+    // NekoRay kept working — on the SAME Wi-Fi and the SAME server. RU DPI
+    // (TSPU) began fingerprinting the static Chrome uTLS ClientHello that
+    // open-core clients emit on `fp=chrome` and RST-resetting those REALITY
+    // sessions; Shadowrocket's own (different) ClientHello slipped through.
+    // Ruled out server-side: Xray-core 26.3.27 AND sing-box 1.13.7/1.13.12
+    // both complete the handshake from a clean datacenter, so the server,
+    // config, version and flow are all fine — only the on-path uTLS
+    // fingerprint mattered. Field-confirmed: the exact same is/REALITY link
+    // failed on `fp=chrome`, connected on `fp=randomized` in v2rayTun.
+    // `randomized` emits a fresh randomized ClientHello per handshake so the
+    // static-fingerprint rule has nothing to match. Mirrors
+    // `vless_reality.rs::REALITY_UTLS_FP` (Protocol-trait share_link path).
     let params = format!(
-        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=chrome&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
+        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=randomized&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
     );
 
     // Fragment format (post-2026-05-20 + post-rename + operator-side
@@ -1143,7 +1159,8 @@ mod tests {
         // Post-2026-05-23 V2rayTun-compat fix: `encryption=none`
         // re-added at the front of the query string. See doc-comment
         // on `render_vless_uri` for the full rationale.
-        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=chrome&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
+        // 2026-06-16 DPI-evasion: `fp=randomized` (was `fp=chrome`).
+        let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=randomized&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
         assert_eq!(got, expected, "vless URI fragment drifted");
     }
 
