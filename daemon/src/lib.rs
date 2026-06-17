@@ -34,6 +34,9 @@ pub mod config;
 pub mod handlers;
 pub mod health_monitor;
 pub mod real_ip;
+// Composite account-sharing risk scorer (weighted, explainable) — replaces
+// the single `distinct_asns >= 3` heuristic. Pavel 2026-06-17.
+pub mod sharing_score;
 // Generic HTTP helpers shared across handler surfaces and (in the
 // future) CLI consumers of form-encoded payloads. Started life as
 // `decode_form_value` inlined in `handlers/admin.rs`; extracted so
