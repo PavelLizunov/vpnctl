@@ -31,7 +31,8 @@ pub use migrate::{
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, HeavyUser, NodeHealthRow, ServerLiveActivity,
     SqliteInventory,
-    SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn,
+    SharingSignals, SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp,
+    SubOriginAsn,
     SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, UaCluster, UptimeStat,
     UserLifecycle, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow,
     VpnUserSessionRow, VpnUserSourceIpRow,

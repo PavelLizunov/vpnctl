@@ -143,6 +143,47 @@ pub struct HeavyUser {
     pub total_bytes: u64,
 }
 
+/// Raw account-sharing signals for one user over the scoring window
+/// (2026-06-17). The daemon's `sharing_score` turns these into a weighted
+/// 0-100 risk score + a human-readable breakdown. All fields are bounded to
+/// REAL external clients (the `real_client_ip_predicate` is applied to the
+/// sub_access-derived counts; the concurrency/source-IP tables only ever
+/// hold public client IPs). Each field is an independent signal:
+///   - `peak_concurrent_ips`   — STRONGEST: most distinct client IPs in ONE
+///                               clash snapshot (true simultaneity).
+///   - `impossible_travel_hops`— country changes between consecutive `/sub`
+///                               fetches < the impossible-travel window.
+///   - `max_daily_source_ips`  — most distinct connect-from IPs in any one day.
+///   - `distinct_device_classes`/`distinct_asns`/`distinct_countries`/
+///     `distinct_ips` — cumulative diversity of `/sub` fetches (weaker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingSignals {
+    pub user_id: UserId,
+    pub distinct_ips: u64,
+    pub distinct_asns: u64,
+    pub distinct_countries: u64,
+    pub distinct_device_classes: u64,
+    pub peak_concurrent_ips: u32,
+    pub max_daily_source_ips: u32,
+    pub impossible_travel_hops: u64,
+}
+
+/// All-zero [`SharingSignals`] for `user_id` — the per-user accumulator seed
+/// in `sharing_signals_all_users` (each of the four signal queries fills in
+/// its own fields).
+fn blank_sharing_signals(user_id: &str) -> SharingSignals {
+    SharingSignals {
+        user_id: UserId(user_id.to_string()),
+        distinct_ips: 0,
+        distinct_asns: 0,
+        distinct_countries: 0,
+        distinct_device_classes: 0,
+        peak_concurrent_ips: 0,
+        max_daily_source_ips: 0,
+        impossible_travel_hops: 0,
+    }
+}
+
 /// One row of `sub_access_log` (Phase Track-1) — emitted by the daemon
 /// every time `/sub/<token>` is hit, after the token has been resolved.
 /// The token itself is never stored, only the resolved `user_id`, so a
@@ -3847,6 +3888,129 @@ impl SqliteInventory {
         Ok(out)
     }
 
+    /// Gather the raw account-sharing signals for EVERY user over the last
+    /// `days` days (2026-06-17 — backs the redesigned sharing-risk scorer
+    /// that replaces the bare `distinct_asns >= 3` heuristic). Four
+    /// index-backed reads, merged in Rust by user_id (fleet scale is tiny):
+    ///   1. sub_access diversity — distinct real-client IPs / ASNs /
+    ///      countries / device-classes,
+    ///   2. impossible travel — consecutive `/sub` fetches whose country
+    ///      changed in under `impossible_travel_hours` (physically can't
+    ///      move between countries that fast → two locations at once),
+    ///   3. peak concurrent source IPs — the true-simultaneity signal from
+    ///      `vpn_user_ip_concurrency`,
+    ///   4. max distinct connect-from IPs in any single day.
+    /// All sub_access/source-IP reads apply `real_client_ip_predicate` so
+    /// our own infra never inflates a user's signals.
+    pub async fn sharing_signals_all_users(
+        &self,
+        days: u32,
+        impossible_travel_hours: f64,
+    ) -> Result<Vec<SharingSignals>> {
+        use sqlx::Row;
+        use std::collections::HashMap;
+        let ts_cut = format!("-{days} days");
+        let pred_ip = real_client_ip_predicate("ip");
+        let pred_src = real_client_ip_predicate("source_ip");
+
+        let mut acc: HashMap<String, SharingSignals> = HashMap::new();
+
+        // 1 — sub_access diversity.
+        let q1 = format!(
+            "SELECT user_id,
+                    COUNT(DISTINCT ip)            AS d_ips,
+                    COUNT(DISTINCT geo_asn)       AS d_asns,
+                    COUNT(DISTINCT geo_country)   AS d_countries,
+                    COUNT(DISTINCT device_class)  AS d_devcls
+             FROM sub_access_log
+             WHERE is_vpn_egress = 0 AND {pred_ip}
+               AND user_id IS NOT NULL AND user_id != ''
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             GROUP BY user_id"
+        );
+        for r in sqlx::query(&q1).bind(&ts_cut).fetch_all(&self.pool).await? {
+            let uid: String = r.try_get("user_id")?;
+            let s = acc
+                .entry(uid.clone())
+                .or_insert_with(|| blank_sharing_signals(&uid));
+            s.distinct_ips = r.try_get::<i64, _>("d_ips")?.max(0) as u64;
+            s.distinct_asns = r.try_get::<i64, _>("d_asns")?.max(0) as u64;
+            s.distinct_countries = r.try_get::<i64, _>("d_countries")?.max(0) as u64;
+            s.distinct_device_classes = r.try_get::<i64, _>("d_devcls")?.max(0) as u64;
+        }
+
+        // 2 — impossible travel (country change between consecutive fetches
+        // faster than `impossible_travel_hours`). LAG yields the previous
+        // country + ts per user; the delta is computed in the outer query
+        // (Debian-12 SQLite 3.40 julianday can't parse the trailing 'Z').
+        let q2 = format!(
+            "WITH ordered AS (
+                SELECT user_id, geo_country AS c, ts,
+                       LAG(geo_country) OVER (PARTITION BY user_id ORDER BY ts) AS pc,
+                       LAG(ts)          OVER (PARTITION BY user_id ORDER BY ts) AS pts
+                FROM sub_access_log
+                WHERE is_vpn_egress = 0 AND {pred_ip}
+                  AND geo_country IS NOT NULL AND geo_country != ''
+                  AND user_id IS NOT NULL AND user_id != ''
+                  AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             )
+             SELECT user_id, COUNT(*) AS hops
+             FROM ordered
+             WHERE pc IS NOT NULL AND c <> pc
+               AND (julianday(replace(ts, 'Z', '')) -
+                    julianday(replace(pts, 'Z', ''))) * 24.0 < ?2
+             GROUP BY user_id"
+        );
+        for r in sqlx::query(&q2)
+            .bind(&ts_cut)
+            .bind(impossible_travel_hours)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            let uid: String = r.try_get("user_id")?;
+            acc.entry(uid.clone())
+                .or_insert_with(|| blank_sharing_signals(&uid))
+                .impossible_travel_hops = r.try_get::<i64, _>("hops")?.max(0) as u64;
+        }
+
+        // 3 — peak concurrent source IPs.
+        for r in sqlx::query(
+            "SELECT user_id, MAX(peak_concurrent_ips) AS peak
+             FROM vpn_user_ip_concurrency
+             WHERE date >= strftime('%Y-%m-%d', 'now', ?1)
+             GROUP BY user_id",
+        )
+        .bind(&ts_cut)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let uid: String = r.try_get("user_id")?;
+            acc.entry(uid.clone())
+                .or_insert_with(|| blank_sharing_signals(&uid))
+                .peak_concurrent_ips = r.try_get::<i64, _>("peak")?.max(0) as u32;
+        }
+
+        // 4 — max distinct connect-from IPs in any single day.
+        let q4 = format!(
+            "SELECT user_id, MAX(daily) AS max_daily
+             FROM (
+                SELECT user_id, date, COUNT(DISTINCT source_ip) AS daily
+                FROM vpn_user_source_ips
+                WHERE date >= strftime('%Y-%m-%d', 'now', ?1) AND {pred_src}
+                GROUP BY user_id, date
+             )
+             GROUP BY user_id"
+        );
+        for r in sqlx::query(&q4).bind(&ts_cut).fetch_all(&self.pool).await? {
+            let uid: String = r.try_get("user_id")?;
+            acc.entry(uid.clone())
+                .or_insert_with(|| blank_sharing_signals(&uid))
+                .max_daily_source_ips = r.try_get::<i64, _>("max_daily")?.max(0) as u32;
+        }
+
+        Ok(acc.into_values().collect())
+    }
+
     // ── abuse-origins: per-user "Subscription origins" breakdown ───────
     //
     // Four grouped, index-backed reads behind the user-detail
@@ -4891,6 +5055,73 @@ impl SqliteInventory {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Record, per user, the number of DISTINCT source IPs seen in ONE
+    /// clash snapshot (the per-tick "concurrent clients" count). UPSERTs
+    /// `peak_concurrent_ips = MAX(existing, n)` for TODAY's UTC date, so the
+    /// stored value is the day's high-water mark of simultaneous client IPs.
+    /// Same `WHERE EXISTS (users)` deleted-user guard as the source-IP
+    /// writer. The caller passes one (user, distinct_ip_count) pair per user
+    /// present in this snapshot; `n == 0` rows are skipped.
+    pub async fn record_user_ip_concurrency(&self, peaks: &[(UserId, u32)]) -> Result<()> {
+        if peaks.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (user_id, n) in peaks {
+            if *n == 0 {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO vpn_user_ip_concurrency
+                    (user_id, date, peak_concurrent_ips, updated_at)
+                 SELECT ?1, strftime('%Y-%m-%d', 'now'), ?2,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
+                 ON CONFLICT(user_id, date) DO UPDATE SET
+                     peak_concurrent_ips =
+                         max(peak_concurrent_ips, excluded.peak_concurrent_ips),
+                     updated_at = excluded.updated_at",
+            )
+            .bind(&user_id.0)
+            .bind(i64::from(*n))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Peak concurrent distinct source IPs for one user over the last
+    /// `days` days (the day-level high-water marks, MAX'd across the
+    /// window). `0` if the user never had a recorded snapshot. Feeds the
+    /// composite sharing-risk score.
+    pub async fn ip_concurrency_peak_for_user(&self, user_id: &UserId, days: u32) -> Result<u32> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT COALESCE(MAX(peak_concurrent_ips), 0)
+             FROM vpn_user_ip_concurrency
+             WHERE user_id = ?1
+               AND date >= strftime('%Y-%m-%d', 'now', ?2)",
+        )
+        .bind(&user_id.0)
+        .bind(format!("-{days} days"))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(m,)| m.max(0) as u32).unwrap_or(0))
+    }
+
+    /// Purge IP-concurrency rows older than `days`. Wired into the hourly
+    /// retention task alongside `purge_user_source_ips_older_than`.
+    pub async fn purge_user_ip_concurrency_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM vpn_user_ip_concurrency
+             WHERE date < strftime('%Y-%m-%d', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Top source IPs for one user across the last `days` days, sorted
@@ -6243,6 +6474,84 @@ mod tests {
             vec!["172.32.5.5".to_string(), "203.0.113.9".to_string()],
             "only the two real public clients survive; server/control/LAN/loopback/link-local all dropped"
         );
+        Ok(())
+    }
+
+    // IP-concurrency: per-day peak is the MAX across snapshots; unknown
+    // users are FK-guard-skipped silently.
+    #[tokio::test]
+    async fn ip_concurrency_records_daily_peak_max() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_user(&sample_user("u")).await?;
+        // snapshots this day: 1, then 3, then 2 distinct IPs → peak 3.
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 1)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 3)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 2)]).await?;
+        assert_eq!(
+            inv.ip_concurrency_peak_for_user(&UserId("u".into()), 30).await?,
+            3
+        );
+        // since-deleted / unknown user → silently skipped, peak stays 0.
+        inv.record_user_ip_concurrency(&[(UserId("ghost".into()), 9)]).await?;
+        assert_eq!(
+            inv.ip_concurrency_peak_for_user(&UserId("ghost".into()), 30).await?,
+            0
+        );
+        Ok(())
+    }
+
+    // sharing_signals_all_users gathers the two NEW signals — peak
+    // concurrency (simultaneity) + country-level impossible travel — plus
+    // the sub_access diversity, all keyed by user.
+    #[tokio::test]
+    async fn sharing_signals_gathers_concurrency_and_impossible_travel() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_user(&sample_user("sharer")).await?;
+        inv.add_user(&sample_user("solo")).await?;
+
+        // Two `/sub` fetches for `sharer` from DIFFERENT countries 15 min
+        // apart (public IPs, non-egress) → exactly one impossible-travel hop.
+        async fn fetch(inv: &SqliteInventory, uid: &str, ip: &str, cc: &str, asn: &str, mins: i64) {
+            sqlx::query(
+                "INSERT INTO sub_access_log
+                    (ts, user_id, ip, ua, status, bytes, device_class,
+                     geo_country, geo_asn, is_vpn_egress)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now',?1), ?2, ?3, 'cli', 200, 100,
+                         'Shadowrocket', ?4, ?5, 0)",
+            )
+            .bind(format!("-{mins} minutes"))
+            .bind(uid)
+            .bind(ip)
+            .bind(cc)
+            .bind(asn)
+            .execute(&inv.pool)
+            .await
+            .unwrap();
+        }
+        fetch(&inv, "sharer", "203.0.113.10", "US", "AS1", 200).await;
+        fetch(&inv, "sharer", "198.51.100.20", "DE", "AS2", 185).await;
+        // solo — single country, single fetch (no impossible travel).
+        fetch(&inv, "solo", "203.0.113.30", "RU", "AS3", 100).await;
+
+        // Concurrency: sharer hit 3 simultaneous IPs once; solo only ever 1.
+        inv.record_user_ip_concurrency(&[(UserId("sharer".into()), 3)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("solo".into()), 1)]).await?;
+
+        let sigs = inv.sharing_signals_all_users(30, 2.0).await?;
+        let find = |u: &str| sigs.iter().find(|s| s.user_id.0 == u).cloned();
+        let sharer = find("sharer").expect("sharer present");
+        let solo = find("solo").expect("solo present");
+
+        assert_eq!(sharer.peak_concurrent_ips, 3, "sharer concurrency peak");
+        assert_eq!(
+            sharer.impossible_travel_hops, 1,
+            "US→DE in 15 min = one impossible-travel hop"
+        );
+        assert_eq!(sharer.distinct_countries, 2);
+        assert_eq!(sharer.distinct_asns, 2);
+
+        assert_eq!(solo.peak_concurrent_ips, 1, "solo never had two IPs at once");
+        assert_eq!(solo.impossible_travel_hops, 0, "solo single country");
         Ok(())
     }
 

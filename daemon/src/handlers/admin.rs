@@ -544,13 +544,6 @@ fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Marku
     }
 }
 
-/// PR-Dash dash#5 — a subscription fetched from at least this many
-/// distinct ASNs is the "one share-link, many networks" signal that
-/// feeds the abuse-summary card. Picked once here so the threshold is
-/// a single constant edit. 3 ASNs ≈ home ISP + mobile carrier + a
-/// third network = a link that's left the household.
-const LIKELY_SHARED_MIN_ASNS: u32 = 3;
-
 /// Parse a dotted version string (`"1.13.12"`, leading `v` tolerated)
 /// into a comparable numeric tuple. Non-numeric / missing components
 /// read as 0, and we pad to three components so `"1.13"` sorts below
@@ -1043,23 +1036,44 @@ fn dashboard_alerts_breakdown(
 }
 
 /// PR-Dash dash#5 — abuse summary. Surfaces subs that look shared (one
-/// link fetched from many ASNs), per `likely_shared_summary` (Q-4h).
-/// «N likely-shared subs · top: {user} ({asns} ASNs)», each user
-/// links to their detail page. Renders nothing when no sub crosses the
-/// ASN threshold (quiet dashboard).
+/// Localized chip text for one sharing-risk reason (the carried value +
+/// a short unit). The scorer orders reasons strongest-first, so the lead
+/// chip is the smoking gun (concurrent IPs / impossible travel).
+fn sharing_reason_label(
+    r: crate::sharing_score::SharingReason,
+    lang: crate::i18n::Locale,
+) -> String {
+    use crate::i18n::tr;
+    use crate::sharing_score::SharingReason as R;
+    match r {
+        R::ConcurrentIps(n) => format!("{n} {}", tr(lang, "IPs at once", "IP одновременно")),
+        R::ImpossibleTravel(h) => {
+            format!("{h}× {}", tr(lang, "impossible travel", "невозможн. перемещ."))
+        }
+        R::DailyIps(n) => format!("{n} {}", tr(lang, "IPs/day", "IP/день")),
+        R::DeviceClasses(n) => format!("{n} {}", tr(lang, "client apps", "клиентов")),
+        R::Asns(n) => format!("{n} {}", tr(lang, "ASNs", "ASN")),
+        R::Countries(n) => format!("{n} {}", tr(lang, "countries", "стран")),
+    }
+}
+
+/// PR-Dash dash#5 — account-sharing risk summary (redesigned 2026-06-17 to
+/// a composite, explainable score; replaces the bare `distinct_asns >= 3`).
+/// Each row shows the user, a 0-100 risk score (red=High, amber=Medium) and
+/// the reasons that fired (strongest first: simultaneous IPs, impossible
+/// travel, per-day IPs, client-app spread, …). Renders nothing when no user
+/// reaches `FLAG_THRESHOLD` (quiet dashboard).
 fn dashboard_abuse_summary(
-    likely_shared: &[(vpnctl_core::UserId, u64, u64, u64)],
+    likely_shared: &[(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // abuse-origins defensive guard: the inventory query already
-    // excludes NULL / empty `user_id` (the deleted-user blank-row bug),
-    // but skip any empty id here too so this render can NEVER emit a
-    // nameless link to `/admin/users/`. Belt-and-braces — a future
-    // query change can't reintroduce the blank row on this surface.
-    let rows: Vec<&(vpnctl_core::UserId, u64, u64, u64)> = likely_shared
+    use crate::sharing_score::SharingLevel;
+    // Defensive: skip any empty id so this render can NEVER emit a nameless
+    // link to `/admin/users/`.
+    let rows: Vec<&(vpnctl_core::UserId, crate::sharing_score::SharingScore)> = likely_shared
         .iter()
-        .filter(|(uid, _, _, _)| !uid.0.is_empty())
+        .filter(|(uid, _)| !uid.0.is_empty())
         .collect();
     if rows.is_empty() {
         return html! {};
@@ -1073,30 +1087,35 @@ fn dashboard_abuse_summary(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
                 b { (n) }
                 @if n == 1 {
-                    (tr(lang, " subscription was fetched from many networks", " подписку тянули из многих сетей"))
+                    (tr(lang, " subscription looks shared", " подписка похожа на расшаренную"))
                 } @else {
-                    (tr(lang, " subscriptions were fetched from many networks", " подписок тянули из многих сетей"))
+                    (tr(lang, " subscriptions look shared", " подписок похожи на расшаренные"))
                 }
                 (tr(
                     lang,
-                    " — a sub URL hitting several ASNs usually means the link left the household. Open a row to rotate the token or shape access.",
-                    " — URL подписки из нескольких ASN обычно значит, что ссылка ушла из дома. Открой строку, чтобы сменить токен или ограничить доступ.",
+                    " — risk score weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity (a traveller's home + mobile + work no longer trips it). Open a row to rotate the token.",
+                    " — риск-скор взвешивает ОДНОВРЕМЕННЫЕ клиентские IP + невозможные перемещения намного выше простого разнообразия сетей (дом + мобильный + работа путешественника больше не срабатывают). Открой строку, чтобы сменить токен.",
                 ))
             }
             ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-                @for (uid, ips, asns, countries) in &rows {
-                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        // Link to the user's "Subscription origins"
-                        // section (#origins, abuse-origins) so one click
-                        // jumps straight to the who-is-sharing breakdown.
+                @for (uid, sc) in &rows {
+                    li style="display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                        span style=(format!(
+                            "font-weight: 700; min-width: 26px; text-align: right; color: {};",
+                            if sc.level == SharingLevel::High { "#b00020" } else { "#9a6700" }
+                        )) {
+                            (sc.score)
+                        }
+                        // Link to the user's "Subscription origins" section.
                         a href=(format!("/admin/users/{}#origins", path_segment_encode(&uid.0)))
                           style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
                             (uid.0)
                         }
                         span style="color: var(--mute);" {
-                            (asns) " " (tr(lang, "ASNs", "ASN"))
-                            " · " (ips) " " (tr(lang, "IPs", "IP"))
-                            " · " (countries) " " (tr(lang, "countries", "стран"))
+                            @for (i, reason) in sc.reasons.iter().take(3).enumerate() {
+                                @if i > 0 { " · " }
+                                (sharing_reason_label(*reason, lang))
+                            }
                         }
                     }
                 }
@@ -1525,17 +1544,28 @@ pub(crate) async fn dashboard(
             Vec::new()
         });
 
-    // PR-Dash dash#5 — likely-shared-subscription summary (Q-4h). A
-    // sub fetched from ≥3 distinct ASNs is the "shared link" signal.
-    // Empty ⇒ card hidden.
-    let likely_shared = state
+    // PR-Dash dash#5 (redesigned 2026-06-17) — composite account-sharing
+    // risk. Gather raw signals fleet-wide over the retention window, score
+    // each (simultaneity-weighted), keep only flagged users, strongest
+    // first. Empty ⇒ card hidden.
+    const SHARING_WINDOW_DAYS: u32 = 30;
+    const IMPOSSIBLE_TRAVEL_HOURS: f64 = 2.0;
+    let mut likely_shared: Vec<(vpnctl_core::UserId, crate::sharing_score::SharingScore)> = state
         .inv
-        .likely_shared_summary(LIKELY_SHARED_MIN_ASNS)
+        .sharing_signals_all_users(SHARING_WINDOW_DAYS, IMPOSSIBLE_TRAVEL_HOURS)
         .await
         .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "likely_shared_summary failed");
+            tracing::warn!(target = "vpnctld::admin", error = %e, "sharing_signals_all_users failed");
             Vec::new()
-        });
+        })
+        .into_iter()
+        .map(|s| {
+            let sc = crate::sharing_score::score(&s);
+            (s.user_id, sc)
+        })
+        .filter(|(_, sc)| sc.is_flagged())
+        .collect();
+    likely_shared.sort_by(|a, b| b.1.score.cmp(&a.1.score));
 
     // PR-Dash dash#6 — "today so far" digest from the audit log (Q-4g).
     // All-zero ⇒ card hidden (quiet dashboard).

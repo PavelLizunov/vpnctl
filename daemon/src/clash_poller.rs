@@ -511,6 +511,39 @@ async fn poll_one_server(
         }
     }
 
+    // Sharing-signal foundation (2026-06-17): the count of DISTINCT public
+    // source IPs a user has IN THIS SNAPSHOT is, by construction, how many
+    // separate clients are connected to this node at the same instant — the
+    // single strongest "shared subscription" signal (industry: simultaneity
+    // beats cumulative ASN-over-30d). `source_ip_pairs` is already the
+    // deduped (user, ip) set for this snapshot, so a per-user count == the
+    // user's distinct-IP count right now. Infra / private / control IPs are
+    // excluded (never a real concurrent client). Persist the DAILY PEAK.
+    {
+        let mut per_user_ips: HashMap<String, u32> = HashMap::new();
+        for (u, ip) in &source_ip_pairs {
+            if crate::ip_kind::classify_ip(ip) == crate::ip_kind::IpKind::Public
+                && !vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS.contains(&ip.as_str())
+            {
+                *per_user_ips.entry(u.0.clone()).or_insert(0) += 1;
+            }
+        }
+        let peaks: Vec<(vpnctl_core::UserId, u32)> = per_user_ips
+            .into_iter()
+            .map(|(u, n)| (vpnctl_core::UserId(u), n))
+            .collect();
+        if !peaks.is_empty() {
+            if let Err(e) = inv.record_user_ip_concurrency(&peaks).await {
+                tracing::warn!(
+                    target = "vpnctld::poller",
+                    server = %server.id.0,
+                    error = %e,
+                    "record_user_ip_concurrency failed (will retry next tick)"
+                );
+            }
+        }
+    }
+
     // Phase 5c — session observation: per (resolved user, this
     // server), advance or open a session window. SESSION_GAP_MINS
     // matches the 15-min budget; a 5-min poll cadence means we

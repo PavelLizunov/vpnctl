@@ -515,6 +515,26 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                 ),
             }
 
+            // IP-concurrency peaks share the source-IP retention window.
+            match inv.purge_user_ip_concurrency_older_than(RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "vpn_user_ip_concurrency purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old vpn_user_ip_concurrency rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "vpn_user_ip_concurrency purge failed; will retry next tick"
+                ),
+            }
+
             // Phase 5a-2 — sweep dns_ptr_cache on the same cadence.
             // 7-day TTL — PTR records change rarely (ISP renames,
             // CDN failovers) but not never; weekly refresh keeps
