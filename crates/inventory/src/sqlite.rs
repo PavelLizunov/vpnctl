@@ -159,13 +159,41 @@ pub struct HeavyUser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharingSignals {
     pub user_id: UserId,
+    // Fetch-side diversity — kept for DISPLAY context only; the redesigned
+    // scorer no longer feeds these into the risk number (they're inflated by
+    // power users with many client apps + proxy/CDN fetches, not sharing).
     pub distinct_ips: u64,
     pub distinct_asns: u64,
     pub distinct_countries: u64,
     pub distinct_device_classes: u64,
-    pub peak_concurrent_ips: u32,
-    pub max_daily_source_ips: u32,
+    /// Peak distinct `/24` networks for this user in ONE clash snapshot
+    /// (rotation-immune simultaneity). The dominant scoring signal.
+    pub peak_concurrent_nets: u32,
+    /// Most distinct `/24` networks the user connected from in any single
+    /// day (secondary signal).
+    pub max_daily_nets: u32,
+    /// `/sub` country changes faster than `impossible_travel_hours` (weak —
+    /// proxy/CDN fetches + geoip flap trip it; only many hops score).
     pub impossible_travel_hops: u64,
+}
+
+/// Collapse an IP to its network key for sharing-detection counting
+/// (2026-06-17): IPv4 → its `/24` (`"91.79.36.72"` → `"91.79.36"`), IPv6 →
+/// the address verbatim. Mobile carriers rotate a single device across many
+/// IPs WITHIN one `/24`-ish pool, so counting distinct `/24`s instead of raw
+/// IPs stops one rotating phone from looking like a dozen shared clients
+/// (the multiviruss false positive: 16 raw IPs were ~5 `/24`s, mostly one
+/// carrier). A real shared sub spans DIFFERENT access networks → different
+/// `/24`s. Not perfect (a carrier can span two `/24`s) but kills the bulk of
+/// the rotation inflation with zero geoip dependency.
+pub fn ipv4_net24(ip: &str) -> String {
+    if ip.contains(':') {
+        return ip.to_string(); // IPv6 — no cheap /24 analogue; keep whole.
+    }
+    match ip.rsplit_once('.') {
+        Some((prefix, _last_octet)) => prefix.to_string(),
+        None => ip.to_string(),
+    }
 }
 
 /// All-zero [`SharingSignals`] for `user_id` — the per-user accumulator seed
@@ -178,8 +206,8 @@ fn blank_sharing_signals(user_id: &str) -> SharingSignals {
         distinct_asns: 0,
         distinct_countries: 0,
         distinct_device_classes: 0,
-        peak_concurrent_ips: 0,
-        max_daily_source_ips: 0,
+        peak_concurrent_nets: 0,
+        max_daily_nets: 0,
         impossible_travel_hops: 0,
     }
 }
@@ -3973,7 +4001,8 @@ impl SqliteInventory {
                 .impossible_travel_hops = r.try_get::<i64, _>("hops")?.max(0) as u64;
         }
 
-        // 3 — peak concurrent source IPs.
+        // 3 — peak concurrent /24 networks (the poller stores the per-
+        // snapshot distinct-/24 count in `peak_concurrent_ips`).
         for r in sqlx::query(
             "SELECT user_id, MAX(peak_concurrent_ips) AS peak
              FROM vpn_user_ip_concurrency
@@ -3987,25 +4016,39 @@ impl SqliteInventory {
             let uid: String = r.try_get("user_id")?;
             acc.entry(uid.clone())
                 .or_insert_with(|| blank_sharing_signals(&uid))
-                .peak_concurrent_ips = r.try_get::<i64, _>("peak")?.max(0) as u32;
+                .peak_concurrent_nets = r.try_get::<i64, _>("peak")?.max(0) as u32;
         }
 
-        // 4 — max distinct connect-from IPs in any single day.
+        // 4 — max distinct /24 NETWORKS connected from in any single day.
+        // Raw (user, date, ip) rows are folded to distinct /24 per day in
+        // Rust (a carrier's rotating IPs collapse to a handful of /24s), then
+        // MAX'd over the window.
         let q4 = format!(
-            "SELECT user_id, MAX(daily) AS max_daily
-             FROM (
-                SELECT user_id, date, COUNT(DISTINCT source_ip) AS daily
-                FROM vpn_user_source_ips
-                WHERE date >= strftime('%Y-%m-%d', 'now', ?1) AND {pred_src}
-                GROUP BY user_id, date
-             )
-             GROUP BY user_id"
+            "SELECT user_id, date, source_ip
+             FROM vpn_user_source_ips
+             WHERE date >= strftime('%Y-%m-%d', 'now', ?1) AND {pred_src}"
         );
+        let mut per_day_nets: HashMap<(String, String), std::collections::HashSet<String>> =
+            HashMap::new();
         for r in sqlx::query(&q4).bind(&ts_cut).fetch_all(&self.pool).await? {
             let uid: String = r.try_get("user_id")?;
+            let date: String = r.try_get("date")?;
+            let ip: String = r.try_get("source_ip")?;
+            per_day_nets
+                .entry((uid, date))
+                .or_default()
+                .insert(ipv4_net24(&ip));
+        }
+        let mut max_nets: HashMap<String, u32> = HashMap::new();
+        for ((uid, _date), nets) in per_day_nets {
+            let n = nets.len() as u32;
+            let e = max_nets.entry(uid).or_insert(0);
+            *e = (*e).max(n);
+        }
+        for (uid, n) in max_nets {
             acc.entry(uid.clone())
                 .or_insert_with(|| blank_sharing_signals(&uid))
-                .max_daily_source_ips = r.try_get::<i64, _>("max_daily")?.max(0) as u32;
+                .max_daily_nets = n;
         }
 
         Ok(acc.into_values().collect())
@@ -6542,7 +6585,7 @@ mod tests {
         let sharer = find("sharer").expect("sharer present");
         let solo = find("solo").expect("solo present");
 
-        assert_eq!(sharer.peak_concurrent_ips, 3, "sharer concurrency peak");
+        assert_eq!(sharer.peak_concurrent_nets, 3, "sharer concurrency peak");
         assert_eq!(
             sharer.impossible_travel_hops, 1,
             "US→DE in 15 min = one impossible-travel hop"
@@ -6550,7 +6593,7 @@ mod tests {
         assert_eq!(sharer.distinct_countries, 2);
         assert_eq!(sharer.distinct_asns, 2);
 
-        assert_eq!(solo.peak_concurrent_ips, 1, "solo never had two IPs at once");
+        assert_eq!(solo.peak_concurrent_nets, 1, "solo never had two nets at once");
         assert_eq!(solo.impossible_travel_hops, 0, "solo single country");
         Ok(())
     }

@@ -520,17 +520,24 @@ async fn poll_one_server(
     // user's distinct-IP count right now. Infra / private / control IPs are
     // excluded (never a real concurrent client). Persist the DAILY PEAK.
     {
-        let mut per_user_ips: HashMap<String, u32> = HashMap::new();
+        // Count distinct /24 NETWORKS, not raw IPs — a single mobile device
+        // rotates across many IPs within one carrier /24, so raw-IP counting
+        // would fake concurrency. Two distinct /24s in one snapshot ⇒ two
+        // separate access networks online together.
+        let mut per_user_nets: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (u, ip) in &source_ip_pairs {
             if crate::ip_kind::classify_ip(ip) == crate::ip_kind::IpKind::Public
                 && !vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS.contains(&ip.as_str())
             {
-                *per_user_ips.entry(u.0.clone()).or_insert(0) += 1;
+                per_user_nets
+                    .entry(u.0.clone())
+                    .or_default()
+                    .insert(vpnctl_inventory::sqlite::ipv4_net24(ip));
             }
         }
-        let peaks: Vec<(vpnctl_core::UserId, u32)> = per_user_ips
+        let peaks: Vec<(vpnctl_core::UserId, u32)> = per_user_nets
             .into_iter()
-            .map(|(u, n)| (vpnctl_core::UserId(u), n))
+            .map(|(u, nets)| (vpnctl_core::UserId(u), nets.len() as u32))
             .collect();
         if !peaks.is_empty() {
             if let Err(e) = inv.record_user_ip_concurrency(&peaks).await {
