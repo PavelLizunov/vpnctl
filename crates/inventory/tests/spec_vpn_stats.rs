@@ -1146,12 +1146,23 @@ async fn top_users_by_traffic_ranks_by_weighted_bytes() {
     let top = inv.top_users_by_traffic(24, 10).await.unwrap();
     assert_eq!(top.len(), 2);
     assert_eq!(
-        top[0].0.0, "alice",
+        top[0].user_id.0, "alice",
         "alice (×2 → 2M weighted) must outrank bob (×1 → 1M) despite equal raw bytes"
     );
-    assert_eq!(top[0].1, 2_000_000, "alice weighted total");
-    assert_eq!(top[1].0.0, "bob");
-    assert_eq!(top[1].1, 1_000_000, "bob ×1 identity");
+    assert_eq!(top[0].total_bytes, 2_000_000, "alice weighted total");
+    // 2026-06-16 — upload / download are now summed separately for the
+    // three-column dashboard tile, each weighted, and total == up + down.
+    assert_eq!(top[0].upload_bytes, 1_000_000, "alice weighted upload (×2)");
+    assert_eq!(top[0].download_bytes, 1_000_000, "alice weighted download (×2)");
+    assert_eq!(
+        top[0].upload_bytes + top[0].download_bytes,
+        top[0].total_bytes,
+        "total must equal upload + download exactly"
+    );
+    assert_eq!(top[1].user_id.0, "bob");
+    assert_eq!(top[1].total_bytes, 1_000_000, "bob ×1 identity");
+    assert_eq!(top[1].upload_bytes, 500_000, "bob ×1 upload");
+    assert_eq!(top[1].download_bytes, 500_000, "bob ×1 download");
 }
 
 // top_users_by_daily_traffic (vpn_user_daily path) is weighted the same
