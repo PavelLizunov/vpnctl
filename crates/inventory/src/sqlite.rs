@@ -421,6 +421,20 @@ pub struct VpnUserSourceIpRow {
     pub last_seen: DateTime<Utc>,
 }
 
+/// Our OWN infrastructure egress IPs that must never count as a real
+/// client source-IP (2026-06-16, Pavel). The homelab NAT egress
+/// `83.97.108.34` is where every LAN box exits — the control-plane curl
+/// tests, the phase6-monitor canary, the claude-chat proxy, and any
+/// browser-opened `/sub` check all appear as this IP, so without the
+/// exclusion it dominates the per-user source-IP counter (it was 656 of
+/// ninitux's 723 hits — 90% pure test noise). VPN SERVER addresses are
+/// excluded separately via `(SELECT address FROM servers)` because a user
+/// who hops node A→B briefly shows node A's egress as their source while
+/// the old session drains. Extend this list if more control-plane egresses
+/// appear; keep it NON-EMPTY (an empty `NOT IN ()` is a SQL error — the
+/// query layer guards by omitting the clause when empty).
+pub const OUR_EGRESS_CONTROL_IPS: &[&str] = &["83.97.108.34"];
+
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
 /// date) aggregated traffic + peak conns. Long-term retention
 /// counterpart to the rolling 30-day `vpn_connection_stats`.
@@ -4265,11 +4279,25 @@ impl SqliteInventory {
         let placeholders = std::iter::repeat_n("?", ips.len())
             .collect::<Vec<_>>()
             .join(",");
+        // `is_vpn_egress = 0` already drops VPN-server-IP fetches, but the
+        // homelab control egress (`OUR_EGRESS_CONTROL_IPS`, e.g. our test
+        // curls) is is_vpn_egress=0, so exclude it explicitly — otherwise
+        // every user we test from that IP would look like they "share" it.
+        let ctrl = OUR_EGRESS_CONTROL_IPS;
+        let ctrl_clause = if ctrl.is_empty() {
+            String::new()
+        } else {
+            let ph = std::iter::repeat_n("?", ctrl.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND ip NOT IN ({ph})")
+        };
         let sql = format!(
             "SELECT ip, user_id, COUNT(*) AS hits
              FROM sub_access_log
              WHERE ip IN ({placeholders})
                AND is_vpn_egress = 0
+               {ctrl_clause}
                AND user_id IS NOT NULL
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
              GROUP BY ip, user_id
@@ -4279,6 +4307,9 @@ impl SqliteInventory {
         let mut q = sqlx::query(&sql);
         for ip in ips {
             q = q.bind(ip);
+        }
+        for ip in ctrl {
+            q = q.bind(*ip);
         }
         q = q.bind(&cutoff);
         let rows = q.fetch_all(&self.pool).await?;
@@ -4820,7 +4851,25 @@ impl SqliteInventory {
         limit: u32,
     ) -> Result<Vec<VpnUserSourceIpRow>> {
         let cutoff = format!("-{days} days");
-        let rows = sqlx::query(
+        // Exclude OUR infra IPs so the per-user counter shows REAL clients:
+        //  - VPN server addresses (a node hop A→B briefly shows node A's
+        //    egress as the source while the old session drains),
+        //  - the control-plane egress(es) in `OUR_EGRESS_CONTROL_IPS`
+        //    (homelab NAT — curl tests / monitor canary / proxy).
+        // Server IPs come from a sub-SELECT (dynamic per inventory); the
+        // control IPs are bound as `?` placeholders. The control clause is
+        // omitted entirely if the const is empty (an empty `NOT IN ()` is a
+        // SQL syntax error).
+        let ctrl = OUR_EGRESS_CONTROL_IPS;
+        let ctrl_clause = if ctrl.is_empty() {
+            String::new()
+        } else {
+            let ph = std::iter::repeat_n("?", ctrl.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND source_ip NOT IN ({ph})")
+        };
+        let sql = format!(
             "SELECT user_id, source_ip, date, hit_count, last_seen
              FROM (
                 SELECT user_id, source_ip,
@@ -4828,18 +4877,21 @@ impl SqliteInventory {
                        SUM(hit_count)   AS hit_count,
                        MAX(last_seen)   AS last_seen
                 FROM vpn_user_source_ips
-                WHERE user_id = ?1
-                  AND date >= strftime('%Y-%m-%d', 'now', ?2)
+                WHERE user_id = ?
+                  AND date >= strftime('%Y-%m-%d', 'now', ?)
+                  AND source_ip NOT IN (SELECT address FROM servers)
+                  {ctrl_clause}
                 GROUP BY user_id, source_ip
              )
              ORDER BY hit_count DESC, last_seen DESC
-             LIMIT ?3",
-        )
-        .bind(&user_id.0)
-        .bind(&cutoff)
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ?"
+        );
+        let mut q = sqlx::query(&sql).bind(&user_id.0).bind(&cutoff);
+        for ip in ctrl {
+            q = q.bind(*ip);
+        }
+        q = q.bind(i64::from(limit));
+        let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_user_source_ip).collect()
     }
 
@@ -6114,6 +6166,31 @@ mod tests {
             subs,
             vec!["oleg".to_string()],
             "only the open, exact-prefix subject (suffix stripped) is returned"
+        );
+        Ok(())
+    }
+
+    // top_source_ips_for_user must hide OUR infra IPs (2026-06-16): VPN
+    // server addresses (a node-hop leaves the old node's egress as a
+    // transient "source") and the control egress in OUR_EGRESS_CONTROL_IPS
+    // (homelab NAT — test curls / monitor). Only real client IPs remain.
+    #[tokio::test]
+    async fn top_source_ips_excludes_server_and_control_ips() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("s1")).await?; // address 1.2.3.4
+        inv.add_user(&sample_user("u")).await?;
+        inv.record_user_source_ips(&[
+            (UserId("u".into()), "203.0.113.9".into()), // real client
+            (UserId("u".into()), "1.2.3.4".into()),     // == server s1 address
+            (UserId("u".into()), "83.97.108.34".into()), // control egress const
+        ])
+        .await?;
+        let rows = inv.top_source_ips_for_user(&UserId("u".into()), 30, 50).await?;
+        let ips: Vec<&str> = rows.iter().map(|r| r.source_ip.as_str()).collect();
+        assert_eq!(
+            ips,
+            ["203.0.113.9"],
+            "server address (1.2.3.4) + control egress (83.97.108.34) excluded; only the real client remains"
         );
         Ok(())
     }
