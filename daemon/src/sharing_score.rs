@@ -1,23 +1,29 @@
-//! Composite account-sharing risk scorer (2026-06-17).
+//! Composite account-sharing risk scorer (2026-06-17, v2).
 //!
 //! Replaces the old single-threshold heuristic («`distinct_asns >= 3` over
-//! the 30-day retention window») which fired on any traveller (home Wi-Fi +
-//! mobile + work = 3 ASNs) and only ever looked at `/sub` URL fetches, never
-//! at the actual VPN connections.
+//! the 30-day window») which fired on any traveller.
 //!
-//! Industry practice (Fingerprint, Netflix household, impossible-travel
-//! detection) weights SIMULTANEITY far above cumulative diversity. So does
-//! this scorer: the dominant term is `peak_concurrent_ips` — the most
-//! distinct client IPs seen in ONE clash snapshot (two IPs at the same
-//! instant ⇒ two clients online together), recorded by the poller into
-//! `vpn_user_ip_concurrency`. The remaining terms add corroboration:
-//! country-level impossible travel, distinct connect-from IPs per day,
-//! client-app diversity, and the legacy ASN/country spread (down-weighted).
+//! v2 lesson (the multiviruss false positive): fetch-side and raw-IP signals
+//! are NOISE. A single mobile phone rotates across a dozen carrier IPs in a
+//! day (looked like "16 IPs"); a power user fetches `/sub` through proxies /
+//! CDNs from several countries (looked like "impossible travel"); a tester
+//! uses six client apps. None of that is sharing. So v2:
+//!   - counts distinct **/24 NETWORKS**, not raw IPs (rotation collapses to a
+//!     handful of /24s),
+//!   - makes **simultaneity** (distinct /24s in ONE clash snapshot) the
+//!     dominant term — it's rotation-immune and about real connections,
+//!   - keeps "distinct /24s per day" as a secondary signal,
+//!   - de-rates impossible-travel to a weak corroborator (only MANY hops),
+//!   - DROPS fetch-side diversity (ASNs / countries / client-apps) from the
+//!     score entirely — it lives on the user page as context, not as a
+//!     risk driver.
 //!
-//! The score is the sum of each signal's points, capped at 100, and carries
-//! the list of contributing reasons so the UI can SHOW WHY a user is flagged
-//! rather than emit an opaque number. Pure (no I/O, no i18n) so it unit-tests
-//! trivially; the render translates [`SharingReason`] labels.
+//! A 2-network snapshot scores below the flag on its own (one person with a
+//! phone + a laptop online together is legitimate); 3+ simultaneous networks,
+//! or 2 networks corroborated by many distinct daily networks, is what flags.
+//!
+//! Pure (no I/O, no i18n) so it unit-tests trivially; the render translates
+//! [`SharingReason`] labels.
 
 use vpnctl_inventory::SharingSignals;
 
@@ -25,61 +31,42 @@ use vpnctl_inventory::SharingSignals;
 /// variant to a localized label and shows the carried value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharingReason {
-    /// Most distinct client IPs in a single clash snapshot (true concurrency).
-    ConcurrentIps(u32),
-    /// `/sub` fetches whose country changed faster than is physically possible.
+    /// Most distinct /24 networks in a single clash snapshot (true,
+    /// rotation-immune concurrency). The dominant signal.
+    ConcurrentNets(u32),
+    /// Most distinct /24 networks the user connected from in any single day.
+    DailyNets(u32),
+    /// `/sub` country changes faster than physically possible (weak — only
+    /// many hops score, since a few are proxy/CDN-fetch + geoip artefacts).
     ImpossibleTravel(u64),
-    /// Most distinct connect-from IPs in any single day.
-    DailyIps(u32),
-    /// Distinct client-app classes (Shadowrocket / v2rayTun / browser / …).
-    DeviceClasses(u64),
-    /// Distinct ASNs the `/sub` URL was fetched from (legacy signal).
-    Asns(u64),
-    /// Distinct countries the `/sub` URL was fetched from.
-    Countries(u64),
 }
 
 impl SharingReason {
     /// Points this reason contributes to the 0-100 score.
     pub fn points(self) -> u8 {
         match self {
-            // STRONGEST — simultaneous distinct client IPs.
-            SharingReason::ConcurrentIps(n) => match n {
+            // STRONGEST — simultaneous distinct access networks. 2 alone is
+            // sub-flag (one person, two devices); 3+ is the real signal.
+            SharingReason::ConcurrentNets(n) => match n {
                 0 | 1 => 0,
                 2 => 25,
-                3 => 40,
-                _ => 55,
+                3 => 45,
+                _ => 65,
             },
-            // Physically-impossible country hops between consecutive fetches.
+            // Distinct access networks in a single day (rotation already
+            // collapsed to /24s).
+            SharingReason::DailyNets(n) => match n {
+                0..=3 => 0,
+                4..=6 => 8,
+                7..=10 => 18,
+                _ => 28,
+            },
+            // De-rated: a handful of country hops is usually proxy/CDN
+            // fetching or geoip flap, not two people abroad.
             SharingReason::ImpossibleTravel(h) => match h {
-                0 => 0,
-                1 => 20,
-                _ => 35,
-            },
-            // Many distinct connect-from IPs within a single day.
-            SharingReason::DailyIps(n) => match n {
                 0..=2 => 0,
-                3 => 10,
-                4 | 5 => 20,
-                _ => 30,
-            },
-            // Many distinct client apps.
-            SharingReason::DeviceClasses(n) => match n {
-                0..=2 => 0,
-                3 => 5,
+                3 | 4 => 8,
                 _ => 15,
-            },
-            // Legacy ASN spread — down-weighted (travellers trip it).
-            SharingReason::Asns(n) => match n {
-                0..=2 => 0,
-                3 | 4 => 5,
-                _ => 12,
-            },
-            // Country spread.
-            SharingReason::Countries(n) => match n {
-                0 | 1 => 0,
-                2 => 5,
-                _ => 12,
             },
         }
     }
@@ -117,17 +104,12 @@ impl SharingScore {
 /// Score one user's raw [`SharingSignals`] into a 0-100 composite.
 pub fn score(s: &SharingSignals) -> SharingScore {
     let candidates = [
-        SharingReason::ConcurrentIps(s.peak_concurrent_ips),
+        SharingReason::ConcurrentNets(s.peak_concurrent_nets),
+        SharingReason::DailyNets(s.max_daily_nets),
         SharingReason::ImpossibleTravel(s.impossible_travel_hops),
-        SharingReason::DailyIps(s.max_daily_source_ips),
-        SharingReason::DeviceClasses(s.distinct_device_classes),
-        SharingReason::Asns(s.distinct_asns),
-        SharingReason::Countries(s.distinct_countries),
     ];
-    let mut reasons: Vec<SharingReason> = candidates
-        .into_iter()
-        .filter(|r| r.points() > 0)
-        .collect();
+    let mut reasons: Vec<SharingReason> =
+        candidates.into_iter().filter(|r| r.points() > 0).collect();
     // Highest-impact reason first so the UI leads with the smoking gun.
     reasons.sort_by(|a, b| b.points().cmp(&a.points()));
 
@@ -155,64 +137,64 @@ mod tests {
     use super::*;
     use vpnctl_core::UserId;
 
-    fn sig(
-        peak: u32,
-        travel: u64,
-        daily: u32,
-        devcls: u64,
-        asns: u64,
-        countries: u64,
-    ) -> SharingSignals {
+    fn sig(peak_nets: u32, daily_nets: u32, travel: u64) -> SharingSignals {
         SharingSignals {
             user_id: UserId("u".into()),
-            distinct_ips: 0,
-            distinct_asns: asns,
-            distinct_countries: countries,
-            distinct_device_classes: devcls,
-            peak_concurrent_ips: peak,
-            max_daily_source_ips: daily,
+            // Fetch-side diversity is intentionally non-zero but MUST NOT
+            // affect the score (dropped in v2).
+            distinct_ips: 99,
+            distinct_asns: 9,
+            distinct_countries: 9,
+            distinct_device_classes: 9,
+            peak_concurrent_nets: peak_nets,
+            max_daily_nets: daily_nets,
             impossible_travel_hops: travel,
         }
     }
 
     #[test]
-    fn single_user_one_ip_never_flags() {
-        // One client, one IP at a time, a couple of ASNs (home + mobile),
-        // one client app. The old method flagged ≥3 ASNs; this must stay calm.
-        let r = score(&sig(1, 0, 2, 1, 2, 1));
-        assert_eq!(r.score, 0);
-        assert_eq!(r.level, SharingLevel::None);
+    fn mobile_rotation_single_user_does_not_flag() {
+        // The multiviruss shape: one device, never two networks at once
+        // (concurrency 1), ~5 /24s in its busiest day (mobile + home + work),
+        // a couple of proxy-fetch country hops. Must stay below the flag —
+        // and the huge fetch-side diversity must contribute NOTHING.
+        let r = score(&sig(1, 5, 2));
+        assert_eq!(r.score, 8, "only DailyNets(5)=8; diversity ignored");
         assert!(!r.is_flagged());
-        assert!(r.reasons.is_empty());
+        assert_eq!(r.level, SharingLevel::None);
     }
 
     #[test]
-    fn traveller_three_asns_three_countries_stays_below_flag() {
-        // The classic false positive: 3 ASNs + 3 countries over a month,
-        // but never two IPs at once. Legacy heuristic fired; composite must
-        // stay under the flag threshold (5 + 12 = 17 → Low, not flagged).
-        let r = score(&sig(1, 0, 1, 1, 3, 3));
-        assert!(r.score < FLAG_THRESHOLD, "score {} should be < flag", r.score);
-        assert_eq!(r.level, SharingLevel::Low);
+    fn one_person_two_devices_stays_under_flag() {
+        // Phone on mobile + laptop on Wi-Fi online together = 2 /24s at once.
+        // Legitimate; 25 alone must not flag.
+        let r = score(&sig(2, 4, 0));
+        assert_eq!(r.score, 33); // 25 + 8
+        assert!(!r.is_flagged());
     }
 
     #[test]
-    fn concurrent_ips_dominate_and_flag() {
-        // Two distinct client IPs in one snapshot ⇒ real simultaneity.
-        let r = score(&sig(2, 0, 0, 0, 0, 0));
-        assert_eq!(r.score, 25);
-        assert!(!r.is_flagged(), "a single soft signal alone shouldn't flag");
-        // Concurrency + one impossible-travel hop ⇒ clearly shared.
-        let r2 = score(&sig(3, 1, 0, 0, 0, 0));
-        assert_eq!(r2.score, 60);
-        assert_eq!(r2.level, SharingLevel::High);
-        assert!(r2.is_flagged());
-        assert_eq!(r2.reasons[0], SharingReason::ConcurrentIps(3)); // smoking gun first
+    fn three_simultaneous_networks_flags() {
+        // 3 distinct access networks in ONE snapshot ⇒ clearly multiple
+        // clients at once. Flags on the concurrency term alone.
+        let r = score(&sig(3, 0, 0));
+        assert_eq!(r.score, 45);
+        assert_eq!(r.level, SharingLevel::Medium);
+        assert!(r.is_flagged());
+        assert_eq!(r.reasons[0], SharingReason::ConcurrentNets(3));
+    }
+
+    #[test]
+    fn two_nets_plus_many_daily_nets_flags() {
+        // 2 at once + 8 distinct daily networks (corroboration) ⇒ shared.
+        let r = score(&sig(2, 8, 0));
+        assert_eq!(r.score, 43); // 25 + 18
+        assert!(r.is_flagged());
     }
 
     #[test]
     fn score_caps_at_100() {
-        let r = score(&sig(9, 5, 9, 9, 9, 9));
+        let r = score(&sig(9, 99, 9));
         assert_eq!(r.score, 100);
         assert_eq!(r.level, SharingLevel::High);
     }

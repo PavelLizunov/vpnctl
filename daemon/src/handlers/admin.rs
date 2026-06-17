@@ -1046,14 +1046,13 @@ fn sharing_reason_label(
     use crate::i18n::tr;
     use crate::sharing_score::SharingReason as R;
     match r {
-        R::ConcurrentIps(n) => format!("{n} {}", tr(lang, "IPs at once", "IP одновременно")),
+        R::ConcurrentNets(n) => {
+            format!("{n} {}", tr(lang, "networks at once", "сетей одновременно"))
+        }
+        R::DailyNets(n) => format!("{n} {}", tr(lang, "networks/day", "сетей/день")),
         R::ImpossibleTravel(h) => {
             format!("{h}× {}", tr(lang, "impossible travel", "невозможн. перемещ."))
         }
-        R::DailyIps(n) => format!("{n} {}", tr(lang, "IPs/day", "IP/день")),
-        R::DeviceClasses(n) => format!("{n} {}", tr(lang, "client apps", "клиентов")),
-        R::Asns(n) => format!("{n} {}", tr(lang, "ASNs", "ASN")),
-        R::Countries(n) => format!("{n} {}", tr(lang, "countries", "стран")),
     }
 }
 
