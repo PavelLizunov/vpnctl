@@ -129,6 +129,20 @@ pub struct SubFetchStallUser {
     pub fetch_age_minutes: i64,
 }
 
+/// One row of the dashboard "Heavy users · <window>" table (2026-06-16 —
+/// split out from the old `(UserId, total)` tuple so the tile can show
+/// upload / download / total as three columns). All three figures are
+/// `usage_coefficient`-weighted (a ×2 node's bytes count double), matching
+/// the #41 traffic-accounting convention; `total_bytes` is exactly
+/// `upload_bytes + download_bytes`, and the ranking is by that total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavyUser {
+    pub user_id: UserId,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub total_bytes: u64,
+}
+
 /// One row of `sub_access_log` (Phase Track-1) — emitted by the daemon
 /// every time `/sub/<token>` is hit, after the token has been resolved.
 /// The token itself is never stored, only the resolved `user_id`, so a
@@ -3435,23 +3449,32 @@ impl SqliteInventory {
         &self,
         since_hours: u32,
         limit: u32,
-    ) -> Result<Vec<(UserId, u64)>> {
+    ) -> Result<Vec<HeavyUser>> {
         // Weight each row's bytes by the source server's
         // `usage_coefficient` before summing per-user, so a heavy user
         // on a ×2 node ranks above an equal-raw-bytes user on a ×1
-        // node. The weighted SUM is REAL; CAST back to INTEGER so the
-        // result column stays an i64 (bytes). 1.0 (or NULL) is the
+        // node. The weighted SUMs are REAL; CAST back to INTEGER so the
+        // result columns stay i64 (bytes). 1.0 (or NULL) is the
         // identity → existing rankings unchanged.
+        //
+        // upload + download are summed SEPARATELY (2026-06-16 — the
+        // dashboard tile shows the three-column breakdown). `total` is
+        // derived Rust-side as `up + down` so it's exactly consistent
+        // with the two columns (independent CASTs could each truncate,
+        // leaving `up + down != CAST(SUM(up+down))` by ±1). Ranking
+        // still uses the un-CAST combined weighted SUM → identical order
+        // to the pre-split query.
         let rows = sqlx::query(
             "SELECT s.user_id AS user_id,
-                    CAST(SUM((s.upload_bytes + s.download_bytes)
-                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
+                    CAST(SUM(s.upload_bytes   * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
+                    CAST(SUM(s.download_bytes * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
              FROM vpn_connection_stats s
              JOIN servers sv ON sv.id = s.server_id
              WHERE s.user_id IS NOT NULL
                AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
              GROUP BY s.user_id
-             ORDER BY total DESC
+             ORDER BY SUM((s.upload_bytes + s.download_bytes)
+                          * COALESCE(sv.usage_coefficient, 1.0)) DESC
              LIMIT ?2",
         )
         .bind(format!("-{since_hours} hours"))
@@ -3461,8 +3484,14 @@ impl SqliteInventory {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let uid: String = r.try_get("user_id")?;
-            let total: i64 = r.try_get("total")?;
-            out.push((UserId(uid), total.max(0) as u64));
+            let up = r.try_get::<i64, _>("up_b")?.max(0) as u64;
+            let down = r.try_get::<i64, _>("down_b")?.max(0) as u64;
+            out.push(HeavyUser {
+                user_id: UserId(uid),
+                upload_bytes: up,
+                download_bytes: down,
+                total_bytes: up + down,
+            });
         }
         Ok(out)
     }

@@ -2062,7 +2062,7 @@ fn dashboard_limit_alerts(
 /// Sorted DESC by total bytes (upload + download). Empty list →
 /// explanatory empty-state explaining the polling prerequisite.
 fn dashboard_heavy_users(
-    rows: &[(vpnctl_core::UserId, u64)],
+    rows: &[vpnctl_inventory::HeavyUser],
     window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
 ) -> Markup {
@@ -2111,15 +2111,41 @@ fn dashboard_heavy_users(
                     ". Кликни чтобы разобраться — страница пользователя содержит полную разбивку + sparkline.",
                 ))
             }
-            ol style="list-style: decimal; padding-left: 24px; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-                @for (uid, total) in rows {
-                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
-                          style="color: var(--ink); text-decoration: none; font-weight: 600;" {
-                            (uid.0)
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;" {
+                thead {
+                    tr style="color: var(--mute); border-bottom: 1px solid var(--rule);" {
+                        th style="text-align: left; padding: 4px 0; font-weight: 600;" {
+                            (tr(lang, "User", "Пользователь"))
                         }
-                        span style="color: var(--mute); margin-left: 8px;" {
-                            "— " (humanize_bytes(*total))
+                        th style="text-align: right; padding: 4px 10px; font-weight: 600;" {
+                            "↑ " (tr(lang, "Upload", "Отдача"))
+                        }
+                        th style="text-align: right; padding: 4px 10px; font-weight: 600;" {
+                            "↓ " (tr(lang, "Download", "Приём"))
+                        }
+                        th style="text-align: right; padding: 4px 0; font-weight: 600;" {
+                            "Σ " (tr(lang, "Total", "Всего"))
+                        }
+                    }
+                }
+                tbody {
+                    @for hu in rows {
+                        tr style="border-bottom: 1px dotted var(--rule);" {
+                            td style="text-align: left; padding: 4px 0;" {
+                                a href=(format!("/admin/users/{}", path_segment_encode(&hu.user_id.0)))
+                                  style="color: var(--ink); text-decoration: none; font-weight: 600;" {
+                                    (hu.user_id.0)
+                                }
+                            }
+                            td style="text-align: right; padding: 4px 10px; color: var(--mute);" {
+                                (humanize_bytes(hu.upload_bytes))
+                            }
+                            td style="text-align: right; padding: 4px 10px; color: var(--mute);" {
+                                (humanize_bytes(hu.download_bytes))
+                            }
+                            td style="text-align: right; padding: 4px 0; font-weight: 600;" {
+                                (humanize_bytes(hu.total_bytes))
+                            }
                         }
                     }
                 }
@@ -17091,6 +17117,47 @@ mod helper_tests {
     fn extract_ip_from_label_returns_ip_for_bare_ipv4_port_form() {
         assert_eq!(extract_ip_from_label("1.2.3.4:443"), Some("1.2.3.4"));
         assert_eq!(extract_ip_from_label("10.0.0.1:80"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn dashboard_heavy_users_renders_three_columns_upload_download_total() {
+        // 2026-06-16 — the tile must show upload / download / total as
+        // three separate aligned columns (was a single "— total" suffix).
+        let window = VpnSparklineWindow {
+            slug: "24h",
+            label_en: "24h",
+            label_ru: "24ч",
+            cells: 24,
+            bucket_hours: 1,
+            per_bucket_en: "per hour",
+            per_bucket_ru: "в час",
+        };
+        let rows = vec![vpnctl_inventory::HeavyUser {
+            user_id: vpnctl_core::UserId("alice".into()),
+            upload_bytes: 1_500_000_000,
+            download_bytes: 3_000_000_000,
+            total_bytes: 4_500_000_000,
+        }];
+        let html = dashboard_heavy_users(&rows, window, crate::i18n::Locale::En).into_string();
+        // Three distinct column headers.
+        assert!(html.contains("Upload"), "missing Upload header: {html}");
+        assert!(html.contains("Download"), "missing Download header");
+        assert!(html.contains("Total"), "missing Total header");
+        // All three figures rendered (distinct humanized values).
+        assert!(
+            html.contains(&humanize_bytes(1_500_000_000)),
+            "missing upload value"
+        );
+        assert!(
+            html.contains(&humanize_bytes(3_000_000_000)),
+            "missing download value"
+        );
+        assert!(
+            html.contains(&humanize_bytes(4_500_000_000)),
+            "missing total value"
+        );
+        // User still links through to the detail page.
+        assert!(html.contains("/admin/users/alice"), "missing user link");
     }
 
     #[test]
