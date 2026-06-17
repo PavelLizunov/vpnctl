@@ -1309,17 +1309,18 @@ async fn top_source_ips_orders_by_hits_desc() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
-    // A=3, B=1, C=2 hits → expect A, C, B.
+    // A=3, B=1, C=2 hits → expect A, C, B. Public IPs (TEST-NET-2) — the
+    // counter now drops RFC1918/infra, so 10.x would be filtered out.
     for _ in 0..3 {
-        inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.1".into())])
+        inv.record_user_source_ips(&[(UserId("alice".into()), "198.51.100.1".into())])
             .await
             .unwrap();
     }
-    inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.2".into())])
+    inv.record_user_source_ips(&[(UserId("alice".into()), "198.51.100.2".into())])
         .await
         .unwrap();
     for _ in 0..2 {
-        inv.record_user_source_ips(&[(UserId("alice".into()), "10.0.0.3".into())])
+        inv.record_user_source_ips(&[(UserId("alice".into()), "198.51.100.3".into())])
             .await
             .unwrap();
     }
@@ -1328,7 +1329,7 @@ async fn top_source_ips_orders_by_hits_desc() {
         .await
         .unwrap();
     let ips: Vec<&str> = top.iter().map(|r| r.source_ip.as_str()).collect();
-    assert_eq!(ips, vec!["10.0.0.1", "10.0.0.3", "10.0.0.2"]);
+    assert_eq!(ips, vec!["198.51.100.1", "198.51.100.3", "198.51.100.2"]);
 }
 
 #[tokio::test]
