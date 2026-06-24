@@ -5240,16 +5240,16 @@ async fn user_online_badge(
             continue;
         };
         for c in &snap.snapshot.connections {
-            let key = (c.metadata.source_ip.clone(), c.metadata.source_port.clone());
-            match snap.attribution.get(&key) {
-                Some(attr_uid) if attr_uid.as_str() == uid.0.as_str() => {
+            match c.metadata.user.as_deref() {
+                Some(u) if u == uid.0.as_str() => {
                     *conns_per_server.entry(sid.0.clone()).or_insert(0) += 1;
                 }
                 Some(_) => {
                     // Attributed to a DIFFERENT user — never this one.
                 }
                 None => {
-                    // Unattributed — defer to the sourceIP join below.
+                    // No user on the wire (e.g. an unpatched node) —
+                    // defer to the sourceIP join below.
                     if !c.metadata.source_ip.is_empty() {
                         unresolved
                             .entry(c.metadata.source_ip.clone())
@@ -14712,28 +14712,28 @@ fn server_detail_live_connections_section(
     };
 
     let snap = &server_snap.snapshot;
-    let log_attribution = &server_snap.attribution;
     let nb = network_breakdown(snap);
     let top_dests = aggregate_by_destination(snap, TOP_N, dns_ptr_map);
     let top_sources = aggregate_by_source(snap, TOP_N);
     let total_conns = snap.connections.len();
 
-    // Phase 4d — for each top-source aggregate, look up the
-    // FRESHEST user_id we have for ANY (source_ip, port) pair
-    // matching this IP in the log map. We don't dedupe across
-    // ports: the log map can carry the same user_id under
-    // different ports (one device, many connections), and we
-    // want to surface that user_id. If multiple users share an
-    // IP (NAT collision), pick the one with the most port
-    // entries — that's the most-active device behind the NAT.
+    // For each top-source aggregate, surface the user_id behind that
+    // source IP, taken from the connections' `metadata.user` (emitted by
+    // our patched sing-box clash-api). If several users share one IP (NAT
+    // collision), pick the one with the most connections — the
+    // most-active device behind the NAT.
     use std::collections::HashMap as StdHashMap;
     let mut ip_to_log_user: StdHashMap<&str, StdHashMap<&str, u32>> = StdHashMap::new();
-    for ((ip, _port), user) in log_attribution.iter() {
-        *ip_to_log_user
-            .entry(ip.as_str())
-            .or_default()
-            .entry(user.as_str())
-            .or_insert(0) += 1;
+    for c in &snap.connections {
+        if let Some(user) = c.metadata.user.as_deref() {
+            if !c.metadata.source_ip.is_empty() {
+                *ip_to_log_user
+                    .entry(c.metadata.source_ip.as_str())
+                    .or_default()
+                    .entry(user)
+                    .or_insert(0) += 1;
+            }
+        }
     }
     // Resolve each IP → top user_id (highest port count).
     let log_ip_winner: StdHashMap<&str, &str> = ip_to_log_user

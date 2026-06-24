@@ -59,11 +59,6 @@ pub mod ssh_subprocess;
 // Cache is shared between the poller (writer) and admin handlers
 // (readers) through a SnapshotCache handle that lives in AppState.
 pub mod snapshot_cache;
-// Phase 4d — sing-box log scraper for exact per-connection
-// `user_id` attribution (NM-11 work-around: sing-box logs include
-// `[user_id]` even though clash-api wire format drops the `user`
-// field). Pure parser + an SSH-driven scrape entry point.
-pub mod sing_box_log_scraper;
 // Phase 5a-2 — periodic reverse-DNS (PTR) resolver. Walks the
 // SnapshotCache, picks unique destination IPs lacking a host
 // field, shells out to `getent hosts <ip>` via spawn_blocking,
