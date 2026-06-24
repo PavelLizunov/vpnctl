@@ -1051,7 +1051,10 @@ fn sharing_reason_label(
         }
         R::DailyNets(n) => format!("{n} {}", tr(lang, "networks/day", "сетей/день")),
         R::ImpossibleTravel(h) => {
-            format!("{h}× {}", tr(lang, "impossible travel", "невозможн. перемещ."))
+            format!(
+                "{h}× {}",
+                tr(lang, "impossible travel", "невозможн. перемещ.")
+            )
         }
     }
 }
@@ -1564,7 +1567,7 @@ pub(crate) async fn dashboard(
         })
         .filter(|(_, sc)| sc.is_flagged())
         .collect();
-    likely_shared.sort_by(|a, b| b.1.score.cmp(&a.1.score));
+    likely_shared.sort_by_key(|b| std::cmp::Reverse(b.1.score));
 
     // PR-Dash dash#6 — "today so far" digest from the audit log (Q-4g).
     // All-zero ⇒ card hidden (quiet dashboard).
@@ -9458,6 +9461,17 @@ pub(crate) async fn user_delete(
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
+    // Capture the user's servers BEFORE remove_user cascades the grants,
+    // so the auto-deploy below can revoke their node access.
+    let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "servers_for_user failed; delete not auto-applied — use Deploy all"
+        );
+        Vec::new()
+    });
     if let Err(e) = state.inv.remove_user(&uid).await {
         return internal_error(anyhow::Error::new(e));
     }
@@ -9473,6 +9487,10 @@ pub(crate) async fn user_delete(
             "audit row for user.remove failed; mutation already committed"
         );
     }
+    // (B) Propagate the delete to the nodes — re-render configs (now without
+    // this user) + reload sing-box — so a deleted user can't keep using a
+    // cached config. Backgrounded; the redirect returns now.
+    spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), "user.remove");
     Redirect::to("/admin/users").into_response()
 }
 
@@ -9676,6 +9694,70 @@ pub(crate) async fn user_set_disabled_false(
     user_set_disabled_inner(state, user_id_str, false).await
 }
 
+/// Background, best-effort redeploy of `servers` after a user-inventory
+/// mutation (disable / enable / delete) so the change lands on the nodes
+/// WITHOUT a manual «Deploy all». Mirrors that button, scoped to one
+/// user's servers. `servers` must be captured by the caller at the right
+/// moment — for a DELETE, BEFORE the cascade drops the grants. Empty →
+/// no-op. NOTE: apply_config restarts sing-box, so other users on a node
+/// see a brief blip — inherent to any config change.
+fn spawn_user_servers_redeploy(
+    state: &AppState,
+    servers: Vec<vpnctl_core::Server>,
+    user_id: String,
+    trigger: &'static str,
+) {
+    if servers.is_empty() {
+        return;
+    }
+    let inv = state.inv.clone();
+    let registry = std::sync::Arc::clone(&state.registry);
+    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    tokio::spawn(async move {
+        use tokio_stream::StreamExt;
+        let mut stream = Box::pin(crate::wizard_bootstrap::run_deploy_all(
+            servers,
+            inv.clone(),
+            registry,
+            key_path,
+        ));
+        let mut errors: Vec<String> = Vec::new();
+        while let Some(ev) = stream.next().await {
+            if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } = ev {
+                errors.push(format!("{phase}: {message}"));
+            }
+        }
+        if errors.is_empty() {
+            tracing::info!(
+                target = "vpnctld::admin",
+                user = %user_id,
+                trigger,
+                "auto-deploy applied to user's servers (config re-rendered + sing-box reloaded)"
+            );
+        } else {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id,
+                trigger,
+                errors = ?errors,
+                "auto-deploy: some servers failed to apply — retry via Deploy all"
+            );
+        }
+        let _ = inv
+            .audit(
+                "admin",
+                "user.autodeploy",
+                Some(&user_id),
+                Some(&serde_json::json!({
+                    "trigger": trigger,
+                    "ok": errors.is_empty(),
+                    "errors": errors,
+                })),
+            )
+            .await;
+    });
+}
+
 async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: bool) -> Response {
     let uid = vpnctl_core::UserId(user_id_str.clone());
     let changed = match state.inv.set_user_disabled(&uid, target).await {
@@ -9716,73 +9798,19 @@ async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: b
             );
         }
 
-        // (B) Apply the change to the nodes: re-render + reload sing-box on
-        // every server this user is granted on. `users_for_server` now
-        // excludes disabled users, so this REVOKES (disable) or RESTORES
-        // (enable) node access — disable is no longer a subscription-only
-        // soft mute. Best-effort + backgrounded: the redirect returns now;
-        // the deploy streams to completion in a spawned task and audits its
-        // outcome. Mirrors «Deploy all», scoped to this user's servers.
-        // NOTE: apply_config restarts sing-box, so other users on the same
-        // node see a brief blip — unavoidable for any config change.
-        match state.inv.servers_for_user(&uid).await {
-            Ok(servers) if !servers.is_empty() => {
-                let inv = state.inv.clone();
-                let registry = std::sync::Arc::clone(&state.registry);
-                let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
-                let uid_log = user_id_str.clone();
-                tokio::spawn(async move {
-                    use tokio_stream::StreamExt;
-                    let mut stream = Box::pin(crate::wizard_bootstrap::run_deploy_all(
-                        servers,
-                        inv.clone(),
-                        registry,
-                        key_path,
-                    ));
-                    let mut errors: Vec<String> = Vec::new();
-                    while let Some(ev) = stream.next().await {
-                        if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } = ev
-                        {
-                            errors.push(format!("{phase}: {message}"));
-                        }
-                    }
-                    if errors.is_empty() {
-                        tracing::info!(
-                            target = "vpnctld::admin",
-                            user = %uid_log,
-                            "disable/enable applied to nodes (config re-rendered + sing-box reloaded)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target = "vpnctld::admin",
-                            user = %uid_log,
-                            errors = ?errors,
-                            "disable/enable: some servers failed to apply — retry via Deploy all"
-                        );
-                    }
-                    let _ = inv
-                        .audit(
-                            "admin",
-                            "user.disable.apply",
-                            Some(&uid_log),
-                            Some(&serde_json::json!({
-                                "ok": errors.is_empty(),
-                                "errors": errors,
-                            })),
-                        )
-                        .await;
-                });
-            }
-            Ok(_) => {} // no grants → nothing to apply on nodes
-            Err(e) => {
-                tracing::warn!(
-                    target = "vpnctld::admin",
-                    user = %user_id_str,
-                    error = %e,
-                    "servers_for_user failed; disable/enable flag set but nodes NOT re-applied — use Deploy all"
-                );
-            }
-        }
+        // (B) Apply to the nodes without a manual «Deploy all»:
+        // `users_for_server` now excludes disabled users, so this REVOKES
+        // (disable) or RESTORES (enable) node access. Backgrounded.
+        let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id_str,
+                error = %e,
+                "servers_for_user failed; disable/enable not auto-applied — use Deploy all"
+            );
+            Vec::new()
+        });
+        spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), action);
     }
     Redirect::to(&format!(
         "/admin/users/{}",

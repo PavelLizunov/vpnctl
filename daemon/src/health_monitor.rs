@@ -1088,7 +1088,9 @@ pub async fn check_sub_fetch_without_traffic(
     // The subject universe here is "users holding an open alert of this
     // kind", not the full user list — symmetric with the attribution-stall
     // recovery branch but keyed off the kind suffix.
-    let open_subjects = inv.open_alert_subjects_with_kind_prefix(KIND_PREFIX).await?;
+    let open_subjects = inv
+        .open_alert_subjects_with_kind_prefix(KIND_PREFIX)
+        .await?;
     for uid in &open_subjects {
         if firing_ids.contains(uid.as_str()) {
             continue;
@@ -1632,15 +1634,9 @@ mod tests {
         // the inventory crate covers directly in
         // `sub_fetch_without_traffic_flags_regression_then_clears`.)
         let (_dir, inv) = fresh_inv().await;
-        inv.insert_alert_if_no_unacked(
-            "user.sub_no_traffic:ghost",
-            None,
-            "warning",
-            "stale",
-            None,
-        )
-        .await
-        .unwrap();
+        inv.insert_alert_if_no_unacked("user.sub_no_traffic:ghost", None, "warning", "stale", None)
+            .await
+            .unwrap();
         let open_before = inv
             .recent_alerts(10, true)
             .await

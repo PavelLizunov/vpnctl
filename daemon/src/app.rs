@@ -516,7 +516,10 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
             }
 
             // IP-concurrency peaks share the source-IP retention window.
-            match inv.purge_user_ip_concurrency_older_than(RETENTION_DAYS).await {
+            match inv
+                .purge_user_ip_concurrency_older_than(RETENTION_DAYS)
+                .await
+            {
                 Ok(0) => tracing::debug!(
                     target = "vpnctld::retention",
                     days = RETENTION_DAYS,

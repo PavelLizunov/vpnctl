@@ -149,13 +149,14 @@ pub struct HeavyUser {
 /// REAL external clients (the `real_client_ip_predicate` is applied to the
 /// sub_access-derived counts; the concurrency/source-IP tables only ever
 /// hold public client IPs). Each field is an independent signal:
-///   - `peak_concurrent_ips`   — STRONGEST: most distinct client IPs in ONE
-///                               clash snapshot (true simultaneity).
-///   - `impossible_travel_hops`— country changes between consecutive `/sub`
-///                               fetches < the impossible-travel window.
-///   - `max_daily_source_ips`  — most distinct connect-from IPs in any one day.
-///   - `distinct_device_classes`/`distinct_asns`/`distinct_countries`/
-///     `distinct_ips` — cumulative diversity of `/sub` fetches (weaker).
+///
+/// - `peak_concurrent_ips` — STRONGEST: most distinct client IPs in ONE
+///   clash snapshot (true simultaneity).
+/// - `impossible_travel_hops` — country changes between consecutive `/sub`
+///   fetches < the impossible-travel window.
+/// - `max_daily_source_ips` — most distinct connect-from IPs in any one day.
+/// - `distinct_device_classes`/`distinct_asns`/`distinct_countries`/`distinct_ips`
+///   — cumulative diversity of `/sub` fetches (weaker).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharingSignals {
     pub user_id: UserId,
@@ -3903,9 +3904,10 @@ impl SqliteInventory {
              ORDER BY distinct_asns DESC, distinct_ips DESC",
             pred = real_client_ip_predicate("ip")
         );
-        let rows = sqlx::query(&sql).bind(i64::from(min_asns))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(&sql)
+            .bind(i64::from(min_asns))
+            .fetch_all(&self.pool)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let uid: String = r.try_get("user_id")?;
@@ -3926,14 +3928,12 @@ impl SqliteInventory {
     /// `days` days (2026-06-17 — backs the redesigned sharing-risk scorer
     /// that replaces the bare `distinct_asns >= 3` heuristic). Four
     /// index-backed reads, merged in Rust by user_id (fleet scale is tiny):
-    ///   1. sub_access diversity — distinct real-client IPs / ASNs /
-    ///      countries / device-classes,
-    ///   2. impossible travel — consecutive `/sub` fetches whose country
-    ///      changed in under `impossible_travel_hours` (physically can't
-    ///      move between countries that fast → two locations at once),
-    ///   3. peak concurrent source IPs — the true-simultaneity signal from
-    ///      `vpn_user_ip_concurrency`,
-    ///   4. max distinct connect-from IPs in any single day.
+    /// (1) sub_access diversity — distinct real-client IPs / ASNs / countries
+    /// / device-classes; (2) impossible travel — consecutive `/sub` fetches
+    /// whose country changed in under `impossible_travel_hours` (two locations
+    /// at once); (3) peak concurrent source IPs — the true-simultaneity signal
+    /// from `vpn_user_ip_concurrency`; (4) max distinct connect-from IPs in any
+    /// single day.
     /// All sub_access/source-IP reads apply `real_client_ip_predicate` so
     /// our own infra never inflates a user's signals.
     pub async fn sharing_signals_all_users(
@@ -4099,10 +4099,10 @@ impl SqliteInventory {
             pred = real_client_ip_predicate("ip")
         );
         let rows = sqlx::query(&sql)
-        .bind(&user.0)
-        .bind(format!("-{days} days"))
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(&user.0)
+            .bind(format!("-{days} days"))
+            .fetch_all(&self.pool)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let country: Option<String> = r.try_get("country")?;
@@ -4145,11 +4145,11 @@ impl SqliteInventory {
             pred = real_client_ip_predicate("ip")
         );
         let rows = sqlx::query(&sql)
-        .bind(&user.0)
-        .bind(format!("-{days} days"))
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(&user.0)
+            .bind(format!("-{days} days"))
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let asn: Option<String> = r.try_get("asn")?;
@@ -4196,11 +4196,11 @@ impl SqliteInventory {
             pred = real_client_ip_predicate("ip")
         );
         let rows = sqlx::query(&sql)
-        .bind(&user.0)
-        .bind(format!("-{days} days"))
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(&user.0)
+            .bind(format!("-{days} days"))
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let ip: String = r.try_get("ip")?;
@@ -6458,7 +6458,10 @@ mod tests {
         // Resolve: oleg now passes traffic AFTER the fetch → drops out.
         traffic(&inv, "oleg", "+0 minutes").await;
         let after = inv.sub_fetch_without_traffic_users(45, 360, 7).await?;
-        assert!(after.is_empty(), "oleg clears once traffic resumes: {after:?}");
+        assert!(
+            after.is_empty(),
+            "oleg clears once traffic resumes: {after:?}"
+        );
         Ok(())
     }
 
@@ -6475,7 +6478,8 @@ mod tests {
         inv.insert_alert_if_no_unacked("user.traffic_limit:bob", None, "warning", "s", None)
             .await?;
         // ack masha → must drop from the open set.
-        inv.ack_open_alerts("user.sub_no_traffic:masha", None).await?;
+        inv.ack_open_alerts("user.sub_no_traffic:masha", None)
+            .await?;
 
         let mut subs = inv
             .open_alert_subjects_with_kind_prefix("user.sub_no_traffic:")
@@ -6500,15 +6504,15 @@ mod tests {
         inv.add_server(&sample_server("s1")).await?; // address 1.2.3.4
         inv.add_user(&sample_user("u")).await?;
         inv.record_user_source_ips(&[
-            (UserId("u".into()), "203.0.113.9".into()),   // real client — KEEP
-            (UserId("u".into()), "172.32.5.5".into()),    // public (>172.31) — KEEP
-            (UserId("u".into()), "1.2.3.4".into()),       // == server s1 address
-            (UserId("u".into()), "83.97.108.34".into()),  // control egress const
+            (UserId("u".into()), "203.0.113.9".into()), // real client — KEEP
+            (UserId("u".into()), "172.32.5.5".into()),  // public (>172.31) — KEEP
+            (UserId("u".into()), "1.2.3.4".into()),     // == server s1 address
+            (UserId("u".into()), "83.97.108.34".into()), // control egress const
             (UserId("u".into()), "192.168.0.200".into()), // LAN (claude-chat host)
-            (UserId("u".into()), "10.5.5.5".into()),      // RFC1918 10/8
-            (UserId("u".into()), "172.20.5.5".into()),    // RFC1918 172.16-31
-            (UserId("u".into()), "127.0.0.1".into()),     // loopback
-            (UserId("u".into()), "169.254.9.9".into()),   // link-local
+            (UserId("u".into()), "10.5.5.5".into()),    // RFC1918 10/8
+            (UserId("u".into()), "172.20.5.5".into()),  // RFC1918 172.16-31
+            (UserId("u".into()), "127.0.0.1".into()),   // loopback
+            (UserId("u".into()), "169.254.9.9".into()), // link-local
         ])
         .await?;
         let mut ips: Vec<String> = inv
@@ -6533,17 +6537,23 @@ mod tests {
         let inv = fresh().await;
         inv.add_user(&sample_user("u")).await?;
         // snapshots this day: 1, then 3, then 2 distinct IPs → peak 3.
-        inv.record_user_ip_concurrency(&[(UserId("u".into()), 1)]).await?;
-        inv.record_user_ip_concurrency(&[(UserId("u".into()), 3)]).await?;
-        inv.record_user_ip_concurrency(&[(UserId("u".into()), 2)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 1)])
+            .await?;
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 3)])
+            .await?;
+        inv.record_user_ip_concurrency(&[(UserId("u".into()), 2)])
+            .await?;
         assert_eq!(
-            inv.ip_concurrency_peak_for_user(&UserId("u".into()), 30).await?,
+            inv.ip_concurrency_peak_for_user(&UserId("u".into()), 30)
+                .await?,
             3
         );
         // since-deleted / unknown user → silently skipped, peak stays 0.
-        inv.record_user_ip_concurrency(&[(UserId("ghost".into()), 9)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("ghost".into()), 9)])
+            .await?;
         assert_eq!(
-            inv.ip_concurrency_peak_for_user(&UserId("ghost".into()), 30).await?,
+            inv.ip_concurrency_peak_for_user(&UserId("ghost".into()), 30)
+                .await?,
             0
         );
         Ok(())
@@ -6583,8 +6593,10 @@ mod tests {
         fetch(&inv, "solo", "203.0.113.30", "RU", "AS3", 100).await;
 
         // Concurrency: sharer hit 3 simultaneous IPs once; solo only ever 1.
-        inv.record_user_ip_concurrency(&[(UserId("sharer".into()), 3)]).await?;
-        inv.record_user_ip_concurrency(&[(UserId("solo".into()), 1)]).await?;
+        inv.record_user_ip_concurrency(&[(UserId("sharer".into()), 3)])
+            .await?;
+        inv.record_user_ip_concurrency(&[(UserId("solo".into()), 1)])
+            .await?;
 
         let sigs = inv.sharing_signals_all_users(30, 2.0).await?;
         let find = |u: &str| sigs.iter().find(|s| s.user_id.0 == u).cloned();
@@ -6599,7 +6611,10 @@ mod tests {
         assert_eq!(sharer.distinct_countries, 2);
         assert_eq!(sharer.distinct_asns, 2);
 
-        assert_eq!(solo.peak_concurrent_nets, 1, "solo never had two nets at once");
+        assert_eq!(
+            solo.peak_concurrent_nets, 1,
+            "solo never had two nets at once"
+        );
         assert_eq!(solo.impossible_travel_hops, 0, "solo single country");
         Ok(())
     }
@@ -6793,10 +6808,7 @@ mod tests {
             2
         );
 
-        assert!(
-            inv.set_user_disabled(&UserId("alice".into()), true)
-                .await?
-        );
+        assert!(inv.set_user_disabled(&UserId("alice".into()), true).await?);
         let users = inv.users_for_server(&ServerId("srv".into())).await?;
         assert_eq!(
             users.len(),

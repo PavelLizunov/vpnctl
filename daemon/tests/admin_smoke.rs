@@ -12830,11 +12830,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
             },
         ],
     };
-    s.snapshot_cache.store(
-        ServerId("active".into()),
-        snap,
-        std::collections::HashMap::new(),
-    );
+    s.snapshot_cache.store(ServerId("active".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/active").await;
     assert!(html.contains("Live connections"));
@@ -12925,28 +12921,18 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
                 source_ip: "31.135.234.102".into(),
                 source_port: "2810".into(),
                 host: String::new(),
-                user: None,
+                user: Some("main-brat".into()),
             },
         }],
     };
-    let mut attribution = std::collections::HashMap::new();
-    attribution.insert(
-        ("31.135.234.102".to_string(), "2810".to_string()),
-        "main-brat".to_string(),
-    );
-    s.snapshot_cache
-        .store(ServerId("phase4d-srv".into()), snap, attribution);
+    s.snapshot_cache.store(ServerId("phase4d-srv".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-srv").await;
-    // Exact match link to main-brat.
+    // Exact match link to main-brat — now sourced from metadata.user
+    // (the patched sing-box clash-api), not the removed log-scrape map.
     assert!(
         html.contains("href=\"/admin/users/main-brat\""),
-        "log-derived attribution must link the source IP to main-brat"
-    );
-    // Tagged «log» (not «sub» fallback).
-    assert!(
-        html.contains(">log<"),
-        "tag «log» must indicate this came from sing-box log attribution"
+        "metadata.user attribution must link the source IP to main-brat"
     );
 }
 
@@ -13013,11 +12999,7 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
         }],
     };
     // EMPTY attribution map — Phase 4d had nothing for this IP.
-    s.snapshot_cache.store(
-        ServerId("phase4d-fb".into()),
-        snap,
-        std::collections::HashMap::new(),
-    );
+    s.snapshot_cache.store(ServerId("phase4d-fb".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-fb").await;
     // Must link to falluser via sub_access fallback.
@@ -13082,11 +13064,8 @@ async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribu
             },
         }],
     };
-    s.snapshot_cache.store(
-        ServerId("phase4d-none".into()),
-        snap,
-        std::collections::HashMap::new(),
-    );
+    s.snapshot_cache
+        .store(ServerId("phase4d-none".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-none").await;
     // Source IP must render in the top-sources row.
@@ -15376,6 +15355,14 @@ async fn seed_dashboard_signals(inv: &SqliteInventory) {
         .await
         .unwrap();
     }
+
+    // sharing v2 — flag u0 via the DOMINANT signal: peak 3 concurrent /24
+    // networks (`ConcurrentNets(3)` = 45 pts ≥ FLAG_THRESHOLD=35). The old
+    // 3-ASN fetch-diversity above no longer scores (dropped in v2), so the
+    // abuse-summary card only renders once a real-simultaneity signal lands.
+    inv.record_user_ip_concurrency(&[(UserId("u0".into()), 3)])
+        .await
+        .unwrap();
 }
 
 /// dash#1 — fleet-at-a-glance renders one row per server with the
@@ -15538,8 +15525,13 @@ async fn dashboard_abuse_summary_lists_shared_user() {
         html.contains("/admin/users/u0"),
         "abuse-summary must link the flagged user to their detail page"
     );
-    // 3 distinct ASNs seeded → "3 ASNs".
-    assert!(html.contains("3 ASNs"), "abuse-summary ASN count missing");
+    // Sharing v2: the dominant reason is ConcurrentNets(3) (seeded above),
+    // rendered as "3 networks at once" — fetch-side ASN diversity no longer
+    // scores or shows here.
+    assert!(
+        html.contains("3 networks at once"),
+        "abuse-summary must show the concurrency reason"
+    );
 }
 
 /// dash#5 — hidden when no sub crosses the ASN threshold.
@@ -16101,11 +16093,7 @@ async fn server_detail_network_split_renders_from_snapshot() {
             },
         ],
     };
-    s.snapshot_cache.store(
-        ServerId("s0".into()),
-        snap,
-        std::collections::HashMap::new(),
-    );
+    s.snapshot_cache.store(ServerId("s0".into()), snap);
     let html = fetch_html(router(s), "/admin/servers/s0").await;
     assert!(
         html.contains("TCP / UDP split"),
@@ -16288,21 +16276,21 @@ fn pr_user_conn(src_ip: &str, src_port: &str) -> vpnctld::clash_api::Connection 
 /// flips to the 🟢-online branch and names the server.
 #[tokio::test]
 async fn pr_user_online_badge_green_when_snapshot_attributes_connection() {
-    use std::collections::HashMap;
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await; // s0, u0, granted
 
-    // Seed a snapshot on s0 with one connection attributed to u0.
-    let conn = pr_user_conn("9.9.9.9", "40000");
+    // Seed a snapshot on s0 with one connection attributed to u0 via
+    // metadata.user (the patched sing-box clash-api), which the online
+    // badge reads directly.
+    let mut conn = pr_user_conn("9.9.9.9", "40000");
+    conn.metadata.user = Some("u0".into());
     let snap = vpnctld::clash_api::Snapshot {
         upload_total: conn.upload,
         download_total: conn.download,
         connections: vec![conn],
     };
-    let mut attr: HashMap<(String, String), String> = HashMap::new();
-    attr.insert(("9.9.9.9".into(), "40000".into()), "u0".into());
-    s.snapshot_cache.store(ServerId("s0".into()), snap, attr);
+    s.snapshot_cache.store(ServerId("s0".into()), snap);
 
     let html = fetch_html(router(s), "/admin/users/u0").await;
     assert!(html.contains("Presence"), "presence eyebrow missing");

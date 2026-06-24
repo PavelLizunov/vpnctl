@@ -111,7 +111,7 @@ pub fn score(s: &SharingSignals) -> SharingScore {
     let mut reasons: Vec<SharingReason> =
         candidates.into_iter().filter(|r| r.points() > 0).collect();
     // Highest-impact reason first so the UI leads with the smoking gun.
-    reasons.sort_by(|a, b| b.points().cmp(&a.points()));
+    reasons.sort_by_key(|b| std::cmp::Reverse(b.points()));
 
     let raw: u32 = reasons.iter().map(|r| u32::from(r.points())).sum();
     let score = raw.min(100) as u8;

@@ -105,9 +105,10 @@ impl DiffEngine {
         for c in &snapshot.connections {
             new_per_conn.insert(c.id.clone(), (c.upload, c.download));
             let (up_d, dn_d) = match prior.as_ref().and_then(|p| p.per_conn.get(&c.id)) {
-                Some(&(p_up, p_dn)) => {
-                    (c.upload.saturating_sub(p_up), c.download.saturating_sub(p_dn))
-                }
+                Some(&(p_up, p_dn)) => (
+                    c.upload.saturating_sub(p_up),
+                    c.download.saturating_sub(p_dn),
+                ),
                 None => (c.upload, c.download),
             };
             if let Some(user) = c.metadata.user.as_deref() {

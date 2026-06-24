@@ -1153,7 +1153,10 @@ async fn top_users_by_traffic_ranks_by_weighted_bytes() {
     // 2026-06-16 — upload / download are now summed separately for the
     // three-column dashboard tile, each weighted, and total == up + down.
     assert_eq!(top[0].upload_bytes, 1_000_000, "alice weighted upload (×2)");
-    assert_eq!(top[0].download_bytes, 1_000_000, "alice weighted download (×2)");
+    assert_eq!(
+        top[0].download_bytes, 1_000_000,
+        "alice weighted download (×2)"
+    );
     assert_eq!(
         top[0].upload_bytes + top[0].download_bytes,
         top[0].total_bytes,
