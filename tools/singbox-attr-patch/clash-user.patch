@@ -1,0 +1,12 @@
+diff --git a/experimental/clashapi/trafficontrol/tracker.go b/experimental/clashapi/trafficontrol/tracker.go
+index f001b77..1029669 100644
+--- a/experimental/clashapi/trafficontrol/tracker.go
++++ b/experimental/clashapi/trafficontrol/tracker.go
+@@ -76,6 +76,7 @@ func (t TrackerMetadata) MarshalJSON() ([]byte, error) {
+ 			"host":            domain,
+ 			"dnsMode":         "normal",
+ 			"processPath":     processPath,
++			"user":            t.Metadata.User,
+ 		},
+ 		"upload":      t.Upload.Load(),
+ 		"download":    t.Download.Load(),
