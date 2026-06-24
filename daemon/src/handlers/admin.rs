@@ -9715,6 +9715,74 @@ async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: b
                 "audit row failed for user disable/enable; mutation already committed"
             );
         }
+
+        // (B) Apply the change to the nodes: re-render + reload sing-box on
+        // every server this user is granted on. `users_for_server` now
+        // excludes disabled users, so this REVOKES (disable) or RESTORES
+        // (enable) node access — disable is no longer a subscription-only
+        // soft mute. Best-effort + backgrounded: the redirect returns now;
+        // the deploy streams to completion in a spawned task and audits its
+        // outcome. Mirrors «Deploy all», scoped to this user's servers.
+        // NOTE: apply_config restarts sing-box, so other users on the same
+        // node see a brief blip — unavoidable for any config change.
+        match state.inv.servers_for_user(&uid).await {
+            Ok(servers) if !servers.is_empty() => {
+                let inv = state.inv.clone();
+                let registry = std::sync::Arc::clone(&state.registry);
+                let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+                let uid_log = user_id_str.clone();
+                tokio::spawn(async move {
+                    use tokio_stream::StreamExt;
+                    let mut stream = Box::pin(crate::wizard_bootstrap::run_deploy_all(
+                        servers,
+                        inv.clone(),
+                        registry,
+                        key_path,
+                    ));
+                    let mut errors: Vec<String> = Vec::new();
+                    while let Some(ev) = stream.next().await {
+                        if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } = ev
+                        {
+                            errors.push(format!("{phase}: {message}"));
+                        }
+                    }
+                    if errors.is_empty() {
+                        tracing::info!(
+                            target = "vpnctld::admin",
+                            user = %uid_log,
+                            "disable/enable applied to nodes (config re-rendered + sing-box reloaded)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            target = "vpnctld::admin",
+                            user = %uid_log,
+                            errors = ?errors,
+                            "disable/enable: some servers failed to apply — retry via Deploy all"
+                        );
+                    }
+                    let _ = inv
+                        .audit(
+                            "admin",
+                            "user.disable.apply",
+                            Some(&uid_log),
+                            Some(&serde_json::json!({
+                                "ok": errors.is_empty(),
+                                "errors": errors,
+                            })),
+                        )
+                        .await;
+                });
+            }
+            Ok(_) => {} // no grants → nothing to apply on nodes
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %user_id_str,
+                    error = %e,
+                    "servers_for_user failed; disable/enable flag set but nodes NOT re-applied — use Deploy all"
+                );
+            }
+        }
     }
     Redirect::to(&format!(
         "/admin/users/{}",

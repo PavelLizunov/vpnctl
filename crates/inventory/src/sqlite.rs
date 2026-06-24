@@ -2007,11 +2007,17 @@ impl SqliteInventory {
     /// uuid; WG identifies peers by pubkey not name) so leaving them
     /// global is correct and avoids needless schema bloat.
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
+        // `u.disabled = 0` — a disabled user is EXCLUDED from the rendered
+        // node config (this slice feeds every kernel's inbound users), so a
+        // disable + redeploy REVOKES node access and an enable + redeploy
+        // restores it. `disabled` is no longer a subscription-only soft mute.
+        // `user_set_disabled_inner` kicks the redeploy on toggle.
         let rows = sqlx::query(
             "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
+               AND u.disabled = 0
              ORDER BY u.id",
         )
         .bind(&server.0)
@@ -6766,6 +6772,48 @@ mod tests {
         let users = inv.users_for_server(&ServerId("srv".into())).await?;
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].id.0, "bob");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn users_for_server_excludes_disabled_users() -> Result<()> {
+        // (B) disable = real revoke: a disabled user must drop out of the
+        // node-config slice (grant kept) so a redeploy removes them from
+        // sing-box; re-enable puts them back.
+        let inv = fresh().await;
+        inv.add_server(&sample_server("srv")).await?;
+        inv.add_user(&sample_user("alice")).await?;
+        inv.add_user(&sample_user("bob")).await?;
+        inv.grant(&UserId("alice".into()), &ServerId("srv".into()))
+            .await?;
+        inv.grant(&UserId("bob".into()), &ServerId("srv".into()))
+            .await?;
+        assert_eq!(
+            inv.users_for_server(&ServerId("srv".into())).await?.len(),
+            2
+        );
+
+        assert!(
+            inv.set_user_disabled(&UserId("alice".into()), true)
+                .await?
+        );
+        let users = inv.users_for_server(&ServerId("srv".into())).await?;
+        assert_eq!(
+            users.len(),
+            1,
+            "disabled user must be excluded from the node config slice"
+        );
+        assert_eq!(users[0].id.0, "bob");
+
+        assert!(
+            inv.set_user_disabled(&UserId("alice".into()), false)
+                .await?
+        );
+        assert_eq!(
+            inv.users_for_server(&ServerId("srv".into())).await?.len(),
+            2,
+            "re-enabled user must return to the node config slice"
+        );
         Ok(())
     }
 
