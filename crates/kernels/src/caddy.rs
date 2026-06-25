@@ -425,6 +425,12 @@ fn render_vlessws_bundle(
     if !env.acme_email.trim().is_empty() {
         cf.push_str(&format!("\temail {}\n", env.acme_email));
     }
+    // Disable HTTP/3 — caddy otherwise binds UDP on the front port, which
+    // collides with a co-tenant QUIC protocol (TUIC / hysteria2) sharing
+    // that port number on the node (caught on `is`: tuic-v5 holds UDP:8443,
+    // so caddy's h3 listener failed with `address already in use`). The ws
+    // tunnel is TCP-only, so h3 buys nothing here.
+    cf.push_str("\tservers {\n\t\tprotocols h1 h2\n\t}\n");
     cf.push_str("\tlog {\n\t\texclude http.log.error\n\t}\n");
     cf.push_str("}\n\n");
 
@@ -1153,6 +1159,9 @@ mod tests {
         assert!(text.contains("@vlessws path /Ab3x9Zq2Kp7Lm"));
         assert!(text.contains("reverse_proxy @vlessws 127.0.0.1:11443"));
         assert!(text.contains("root /var/www/naive-site"));
+        // HTTP/3 disabled so caddy never binds UDP on the front port (would
+        // collide with a co-tenant TUIC/hysteria2 QUIC listener).
+        assert!(text.contains("protocols h1 h2"));
         // sing-box: ws transport + the user uuid; NO tls, NO flow
         assert!(text.contains("\"path\": \"/Ab3x9Zq2Kp7Lm\""));
         assert!(text.contains("uuid-alice"));
