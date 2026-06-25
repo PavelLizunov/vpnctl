@@ -14101,6 +14101,7 @@ pub(crate) async fn server_detail(
         // DNS-A-record + open-80/443 prerequisite reminder vpnctl can't
         // do for the operator.
         (server_detail_naive_config_section(&server, &server_secrets, lang))
+        (server_detail_vlessws_config_section(&server, &server_secrets, lang))
 
         // Trusted host fingerprint — TOFU pin for the daemon's SSH
         // probe + clash-api poller + deploy. Both the web action below
@@ -15440,6 +15441,90 @@ fn server_detail_naive_config_section(
     }
 }
 
+/// vless-ws (Caddy + reverse_proxy) per-server config. The operator sets
+/// `vlessws.domain` + `vlessws.acme_email` + `vlessws.listen_port`
+/// (server_secrets); the secret ws path (`vlessws.path`) is auto-minted at
+/// deploy, so there's no field for it. Rendered ONLY when the `vless-ws`
+/// protocol is enabled on this server. Carries the prerequisite reminder
+/// vpnctl CANNOT satisfy: a DNS A-record pointing here + open TCP 80 (ACME)
+/// and the front port.
+fn server_detail_vlessws_config_section(
+    server: &vpnctl_core::Server,
+    server_secrets: &std::collections::HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server.enabled_protocols.iter().any(|p| p.0 == "vless-ws") {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let domain = server_secrets
+        .get("vlessws.domain")
+        .map(String::as_str)
+        .unwrap_or("");
+    let email = server_secrets
+        .get("vlessws.acme_email")
+        .map(String::as_str)
+        .unwrap_or("");
+    let port = server_secrets
+        .get("vlessws.listen_port")
+        .map(String::as_str)
+        .unwrap_or("");
+    // Whether the secret ws path has been minted yet (deploy mints it).
+    let path_minted = server_secrets.contains_key("vlessws.path");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(lang,
+                "Caddy terminates a real Let's-Encrypt cert on the front port, serves a decoy site at /, and reverse_proxies one secret path to a loopback sing-box VLESS+ws inbound. DIRECT (no CDN) — the RU-DPI-resistant, client-universal fallback that runs alongside REALITY on :443.",
+                "Caddy терминирует настоящий сертификат Let's-Encrypt на фронт-порту, отдаёт сайт-приманку на /, и reverse_proxy одного секретного пути на loopback sing-box VLESS+ws. ПРЯМОЙ (без CDN) — устойчивый к RU-DPI, совместимый со всеми клиентами фолбэк рядом с REALITY на :443.")) {
+            (tr(lang, "VLESS-WS (CADDY) CONFIG", "КОНФИГ VLESS-WS (CADDY)"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "Before deploy: point a DNS A-record at this server and open TCP 80 (ACME) + the front port. The secret ws path is generated automatically on deploy.",
+                "До деплоя: направь DNS A-запись на этот сервер и открой TCP 80 (ACME) + фронт-порт. Секретный ws-путь генерируется автоматически при деплое."))
+            @if path_minted {
+                (tr(lang, " The path is set.", " Путь задан."))
+            } @else {
+                (tr(lang, " The path is not minted yet (deploy to generate it).", " Путь ещё не сгенерирован (задеплой, чтобы создать его)."))
+            }
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/vlessws-config"))
+             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "domain", "домен"))
+            }
+            input type="text" name="domain" maxlength="253" required
+                  value=(domain)
+                  placeholder="de.ninitux.top"
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "front port", "фронт-порт"))
+            }
+            input type="text" name="listen_port" maxlength="5" inputmode="numeric"
+                  value=(port)
+                  placeholder="8443"
+                  title=(tr(lang, "Public TLS port Caddy serves on — NOT 443 (REALITY owns that). Blank = 8443.", "Публичный TLS-порт Caddy — НЕ 443 (его занимает REALITY). Пусто = 8443."))
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "ACME email", "ACME почта"))
+            }
+            input type="text" name="acme_email" maxlength="254"
+                  value=(email)
+                  placeholder="admin@example.com"
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            span {}
+            button type="submit"
+                   title=(tr(lang, "Save vless-ws domain + front port + ACME email", "Сохранить домен vless-ws + фронт-порт + ACME почту"))
+                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (tr(lang, "save vless-ws config", "сохранить конфиг"))
+            }
+        }
+    }
+}
+
 fn server_detail_display_name_section(
     server: &vpnctl_core::Server,
     current: Option<&str>,
@@ -15874,6 +15959,88 @@ pub(crate) async fn server_set_naive_config(
             Some(&serde_json::json!({
                 "domain": domain,
                 "acme_email_set": !email.is_empty(),
+            })),
+        )
+        .await;
+
+    Redirect::to(&format!(
+        "/admin/servers/{}",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/vlessws-config` — set the vless-ws (Caddy)
+/// per-server params `vlessws.domain` + `vlessws.acme_email` +
+/// `vlessws.listen_port` (server_secrets) the caddy kernel renders into the
+/// vless-ws bundle + Caddy's built-in ACME consumes. The secret ws path
+/// (`vlessws.path`) is NOT set here — it's auto-minted at deploy. Domain is
+/// required; all three land in config/URI artefacts, so the same
+/// illegal-char guard the kernel applies is enforced here, and `listen_port`
+/// (when non-blank) must be a valid non-zero u16. Redirects to the detail.
+pub(crate) async fn server_set_vlessws_config(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let domain_raw = form_field(&body, "domain").unwrap_or_default();
+    let domain = domain_raw.trim();
+    let email_raw = form_field(&body, "acme_email").unwrap_or_default();
+    let email = email_raw.trim();
+    let port_raw = form_field(&body, "listen_port").unwrap_or_default();
+    let port = port_raw.trim();
+
+    // These land verbatim in a Caddyfile / vless:// URI; reject anything
+    // that could break out of its line/block (same guard the caddy kernel +
+    // the vless_ws protocol apply at render). Fail 400 here rather than at
+    // node-side `caddy validate`.
+    const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
+    if domain.is_empty() {
+        return bad_request("vpnctl admin: vless-ws domain is required");
+    }
+    if domain.chars().count() > 253 || domain.contains(ILLEGAL) {
+        return bad_request("vpnctl admin: invalid vless-ws domain");
+    }
+    if email.chars().count() > 254 || email.contains(ILLEGAL) {
+        return bad_request("vpnctl admin: invalid vless-ws ACME email");
+    }
+    // Front port: optional (blank → kernel default 8443). When set it must
+    // be a valid non-zero u16, else the kernel silently falls back and the
+    // operator's typo is hidden.
+    if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
+        return bad_request("vpnctl admin: invalid vless-ws front port (1..=65535)");
+    }
+
+    // Three per-key upserts (the generic KV setter is per-key). Same
+    // non-transactional, idempotent-form caveat as the naive handler.
+    for (key, val) in [
+        ("vlessws.domain", domain),
+        ("vlessws.acme_email", email),
+        ("vlessws.listen_port", port),
+    ] {
+        if let Err(e) = state.inv.set_server_secret(&sid, key, val).await {
+            return internal_error(anyhow::Error::new(e));
+        }
+    }
+    // set_server_secret has no built-in audit, so emit the row here.
+    // Best-effort: a failed audit must not 500 the save.
+    let _ = state
+        .inv
+        .audit(
+            "admin",
+            "server.vlessws.set",
+            Some(&server_id),
+            Some(&serde_json::json!({
+                "domain": domain,
+                "acme_email_set": !email.is_empty(),
+                "listen_port": port,
             })),
         )
         .await;

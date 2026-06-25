@@ -7,7 +7,7 @@ use vpnctl_kernels::{
 };
 use vpnctl_protocols::{
     AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-    VlessReality, WgTurn as WgTurnProtocol, WireGuard,
+    VlessReality, VlessWs, WgTurn as WgTurnProtocol, WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -70,6 +70,14 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // `User.tuic_password` for HTTP Basic; server params
     // `naive.domain` / `naive.acme_email` in inventory.server_secrets.
     reg.register_protocol(Box::new(Naive::new()))?;
+    // vless-ws — VLESS over WebSocket+TLS, DIRECT (no CDN), also served
+    // by the Caddy kernel (real LE cert on an alt-port + decoy site +
+    // reverse_proxy of one secret path → loopback sing-box ws inbound).
+    // RU-DPI-resistant AND client-universal (v2rayNG/v2RayTun/Happ/
+    // sing-box). No static listen_port → coexists with REALITY on :443.
+    // Server params `vlessws.domain` / `vlessws.acme_email` /
+    // `vlessws.listen_port`; `vlessws.path` auto-minted.
+    reg.register_protocol(Box::new(VlessWs::new()))?;
     // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
     // client (slipstream-client + loopback VLESS), so
     // `appears_in_sing_box_sub()` is false; `share_link` emits the

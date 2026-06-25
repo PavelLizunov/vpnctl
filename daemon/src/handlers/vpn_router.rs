@@ -916,6 +916,13 @@ pub(crate) async fn get_config(
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
         ("hysteria2", "HY2", None),
+        // vless-ws — VLESS/WebSocket+TLS direct (caddy front, no CDN). The
+        // RU-DPI fallback the v2ray-core family (v2RayTun) CAN parse, unlike
+        // HY2/TUIC. Skipped on a server without the `vlessws.domain` ACME
+        // secret (same gate shape as naive). `share_link` additionally needs
+        // the minted `vlessws.path` → a server missing it logs+skips
+        // (failure-isolated), never dropping the user's vless.
+        ("vless-ws", "WS", Some("vlessws.domain")),
         ("dns-tunnel", "WL-BYPASS", Some("dns-tunnel:domain")),
     ];
     for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {
