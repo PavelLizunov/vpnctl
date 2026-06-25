@@ -127,6 +127,50 @@ impl Default for BoostySettings {
     }
 }
 
+/// Find an EXISTING grant on `server_id` whose **effective** VLESS uuid
+/// (`COALESCE(grants.client_uuid, users.uuid)`) equals `candidate_uuid`,
+/// ignoring grants that belong to `exclude_user`. Returns that other user's
+/// id, or `None` when `candidate_uuid` is free to use on the server.
+///
+/// This is the core of the per-server uuid-uniqueness invariant. Two users
+/// sharing one effective uuid on a node make sing-box dedup them, so one
+/// silently fails to connect (HANDOFF §4.1 — the `main-brat@de` incident).
+/// `users.uuid` is globally UNIQUE, but `grants.client_uuid` has no such
+/// constraint and the effective value spans two tables, so the invariant is
+/// enforced in code (write-time) + a pre-deploy assertion rather than via a
+/// single-column UNIQUE index.
+///
+/// Generic over the executor so callers can run it on the pool (`grant`) or
+/// inside an already-open transaction (`set_grant_client_uuid`).
+async fn find_effective_uuid_conflict<'e, E>(
+    executor: E,
+    server_id: &str,
+    candidate_uuid: &str,
+    exclude_user: &str,
+) -> Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query(
+        "SELECT g.user_id AS who
+         FROM grants g
+         INNER JOIN users u ON u.id = g.user_id
+         WHERE g.server_id = ?1
+           AND g.user_id <> ?2
+           AND COALESCE(g.client_uuid, u.uuid) = ?3
+         LIMIT 1",
+    )
+    .bind(server_id)
+    .bind(exclude_user)
+    .bind(candidate_uuid)
+    .fetch_optional(executor)
+    .await?;
+    match row {
+        None => Ok(None),
+        Some(r) => Ok(Some(r.try_get("who")?)),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: i64,
@@ -2668,7 +2712,57 @@ impl SqliteInventory {
 
     // ── Grants (user × server) ──────────────────────────────────────────
 
+    /// Grant `user` access to `server`. Idempotent — re-granting an existing
+    /// (user, server) pair is a no-op.
+    ///
+    /// **uuid-uniqueness invariant (HANDOFF §4.1).** A fresh grant's effective
+    /// VLESS uuid is the user's GLOBAL `users.uuid` (the new row's
+    /// `client_uuid` is NULL). If another user already resolves to that same
+    /// effective uuid on this server, sing-box would dedup the two and one of
+    /// them would silently fail to connect — so we reject the grant rather
+    /// than mint a config that bricks a user. This can only happen when some
+    /// *other* grant carries a `client_uuid` override equal to this user's
+    /// global uuid (exactly the `main-brat@de` pathology). The check spans all
+    /// users (incl. disabled) so a later re-enable can't surface a latent
+    /// collision. Re-granting an existing pair skips the check so it never
+    /// trips over pre-existing (legacy) data.
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        // Already granted? Idempotent no-op (preserves the prior
+        // `ON CONFLICT DO NOTHING` semantics) — and skip the collision check.
+        let already = sqlx::query("SELECT 1 FROM grants WHERE user_id = ?1 AND server_id = ?2")
+            .bind(&user.0)
+            .bind(&server.0)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+        if already {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        // Fresh grant ⇒ effective uuid will be the user's global uuid.
+        let user_uuid: String = sqlx::query("SELECT uuid FROM users WHERE id = ?1")
+            .bind(&user.0)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| r.try_get::<String, _>("uuid"))
+            .transpose()?
+            .ok_or_else(|| {
+                SqliteInventoryError::Invalid(format!("no such user {}; cannot grant", user.0))
+            })?;
+
+        if let Some(other) =
+            find_effective_uuid_conflict(&mut *tx, &server.0, &user_uuid, &user.0).await?
+        {
+            return Err(SqliteInventoryError::AlreadyExists(format!(
+                "effective uuid {user_uuid} on server {} is already used by user {other}; \
+                 refusing to grant {} — they would collide and one would be bricked on the node",
+                server.0, user.0
+            )));
+        }
+
         sqlx::query(
             "INSERT INTO grants (user_id, server_id, granted_at)
              VALUES (?1, ?2, datetime('now'))
@@ -2676,8 +2770,9 @@ impl SqliteInventory {
         )
         .bind(&user.0)
         .bind(&server.0)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2845,6 +2940,50 @@ impl SqliteInventory {
         }
     }
 
+    /// Defence-in-depth pre-deploy assertion: error if any two **rendered**
+    /// users on `server` (granted AND enabled — exactly the slice
+    /// `users_for_server` feeds to the kernels) resolve to the same effective
+    /// VLESS uuid. The write-time guards in `grant` / `set_grant_client_uuid`
+    /// stop collisions at the source, but a manual `sqlite3` edit or a buggy
+    /// import could still plant one; the deploy pipeline calls this so a
+    /// colliding config is NEVER pushed (sing-box silently dedups the users,
+    /// bricking one with no telemetry signal — HANDOFF §4.1). Read-only.
+    ///
+    /// Disabled users are excluded, matching `users_for_server` — a disabled
+    /// user isn't rendered, so it can't collide on the wire, and including it
+    /// would block deploys on a latent (non-shipping) duplicate.
+    pub async fn assert_no_uuid_collisions(&self, server: &ServerId) -> Result<()> {
+        let rows = sqlx::query(
+            "SELECT COALESCE(g.client_uuid, u.uuid) AS eff,
+                    GROUP_CONCAT(u.id) AS who
+             FROM grants g
+             INNER JOIN users u ON u.id = g.user_id
+             WHERE g.server_id = ?1
+               AND u.disabled = 0
+             GROUP BY COALESCE(g.client_uuid, u.uuid)
+             HAVING COUNT(*) > 1",
+        )
+        .bind(&server.0)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let detail = rows
+            .iter()
+            .map(|r| {
+                let eff: String = r.try_get("eff").unwrap_or_default();
+                let who: String = r.try_get("who").unwrap_or_default();
+                format!("{eff} → [{who}]")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(SqliteInventoryError::Invalid(format!(
+            "server {} has effective-uuid collisions, refusing to deploy: {detail}",
+            server.0
+        )))
+    }
+
     /// Set the per-server VLESS uuid override on an existing grant. The
     /// grant must already exist (call `grant` first if not). Idempotent —
     /// setting to the same value is a no-op SQL-wise; setting to a
@@ -2914,6 +3053,25 @@ impl SqliteInventory {
                 .ok()
                 .flatten()
         });
+
+        // uuid-uniqueness invariant (HANDOFF §4.1): the new `client_uuid` must
+        // not equal another user's effective uuid on this server, or sing-box
+        // would dedup the two and brick one of them. Checked inside the same
+        // transaction as the UPDATE so the read + write are atomic. Skipped
+        // when the grant is absent — the "no grant" error below owns that
+        // case. `exclude_user = user` means a same-value re-write (the
+        // idempotent no-op path) never trips on itself.
+        if grant_exists {
+            if let Some(other) =
+                find_effective_uuid_conflict(&mut *tx, &server.0, client_uuid, &user.0).await?
+            {
+                return Err(SqliteInventoryError::AlreadyExists(format!(
+                    "client_uuid {client_uuid} is already used by user {other} on server {}; \
+                     refusing to set it for {} — they would collide on the node",
+                    server.0, user.0
+                )));
+            }
+        }
 
         // `AND client_uuid IS NOT ?3` (NULL-safe) makes a same-value write
         // match 0 rows, mirroring the no-op-suppression idiom in
@@ -8684,6 +8842,140 @@ mod tests {
             err.is_err(),
             "setting client_uuid without a grant must still error"
         );
+        Ok(())
+    }
+
+    // ── effective-uuid uniqueness guard (HANDOFF §4.1) ───────────────────
+
+    #[tokio::test]
+    async fn grant_rejects_effective_uuid_collision() -> Result<()> {
+        // Reconstruct the main-brat@de pathology: user `bbb`'s per-server
+        // client_uuid override equals user `aaa`'s GLOBAL uuid. Granting
+        // `aaa` to the same server must be rejected (aaa's effective uuid
+        // would equal bbb's override).
+        let inv = fresh().await;
+        inv.add_server(&sample_server("de")).await?;
+        let shared = "b25684c3-90d6-454a-a911-4e0abba568b0";
+        let mut aaa = sample_user("aaa");
+        aaa.uuid = shared.into();
+        inv.add_user(&aaa).await?;
+        inv.add_user(&sample_user("bbb")).await?; // global uuid "uuid-bbb"
+
+        // bbb granted on de, then bbb's de override set to aaa's global uuid
+        // (allowed: aaa has no grant on de yet, so nothing collides at this
+        // point — this sets up the precondition).
+        inv.grant(&UserId("bbb".into()), &ServerId("de".into()))
+            .await?;
+        inv.set_grant_client_uuid(&UserId("bbb".into()), &ServerId("de".into()), shared)
+            .await?;
+
+        // Granting aaa (global uuid == shared) on de must now be rejected.
+        let err = inv
+            .grant(&UserId("aaa".into()), &ServerId("de".into()))
+            .await;
+        assert!(
+            matches!(err, Err(SqliteInventoryError::AlreadyExists(_))),
+            "expected AlreadyExists collision, got {err:?}"
+        );
+        // …and the rejected grant must not have leaked a row.
+        assert!(
+            inv.client_uuid_for(&UserId("aaa".into()), &ServerId("de".into()))
+                .await?
+                .is_none(),
+            "rejected grant must not create a grant row"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grant_allows_unique_uuid_and_is_idempotent() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("de")).await?;
+        inv.add_user(&sample_user("alice")).await?; // uuid-alice
+        inv.add_user(&sample_user("bob")).await?; // uuid-bob (distinct)
+        inv.grant(&UserId("alice".into()), &ServerId("de".into()))
+            .await?;
+        inv.grant(&UserId("bob".into()), &ServerId("de".into()))
+            .await?;
+        // re-grant is a no-op, NOT an error
+        inv.grant(&UserId("alice".into()), &ServerId("de".into()))
+            .await?;
+        assert_eq!(inv.users_for_server(&ServerId("de".into())).await?.len(), 2);
+        inv.assert_no_uuid_collisions(&ServerId("de".into()))
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_grant_client_uuid_rejects_collision() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("de")).await?;
+        inv.add_user(&sample_user("alice")).await?;
+        inv.add_user(&sample_user("bob")).await?;
+        inv.grant(&UserId("alice".into()), &ServerId("de".into()))
+            .await?;
+        inv.grant(&UserId("bob".into()), &ServerId("de".into()))
+            .await?;
+
+        let u = "11111111-1111-4111-8111-111111111111";
+        inv.set_grant_client_uuid(&UserId("alice".into()), &ServerId("de".into()), u)
+            .await?;
+        // bob tries to take the same client_uuid → rejected
+        let err = inv
+            .set_grant_client_uuid(&UserId("bob".into()), &ServerId("de".into()), u)
+            .await;
+        assert!(
+            matches!(err, Err(SqliteInventoryError::AlreadyExists(_))),
+            "expected AlreadyExists, got {err:?}"
+        );
+        // bob's override didn't land — he still resolves to his global uuid
+        assert_eq!(
+            inv.client_uuid_for(&UserId("bob".into()), &ServerId("de".into()))
+                .await?,
+            Some("uuid-bob".into()),
+        );
+        // alice can still re-set her OWN value (self-excluded, idempotent)
+        inv.set_grant_client_uuid(&UserId("alice".into()), &ServerId("de".into()), u)
+            .await?;
+        inv.assert_no_uuid_collisions(&ServerId("de".into()))
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assert_no_uuid_collisions_catches_manual_edit() -> Result<()> {
+        // A manual sqlite3 edit / buggy import that bypasses the write-time
+        // guards must still be caught by the fail-closed pre-deploy assertion.
+        let inv = fresh().await;
+        inv.add_server(&sample_server("de")).await?;
+        inv.add_user(&sample_user("alice")).await?;
+        inv.add_user(&sample_user("bob")).await?;
+        inv.grant(&UserId("alice".into()), &ServerId("de".into()))
+            .await?;
+        inv.grant(&UserId("bob".into()), &ServerId("de".into()))
+            .await?;
+        inv.assert_no_uuid_collisions(&ServerId("de".into()))
+            .await?; // clean
+
+        // raw UPDATE: force bob's de override to alice's global uuid
+        sqlx::query(
+            "UPDATE grants SET client_uuid = 'uuid-alice' WHERE user_id='bob' AND server_id='de'",
+        )
+        .execute(&inv.pool)
+        .await?;
+        let err = inv.assert_no_uuid_collisions(&ServerId("de".into())).await;
+        assert!(
+            matches!(err, Err(SqliteInventoryError::Invalid(_))),
+            "planted collision must fail the deploy assertion, got {err:?}"
+        );
+
+        // disabling bob removes him from the rendered slice → assertion clean
+        // again (a non-shipping latent duplicate must not block the deploy).
+        sqlx::query("UPDATE users SET disabled = 1 WHERE id='bob'")
+            .execute(&inv.pool)
+            .await?;
+        inv.assert_no_uuid_collisions(&ServerId("de".into()))
+            .await?;
         Ok(())
     }
 
