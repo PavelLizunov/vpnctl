@@ -214,7 +214,7 @@ them; the rest are tabled with explicit decisions.
 
 | Inbound | Wire | Anti-DPI? | Use case | Status in vpnctl | Recommendation |
 |---|---|---|---|---|---|
-| `vless` (+REALITY) | TCP/443 | ✅ TLS-mimics microsoft.com | Censorship-circumvention primary | ✅ shipped | keep as default |
+| `vless` (+REALITY) | TCP/443 | ✅ TLS-mimics yahoo.com (default `vless.sni`; was microsoft.com — fragile dest, 2026-06-25) | Censorship-circumvention primary | ✅ shipped | keep as default |
 | `tuic` v5 | UDP | ⚠️ self-signed TLS, no SNI mimic | Low-latency UDP-friendly net | ✅ shipped | keep as secondary |
 | `hysteria2` | UDP/QUIC | ⚠️ fingerprintable; ✅ with Salamander obfs (just shipped) | LTE/satellite + censored networks | ✅ shipped + Realm + Salamander | promote when Pavel has rendezvous server |
 | `shadowsocks` (2022) | TCP/UDP | ⚠️ different fingerprint than VLESS | Fallback channel | ✅ shipped (single-user) | wire multi-user via new `User.shadowsocks_2022_psk` column |

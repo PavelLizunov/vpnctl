@@ -31,6 +31,27 @@ const FRAGMENT: &AsciiSet = &CONTROLS
 /// sing-box 1.13.12 (`sing-box check`) and Xray-core 26.3.27 (both accept it).
 const REALITY_UTLS_FP: &str = "randomized";
 
+/// Default REALITY dest / `serverName` when the server carries no explicit
+/// `vless.sni` secret.
+///
+/// Was `"www.microsoft.com"` (matched legacy `get-vless.sh`). Switched to
+/// `"yahoo.com"` on 2026-06-25 after an A/B from a RU network proved
+/// `www.microsoft.com` is a **fragile** REALITY dest: REALITY's TLS "steal"
+/// only completes for the `randomized` uTLS ClientHello — `firefox`/`chrome`
+/// ClientHellos get EOF (microsoft's TLS server does something REALITY can't
+/// relay — HRR / cert-chain / extension mismatch — for those profiles).
+/// `yahoo.com` is permissive → robust to **every** fingerprint, matching the
+/// proven 3x-ui config on the same nl box. Many clients (v2RayTun/Xray-family,
+/// the ninitux app) don't honour `randomized` or let the user pick chrome/
+/// firefox, so a microsoft dest silently broke them; yahoo sidesteps it.
+///
+/// This is the **default only** — `vless.sni` is per-server secret material,
+/// so a server that needs byte-identical legacy behaviour (e.g. a phone
+/// holding a cached bash `sni=www.microsoft.com` link) can pin microsoft
+/// explicitly. See `vless_explicit_microsoft_sni_byte_equal_with_bash_scripts`
+/// in `spec_share_link_byte_equality.rs`.
+pub const DEFAULT_REALITY_SNI: &str = "yahoo.com";
+
 /// VLESS + REALITY на TCP:443.
 ///
 /// **Stateless**: ключи REALITY и SNI приходят через [`RenderCtx::secrets`]
@@ -42,7 +63,7 @@ const REALITY_UTLS_FP: &str = "randomized";
 /// - `vless.private_key` (required) — REALITY x25519 private (base64-url-no-pad)
 /// - `vless.public_key`  (required) — REALITY x25519 public  (base64-url-no-pad)
 /// - `vless.short_id`    (required) — REALITY short ID (8 hex)
-/// - `vless.sni`         (optional, default `www.microsoft.com`)
+/// - `vless.sni`         (optional, default [`DEFAULT_REALITY_SNI`] = `yahoo.com`)
 #[derive(Debug, Default)]
 pub struct VlessReality;
 
@@ -63,10 +84,10 @@ impl Protocol for VlessReality {
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         // REALITY serves a real TLS handshake to a real upstream
-        // (`dest:` SNI, default www.microsoft.com); any probe that
-        // doesn't carry valid VLESS-flow auth gets transparently
-        // forwarded to Microsoft, so DPI sees authentic www.microsoft.com
-        // HTML and cannot distinguish our server from a real visitor.
+        // (`dest:` SNI, default yahoo.com — see DEFAULT_REALITY_SNI); any
+        // probe that doesn't carry valid VLESS-flow auth gets transparently
+        // forwarded to that upstream, so DPI sees authentic upstream HTML
+        // and cannot distinguish our server from a real visitor.
         // This is the gold-standard 2026 anti-probing posture.
         vpnctl_core::DpiRisk::Strong
     }
@@ -89,7 +110,7 @@ impl Protocol for VlessReality {
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;
-        let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
         // Per-server listen port override (post-2026-05-26). Default
         // 443 is the gold-standard cover (looks like real HTTPS),
         // but on a co-tenant host where :443 is owned by a legacy
@@ -145,7 +166,7 @@ impl Protocol for VlessReality {
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
-        let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
         let server_port: u16 = ctx
             .secrets
             .get("vless.listen_port")
@@ -179,7 +200,7 @@ impl Protocol for VlessReality {
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
-        let sni = ctx.or_default("vless.sni", "www.microsoft.com");
+        let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
         let port: u16 = ctx
             .secrets
             .get("vless.listen_port")

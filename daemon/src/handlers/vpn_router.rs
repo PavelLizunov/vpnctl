@@ -61,7 +61,7 @@
 //!   today only tracks a single VLESS inbound per server in
 //!   `server_secrets` (no `vless.extra_sni_1` etc.). This handler
 //!   emits ONE URI per granted server, byte-equivalent on the
-//!   primary inbound (port 443 + microsoft.com SNI), but missing the
+//!   primary inbound (port 443 + default REALITY SNI), but missing the
 //!   secondary/tertiary failover URIs. Acceptable for migration —
 //!   clients still connect via the primary URI; failover redundancy
 //!   on secondary ports is lost until vpnctld grows multi-inbound
@@ -400,7 +400,7 @@ async fn collect_vless_uris_for_user(
         let sni = secrets
             .get("vless.sni")
             .map(String::as_str)
-            .unwrap_or("www.microsoft.com");
+            .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
 
         // Per-server uuid override (Phase 1 + 2 merge). When no
         // override is pinned, falls back to user.uuid via COALESCE
