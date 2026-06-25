@@ -147,12 +147,12 @@ async fn find_effective_uuid_conflict<'e, E>(
     server_id: &str,
     candidate_uuid: &str,
     exclude_user: &str,
-) -> Result<Option<String>>
+) -> Result<Option<(String, bool)>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let row = sqlx::query(
-        "SELECT g.user_id AS who
+        "SELECT g.user_id AS who, u.disabled AS who_disabled
          FROM grants g
          INNER JOIN users u ON u.id = g.user_id
          WHERE g.server_id = ?1
@@ -165,9 +165,16 @@ where
     .bind(candidate_uuid)
     .fetch_optional(executor)
     .await?;
+    // Returns the conflicting user's id AND whether it is disabled — a disabled
+    // user is invisible in the admin UI but still owns the uuid, so surfacing
+    // that in the error stops the operator from chasing a "ghost".
     match row {
         None => Ok(None),
-        Some(r) => Ok(Some(r.try_get("who")?)),
+        Some(r) => {
+            let who: String = r.try_get("who")?;
+            let who_disabled: i64 = r.try_get("who_disabled")?;
+            Ok(Some((who, who_disabled != 0)))
+        }
     }
 }
 
@@ -2753,11 +2760,16 @@ impl SqliteInventory {
                 SqliteInventoryError::Invalid(format!("no such user {}; cannot grant", user.0))
             })?;
 
-        if let Some(other) =
+        if let Some((other, other_disabled)) =
             find_effective_uuid_conflict(&mut *tx, &server.0, &user_uuid, &user.0).await?
         {
+            let dis = if other_disabled {
+                " (disabled — hidden in the UI)"
+            } else {
+                ""
+            };
             return Err(SqliteInventoryError::AlreadyExists(format!(
-                "effective uuid {user_uuid} on server {} is already used by user {other}; \
+                "effective uuid {user_uuid} on server {} is already used by user {other}{dis}; \
                  refusing to grant {} — they would collide and one would be bricked on the node",
                 server.0, user.0
             )));
@@ -2952,10 +2964,21 @@ impl SqliteInventory {
     /// Disabled users are excluded, matching `users_for_server` — a disabled
     /// user isn't rendered, so it can't collide on the wire, and including it
     /// would block deploys on a latent (non-shipping) duplicate.
+    ///
+    /// **Blast radius:** this fails the deploy of the WHOLE node fail-closed —
+    /// the operator cannot push ANY change to the server until the collision
+    /// is resolved. That is intentional (rendering a colliding config bricks a
+    /// user with no signal, which is worse), but it means a collision can
+    /// wedge an urgent unrelated deploy. The error therefore names each
+    /// colliding user and marks which carries the `(override)` `client_uuid`,
+    /// so remediation is one step: clear or replace that override.
     pub async fn assert_no_uuid_collisions(&self, server: &ServerId) -> Result<()> {
         let rows = sqlx::query(
             "SELECT COALESCE(g.client_uuid, u.uuid) AS eff,
-                    GROUP_CONCAT(u.id) AS who
+                    GROUP_CONCAT(
+                        u.id || CASE WHEN g.client_uuid IS NOT NULL
+                                     THEN ' (override)' ELSE ' (global)' END,
+                        ', ') AS who
              FROM grants g
              INNER JOIN users u ON u.id = g.user_id
              WHERE g.server_id = ?1
@@ -2979,7 +3002,8 @@ impl SqliteInventory {
             .collect::<Vec<_>>()
             .join("; ");
         Err(SqliteInventoryError::Invalid(format!(
-            "server {} has effective-uuid collisions, refusing to deploy: {detail}",
+            "server {} has effective-uuid collisions; refusing to deploy the whole node until \
+             fixed — clear or replace the offending grant's (override) client_uuid: {detail}",
             server.0
         )))
     }
@@ -3062,11 +3086,16 @@ impl SqliteInventory {
         // case. `exclude_user = user` means a same-value re-write (the
         // idempotent no-op path) never trips on itself.
         if grant_exists {
-            if let Some(other) =
+            if let Some((other, other_disabled)) =
                 find_effective_uuid_conflict(&mut *tx, &server.0, client_uuid, &user.0).await?
             {
+                let dis = if other_disabled {
+                    " (disabled — hidden in the UI)"
+                } else {
+                    ""
+                };
                 return Err(SqliteInventoryError::AlreadyExists(format!(
-                    "client_uuid {client_uuid} is already used by user {other} on server {}; \
+                    "client_uuid {client_uuid} is already used by user {other}{dis} on server {}; \
                      refusing to set it for {} — they would collide on the node",
                     server.0, user.0
                 )));
@@ -8976,6 +9005,22 @@ mod tests {
             .await?;
         inv.assert_no_uuid_collisions(&ServerId("de".into()))
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grant_unknown_user_errors() -> Result<()> {
+        // The new grant() looks the user up to compute its effective uuid; a
+        // non-existent user must fail loudly (Invalid), not insert an orphan.
+        let inv = fresh().await;
+        inv.add_server(&sample_server("de")).await?;
+        let err = inv
+            .grant(&UserId("ghost".into()), &ServerId("de".into()))
+            .await;
+        assert!(
+            matches!(err, Err(SqliteInventoryError::Invalid(_))),
+            "granting a non-existent user must error, got {err:?}"
+        );
         Ok(())
     }
 
