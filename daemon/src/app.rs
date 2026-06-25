@@ -928,6 +928,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/naive-config",
             post(admin::server_set_naive_config),
         )
+        // vless-ws (Caddy) per-server config — operator sets vlessws.domain
+        // + vlessws.acme_email + vlessws.listen_port (server_secrets); the
+        // secret ws path is auto-minted at deploy. Consumed by the caddy
+        // kernel's vless-ws bundle render + Caddy's built-in ACME.
+        .route(
+            "/admin/servers/{id}/vlessws-config",
+            post(admin::server_set_vlessws_config),
+        )
         // Auto-suppress opt-in (migration 0030). Toggle whether the
         // server is auto-hidden from subscriptions while unreachable
         // (health monitor sets/clears the runtime suppressed_at flag).
@@ -1435,7 +1443,7 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     };
     use vpnctl_protocols::{
         AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-        VlessReality, WgTurn as WgTurnProtocol, WireGuard,
+        VlessReality, VlessWs, WgTurn as WgTurnProtocol, WireGuard,
     };
 
     let mut reg = Registry::new();
@@ -1465,6 +1473,10 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // Without this the daemon's /sub render + admin dpi-chip silently
     // drop naive (the CLI deploy still worked, hiding the gap).
     reg.register_protocol(Box::new(Naive::new()))?;
+    // vless-ws — VLESS/WebSocket+TLS direct (Caddy kernel). Without this
+    // the daemon's /sub + ninitux render + admin dpi-chip silently drop
+    // it. MUST stay in lockstep with cli/registry.rs.
+    reg.register_protocol(Box::new(VlessWs::new()))?;
     // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
     // client → appears_in_sing_box_sub() is false. MUST stay in lockstep
     // with cli/registry.rs.
@@ -1501,6 +1513,7 @@ mod registry_drift_guard {
             "trojan",
             "tuic-v5",
             "vless+reality",
+            "vless-ws",
             "wgturn",
             "wireguard",
         ]
