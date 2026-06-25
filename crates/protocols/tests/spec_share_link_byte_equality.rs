@@ -69,27 +69,52 @@ fn vless_secrets() -> HashMap<String, String> {
 // ── VLESS ───────────────────────────────────────────────────────────────
 
 #[test]
-fn vless_happy_path_byte_equal_with_bash_scripts() {
-    // Post-fix 2026-05-16 (commit AFTER db3998c): link layout now
-    // matches `scripts/get-vless.sh` from the bash vpn-control project
-    // BYTE-FOR-BYTE — same param ORDER + same param SET (encryption=none
-    // is included; was missing in db3998c). Verified against:
-    //   $ grep get-vless.sh vless://...
-    //   vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision
-    //                                   &security=reality&sni=www.microsoft.com
-    //                                   &fp=randomized&pbk=${REALITY_PUBLIC}
-    //                                   &sid=${SHORT_ID}&type=tcp#${USERNAME}
-    // Honours CLAUDE.md "Migration from bash — seamless preservation"
-    // requirement: phones holding bash-issued vless:// links keep
-    // working byte-for-byte after the vpnctl cutover.
+fn vless_happy_path_byte_equal_uses_robust_default_sni() {
+    // Pins the link LAYOUT (param ORDER + param SET — `encryption=none`
+    // included; was missing in db3998c) against `scripts/get-vless.sh`
+    // from the bash vpn-control project. This is the format regression
+    // net: if a future commit reorders/drops a param or changes the
+    // encoding, this fires before it lands.
     //
-    // ONE intentional deviation from the bash byte-equality: `fp` is
-    // `randomized`, not the bash `chrome` literal. RU DPI began
-    // fingerprinting the static Chrome uTLS ClientHello (2026-06-16) and
-    // resetting REALITY; `randomized` evades it. See
-    // `vless_reality.rs::REALITY_UTLS_FP`. Every other byte stays pinned.
+    // Two intentional deviations from the *literal* bash bytes — neither
+    // changes the param layout this test guards:
+    //   1. `fp` is `randomized`, not the bash `chrome` literal. RU DPI
+    //      began fingerprinting the static Chrome uTLS ClientHello
+    //      (2026-06-16) and resetting REALITY; `randomized` evades it.
+    //      See `vless_reality.rs::REALITY_UTLS_FP`.
+    //   2. `sni` is `yahoo.com` (DEFAULT_REALITY_SNI), not the bash
+    //      `www.microsoft.com` literal. The microsoft dest is a FRAGILE
+    //      REALITY upstream — its TLS "steal" only completes for the
+    //      `randomized` fingerprint, so firefox/chrome clients got EOF
+    //      (proven A/B from a RU network 2026-06-25). yahoo.com is
+    //      robust to every fingerprint. The genuine "byte-identical to
+    //      bash" contract — for a server that explicitly carries the
+    //      legacy microsoft secret — is pinned separately in
+    //      `vless_explicit_microsoft_sni_byte_equal_with_bash_scripts`.
     let s = srv();
     let secrets = vless_secrets();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+    let link = VlessReality::new().share_link(&ctx, &u).unwrap();
+    assert_eq!(
+        link,
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
+    );
+}
+
+#[test]
+fn vless_explicit_microsoft_sni_byte_equal_with_bash_scripts() {
+    // CLAUDE.md "Migration from bash — seamless preservation": the
+    // contract is *same secret material → same bytes*. `vless.sni` IS
+    // per-server secret material. A server that explicitly pins
+    // `vless.sni=www.microsoft.com` (as the bash get-vless.sh deploys
+    // baked in) must still render the legacy link BYTE-FOR-BYTE, so a
+    // phone holding a cached bash `sni=www.microsoft.com` link keeps
+    // working after the vpnctl cutover. Only `fp` deviates (randomized,
+    // the 2026-06-16 DPI-evasion switch — see the other test).
+    let s = srv();
+    let mut secrets = vless_secrets();
+    secrets.insert("vless.sni".into(), "www.microsoft.com".into());
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", Some("pw-alice"));
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
@@ -100,10 +125,44 @@ fn vless_happy_path_byte_equal_with_bash_scripts() {
 }
 
 #[test]
+fn vless_server_inbound_default_sni_matches_client_link_default() {
+    // The default SNI feeds BOTH the server's REALITY serverNames
+    // allowlist (server_inbound → tls.server_name + reality.handshake.server)
+    // AND the client surfaces (share_link / client_config). If these two
+    // defaults ever diverge, a freshly-deployed server would advertise one
+    // dest in its allowlist while handing clients a link for another →
+    // REALITY rejects the SNI and every client breaks at the TLS steal.
+    // Both server-side fields are pinned to the SAME literal the client
+    // byte-equality tests assert (`yahoo.com` = DEFAULT_REALITY_SNI), so a
+    // future edit that changes one default-SNI surface but not the others
+    // fails here.
+    let s = srv();
+    let secrets = vless_secrets();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", Some("pw-alice"));
+    let inbound = VlessReality::new().server_inbound(&ctx, &[u]).unwrap();
+    assert_eq!(
+        inbound
+            .pointer("/tls/server_name")
+            .and_then(serde_json::Value::as_str),
+        Some("yahoo.com"),
+        "server_inbound default serverName must equal the client-link default SNI",
+    );
+    assert_eq!(
+        inbound
+            .pointer("/tls/reality/handshake/server")
+            .and_then(serde_json::Value::as_str),
+        Some("yahoo.com"),
+        "server_inbound default REALITY handshake dest must equal the client-link default SNI",
+    );
+}
+
+#[test]
 fn vless_fragment_percent_encodes_space_byte_equal() {
     // user.id "alice cool" — space is NOT in the FRAGMENT unreserved set,
     // so it MUST become %20. Everything else stays verbatim. Param
-    // order matches `vless_happy_path_byte_equal_with_bash_scripts`.
+    // order matches `vless_happy_path_byte_equal_uses_robust_default_sni`
+    // (default SNI = yahoo.com).
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -111,7 +170,7 @@ fn vless_fragment_percent_encodes_space_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
     );
 }
 

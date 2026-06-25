@@ -120,9 +120,9 @@ fn vless_ipv6_authority_is_bracketed() {
         .unwrap();
     let tail = assert_bracketed_authority(&link, "vless://");
     assert!(tail.starts_with(":443?"), "expected :443? got {tail}");
-    // The sni= here is a fixed domain (www.microsoft.com), never the
+    // The sni= here is a fixed domain (default yahoo.com), never the
     // address — so there is no bare-IPv6-sni concern for VLESS.
-    assert!(link.contains("sni=www.microsoft.com"));
+    assert!(link.contains("sni=yahoo.com"));
 }
 
 // ── TUIC ────────────────────────────────────────────────────────────────

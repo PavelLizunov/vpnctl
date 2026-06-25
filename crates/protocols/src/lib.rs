@@ -21,7 +21,7 @@ pub use naive::{NAIVE_PORT, Naive};
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
 pub use trojan::{TROJAN_PORT, Trojan};
 pub use tuic_v5::TuicV5;
-pub use vless_reality::VlessReality;
+pub use vless_reality::{DEFAULT_REALITY_SNI, VlessReality};
 pub use vless_ws::{DEFAULT_FRONT_PORT as VLESS_WS_DEFAULT_FRONT_PORT, VlessWs};
 pub use wgturn::{WGTURN_PORT, WgTurn};
 pub use wireguard::{
