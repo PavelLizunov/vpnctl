@@ -15,6 +15,48 @@ async fn open(dir: &TempDir) -> SqliteInventory {
         .expect("open")
 }
 
+// ─── set_notification_language: round-trip + independence ────────────
+
+#[tokio::test]
+async fn notification_language_round_trips_and_is_independent_of_telegram() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    // Fresh DB: language column seeds NULL.
+    assert_eq!(
+        inv.get_telegram_config().await.unwrap().unwrap().language,
+        None
+    );
+    // Set ru → reads back ru.
+    inv.set_notification_language(Some("ru")).await.unwrap();
+    assert_eq!(
+        inv.get_telegram_config()
+            .await
+            .unwrap()
+            .unwrap()
+            .language
+            .as_deref(),
+        Some("ru")
+    );
+    // Saving the Telegram token/chat must NOT clobber the language
+    // (set_telegram_config uses a 3-column UPDATE that leaves it alone).
+    inv.set_telegram_config(Some("123:abcdefghijklmno"), Some("42"), None)
+        .await
+        .unwrap();
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(
+        cfg.language.as_deref(),
+        Some("ru"),
+        "language preserved across telegram save"
+    );
+    assert_eq!(cfg.token.as_deref(), Some("123:abcdefghijklmno"));
+    // Clearing language back to NULL works.
+    inv.set_notification_language(None).await.unwrap();
+    assert_eq!(
+        inv.get_telegram_config().await.unwrap().unwrap().language,
+        None
+    );
+}
+
 // ─── get_telegram_config: fresh-DB seed ──────────────────────────────
 
 // 1. Fresh DB after migrations: singleton row exists with both halves
@@ -33,6 +75,7 @@ async fn get_on_fresh_db_returns_some_with_both_halves_none() {
             token: None,
             chat_id: None,
             proxy_via_server_id: None,
+            language: None,
         }),
         "migration 0014 seed must insert singleton row with both halves NULL"
     );
@@ -87,6 +130,7 @@ async fn proxy_via_server_id_does_not_gate_is_enabled() {
         token: Some("t".into()),
         chat_id: Some("c".into()),
         proxy_via_server_id: None,
+        language: None,
     };
     assert!(cfg.is_enabled(), "direct mode with both halves → enabled");
 
@@ -94,6 +138,7 @@ async fn proxy_via_server_id_does_not_gate_is_enabled() {
         token: Some("t".into()),
         chat_id: Some("c".into()),
         proxy_via_server_id: Some("vps-de1".into()),
+        language: None,
     };
     assert!(
         cfg.is_enabled(),
@@ -104,6 +149,7 @@ async fn proxy_via_server_id_does_not_gate_is_enabled() {
         token: None,
         chat_id: Some("c".into()),
         proxy_via_server_id: Some("vps-de1".into()),
+        language: None,
     };
     assert!(
         !cfg.is_enabled(),
@@ -128,6 +174,7 @@ async fn set_both_some_then_get_returns_both() {
             token: Some("t".into()),
             chat_id: Some("c".into()),
             proxy_via_server_id: None,
+            language: None,
         }),
         "round-trip must return exactly what was set"
     );
@@ -154,6 +201,7 @@ async fn set_both_none_clears_but_singleton_remains() {
             token: None,
             chat_id: None,
             proxy_via_server_id: None,
+            language: None,
         }),
         "clear must leave singleton row in place with both halves NULL"
     );
@@ -210,6 +258,7 @@ async fn successive_set_calls_overwrite_only_one_row() {
             token: Some("third-token".into()),
             chat_id: Some("third-chat".into()),
             proxy_via_server_id: None,
+            language: None,
         }),
         "only the LAST set must be observable — proves singleton, not append"
     );
@@ -224,6 +273,7 @@ async fn successive_set_calls_overwrite_only_one_row() {
             token: None,
             chat_id: None,
             proxy_via_server_id: None,
+            language: None,
         }),
         "clear after multiple writes still ends in single empty row"
     );
@@ -238,6 +288,7 @@ async fn is_enabled_true_when_both_halves_some() {
         token: Some("hello123".into()),
         chat_id: Some("@me".into()),
         proxy_via_server_id: None,
+        language: None,
     };
     assert!(cfg.is_enabled(), "both Some(_) must be enabled");
 }
@@ -249,6 +300,7 @@ async fn is_enabled_false_when_token_missing() {
         token: None,
         chat_id: Some("@me".into()),
         proxy_via_server_id: None,
+        language: None,
     };
     assert!(!cfg.is_enabled(), "missing token must disable");
 }
@@ -260,6 +312,7 @@ async fn is_enabled_false_when_chat_id_missing() {
         token: Some("abc".into()),
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert!(!cfg.is_enabled(), "missing chat_id must disable");
 }
@@ -271,6 +324,7 @@ async fn is_enabled_false_when_both_none() {
         token: None,
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert!(!cfg.is_enabled(), "both None must be disabled");
 }
@@ -285,6 +339,7 @@ async fn token_last4_returns_last_four_chars_for_long_token() {
         token: Some("1234567890:ABCDEF".into()),
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -300,6 +355,7 @@ async fn token_last4_returns_full_token_when_shorter_than_4() {
         token: Some("abc".into()),
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -315,6 +371,7 @@ async fn token_last4_handles_exactly_four_chars() {
         token: Some("abcd".into()),
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert_eq!(
         cfg.token_last4(),
@@ -330,6 +387,7 @@ async fn token_last4_returns_empty_string_when_token_none() {
         token: None,
         chat_id: None,
         proxy_via_server_id: None,
+        language: None,
     };
     assert_eq!(cfg.token_last4(), "", "None token must yield empty string");
 }

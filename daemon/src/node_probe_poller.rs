@@ -357,14 +357,16 @@ pub async fn dispatch_alerts(
             // Payload is operationally-relevant numbers + the redacted
             // SSH stderr. Per `insert_alert_if_no_unacked` doc: no
             // secrets.
-            let payload = serde_json::json!({
+            let payload_val = serde_json::json!({
                 "consecutive_failures": consecutive_failures,
                 "threshold": threshold,
                 "last_ssh_error": reason,
                 "ssh_user": server.ssh_user,
                 "ssh_port": server.ssh_port,
-            })
-            .to_string();
+                "ip": server.address,
+            });
+            let payload = payload_val.to_string();
+            let subject = server_subject(inv, &server.id).await;
             let summary = format!(
                 "{consecutive_failures} consecutive SSH probes failed — host may be down, key revoked, or sshd port changed"
             );
@@ -386,7 +388,7 @@ pub async fn dispatch_alerts(
                     // detectors skipped it, breaking /admin/audit.
                     audit_alert_fire(inv, &server.id, id, "server.unreachable", &summary).await;
                     // Then push to the configured sink (best-effort).
-                    push_alert(inv, "server.unreachable", "warning", &summary).await;
+                    push_alert(inv, "server.unreachable", "warning", &subject, &payload_val).await;
                 }
                 Ok(None) => {
                     // Duplicate suppressed by the partial-UNIQUE
@@ -480,12 +482,13 @@ pub async fn dispatch_alerts(
                 //       NOT in `payload_json` (which `/admin/alerts`
                 //       never displays — only kind + summary + severity
                 //       are surfaced).
-                let payload = serde_json::json!({
+                let payload_val = serde_json::json!({
                     "our_ip": our_ip,
                     "fail2ban_banned_ips": banned_list,
                     "ban_count_other": ban_count_other,
-                })
-                .to_string();
+                });
+                let payload = payload_val.to_string();
+                let subject = server_subject(inv, &server.id).await;
                 // Summary IS rendered; bake the unban command + the
                 // «hoster console» hint right into it so the operator
                 // sees it on /admin/alerts without drilling into the
@@ -517,7 +520,14 @@ pub async fn dispatch_alerts(
                             &summary,
                         )
                         .await;
-                        push_alert(inv, "server.fail2ban.banned_self", "critical", &summary).await;
+                        push_alert(
+                            inv,
+                            "server.fail2ban.banned_self",
+                            "critical",
+                            &subject,
+                            &payload_val,
+                        )
+                        .await;
                     }
                     Ok(None) => {}
                     Err(e) => tracing::warn!(
@@ -590,7 +600,31 @@ async fn audit_alert_fire(
     }
 }
 
-pub(crate) async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str, summary: &str) {
+/// Push one alert to the configured transport, rendered localized +
+/// pretty. `subject` is the human display-name (country label for server
+/// alerts, user id for user alerts); `payload` is the structured event
+/// fields — the message TEXT is produced HERE in the operator's language
+/// (`notification_settings.language`), so the same event speaks Russian
+/// to the operator while the dashboard can render any locale.
+pub(crate) async fn push_alert(
+    inv: &SqliteInventory,
+    kind: &str,
+    severity: &str,
+    subject: &str,
+    payload: &serde_json::Value,
+) {
+    // Resolve the operator's notification language (best-effort — fall
+    // back to En on any read failure rather than dropping the alert).
+    let loc = match inv.get_telegram_config().await {
+        Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+        _ => crate::i18n::Locale::En,
+    };
+    let rendered = crate::alert_text::render_alert(kind, severity, subject, payload, loc);
+    let time_local =
+        crate::handlers::admin::format_local_with_pattern(chrono::Utc::now(), "%d.%m %H:%M");
+    let text = crate::alert_text::to_telegram_html(&rendered, loc, &time_local, false);
+    let silent = crate::alert_text::is_silent(severity);
+
     let sink = match build_alert_sink(inv).await {
         Ok(Some(s)) => s,
         Ok(None) => return, // transport not configured — no-op
@@ -607,12 +641,11 @@ pub(crate) async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str
     // Owned clones for the spawn — these are short strings.
     let kind = kind.to_string();
     let severity = severity.to_string();
-    let summary = summary.to_string();
     tokio::spawn(async move {
         // Track sink name BEFORE the move-into-await so we can log
         // it on success without resurrecting a borrow from `sink`.
         let sink_name = sink.name();
-        if let Err(e) = sink.send_text(&kind, &severity, &summary).await {
+        if let Err(e) = sink.send_text(&kind, &severity, &text, silent).await {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
                 kind = %kind,
@@ -629,6 +662,16 @@ pub(crate) async fn push_alert(inv: &SqliteInventory, kind: &str, severity: &str
             );
         }
     });
+}
+
+/// Resolve a server's human label for an alert subject: operator's
+/// custom `display_name` → country map → uppercased id. Same precedence
+/// as the `/sub` + `/api/v1/app/config` render, so an alert names a node
+/// exactly as the operator sees it elsewhere (e.g. `cdn` → «Latvia»).
+/// Best-effort — a DB read failure degrades to the country/id resolution.
+pub(crate) async fn server_subject(inv: &SqliteInventory, sid: &vpnctl_core::ServerId) -> String {
+    let custom = inv.server_display_name(sid).await.ok().flatten();
+    crate::handlers::vpn_router::server_display_label(&sid.0, custom.as_deref())
 }
 
 /// Build the appropriate `AlertSink` from the current

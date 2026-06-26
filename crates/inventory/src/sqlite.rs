@@ -694,6 +694,10 @@ pub struct TelegramConfig {
     pub token: Option<String>,
     pub chat_id: Option<String>,
     pub proxy_via_server_id: Option<String>,
+    /// Operator's notification language (migration 0036). `Some("ru")`
+    /// → Russian alert pushes; `None`/anything else → English. Read by
+    /// `alert_text::render_alert` at push time.
+    pub language: Option<String>,
 }
 
 impl TelegramConfig {
@@ -5884,19 +5888,28 @@ impl SqliteInventory {
     /// (shouldn't happen — migration 0014 seeds it — but defended
     /// against so a corrupted DB doesn't crash-loop the daemon).
     pub async fn get_telegram_config(&self) -> Result<Option<TelegramConfig>> {
-        let row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
-            "SELECT telegram_bot_token, telegram_chat_id, proxy_via_server_id
-             FROM notification_settings WHERE id = 1",
+        let row = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT telegram_bot_token, telegram_chat_id, proxy_via_server_id, language
+                 FROM notification_settings WHERE id = 1",
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(
-            row.map(|(token, chat_id, proxy_via_server_id)| TelegramConfig {
+        Ok(row.map(
+            |(token, chat_id, proxy_via_server_id, language)| TelegramConfig {
                 token,
                 chat_id,
                 proxy_via_server_id,
-            }),
-        )
+                language,
+            },
+        ))
     }
 
     /// Atomically set ALL THREE halves of the Telegram config. `None`
@@ -5931,6 +5944,24 @@ impl SqliteInventory {
         .bind(token)
         .bind(chat_id)
         .bind(proxy_via_server_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Set the operator's notification language (`'en'` / `'ru'`;
+    /// `None` clears → renders as English). Independent of
+    /// `set_telegram_config` (which leaves this column untouched), so
+    /// flipping the language never disturbs the token / chat_id. Caller
+    /// writes the audit row.
+    pub async fn set_notification_language(&self, lang: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE notification_settings
+             SET language    = ?1,
+                 updated_at  = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = 1",
+        )
+        .bind(lang)
         .execute(&self.pool)
         .await?;
         Ok(())

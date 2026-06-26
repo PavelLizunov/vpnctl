@@ -448,6 +448,20 @@ pub async fn scan_once(
                             "alert.fire audit row failed; admin_alerts row exists but timeline will be missing this entry"
                         );
                     }
+                    // Push the localized message (best-effort). These
+                    // diff-events (sing-box / fail2ban / disk / mem /
+                    // log up+down) were previously dashboard-only; the
+                    // notification-normalization work pushes them too,
+                    // rendered in the operator's language.
+                    let subject = crate::node_probe_poller::server_subject(inv, &server.id).await;
+                    crate::node_probe_poller::push_alert(
+                        inv,
+                        ev.kind,
+                        ev.severity,
+                        &subject,
+                        &ev.payload,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -669,8 +683,10 @@ pub async fn check_fingerprint_drift(
             "observed_keys": observed,
             "ssh_user": server.ssh_user,
             "ssh_port": server.ssh_port,
+            "ip": server.address,
         });
         let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        let subject = crate::node_probe_poller::server_subject(inv, &server.id).await;
         match inv
             .insert_alert_if_no_unacked(
                 &kind,
@@ -710,7 +726,8 @@ pub async fn check_fingerprint_drift(
                         "alert.fire audit row failed for server.fingerprint.drift"
                     );
                 }
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &subject, &payload)
+                    .await;
             }
             Ok(None) => {
                 // Already-open drift alert for this server. The
@@ -928,8 +945,9 @@ pub async fn check_user_traffic_limits(
                 }
                 // Best-effort Telegram push (same pattern as
                 // node_probe_poller). Failures stay in the log; the
-                // admin_alerts row is the source of truth.
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+                // admin_alerts row is the source of truth. Subject is the
+                // user id (this alert is user-scoped, not server-scoped).
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &uid.0, &payload).await;
             }
             Ok(None) => {
                 // Already-open alert for the same (kind, NULL) pair —
@@ -1040,7 +1058,9 @@ pub async fn check_attribution_stall(
                         "alert.fire audit row failed for server.attribution.stalled"
                     );
                 }
-                crate::node_probe_poller::push_alert(inv, KIND, "warning", &summary).await;
+                let subject = crate::node_probe_poller::server_subject(inv, sid).await;
+                crate::node_probe_poller::push_alert(inv, KIND, "warning", &subject, &payload)
+                    .await;
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(
@@ -1165,7 +1185,8 @@ pub async fn check_sub_fetch_without_traffic(
                         "alert.fire audit row failed for user.sub_no_traffic"
                     );
                 }
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &summary).await;
+                crate::node_probe_poller::push_alert(inv, &kind, "warning", &u.user_id.0, &payload)
+                    .await;
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(

@@ -70,15 +70,18 @@ use vpnctl_core::shell::single_quote;
 /// (test-send handler) or swallow them (production fire-and-forget).
 #[async_trait::async_trait]
 pub trait AlertSink: Send + Sync {
-    /// Send one alert as a free-text message. Implementations format
-    /// the three inputs however suits the transport (Telegram does
-    /// plain text + emoji severity prefix; ntfy.sh would use title
-    /// + body; journald would write a structured tracing event).
+    /// Send one alert. `text` is the ALREADY-RENDERED message body
+    /// (localized + pretty — `alert_text::to_telegram_html` produces the
+    /// Telegram HTML; the caller picks the locale). `kind` / `severity`
+    /// are kept for transport-specific routing + log lines. `silent`
+    /// asks the transport to deliver without a notification buzz
+    /// (info / recovery alerts) where it supports it.
     async fn send_text(
         &self,
         kind: &str,
         severity: &str,
-        summary: &str,
+        text: &str,
+        silent: bool,
     ) -> Result<(), AlertSinkError>;
 
     /// Short identifier for log lines («telegram», «null»). Doesn't
@@ -116,27 +119,6 @@ pub enum AlertSinkError {
     /// produce a `TelegramSink` at all.
     #[error("alert-sink: misconfigured (token or chat_id empty)")]
     Misconfigured,
-}
-
-/// Format the per-alert message body the way Telegram chat (and any
-/// future text-shaped sink) will render it. Standalone free fn so
-/// every sink can share the same triage prefix without duplicating
-/// the severity → emoji table.
-///
-/// **Severity → emoji table** — chosen for fast triage in the chat:
-///   * `critical` → 🟥 (red square — actionable, daemon may have
-///     lost contact)
-///   * `warning`  → ⚠️ (yellow triangle — operator should look soon)
-///   * `info`     → 🔵 (blue circle — informational, e.g. test-send)
-///   * (anything else) → ▪ (neutral marker — defensive default)
-pub fn format_alert_message(kind: &str, severity: &str, summary: &str) -> String {
-    let prefix = match severity {
-        "critical" => "🟥",
-        "warning" => "⚠️",
-        "info" => "🔵",
-        _ => "▪",
-    };
-    format!("{prefix} vpnctld · {severity} · {kind}\n\n{summary}")
 }
 
 /// Classify a raw SSH transport error string into an actionable
@@ -193,7 +175,8 @@ impl AlertSink for NullSink {
         &self,
         _kind: &str,
         _severity: &str,
-        _summary: &str,
+        _text: &str,
+        _silent: bool,
     ) -> Result<(), AlertSinkError> {
         Ok(())
     }
@@ -390,19 +373,24 @@ impl TelegramSink {
 impl AlertSink for TelegramSink {
     async fn send_text(
         &self,
-        kind: &str,
-        severity: &str,
-        summary: &str,
+        _kind: &str,
+        _severity: &str,
+        text: &str,
+        silent: bool,
     ) -> Result<(), AlertSinkError> {
-        let text = format_alert_message(kind, severity, summary);
-        // chat_id can be either an integer (e.g. 123456789) or a
-        // string (`@channel_name`). serde_json's `json!` macro
-        // encodes whichever-shape we give it; we stringify both
-        // because Telegram accepts string-form for both. Simplifies
-        // the schema.
+        // `text` arrives pre-rendered as Telegram HTML (localized) from
+        // `alert_text::to_telegram_html`. We add the modern send fields:
+        //   parse_mode=HTML            → <b>/<code> styling
+        //   disable_web_page_preview   → no link unfurl card
+        //   disable_notification       → silent for info/recovery
+        // chat_id can be an integer or `@channel`; Telegram accepts the
+        // string form for both, so we pass it as-is.
         let body = serde_json::json!({
             "chat_id": self.chat_id,
             "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
+            "disable_notification": silent,
         })
         .to_string();
 
@@ -554,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn null_sink_is_noop_and_returns_ok() {
         let s = NullSink;
-        s.send_text("k", "info", "hi").await.unwrap();
+        s.send_text("k", "info", "hi", false).await.unwrap();
         assert_eq!(s.name(), "null");
     }
 
@@ -578,28 +566,6 @@ mod tests {
     fn telegram_sink_constructs_with_both_halves() {
         let s = TelegramSink::new("1234567890:ABCDEF".into(), "987".into(), None).unwrap();
         assert_eq!(s.name(), "telegram");
-    }
-
-    #[test]
-    fn format_alert_message_prefixes_severity_with_emoji() {
-        let m = format_alert_message("server.unreachable", "warning", "3 fails");
-        assert!(
-            m.starts_with("⚠️ vpnctld · warning · server.unreachable"),
-            "got: {m:?}"
-        );
-        assert!(m.contains("3 fails"));
-
-        let m = format_alert_message("server.fail2ban.banned_self", "critical", "boom");
-        assert!(m.starts_with("🟥"), "got: {m:?}");
-    }
-
-    #[test]
-    fn format_alert_message_uses_neutral_marker_for_unknown_severity() {
-        let m = format_alert_message("kind", "🤷", "summary");
-        assert!(
-            m.starts_with("▪"),
-            "unknown severity → neutral marker: {m:?}"
-        );
     }
 
     // ─── Token-via-stdin contract (security-audit 2026-05-18) ───

@@ -7117,7 +7117,10 @@ fn format_msk_iso(dt: chrono::DateTime<chrono::Utc>) -> String {
 /// Inner helper: format `dt` with `pattern` followed by a space and
 /// the chosen zone's abbreviation (e.g. «MSK», «UTC», «EST»). On
 /// any failure to read the configured tz, fall back to UTC.
-fn format_local_with_pattern(dt: chrono::DateTime<chrono::Utc>, pattern: &str) -> String {
+pub(crate) fn format_local_with_pattern(
+    dt: chrono::DateTime<chrono::Utc>,
+    pattern: &str,
+) -> String {
     let tz = display_tz();
     let local = dt.with_timezone(&tz);
     // chrono-tz's `Tz::name()` gives the IANA name (`Europe/Moscow`);
@@ -11904,8 +11907,8 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
                         (crate::i18n::tr(
                             lang,
-                            "Posts «🔵 vpnctld · info · test · vpnctld test message ...» to your chat.",
-                            "Пошлёт «🔵 vpnctld · info · test · vpnctld test message ...» в твой чат.",
+                            "Posts a «🟢 Telegram connected» sample in the real alert format + your chosen language.",
+                            "Пошлёт пример «🟢 Telegram подключён» в реальном формате алертов и на выбранном языке.",
                         ))
                     }
                 }
@@ -11919,6 +11922,46 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                     ))
                     b style="color: var(--ink);" { (crate::i18n::tr(lang, "enabled", "включено")) } "."
                 }
+            }
+        }
+
+        // Notification language — operator-selectable locale for the
+        // Telegram alert pushes. Independent of the per-browser admin-UI
+        // [EN|RU] shell toggle: this one is persisted in
+        // notification_settings.language + drives render_alert at push
+        // time, so alerts speak the chosen language regardless of which
+        // browser the operator reads /admin from.
+        @let notif_lang = match &telegram_cfg {
+            Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+            _ => crate::i18n::Locale::En,
+        };
+        div style="margin-top: 16px;" {
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                (crate::i18n::tr(lang, "Alert language", "Язык уведомлений"))
+            }
+            @for (code, label, is_active) in [
+                ("ru", "Русский", notif_lang == crate::i18n::Locale::Ru),
+                ("en", "English", notif_lang == crate::i18n::Locale::En),
+            ] {
+                form method="post" action="/admin/settings/notification-language"
+                     style="display: inline; margin: 0 8px 0 0;" {
+                    input type="hidden" name="language" value=(code);
+                    button type="submit" disabled[is_active]
+                           style=(if is_active {
+                               "padding: 5px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px;"
+                           } else {
+                               "padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;"
+                           }) {
+                        (label)
+                    }
+                }
+            }
+            span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 6px;" {
+                (crate::i18n::tr(
+                    lang,
+                    "Telegram alerts are sent in this language.",
+                    "Алерты в Telegram приходят на этом языке.",
+                ))
             }
         }
 
@@ -12264,6 +12307,42 @@ pub(crate) async fn server_push_deploy_key(
     }
 }
 
+/// `POST /admin/settings/notification-language` — set the operator's
+/// notification language (`ru` / `en`). Persisted in
+/// `notification_settings.language`; drives `alert_text::render_alert`
+/// at push time so Telegram alerts (and the localized test-send) speak
+/// the chosen language. Audited; 303-redirects back to /admin/settings.
+pub(crate) async fn settings_notification_language(
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let lang_in = form_field(&body, "language").unwrap_or_default();
+    let lang = lang_in.trim();
+    if lang != "ru" && lang != "en" {
+        return bad_request("notification language must be 'ru' or 'en'");
+    }
+    if let Err(e) = state.inv.set_notification_language(Some(lang)).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "settings.notification.language",
+            None,
+            Some(&serde_json::json!({ "language": lang })),
+        )
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::settings_notification_language",
+            error = %e,
+            "audit row for notification-language change failed; setting was applied"
+        );
+    }
+    Redirect::to("/admin/settings").into_response()
+}
+
 /// `POST /admin/settings/telegram` — save the Telegram bot
 /// transport config (Phase G chunk 3 part 1). Atomic update of both
 /// fields. Either empty input → that field set to NULL in DB →
@@ -12442,14 +12521,28 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let send_result = sink
-        .send_text(
-            "test",
-            "info",
-            "vpnctld test message — Telegram bot is configured correctly. \
-             Real alerts arrive with the same format.",
+    // Render the test message in the operator's chosen language, in the
+    // SAME pretty HTML format real alerts use — so the test verifies not
+    // just connectivity but that the operator likes the look + locale.
+    let loc = match state.inv.get_telegram_config().await {
+        Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+        _ => crate::i18n::Locale::En,
+    };
+    let time_local = format_local_with_pattern(chrono::Utc::now(), "%d.%m %H:%M");
+    let sample = crate::alert_text::RenderedAlert {
+        icon: "🟢",
+        title: crate::i18n::tr(loc, "Telegram connected — vpnctl", "Telegram подключён — vpnctl")
+            .to_string(),
+        body: crate::i18n::tr(
+            loc,
+            "This is a test message. Real alerts arrive in this format: a severity icon, what happened, and what to do.",
+            "Это тестовое сообщение. Реальные алерты приходят в этом формате: иконка важности, что случилось и что делать.",
         )
-        .await;
+        .to_string(),
+        action: None,
+    };
+    let text = crate::alert_text::to_telegram_html(&sample, loc, &time_local, false);
+    let send_result = sink.send_text("test", "info", &text, true).await;
 
     // Audit either way.
     let audit_payload = match &send_result {
