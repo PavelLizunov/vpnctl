@@ -1247,6 +1247,12 @@ fn admin_router(state: AppState) -> Router {
             "/admin/settings/telegram",
             post(admin::settings_telegram),
         )
+        // Notification-normalization — operator-selectable alert language
+        // (ru / en). Drives render_alert at push time.
+        .route(
+            "/admin/settings/notification-language",
+            post(admin::settings_notification_language),
+        )
         // Phase G chunk 3 part 2 — synchronous test-send so the
         // operator can verify credentials without waiting for an
         // actual alert. Surfaces curl/API errors as 502.

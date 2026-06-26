@@ -87,6 +87,17 @@ impl Locale {
         Locale::En
     }
 
+    /// Resolve a stored language code (e.g. `notification_settings.language`)
+    /// into a `Locale`. `Some("ru")` → Russian; everything else
+    /// (including `None` and unknown codes) → English. Used by the
+    /// alert-push path + the notification-language settings control.
+    pub fn from_lang_code(code: Option<&str>) -> Self {
+        match code {
+            Some("ru") => Locale::Ru,
+            _ => Locale::En,
+        }
+    }
+
     /// The cookie value to set when the operator picks this locale.
     /// Used by the `/admin/tweak/lang/<x>` handler.
     pub fn cookie_value(self) -> &'static str {
@@ -327,6 +338,17 @@ mod tests {
     #[test]
     fn default_locale_is_en() {
         assert_eq!(Locale::from_request(&hm(&[])), Locale::En);
+    }
+
+    #[test]
+    fn from_lang_code_maps_ru_else_en() {
+        // Drives notification-language resolution for alert pushes.
+        assert_eq!(Locale::from_lang_code(Some("ru")), Locale::Ru);
+        assert_eq!(Locale::from_lang_code(Some("en")), Locale::En);
+        // Unknown code + absent → English (never panics, never Ru-by-accident).
+        assert_eq!(Locale::from_lang_code(Some("de")), Locale::En);
+        assert_eq!(Locale::from_lang_code(Some("")), Locale::En);
+        assert_eq!(Locale::from_lang_code(None), Locale::En);
     }
 
     #[test]

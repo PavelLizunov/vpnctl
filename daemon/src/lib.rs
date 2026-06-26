@@ -46,6 +46,9 @@ pub mod http_util;
 // default; TelegramSink for the operator's configured chat. Future
 // ntfy.sh / journald-bridge land as sibling impls in the same module.
 pub mod alert_sink;
+/// Localized (ru/en) + pretty rendering of alert messages. Consumed by
+/// `alert_sink` (Telegram HTML push) and the admin UI alert surfaces.
+pub mod alert_text;
 pub mod node_probe;
 pub mod node_probe_poller;
 pub mod rate_limit;
