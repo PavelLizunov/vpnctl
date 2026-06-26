@@ -9990,6 +9990,7 @@ pub(crate) async fn search(
                 }
                 ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 13px; line-height: 1.7;" {
                     @for a in &alerts {
+                        @let rendered = localized_alert(a, lang);
                         li style="display: flex; gap: 10px; padding: 2px 0; border-bottom: 1px dotted var(--rule);" {
                             // Alert detail isn't a route yet; link to
                             // /admin/alerts where the operator can ack
@@ -9998,7 +9999,7 @@ pub(crate) async fn search(
                             // open-vs-historical context.
                             a href="/admin/alerts"
                               style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                b { (a.kind) }
+                                b title=(a.kind) { (rendered.icon) " " (crate::alert_text::to_plain(&rendered.title)) }
                             }
                             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                                 (a.severity) " · "
@@ -10011,7 +10012,7 @@ pub(crate) async fn search(
                                         (crate::i18n::tr(lang, "OPEN", "ОТКРЫТ"))
                                     }
                                 }
-                                " · " (a.summary)
+                                " · " (crate::alert_text::to_plain(&rendered.body))
                             }
                         }
                     }
@@ -10831,13 +10832,52 @@ fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale
     }
 }
 
+/// Render an `AdminAlert` into its localized `{icon,title,body,action}`
+/// for the admin UI — the SAME `alert_text::render_alert` the Telegram
+/// push uses, so the dashboard + /admin/alerts speak the operator's
+/// language instead of the stored English summary. Subject = the user id
+/// (for `user.*:id` kinds) or the server's country label; payload comes
+/// from the stored `payload_json`.
+fn localized_alert(
+    a: &vpnctl_inventory::AdminAlert,
+    lang: crate::i18n::Locale,
+) -> crate::alert_text::RenderedAlert {
+    // server_id wins over a `:`-suffix: server alerts can ALSO carry a
+    // suffix (e.g. `server.fingerprint.drift:de`), where the suffix is
+    // the raw id — we want the country label. The suffix is only the
+    // subject for user-scoped alerts (server_id is None).
+    let subject = if let Some(sid) = &a.server_id {
+        crate::handlers::vpn_router::server_display_label(&sid.0, None)
+    } else if let Some((_, suffix)) = a.kind.split_once(':') {
+        suffix.to_string()
+    } else {
+        String::new()
+    };
+    let payload: serde_json::Value = a
+        .payload_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    crate::alert_text::render_alert(&a.kind, &a.severity, &subject, &payload, lang)
+}
+
 fn alert_row(
     a: &vpnctl_inventory::AdminAlert,
     lang: crate::i18n::Locale,
     with_hint: bool,
 ) -> Markup {
     use crate::i18n::{K, t, tr};
-    let (title, hint) = alert_explainer(&a.kind, lang);
+    let (_explainer_title, explainer_hint) = alert_explainer(&a.kind, lang);
+    // Localized render (icon + title + body + action) — replaces the
+    // stored English summary on the operator-facing surface.
+    let rendered = localized_alert(a, lang);
+    let r_title = crate::alert_text::to_plain(&rendered.title);
+    let r_body = crate::alert_text::to_plain(&rendered.body);
+    let r_hint: Option<String> = rendered
+        .action
+        .as_deref()
+        .map(crate::alert_text::to_plain)
+        .or_else(|| explainer_hint.map(|h| h.to_string()));
     html! {
                 div.ed-time-row {
                     span.ed-time-row__t { (format_msk_iso(a.created_at)) }
@@ -10856,16 +10896,13 @@ fn alert_row(
                         }
                     }
                     span.ed-time-row__pl {
-                        // Human title first (raw kind in the tooltip) —
-                        // operators scan titles, machines grep kinds.
-                        @if !title.is_empty() {
-                            b title=(a.kind) { (title) }
-                            " · "
-                        } @else {
-                            span.ed-mono { (a.kind) }
-                            " · "
-                        }
-                        (a.summary)
+                        // Localized icon + title first (raw kind in the
+                        // tooltip) — operators scan titles, machines grep
+                        // kinds. Body is the localized description, not the
+                        // stored English summary.
+                        b title=(a.kind) { (rendered.icon) " " (r_title) }
+                        " · "
+                        (r_body)
                         @match &a.acked_at {
                             Some(when) => {
                                 " · " span style="color: var(--mute);" {
@@ -10895,7 +10932,7 @@ fn alert_row(
                         // the collapsed spam group, which shows the
                         // hint once at group level instead.
                         @if with_hint && a.acked_at.is_none() {
-                            @if let Some(h) = hint {
+                            @if let Some(h) = &r_hint {
                                 span style="display: block; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 2px;" {
                                     "→ " (h)
                                 }
@@ -11912,6 +11949,26 @@ pub(crate) async fn settings(headers: HeaderMap, State(state): State<AppState>) 
                         ))
                     }
                 }
+                // On-demand fleet digest (the daily scheduler sends it
+                // automatically; this is the «send it now» button).
+                form method="post" action="/admin/settings/digest-now" style="margin-top: 8px;" {
+                    button type="submit"
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Send the fleet digest now: all-clear, or the list of open problems. Also sent daily.",
+                               "Отправить дайджест по флоту сейчас: всё спокойно или список открытых проблем. Также шлётся раз в сутки.",
+                           ))
+                           style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        (crate::i18n::tr(lang, "send digest now", "отправить дайджест"))
+                    }
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "A daily summary is sent automatically; this sends one immediately.",
+                            "Ежедневная сводка отправляется автоматически; эта кнопка шлёт её сразу.",
+                        ))
+                    }
+                }
             }
             _ => {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 10px 0 0;" {
@@ -12307,6 +12364,25 @@ pub(crate) async fn server_push_deploy_key(
     }
 }
 
+/// `POST /admin/settings/digest-now` — send the fleet digest to Telegram
+/// on demand (the daily scheduler sends it automatically; this is the
+/// «send it now» button). Audited; 303 back to /admin/settings.
+pub(crate) async fn settings_digest_now(State(state): State<AppState>) -> Response {
+    crate::node_probe_poller::send_digest(&state.inv).await;
+    if let Err(e) = state
+        .inv
+        .audit("admin", "settings.digest.send", None, None)
+        .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::settings_digest_now",
+            error = %e,
+            "audit row for digest-now failed; digest was sent"
+        );
+    }
+    Redirect::to("/admin/settings#telegram-notifications").into_response()
+}
+
 /// `POST /admin/settings/notification-language` — set the operator's
 /// notification language (`ru` / `en`). Persisted in
 /// `notification_settings.language`; drives `alert_text::render_alert`
@@ -12546,7 +12622,7 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
 
     // Audit either way.
     let audit_payload = match &send_result {
-        Ok(()) => serde_json::json!({"success": true}),
+        Ok(_) => serde_json::json!({"success": true}),
         Err(e) => serde_json::json!({"success": false, "error": e.to_string()}),
     };
     if let Err(audit_err) = state
@@ -12568,7 +12644,7 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
     }
 
     match send_result {
-        Ok(()) => Redirect::to("/admin/settings#telegram-notifications").into_response(),
+        Ok(_) => Redirect::to("/admin/settings#telegram-notifications").into_response(),
         Err(e) => {
             let raw = e.to_string();
             // Don't double up on remediation hints: `classify_ssh_failure`

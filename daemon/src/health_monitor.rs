@@ -454,14 +454,33 @@ pub async fn scan_once(
                     // notification-normalization work pushes them too,
                     // rendered in the operator's language.
                     let subject = crate::node_probe_poller::server_subject(inv, &server.id).await;
-                    crate::node_probe_poller::push_alert(
-                        inv,
-                        ev.kind,
-                        ev.severity,
-                        &subject,
-                        &ev.payload,
-                    )
-                    .await;
+                    if let Some(resolves) = ev.resolves {
+                        // Recovery event (`*.up` / `*.recovered`): EDIT the
+                        // original 🔴 condition message to 🟢 instead of
+                        // posting a second message (edit-on-recover).
+                        crate::node_probe_poller::recover_alert(
+                            inv,
+                            ev.kind,
+                            resolves,
+                            &subject,
+                            &ev.payload,
+                            Some(&server.id),
+                            Some(alert_id),
+                        )
+                        .await;
+                    } else {
+                        // Condition event: push + record its message id for
+                        // a future recovery edit.
+                        crate::node_probe_poller::push_alert(
+                            inv,
+                            ev.kind,
+                            ev.severity,
+                            &subject,
+                            &ev.payload,
+                            Some(alert_id),
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -726,8 +745,15 @@ pub async fn check_fingerprint_drift(
                         "alert.fire audit row failed for server.fingerprint.drift"
                     );
                 }
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &subject, &payload)
-                    .await;
+                crate::node_probe_poller::push_alert(
+                    inv,
+                    &kind,
+                    "warning",
+                    &subject,
+                    &payload,
+                    Some(alert_id),
+                )
+                .await;
             }
             Ok(None) => {
                 // Already-open drift alert for this server. The
@@ -947,7 +973,15 @@ pub async fn check_user_traffic_limits(
                 // node_probe_poller). Failures stay in the log; the
                 // admin_alerts row is the source of truth. Subject is the
                 // user id (this alert is user-scoped, not server-scoped).
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &uid.0, &payload).await;
+                crate::node_probe_poller::push_alert(
+                    inv,
+                    &kind,
+                    "warning",
+                    &uid.0,
+                    &payload,
+                    Some(alert_id),
+                )
+                .await;
             }
             Ok(None) => {
                 // Already-open alert for the same (kind, NULL) pair —
@@ -1059,8 +1093,15 @@ pub async fn check_attribution_stall(
                     );
                 }
                 let subject = crate::node_probe_poller::server_subject(inv, sid).await;
-                crate::node_probe_poller::push_alert(inv, KIND, "warning", &subject, &payload)
-                    .await;
+                crate::node_probe_poller::push_alert(
+                    inv,
+                    KIND,
+                    "warning",
+                    &subject,
+                    &payload,
+                    Some(alert_id),
+                )
+                .await;
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(
@@ -1185,8 +1226,15 @@ pub async fn check_sub_fetch_without_traffic(
                         "alert.fire audit row failed for user.sub_no_traffic"
                     );
                 }
-                crate::node_probe_poller::push_alert(inv, &kind, "warning", &u.user_id.0, &payload)
-                    .await;
+                crate::node_probe_poller::push_alert(
+                    inv,
+                    &kind,
+                    "warning",
+                    &u.user_id.0,
+                    &payload,
+                    Some(alert_id),
+                )
+                .await;
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(

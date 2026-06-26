@@ -341,3 +341,50 @@ async fn ack_open_hides_from_unacked_feed_but_keeps_history() {
         "acked row must remain visible in include_acked=true view: {with_history:?}"
     );
 }
+
+// ─── telegram_message_id (edit-on-recover) ───────────────────────────
+
+// 13. set_alert_telegram_message_id round-trips; latest_alert_message_id
+//     finds the most-recent matching (kind, server) message id and is
+//     scoped strictly by kind + server.
+#[tokio::test]
+async fn telegram_message_id_round_trip_and_recovery_lookup() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("de")).await.unwrap();
+    let de = sid("de");
+
+    let id = fire(&inv, "server.unreachable", Some(&de))
+        .await
+        .expect("fresh insert");
+    // Before recording a message id, the recovery lookup finds nothing
+    // (the column is NULL) → caller would send a fresh recovery message.
+    assert_eq!(
+        inv.latest_alert_message_id("server.unreachable", Some(&de))
+            .await
+            .unwrap(),
+        None
+    );
+    inv.set_alert_telegram_message_id(id, "4242").await.unwrap();
+    // Now the original 🔴 message can be located for the 🟢 edit.
+    assert_eq!(
+        inv.latest_alert_message_id("server.unreachable", Some(&de))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("4242")
+    );
+    // Strict scope: wrong kind / wrong server → None.
+    assert_eq!(
+        inv.latest_alert_message_id("server.singbox.down", Some(&de))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        inv.latest_alert_message_id("server.unreachable", Some(&sid("fi")))
+            .await
+            .unwrap(),
+        None
+    );
+}

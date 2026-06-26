@@ -5670,6 +5670,49 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Record the Telegram `message_id` of the push for `alert_id` so a
+    /// later recovery can EDIT that message in place (🔴→🟢) instead of
+    /// sending a second "recovered" message (migration 0037). Best-effort
+    /// — a failed/absent push leaves it NULL and the recovery path falls
+    /// back to a fresh message.
+    pub async fn set_alert_telegram_message_id(
+        &self,
+        alert_id: i64,
+        message_id: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE admin_alerts SET telegram_message_id = ?2 WHERE id = ?1")
+            .bind(alert_id)
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The Telegram `message_id` of the most-recent alert of `kind` for
+    /// `server_id` that carries one — edit-on-recover uses it to find the
+    /// original 🔴 message to flip to 🟢. `None` when no matching alert
+    /// recorded a message id (e.g. the transport was off when it fired),
+    /// in which case the caller sends a fresh recovery message.
+    pub async fn latest_alert_message_id(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+    ) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT telegram_message_id FROM admin_alerts
+             WHERE kind = ?1
+               AND (?2 IS NULL OR server_id = ?2)
+               AND telegram_message_id IS NOT NULL
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(kind)
+        .bind(server_id.map(|s| s.0.as_str()))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(m,)| m))
+    }
+
     /// Ack EVERY currently-unacked alert in one UPDATE. Used by the
     /// «ack all (N)» button on /admin/alerts so the operator can
     /// clear a triaged backlog without 30 individual clicks.

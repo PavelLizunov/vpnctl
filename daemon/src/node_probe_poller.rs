@@ -387,8 +387,18 @@ pub async fn dispatch_alerts(
                     // hunt agent 2026-05-18 caught this — chunk 2
                     // detectors skipped it, breaking /admin/audit.
                     audit_alert_fire(inv, &server.id, id, "server.unreachable", &summary).await;
-                    // Then push to the configured sink (best-effort).
-                    push_alert(inv, "server.unreachable", "warning", &subject, &payload_val).await;
+                    // Then push to the configured sink (best-effort). The
+                    // row id is threaded so the message id is recorded for
+                    // edit-on-recover.
+                    push_alert(
+                        inv,
+                        "server.unreachable",
+                        "warning",
+                        &subject,
+                        &payload_val,
+                        Some(id),
+                    )
+                    .await;
                 }
                 Ok(None) => {
                     // Duplicate suppressed by the partial-UNIQUE
@@ -428,6 +438,21 @@ pub async fn dispatch_alerts(
             }
         }
         UnreachableTransition::Recovered => {
+            // Edit-on-recover: flip the original 🔴 «недоступна» message
+            // to 🟢 «снова доступна» BEFORE acking (the ack clears the
+            // row but the message id is read from the most-recent
+            // unreachable row regardless of ack state).
+            let subject = server_subject(inv, &server.id).await;
+            recover_alert(
+                inv,
+                "server.unreachable",
+                "server.unreachable",
+                &subject,
+                &serde_json::json!({ "ip": server.address }),
+                Some(&server.id),
+                None,
+            )
+            .await;
             auto_ack(
                 inv,
                 &server.id,
@@ -526,6 +551,7 @@ pub async fn dispatch_alerts(
                             "critical",
                             &subject,
                             &payload_val,
+                            Some(id),
                         )
                         .await;
                     }
@@ -606,12 +632,16 @@ async fn audit_alert_fire(
 /// fields — the message TEXT is produced HERE in the operator's language
 /// (`notification_settings.language`), so the same event speaks Russian
 /// to the operator while the dashboard can render any locale.
+/// `alert_id` (when known) is the `admin_alerts` row id; on a successful
+/// push the transport's `message_id` is recorded against it so a later
+/// recovery can EDIT this exact 🔴 message to 🟢 (see [`recover_alert`]).
 pub(crate) async fn push_alert(
     inv: &SqliteInventory,
     kind: &str,
     severity: &str,
     subject: &str,
     payload: &serde_json::Value,
+    alert_id: Option<i64>,
 ) {
     // Resolve the operator's notification language (best-effort — fall
     // back to En on any read failure rather than dropping the alert).
@@ -641,23 +671,139 @@ pub(crate) async fn push_alert(
     // Owned clones for the spawn — these are short strings.
     let kind = kind.to_string();
     let severity = severity.to_string();
+    let inv = inv.clone();
     tokio::spawn(async move {
         // Track sink name BEFORE the move-into-await so we can log
         // it on success without resurrecting a borrow from `sink`.
         let sink_name = sink.name();
-        if let Err(e) = sink.send_text(&kind, &severity, &text, silent).await {
+        match sink.send_text(&kind, &severity, &text, silent).await {
+            Ok(message_id) => {
+                tracing::info!(
+                    target = "vpnctld::alert_sink",
+                    kind = %kind,
+                    "pushed via {}",
+                    sink_name
+                );
+                // Record the Telegram message id against the alert row so
+                // a later recovery edits THIS message instead of posting a
+                // second one. Best-effort — failure just means recovery
+                // falls back to a fresh 🟢 message.
+                if let (Some(aid), Some(mid)) = (alert_id, message_id) {
+                    if let Err(e) = inv.set_alert_telegram_message_id(aid, &mid).await {
+                        tracing::warn!(
+                            target = "vpnctld::alert_sink",
+                            kind = %kind,
+                            error = %e,
+                            "failed to record telegram_message_id; edit-on-recover will fall back"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "vpnctld::alert_sink",
+                    kind = %kind,
+                    error = %e,
+                    "push to {} failed; alert row still in admin_alerts",
+                    sink_name
+                );
+            }
+        }
+    });
+}
+
+/// Recovery push (edit-on-recover): instead of sending a SECOND message
+/// when a condition clears, EDIT the original 🔴 alert message in place
+/// to 🟢. Looks up the `resolves_kind`'s most-recent
+/// `telegram_message_id` for `server_id`; if found, edits that message
+/// with the localized recovery text; if not (transport was off when the
+/// condition fired, or it predates this feature) falls back to a fresh
+/// recovery message via [`push_alert`]. Recovery is always rendered as
+/// the silent 🟢 info variant.
+///
+/// Eventual-consistency note: the condition's message id is written by a
+/// spawned task inside [`push_alert`]. Recovery normally happens a probe
+/// interval (≥10 min) later, so the write has long landed; a sub-second
+/// flap across two back-to-back ticks could miss it and send a fresh 🟢
+/// rather than editing — graceful degradation, not a bug.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recover_alert(
+    inv: &SqliteInventory,
+    recovery_kind: &str,
+    resolves_kind: &str,
+    subject: &str,
+    payload: &serde_json::Value,
+    server_id: Option<&vpnctl_core::ServerId>,
+    fallback_alert_id: Option<i64>,
+) {
+    let loc = match inv.get_telegram_config().await {
+        Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+        _ => crate::i18n::Locale::En,
+    };
+    let rendered = crate::alert_text::render_alert(recovery_kind, "info", subject, payload, loc);
+    let time_local =
+        crate::handlers::admin::format_local_with_pattern(chrono::Utc::now(), "%d.%m %H:%M");
+    let text = crate::alert_text::to_telegram_html(&rendered, loc, &time_local, false);
+
+    let message_id = match inv.latest_alert_message_id(resolves_kind, server_id).await {
+        Ok(mid) => mid,
+        Err(e) => {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
-                kind = %kind,
+                resolves = %resolves_kind,
                 error = %e,
-                "push to {} failed; alert row still in admin_alerts",
+                "latest_alert_message_id failed; sending a fresh recovery message"
+            );
+            None
+        }
+    };
+
+    let Some(mid) = message_id else {
+        // No original message to edit → fresh 🟢 (carries its own row id).
+        push_alert(
+            inv,
+            recovery_kind,
+            "info",
+            subject,
+            payload,
+            fallback_alert_id,
+        )
+        .await;
+        return;
+    };
+
+    let sink = match build_alert_sink(inv).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                error = %e,
+                "build_alert_sink failed; skipping recovery edit"
+            );
+            return;
+        }
+    };
+    let recovery_kind = recovery_kind.to_string();
+    tokio::spawn(async move {
+        let sink_name = sink.name();
+        if let Err(e) = sink.edit_text(&mid, &text).await {
+            // The original message is gone (operator deleted it, or it
+            // aged past Telegram's 48h edit window). Don't lose the
+            // recovery — send a fresh 🟢 instead.
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                kind = %recovery_kind,
+                error = %e,
+                "edit-on-recover via {} failed; sending a fresh recovery message",
                 sink_name
             );
+            let _ = sink.send_text(&recovery_kind, "info", &text, true).await;
         } else {
             tracing::info!(
                 target = "vpnctld::alert_sink",
-                kind = %kind,
-                "pushed via {}",
+                kind = %recovery_kind,
+                "edited original alert message to recovered via {}",
                 sink_name
             );
         }
@@ -672,6 +818,65 @@ pub(crate) async fn push_alert(
 pub(crate) async fn server_subject(inv: &SqliteInventory, sid: &vpnctl_core::ServerId) -> String {
     let custom = inv.server_display_name(sid).await.ok().flatten();
     crate::handlers::vpn_router::server_display_label(&sid.0, custom.as_deref())
+}
+
+/// Build + send a fleet digest to the configured transport: «all clear»
+/// 🟢 when there are no open alerts, otherwise a 🔴 list of every open
+/// problem (each rendered + localized). Drives the daily scheduler + the
+/// on-demand /admin/settings button. Best-effort — logs + returns on any
+/// storage/transport failure. Sent silently (a routine summary).
+pub(crate) async fn send_digest(inv: &SqliteInventory) {
+    let loc = match inv.get_telegram_config().await {
+        Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+        _ => crate::i18n::Locale::En,
+    };
+    let open = inv.recent_alerts(50, false).await.unwrap_or_default();
+    let servers = inv.list_servers().await.map(|s| s.len()).unwrap_or(0);
+    let mut titles = Vec::with_capacity(open.len());
+    for a in &open {
+        // server_id wins over a `:`-suffix (server alerts can carry a
+        // suffix where it's the raw id; we want the country label). The
+        // suffix is the subject only for user-scoped alerts.
+        let subject = if let Some(sid) = &a.server_id {
+            server_subject(inv, sid).await
+        } else if let Some((_, suffix)) = a.kind.split_once(':') {
+            suffix.to_string()
+        } else {
+            String::new()
+        };
+        let payload: serde_json::Value = a
+            .payload_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let r = crate::alert_text::render_alert(&a.kind, &a.severity, &subject, &payload, loc);
+        titles.push(format!("{} {}", r.icon, r.title));
+    }
+    let time_local =
+        crate::handlers::admin::format_local_with_pattern(chrono::Utc::now(), "%d.%m %H:%M");
+    let text = crate::alert_text::render_digest_html(loc, servers, &titles, &time_local);
+
+    let sink = match build_alert_sink(inv).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return, // transport not configured — no-op
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::alert_sink",
+                error = %e,
+                "build_alert_sink failed; skipping digest"
+            );
+            return;
+        }
+    };
+    if let Err(e) = sink.send_text("digest", "info", &text, true).await {
+        tracing::warn!(target = "vpnctld::alert_sink", error = %e, "digest push failed");
+    } else {
+        tracing::info!(
+            target = "vpnctld::alert_sink",
+            open = open.len(),
+            "sent fleet digest"
+        );
+    }
 }
 
 /// Build the appropriate `AlertSink` from the current

@@ -160,6 +160,13 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // on every state-change.
     drop(crate::health_monitor::spawn_health_monitor(inv.clone()));
 
+    // Daily fleet digest to Telegram (all-clear 🟢 or the open-problems
+    // list), localized. Cadence env-overridable via
+    // VPNCTLD_DIGEST_INTERVAL_SECS (default 86400 = 24h); the first
+    // digest fires one interval after start, not at boot. No-op until
+    // the operator configures the Telegram transport.
+    drop(spawn_digest_scheduler(inv.clone()));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker
@@ -334,6 +341,31 @@ pub(crate) fn spawn_rate_limit_cleanup(
                     "purge_expired_bans failed; retry next tick"
                 ),
             }
+        }
+    })
+}
+
+/// Spawn the daily fleet-digest scheduler. Sends a localized Telegram
+/// digest (all-clear 🟢 or open-problems list) every
+/// `VPNCTLD_DIGEST_INTERVAL_SECS` (default 86400 = 24h, min 60). The
+/// first digest fires one interval after start, not at boot. Returns the
+/// `JoinHandle` for test/abort symmetry. No-op when the transport isn't
+/// configured (`send_digest` returns early). The digest content is
+/// unit-tested in `alert_text::render_digest_html`; this is dumb wiring.
+pub(crate) fn spawn_digest_scheduler(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
+    const DEFAULT_SECS: u64 = 86_400;
+    let secs = std::env::var("VPNCTLD_DIGEST_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n >= 60)
+        .unwrap_or(DEFAULT_SECS);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
+        // Skip the immediate first tick — don't fire a digest at boot.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            crate::node_probe_poller::send_digest(&inv).await;
         }
     })
 }
@@ -1252,6 +1284,11 @@ fn admin_router(state: AppState) -> Router {
         .route(
             "/admin/settings/notification-language",
             post(admin::settings_notification_language),
+        )
+        // On-demand fleet digest (the daily scheduler sends it too).
+        .route(
+            "/admin/settings/digest-now",
+            post(admin::settings_digest_now),
         )
         // Phase G chunk 3 part 2 — synchronous test-send so the
         // operator can verify credentials without waiting for an

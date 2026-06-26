@@ -60,6 +60,22 @@ pub fn is_silent(severity: &str) -> bool {
     severity == "info"
 }
 
+/// Convert a rendered (Telegram-HTML) `title`/`body`/`action` string to
+/// plain text for the admin UI — strips the fixed markup vocabulary
+/// (`<b>`,`<code>`) then unescapes the 3 entities. Order matters: strip
+/// real tags FIRST, then unescape, so a literal `<b>` in data (which the
+/// render escaped to `&lt;b&gt;`) survives as text rather than being
+/// stripped. maud re-escapes on render, so the result is injection-safe.
+pub fn to_plain(s: &str) -> String {
+    s.replace("<code>", "")
+        .replace("</code>", "")
+        .replace("<b>", "")
+        .replace("</b>", "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// Severity / kind → leading icon. Recovery (`*.up` / `*.recovered`, or
 /// severity `info`) is always 🟢; otherwise by severity.
 fn icon_for(kind: &str, severity: &str) -> &'static str {
@@ -162,6 +178,24 @@ pub fn render_alert(
         }
 
         // ───────────────────────── warnings ─────────────────────────
+        "server.unreachable" if severity == "info" => {
+            // Recovery variant (edit-on-recover flips the original 🔴 to
+            // this 🟢). Unreachable has no separate `.up` kind, so the
+            // recovery is signalled by severity=info on the same kind.
+            (
+                pick(
+                    loc,
+                    format!("Node reachable again — {subj}"),
+                    format!("Нода снова доступна — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!("{subj} is responding again — SSH probes succeed."),
+                    format!("{subj} снова отвечает — SSH-проверки проходят."),
+                ),
+                None,
+            )
+        }
         "server.unreachable" => {
             let n = u(payload, "consecutive_failures").unwrap_or(3);
             let ip = ps(payload, "ip");
@@ -481,6 +515,53 @@ pub fn to_telegram_html(r: &RenderedAlert, loc: Locale, time_local: &str, repeat
     m
 }
 
+/// Render a fleet digest as a Telegram HTML message. `open_titles` are
+/// the already-rendered, HTML-safe `{icon} {title}` lines of every open
+/// alert (caller produces them via `render_alert`). Empty → an «all
+/// clear» 🟢 summary; non-empty → a 🔴 list. `servers` is the fleet size
+/// for the headline context.
+pub fn render_digest_html(
+    loc: Locale,
+    servers: usize,
+    open_titles: &[String],
+    time_local: &str,
+) -> String {
+    let mut m = String::with_capacity(256);
+    if open_titles.is_empty() {
+        m.push_str(match loc {
+            Locale::En => "🟢 <b>vpnctl digest — all clear</b>",
+            Locale::Ru => "🟢 <b>Дайджест vpnctl — всё спокойно</b>",
+        });
+        m.push_str("\n\n");
+        m.push_str(&pick(
+            loc,
+            format!("{servers} servers monitored · no open alerts."),
+            format!("{servers} серверов под наблюдением · открытых алертов нет."),
+        ));
+    } else {
+        let n = open_titles.len();
+        m.push_str(&pick(
+            loc,
+            format!("🔴 <b>vpnctl digest — {n} open</b>"),
+            format!("🔴 <b>Дайджест vpnctl — {n} открытых проблем</b>"),
+        ));
+        m.push_str("\n\n");
+        for line in open_titles {
+            m.push_str("• ");
+            m.push_str(line); // already icon + HTML-escaped title
+            m.push('\n');
+        }
+        m.push_str(&pick(
+            loc,
+            format!("\n{servers} servers monitored."),
+            format!("\n{servers} серверов под наблюдением."),
+        ));
+    }
+    m.push_str("\n\n🕐 ");
+    m.push_str(&esc(time_local));
+    m
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -694,6 +775,40 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_info_severity_renders_recovery_not_down() {
+        // Edit-on-recover uses severity=info on the same kind to signal
+        // the 🟢 recovery variant (unreachable has no `.up` kind).
+        let up = render_alert(
+            "server.unreachable",
+            "info",
+            "Нидерланды",
+            &json!({}),
+            Locale::Ru,
+        );
+        assert_eq!(up.icon, "🟢");
+        assert!(up.title.contains("снова доступна"), "got: {}", up.title);
+        assert!(up.action.is_none(), "recovery has no what-to-do line");
+        assert!(is_silent("info"), "recovery push is silent");
+        // The warning variant is still the 🟠 down message — same kind.
+        let down = render_alert(
+            "server.unreachable",
+            "warning",
+            "Нидерланды",
+            &json!({"consecutive_failures": 3}),
+            Locale::Ru,
+        );
+        assert_eq!(down.icon, "🟠");
+        assert!(down.title.contains("недоступна"), "got: {}", down.title);
+        // EN side too.
+        let up_en = render_alert("server.unreachable", "info", "NL", &json!({}), Locale::En);
+        assert!(
+            up_en.title.contains("reachable again"),
+            "got: {}",
+            up_en.title
+        );
+    }
+
+    #[test]
     fn user_body_keeps_inline_bold_and_escapes_subject() {
         // user.* bodies wrap the (escaped) subject in literal <b>…</b>.
         // A `<` in the user id must be escaped INSIDE the bold, and the
@@ -722,5 +837,31 @@ mod tests {
         let r = render_alert("weird.<kind>", "warning", "x", &json!({}), Locale::En);
         assert!(r.body.contains("weird.&lt;kind&gt;"));
         assert!(!r.body.contains("weird.<kind>"));
+    }
+
+    #[test]
+    fn digest_all_clear_vs_problems() {
+        // All-clear: 🟢 + the fleet size, no bullet list.
+        let clear = render_digest_html(Locale::Ru, 4, &[], "27.06 10:00 MSK");
+        assert!(clear.starts_with("🟢 <b>Дайджест vpnctl — всё спокойно</b>"));
+        assert!(clear.contains("4 серверов"));
+        assert!(!clear.contains("• "));
+        assert!(clear.contains("🕐 27.06 10:00 MSK"));
+        // Problems: 🔴 + count + one bullet per title.
+        let probs = render_digest_html(
+            Locale::Ru,
+            4,
+            &[
+                "🔴 <b>sing-box упал — de</b>".into(),
+                "🟠 <b>Мало места на диске — fi</b>".into(),
+            ],
+            "27.06 10:00 MSK",
+        );
+        assert!(probs.contains("2 открытых проблем"));
+        assert!(probs.contains("• 🔴 <b>sing-box упал — de</b>"));
+        assert_eq!(probs.matches("• ").count(), 2);
+        // EN side.
+        let en = render_digest_html(Locale::En, 3, &[], "27.06 10:00 MSK");
+        assert!(en.contains("all clear") && en.contains("3 servers"));
     }
 }
