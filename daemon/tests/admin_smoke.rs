@@ -3738,8 +3738,8 @@ async fn admin_alerts_renders_unreachable_kind_row() {
         "feed must render the kind: {html:?}"
     );
     assert!(
-        html.contains("3 consecutive SSH probes failed"),
-        "feed must render the summary"
+        html.contains("Node unreachable") && html.contains("probes failed in a row"),
+        "feed must render the localized title + body (not the stored English summary): {html:?}"
     );
 }
 
@@ -13599,9 +13599,11 @@ async fn alerts_page_orders_titles_hints_and_collapses_spam() {
     let html = fetch_html(router(st), "/admin/alerts").await;
 
     // Severity ordering: critical title appears before the info title.
+    // Titles are the localized render (`alert_text::render_alert`), not
+    // the old explainer copy.
     let crit_pos = html
-        .find("sing-box is DOWN")
-        .expect("critical human title must render");
+        .find("sing-box down")
+        .expect("critical localized title must render");
     let info_pos = html
         .find("fail2ban recovered")
         .expect("info row must render");
@@ -13609,10 +13611,10 @@ async fn alerts_page_orders_titles_hints_and_collapses_spam() {
         crit_pos < info_pos,
         "open critical must render above open info (severity rank, not age)"
     );
-    // What-to-do hint for the open critical.
+    // What-to-do hint for the open critical — the localized render action.
     assert!(
-        html.contains("hoster console"),
-        "open critical must carry its what-to-do hint"
+        html.contains("reapplies the config"),
+        "open critical must carry its localized what-to-do hint"
     );
     // Spam collapse: <details> group with the count, individual rows inside.
     assert!(
@@ -13624,8 +13626,8 @@ async fn alerts_page_orders_titles_hints_and_collapses_spam() {
         "collapsed group must show the row count"
     );
     assert!(
-        html.contains("user=ua") && html.contains("user=uc"),
-        "per-user rows must stay reachable inside the group"
+        html.contains("User ua") && html.contains("User uc"),
+        "per-user rows must stay reachable inside the group (localized body carries the user id)"
     );
 }
 

@@ -76,13 +76,24 @@ pub trait AlertSink: Send + Sync {
     /// are kept for transport-specific routing + log lines. `silent`
     /// asks the transport to deliver without a notification buzz
     /// (info / recovery alerts) where it supports it.
+    ///
+    /// Returns the transport's message id (Telegram `message_id` as a
+    /// string) when it has one, so a later recovery can edit that message
+    /// in place. `None` for transports without an editable-message
+    /// concept (NullSink) or when the id couldn't be parsed.
     async fn send_text(
         &self,
         kind: &str,
         severity: &str,
         text: &str,
         silent: bool,
-    ) -> Result<(), AlertSinkError>;
+    ) -> Result<Option<String>, AlertSinkError>;
+
+    /// Edit a previously-sent message in place — used by edit-on-recover
+    /// to flip the original 🔴 alert message to 🟢 instead of sending a
+    /// second message. `message_id` is the value `send_text` returned.
+    /// No-op for transports that can't edit (NullSink).
+    async fn edit_text(&self, message_id: &str, text: &str) -> Result<(), AlertSinkError>;
 
     /// Short identifier for log lines («telegram», «null»). Doesn't
     /// leak secrets — token-bearing transports omit the value.
@@ -177,7 +188,11 @@ impl AlertSink for NullSink {
         _severity: &str,
         _text: &str,
         _silent: bool,
-    ) -> Result<(), AlertSinkError> {
+    ) -> Result<Option<String>, AlertSinkError> {
+        Ok(None)
+    }
+
+    async fn edit_text(&self, _message_id: &str, _text: &str) -> Result<(), AlertSinkError> {
         Ok(())
     }
 
@@ -316,16 +331,18 @@ impl TelegramSink {
     ///
     /// Returns `(remote_cmd, stdin_bytes)` so caller pipes them
     /// together via `SubprocessSshTransport::exec_with_stdin`.
-    pub fn build_remote_curl_invocation(&self, body_json: &str) -> (String, Vec<u8>) {
+    pub fn build_remote_curl_invocation(&self, method: &str, body_json: &str) -> (String, Vec<u8>) {
         let cmd = format!(
             "curl -sS --connect-timeout 10 --max-time 20 -X POST \
              -H 'Content-Type: application/json' --data {body} -K -",
             body = single_quote(body_json),
         );
         // curl config-file syntax: one option per line, `url = "..."`.
-        // Token never appears on the remote shell argv.
+        // Token never appears on the remote shell argv. `method` is a
+        // fixed internal literal (sendMessage / editMessageText), never
+        // operator input — no injection surface.
         let stdin = format!(
-            "url = \"https://api.telegram.org/bot{}/sendMessage\"\n",
+            "url = \"https://api.telegram.org/bot{}/{method}\"\n",
             self.token
         )
         .into_bytes();
@@ -336,7 +353,11 @@ impl TelegramSink {
     /// to feed via `-K -`. Public so a test can pin the invariants
     /// (`-K -` present; URL in stdin not argv; token never in any
     /// argv element).
-    pub fn build_curl_local_invocation(&self, body_json: &str) -> (Vec<String>, Vec<u8>) {
+    pub fn build_curl_local_invocation(
+        &self,
+        method: &str,
+        body_json: &str,
+    ) -> (Vec<String>, Vec<u8>) {
         let mut args: Vec<String> = vec![
             "-sS".into(),
             "--connect-timeout".into(),
@@ -361,55 +382,28 @@ impl TelegramSink {
         args.push("-K".into());
         args.push("-".into());
         let stdin = format!(
-            "url = \"https://api.telegram.org/bot{}/sendMessage\"\n",
+            "url = \"https://api.telegram.org/bot{}/{method}\"\n",
             self.token
         )
         .into_bytes();
         (args, stdin)
     }
-}
 
-#[async_trait::async_trait]
-impl AlertSink for TelegramSink {
-    async fn send_text(
+    /// Shared Bot API transport: POST `body_json` to `method`
+    /// (`sendMessage` / `editMessageText`) via the via-ssh relay or local
+    /// curl, parse the response, enforce Telegram's `ok:true`, and return
+    /// the `result` object. Token never lands in argv (URL via `-K -`
+    /// stdin); response is byte-capped (64 KiB) + char-boundary trimmed.
+    async fn call(
         &self,
-        _kind: &str,
-        _severity: &str,
-        text: &str,
-        silent: bool,
-    ) -> Result<(), AlertSinkError> {
-        // `text` arrives pre-rendered as Telegram HTML (localized) from
-        // `alert_text::to_telegram_html`. We add the modern send fields:
-        //   parse_mode=HTML            → <b>/<code> styling
-        //   disable_web_page_preview   → no link unfurl card
-        //   disable_notification       → silent for info/recovery
-        // chat_id can be an integer or `@channel`; Telegram accepts the
-        // string form for both, so we pass it as-is.
-        let body = serde_json::json!({
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": true,
-            "disable_notification": silent,
-        })
-        .to_string();
-
-        // Two egress paths. Both end up parsing the same response
-        // JSON (Telegram always returns 200 + body); only the
-        // transport differs.
+        method: &str,
+        body_json: &str,
+    ) -> Result<serde_json::Value, AlertSinkError> {
         let response_body: String = if let Some(ssh) = &self.via_ssh {
-            // Via-server path: SSH to inventory server, run curl
-            // THERE. The URL (with token) goes via SSH stdin →
-            // curl's `-K -` config-from-stdin → never in remote
-            // argv. Body literal still in argv (it's just chat_id +
-            // alert text, not a secret).
-            let (remote_cmd, stdin) = self.build_remote_curl_invocation(&body);
+            let (remote_cmd, stdin) = self.build_remote_curl_invocation(method, body_json);
             let bytes = ssh.exec_with_stdin(&remote_cmd, stdin).await.map_err(|e| {
-                // Redact token before surfacing stderr — some curl
-                // failure modes echo the URL (containing the token)
-                // into stderr, which would then leak via the 502
-                // response body + audit_log row. Bug-hunt finding
-                // 2026-05-18.
+                // Redact token before surfacing stderr — some curl failure
+                // modes echo the token-bearing URL.
                 let redacted = self.redact_token(&e.to_string());
                 AlertSinkError::NonZeroExit {
                     tool: "ssh-then-curl",
@@ -419,10 +413,7 @@ impl AlertSink for TelegramSink {
             })?;
             String::from_utf8_lossy(&bytes).into_owned()
         } else {
-            // Local path: spawn curl directly. URL via stdin (-K -)
-            // for the same reason — keeps token out of
-            // /proc/<pid>/cmdline of any same-user process.
-            let (args, stdin) = self.build_curl_local_invocation(&body);
+            let (args, stdin) = self.build_curl_local_invocation(method, body_json);
             let res = tokio::task::spawn_blocking(move || {
                 use std::io::Write;
                 let mut child = Command::new("curl")
@@ -431,10 +422,6 @@ impl AlertSink for TelegramSink {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()?;
-                // `take()` returning None would mean Stdio::piped
-                // was ignored — silently skipping the write would
-                // deadlock `wait_with_output` on EOF that never
-                // arrives. Same pattern as ssh_subprocess::run.
                 if let Some(mut sin) = child.stdin.take() {
                     sin.write_all(&stdin)?;
                     drop(sin); // EOF → curl proceeds
@@ -458,9 +445,6 @@ impl AlertSink for TelegramSink {
             if !res.status.success() {
                 let stderr = String::from_utf8_lossy(&res.stderr);
                 let truncated: String = stderr.chars().take(200).collect();
-                // Same token-redaction defense as the via_ssh
-                // branch — curl can echo the URL on some failure
-                // modes (cert errors, proxy CONNECT fails).
                 return Err(AlertSinkError::NonZeroExit {
                     tool: "curl",
                     code: res.status.code(),
@@ -470,32 +454,11 @@ impl AlertSink for TelegramSink {
             String::from_utf8_lossy(&res.stdout).into_owned()
         };
 
-        // Telegram returns HTTP 200 even on logical errors (chat
-        // not found, bot blocked) with body `{"ok":false,
-        // "error_code":..., "description":"..."}`. Parse the JSON
-        // structurally — a `contains("\"ok\":true")` substring check
-        // would false-positive on a description like
-        // `{"ok":false,"description":"... \"ok\":true ..."}` since
-        // Telegram echoes operator-supplied chat names into
-        // `description` (review-agent finding from chunk 3 part 2).
-        //
-        // **Response body cap (64 KiB)** — defense against an
-        // upstream that streams arbitrarily-large JSON. curl
-        // already caps at `--max-time 20`, but a fat pipe could
-        // still deliver hundreds of MB in that window; serde_json
-        // would happily parse the whole thing into a `Value` tree
-        // and OOM the daemon. Telegram's real responses are tiny
-        // (sub-KiB); 64 KiB is generous + bounds memory.
-        // Security-audit 2026-05-18 finding.
+        // Telegram returns HTTP 200 even on logical errors with body
+        // `{"ok":false,...}`. Parse structurally + cap at 64 KiB
+        // (char-boundary trim — non-ASCII descriptions would panic a raw
+        // byte slice).
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-        // Truncate by CHAR boundary, not raw byte index. A raw byte
-        // slice at byte 65536 panics if it splits a multi-byte UTF-8
-        // sequence (channel-name Cyrillic, emoji, CJK in
-        // description). Bug-hunt agent 2026-05-18 caught this: my
-        // own «OOM defense» from yesterday introduced a DoS path
-        // that a malicious upstream could trigger by streaming
-        // non-ASCII payload past the cap. `chars().take(N)` walks
-        // by codepoint, no boundary issue.
         let trimmed: String = if response_body.len() > MAX_RESPONSE_BYTES {
             tracing::warn!(
                 target = "vpnctld::alert_sink",
@@ -503,9 +466,6 @@ impl AlertSink for TelegramSink {
                 cap = MAX_RESPONSE_BYTES,
                 "Telegram response body exceeded cap; truncating"
             );
-            // Worst case: every char is 1 byte, so N chars ≤ N bytes
-            // — we'll never overshoot the cap. If chars are 4 bytes
-            // each, we trim earlier than the byte cap (fine).
             response_body.chars().take(MAX_RESPONSE_BYTES).collect()
         } else {
             response_body.clone()
@@ -521,7 +481,65 @@ impl AlertSink for TelegramSink {
                 stderr: format!("logical error from api.telegram.org: {truncated}"),
             });
         }
+        Ok(parsed
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
 
+#[async_trait::async_trait]
+impl AlertSink for TelegramSink {
+    async fn send_text(
+        &self,
+        _kind: &str,
+        _severity: &str,
+        text: &str,
+        silent: bool,
+    ) -> Result<Option<String>, AlertSinkError> {
+        // `text` arrives pre-rendered as Telegram HTML (localized) from
+        // `alert_text::to_telegram_html`. Modern send fields:
+        //   parse_mode=HTML            → <b>/<code> styling
+        //   disable_web_page_preview   → no link unfurl card
+        //   disable_notification       → silent for info/recovery
+        let body = serde_json::json!({
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
+            "disable_notification": silent,
+        })
+        .to_string();
+        let result = self.call("sendMessage", &body).await?;
+        // `result.message_id` is an integer; stringify for the
+        // admin_alerts TEXT column + the edit-on-recover lookup.
+        Ok(result
+            .get("message_id")
+            .and_then(serde_json::Value::as_i64)
+            .map(|id| id.to_string()))
+    }
+
+    async fn edit_text(&self, message_id: &str, text: &str) -> Result<(), AlertSinkError> {
+        // editMessageText wants message_id as an integer. A non-numeric
+        // stored id (shouldn't happen — we write it from an i64) is a
+        // hard error rather than a silently-malformed request.
+        let mid: i64 = message_id
+            .parse()
+            .map_err(|_| AlertSinkError::NonZeroExit {
+                tool: "telegram-api",
+                code: None,
+                stderr: format!("non-numeric message_id {message_id:?}; cannot edit"),
+            })?;
+        // No disable_notification on edits — editing never re-notifies.
+        let body = serde_json::json!({
+            "chat_id": self.chat_id,
+            "message_id": mid,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
+        })
+        .to_string();
+        self.call("editMessageText", &body).await?;
         Ok(())
     }
 
@@ -579,7 +597,7 @@ mod tests {
     #[test]
     fn local_invocation_argv_contains_no_token() {
         let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
-        let (args, stdin) = s.build_curl_local_invocation(r#"{"x":1}"#);
+        let (args, stdin) = s.build_curl_local_invocation("sendMessage", r#"{"x":1}"#);
         let joined = args.join(" ");
         assert!(
             !joined.contains("SECRETTOKEN"),
@@ -608,7 +626,7 @@ mod tests {
     #[test]
     fn local_invocation_stdin_is_curl_config_url_line() {
         let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
-        let (_args, stdin) = s.build_curl_local_invocation("{}");
+        let (_args, stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         let stdin_str = std::str::from_utf8(&stdin).unwrap();
         // Format: `url = "<URL>"` followed by `\n`. Single line.
         assert_eq!(
@@ -620,7 +638,7 @@ mod tests {
     #[test]
     fn remote_invocation_does_not_embed_token_in_shell_command() {
         let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
-        let (cmd, stdin) = s.build_remote_curl_invocation(r#"{"x":1}"#);
+        let (cmd, stdin) = s.build_remote_curl_invocation("sendMessage", r#"{"x":1}"#);
         assert!(
             !cmd.contains("SECRETTOKEN"),
             "token MUST NOT appear in the remote shell command \
@@ -648,7 +666,7 @@ mod tests {
             Some("http://192.168.0.142:18080".into()),
         )
         .unwrap();
-        let (args, _stdin) = s.build_curl_local_invocation("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         assert!(args.iter().any(|a| a == "--proxy"));
         assert!(args.iter().any(|a| a == "http://192.168.0.142:18080"));
     }
@@ -656,7 +674,7 @@ mod tests {
     #[test]
     fn local_invocation_omits_proxy_when_none() {
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
-        let (args, _stdin) = s.build_curl_local_invocation("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
     }
 
@@ -693,7 +711,7 @@ mod tests {
         // Operator passing an env var set to "" should not produce a
         // `--proxy ""` argv element — filter at construction time.
         let s = TelegramSink::new("TOK".into(), "CHAT".into(), Some(String::new())).unwrap();
-        let (args, _stdin) = s.build_curl_local_invocation("{}");
+        let (args, _stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
     }
 
