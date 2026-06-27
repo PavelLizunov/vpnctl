@@ -199,6 +199,45 @@ struct EnvelopePeer {
     allowed_ips: String,
 }
 
+/// Shell script run by [`AmneziaWg::apply_config`] after uploading the
+/// rendered config to `awg0.conf.new`: validate, atomically install, then
+/// (re)start `awg-quick@awg0` and poll it active. Fully static (no
+/// interpolation) so it can be unit-tested for the validation contract.
+///
+/// The validation copies the temp file to a path NAMED `awg0.conf` before
+/// running `awg-quick strip`, because `awg-quick strip` rejects any path
+/// not ending in `<iface>.conf` (a `.conf.new` name dies with "must be a
+/// valid interface name, followed by .conf"). Caught on the first live
+/// amneziawg deploy (de, 2026-06-27).
+const APPLY_CONFIG_CMD: &str = r#"
+            set -eu
+            _awgval=$(mktemp -d)
+            cp /etc/amnezia/amneziawg/awg0.conf.new "$_awgval/awg0.conf"
+            awg-quick strip "$_awgval/awg0.conf" > /dev/null
+            rm -rf "$_awgval"
+            mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf
+            chown root:root /etc/amnezia/amneziawg/awg0.conf
+            chmod 0600 /etc/amnezia/amneziawg/awg0.conf
+
+            systemctl enable awg-quick@awg0 >/dev/null 2>&1 || true
+            systemctl reload-or-restart awg-quick@awg0
+
+            # Wait up to 8 seconds for the service to settle. systemd's
+            # auto-restart back-off kicks in every 10s, so 8s is past
+            # the first attempt — not "active" by then = crash loop.
+            for i in 1 2 3 4 5 6 7 8; do
+                state=$(systemctl is-active awg-quick@awg0 || true)
+                [ "$state" = "active" ] && exit 0
+                sleep 1
+            done
+
+            echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2
+            journalctl -u awg-quick@awg0 --no-pager -n 20 >&2 || true
+            echo "--- attempted config (post-strip) ---" >&2
+            awg-quick strip /etc/amnezia/amneziawg/awg0.conf >&2 || true
+            exit 1
+        "#;
+
 #[async_trait]
 impl Kernel for AmneziaWg {
     fn id(&self) -> KernelId {
@@ -329,32 +368,7 @@ impl Kernel for AmneziaWg {
         // and prints a useful error). Atomic-rename. Lock perms.
         // Restart + verify-active poll, exact same pattern as sing-box's
         // apply_config (CLAUDE.md staging-deploy lesson #3).
-        let cmd = r#"
-            set -eu
-            awg-quick strip /etc/amnezia/amneziawg/awg0.conf.new > /dev/null
-            mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf
-            chown root:root /etc/amnezia/amneziawg/awg0.conf
-            chmod 0600 /etc/amnezia/amneziawg/awg0.conf
-
-            systemctl enable awg-quick@awg0 >/dev/null 2>&1 || true
-            systemctl reload-or-restart awg-quick@awg0
-
-            # Wait up to 8 seconds for the service to settle. systemd's
-            # auto-restart back-off kicks in every 10s, so 8s is past
-            # the first attempt — not "active" by then = crash loop.
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active awg-quick@awg0 || true)
-                [ "$state" = "active" ] && exit 0
-                sleep 1
-            done
-
-            echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2
-            journalctl -u awg-quick@awg0 --no-pager -n 20 >&2 || true
-            echo "--- attempted config (post-strip) ---" >&2
-            awg-quick strip /etc/amnezia/amneziawg/awg0.conf >&2 || true
-            exit 1
-        "#;
-        ssh.exec(cmd).await?;
+        ssh.exec(APPLY_CONFIG_CMD).await?;
         Ok(())
     }
 
@@ -665,5 +679,34 @@ mod tests {
                 && s.contains("WARNING: amneziawg DKMS module built for newer kernel"),
             "post-install assertions + kernel-mismatch detection must remain: {s}"
         );
+    }
+
+    #[test]
+    fn apply_config_validates_via_conf_named_temp_not_conf_new() {
+        let s = APPLY_CONFIG_CMD;
+        // REGRESSION (de 2026-06-27, first live amneziawg deploy): the
+        // original code ran `awg-quick strip .../awg0.conf.new`, which
+        // awg-quick rejects ("must be a valid interface name, followed by
+        // .conf"), failing the deploy before the config was installed. The
+        // validated path MUST end in `<iface>.conf`, never `.conf.new`.
+        assert!(
+            !s.contains("awg-quick strip /etc/amnezia/amneziawg/awg0.conf.new"),
+            "must NOT validate the .conf.new temp file directly: {s}"
+        );
+        // Validation runs on a temp copy NAMED awg0.conf (a path with a
+        // slash → awg-quick treats it as a file, not a bare iface name).
+        assert!(
+            s.contains(r#"cp /etc/amnezia/amneziawg/awg0.conf.new "$_awgval/awg0.conf""#)
+                && s.contains(r#"awg-quick strip "$_awgval/awg0.conf""#),
+            "must validate a temp copy named awg0.conf: {s}"
+        );
+        // Only after validation is the real temp atomically installed and
+        // the service (re)started + polled active.
+        assert!(
+            s.contains("mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf")
+                && s.contains("systemctl reload-or-restart awg-quick@awg0"),
+            "atomic install + service restart must remain: {s}"
+        );
+        assert!(s.contains("set -eu"), "fail-fast shell flags: {s}");
     }
 }
