@@ -7113,6 +7113,9 @@ async fn admin_server_detail_with_probe_renders_kpis() {
             Some(r#"["tcp/443","tcp/8388","udp/8388","udp/8443"]"#),
             Some(308_432),
             None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -7164,6 +7167,9 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
             Some(10),
             Some(r#"["tcp/22","tcp/443","udp/8444"]"#),
             Some(1000),
+            None,
+            None,
+            None,
             None,
         )
         .await
@@ -13145,6 +13151,86 @@ async fn server_detail_uptime_section_omitted_when_no_probes() {
 }
 
 #[tokio::test]
+async fn server_detail_renders_traffic_gap_section() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    let sid = ServerId("gaptest".into());
+    st.inv
+        .add_server(&Server {
+            id: sid.clone(),
+            address: "203.0.113.9".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    // Two NIC readings → rx Δ5 GB, tx 0 → nic_total ≈ 5 GB.
+    for rx in [1_000_000_000u64, 6_000_000_000u64] {
+        st.inv
+            .record_node_health(
+                &sid,
+                Some(true),
+                Some(true),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("ens18"),
+                Some(rx),
+                Some(0),
+            )
+            .await
+            .unwrap();
+    }
+    // Clash attributes ~1 GB → the gap is ~4 GB of unseen traffic.
+    st.inv
+        .record_vpn_stats(
+            &sid,
+            &[vpnctl_inventory::VpnStatsDelta {
+                user_id: None,
+                upload_bytes: 1_000_000_000,
+                download_bytes: 0,
+                active_connections: 0,
+            }],
+        )
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/servers/gaptest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    // Section + the three tiles render (NIC ground-truth vs attributed vs gap).
+    assert!(html.contains("Traffic accounting"), "gap section eyebrow");
+    assert!(html.contains("NIC total"), "NIC total tile");
+    assert!(html.contains("GAP (unattributed)"), "gap tile");
+    assert!(html.contains("ens18"), "interface name shown");
+    // With 2 samples it must NOT show the empty-state.
+    assert!(
+        !html.contains("No NIC ground-truth yet"),
+        "should render real numbers, not the empty-state"
+    );
+}
+
+#[tokio::test]
 async fn server_detail_uptime_section_renders_with_probe_data() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
@@ -13179,6 +13265,9 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
                 Some(50),    // load_1min_x100
                 Some("[\"tcp/443\",\"udp/8443\"]"),
                 Some(1024 * 1024),
+                None,
+                None,
+                None,
                 None,
             )
             .await
@@ -13323,6 +13412,9 @@ async fn dashboard_fleet_uptime_section_renders_with_probe_data() {
                     Some("[\"tcp/443\"]"),
                     Some(1024 * 1024),
                     None,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -13407,6 +13499,9 @@ async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
                 Some(50),
                 Some("[\"tcp/443\"]"),
                 Some(1024 * 1024),
+                None,
+                None,
+                None,
                 None,
             )
             .await
@@ -13670,6 +13765,9 @@ async fn scan_once_auto_resolves_paired_alert_on_recovery() {
                 Some(1),
                 None,
                 Some(1024),
+                None,
+                None,
+                None,
                 None,
             )
             .await
@@ -15309,6 +15407,9 @@ async fn seed_dashboard_signals(inv: &SqliteInventory) {
         Some(r#"["tcp/443","udp/8443"]"#),
         Some(1_048_576),
         Some(r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#),
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -16184,6 +16285,9 @@ async fn server_detail_kernel_rollup_renders_version_for_this_node() {
             Some(r#"["tcp/443","udp/8443"]"#),
             Some(1000),
             Some(r#"{"sing-box":"1.13.12"}"#),
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
