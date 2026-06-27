@@ -9374,6 +9374,151 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
     );
 }
 
+/// Flow F — AmneziaWG `awg://` card for the operator's sing-box-lx app.
+/// Renders only for a granted server running the `amneziawg` kernel
+/// (obfs minted), and the link carries the per-server obfs (with s3=s4=0
+/// since vpnctl serves AWG 1.x) + the server-generated client key.
+#[tokio::test]
+async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("awgnode".into()),
+        address: "203.0.113.11".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("amneziawg".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    for (k, v) in [
+        (
+            "wireguard.server_public_key",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
+        (
+            "wireguard.server_private_key",
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+        ),
+        ("amneziawg.jc", "7"),
+        ("amneziawg.jmin", "60"),
+        ("amneziawg.jmax", "140"),
+        ("amneziawg.s1", "30"),
+        ("amneziawg.s2", "90"),
+        ("amneziawg.h1", "1111111111"),
+        ("amneziawg.h2", "2022222222"),
+        ("amneziawg.h3", "333333333"),
+        ("amneziawg.h4", "444444444"),
+    ] {
+        inv.set_server_secret(&ServerId("awgnode".into()), k, v)
+            .await
+            .unwrap();
+    }
+    inv.add_user(&User {
+        id: UserId("awgtest".into()),
+        uuid: "55555555-5555-5555-5555-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-awgtest".into()),
+        vpn_router_device_id: None,
+        disabled: false,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("awgtest".into()), &ServerId("awgnode".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/awgtest").await;
+    // Dash-agnostic label match (the card eyebrow is "Flow F — AmneziaWG
+    // (awg://)" with an em-dash).
+    assert!(
+        html.contains("AmneziaWG (awg://)"),
+        "Flow F AmneziaWG card label missing"
+    );
+    assert!(
+        html.contains("awg://"),
+        "Flow F card must include an awg:// link"
+    );
+    // The link carries the per-server obfs (substrings survive maud's
+    // `&` → `&amp;` query escaping) + the always-zero s3/s4 (1.x server).
+    // Use rfind: the FIRST "awg://" is the label «(awg://)»; the actual
+    // link is in the textarea after the QR.
+    let at = html.rfind("awg://").expect("awg:// link missing");
+    let win = &html[at..(at + 700).min(html.len())];
+    assert!(
+        win.contains("jc=7") && win.contains("s1=30") && win.contains("h1=1111111111"),
+        "obfs params missing in awg:// link: {win}"
+    );
+    assert!(
+        win.contains("s3=0") && win.contains("s4=0"),
+        "s3/s4 must be 0 (vpnctl serves AWG 1.x): {win}"
+    );
+}
+
+/// A WG server on the sing-box kernel (no amneziawg obfs minted) must
+/// NOT show Flow F — the awg:// link is meaningless without obfs.
+#[tokio::test]
+async fn admin_user_detail_no_flow_f_without_amneziawg_obfs() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("sbwg".into()),
+        address: "203.0.113.12".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    // server keys but NO amneziawg.* obfs.
+    inv.set_server_secret(
+        &ServerId("sbwg".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("sbwguser".into()),
+        uuid: "66666666-6666-6666-6666-666666666666".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-sbwg".into()),
+        vpn_router_device_id: None,
+        disabled: false,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("sbwguser".into()), &ServerId("sbwg".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/users/sbwguser").await;
+    assert!(
+        !html.contains("AmneziaWG (awg://)"),
+        "Flow F must not render without minted AmneziaWG obfs"
+    );
+}
+
 #[tokio::test]
 async fn admin_user_wireguard_conf_download_serves_attachment() {
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};

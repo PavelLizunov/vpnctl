@@ -634,6 +634,103 @@ fn qcompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// AmneziaWG `awg://` share-link for the operator's sing-box-lx-based
+/// client app (Flow F — distinct from Flow B `wireguard://?conf=` and
+/// Flow C AmneziaVPN `vpn://`; D=wgturn, E=dns-tunnel are taken).
+/// Operator-specified format:
+///
+/// ```text
+/// awg://<server_pubkey>@<host>:<port>?private_key=<client_priv_b64>
+///   &address=<10.66.0.N/32>&keepalive=25
+///   &jc=<int>&jmin=<int>&jmax=<int>&s1=<int>&s2=<int>&s3=<int>&s4=<int>
+///   &h1=<uint32>&h2=<uint32>&h3=<uint32>&h4=<uint32>#<Name>
+/// ```
+///
+/// Design choices pinned by the AWG protocol semantics:
+///   * `<server_pubkey>` (userinfo) is the PEER the client dials; the
+///     `private_key` is the CLIENT's, server-generated (`--gen-wireguard`)
+///     so the link is one-tap (no on-device key-gen — the low-tech
+///     north-star). A user without a server-generated private key is a
+///     HARD error (a placeholder link can't connect).
+///   * `s3=0 & s4=0` ALWAYS — vpnctl serves AmneziaWG 1.x; s3 (cookie)
+///     and s4 (transport) padding are BIDIRECTIONAL, and the server
+///     doesn't apply them, so a non-zero value would desync every data
+///     packet and break the tunnel.
+///   * `h1`-`h4` are single uint32 magic headers (the per-server minted
+///     1.x values); the schema also permits `min-max` ranges (2.0), unused.
+///   * The 9 obfs params are REQUIRED — the link only makes sense for an
+///     AmneziaWG node, so a server with no minted obfs is a hard error.
+///
+/// Values are emitted verbatim (standard-base64 keys, decimal obfs) to
+/// match the operator's literal schema; the consuming app parses them.
+pub fn awg_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+    let server_pub = ctx.require("wireguard.server_public_key")?;
+    // Operator must have generated the client keypair server-side.
+    let client_priv = user.wireguard_private.as_deref().ok_or_else(|| {
+        CoreError::Render(format!(
+            "user '{}' has no server-generated wireguard private key — \
+             an awg:// link can't be one-tap without it (use --gen-wireguard)",
+            user.id.0
+        ))
+    })?;
+    // The matching public must be in the server's [Peer] list, else the
+    // server can't authenticate this client. Mirror share_link's gate.
+    let user_pub = user.wireguard_pubkey.as_deref().ok_or_else(|| {
+        CoreError::Render(format!(
+            "user '{}' has wireguard_private but no wireguard_pubkey — \
+             the server [Peer] block can't authenticate this client",
+            user.id.0
+        ))
+    })?;
+    if !is_valid_wg_pubkey(user_pub) {
+        return Err(CoreError::Render(format!(
+            "user '{}' has malformed wireguard pubkey: {user_pub:?}",
+            user.id.0
+        )));
+    }
+    let listen_port: u16 = ctx
+        .secrets
+        .get("wireguard.listen_port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(WIREGUARD_PORT);
+    let peer_octet = peer_octet_for(ctx, user)?;
+    let address = format!("10.66.0.{peer_octet}/32");
+
+    // AmneziaWG obfs are REQUIRED for this link — all-or-nothing (same
+    // coherence contract as the .conf / client_config paths).
+    let obfs = amneziawg_block(ctx).ok_or_else(|| {
+        CoreError::Render(
+            "server has no AmneziaWG obfuscation params minted — \
+             an awg:// link requires them (deploy the amneziawg kernel so \
+             bootstrap mints amneziawg.{jc,jmin,jmax,s1,s2,h1-h4})"
+                .into(),
+        )
+    })?;
+    let m = obfs
+        .as_object()
+        .ok_or_else(|| CoreError::Render("amneziawg block must be a JSON object".into()))?;
+    // Secret values are stored as decimal strings; emit verbatim.
+    let g = |k: &str| -> &str { m.get(k).and_then(|v| v.as_str()).unwrap_or("0") };
+
+    let host = host_for_url(&ctx.server.address);
+    let tag = utf8_percent_encode(&user.id.0, FRAGMENT);
+    Ok(format!(
+        "awg://{server_pub}@{host}:{listen_port}?private_key={client_priv}\
+         &address={address}&keepalive=25\
+         &jc={jc}&jmin={jmin}&jmax={jmax}&s1={s1}&s2={s2}&s3=0&s4=0\
+         &h1={h1}&h2={h2}&h3={h3}&h4={h4}#{tag}",
+        jc = g("jc"),
+        jmin = g("jmin"),
+        jmax = g("jmax"),
+        s1 = g("s1"),
+        s2 = g("s2"),
+        h1 = g("h1"),
+        h2 = g("h2"),
+        h3 = g("h3"),
+        h4 = g("h4"),
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -890,6 +987,114 @@ mod tests {
         assert!(
             format!("{err}").contains("wireguard.server_public_key"),
             "expected MissingSecret(wireguard.server_public_key), got: {err}"
+        );
+    }
+
+    // ── awg:// share-link (Flow D — sing-box-lx client app) ────────
+
+    fn fake_secrets_awg() -> HashMap<String, String> {
+        let mut m = fake_secrets(); // wireguard.server_public_key
+        for (k, v) in [
+            ("jc", "7"),
+            ("jmin", "60"),
+            ("jmax", "140"),
+            ("s1", "30"),
+            ("s2", "90"),
+            ("h1", "1111111111"),
+            ("h2", "2022222222"),
+            ("h3", "333333333"),
+            ("h4", "444444444"),
+        ] {
+            m.insert(format!("amneziawg.{k}"), v.into());
+        }
+        m
+    }
+
+    #[test]
+    fn awg_share_link_matches_operator_schema() {
+        let server = fake_server();
+        let secrets = fake_secrets_awg();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let user = fake_user();
+        let link = awg_share_link(&ctx, &user).unwrap();
+
+        // scheme + userinfo(server pubkey) @ host:port
+        assert!(link.starts_with("awg://"), "scheme: {link}");
+        assert!(
+            link.contains(&format!(
+                "awg://{}@198.51.100.42:51820?",
+                secrets["wireguard.server_public_key"]
+            )),
+            "userinfo/host/port wrong: {link}"
+        );
+        // client private key = the server-generated one
+        assert!(link.contains(&format!(
+            "private_key={}",
+            user.wireguard_private.as_deref().unwrap()
+        )));
+        assert!(link.contains("address=10.66.0.2/32"));
+        assert!(link.contains("keepalive=25"));
+        // obfs verbatim from secrets
+        assert!(link.contains("jc=7"));
+        assert!(link.contains("jmin=60"));
+        assert!(link.contains("jmax=140"));
+        assert!(link.contains("s1=30"));
+        assert!(link.contains("s2=90"));
+        // s3/s4 ALWAYS 0 (1.x server — bidirectional, unused server-side)
+        assert!(link.contains("s3=0"));
+        assert!(link.contains("s4=0"));
+        assert!(link.contains("h1=1111111111"));
+        assert!(link.contains("h4=444444444"));
+        // fragment = user id
+        assert!(link.ends_with("#alex"), "fragment: {link}");
+    }
+
+    #[test]
+    fn awg_share_link_errors_without_server_generated_private_key() {
+        let server = fake_server();
+        let secrets = fake_secrets_awg();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let mut user = fake_user();
+        user.wireguard_private = None; // operator-provided-pubkey path
+        let err = awg_share_link(&ctx, &user).unwrap_err();
+        assert!(
+            format!("{err}").contains("no server-generated wireguard private key"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn awg_share_link_errors_without_obfs_secrets() {
+        // No amneziawg.* minted (e.g. a vanilla wg server) → hard error;
+        // an awg:// link only makes sense for an AmneziaWG node.
+        let server = fake_server();
+        let secrets = fake_secrets(); // server pubkey only, no obfs
+        let ctx = RenderCtx::new(&server, &secrets);
+        let user = fake_user();
+        let err = awg_share_link(&ctx, &user).unwrap_err();
+        assert!(
+            format!("{err}").contains("obfuscation params"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn awg_share_link_emits_base64_key_verbatim() {
+        // The operator's schema places the standard-base64 private key RAW
+        // in the query value; their sing-box-lx app parses values verbatim
+        // (NOT application/x-www-form-urlencoded, under which `+` → space).
+        // Pin verbatim emission of a key containing `+` and `/` so a future
+        // percent-encoding change is a deliberate, test-breaking decision.
+        let server = fake_server();
+        let secrets = fake_secrets_awg();
+        let ctx = RenderCtx::new(&server, &secrets);
+        let mut user = fake_user();
+        let key = "ab+CD/ef+GH/ijKLmnopQRSTuvwx0123456789ABCxz=";
+        user.wireguard_private = Some(key.into());
+        let link = awg_share_link(&ctx, &user).unwrap();
+        assert!(
+            link.contains(&format!("private_key={key}")),
+            "private key must be emitted verbatim (raw +,/,= — not url-encoded): {link}"
         );
     }
 }
