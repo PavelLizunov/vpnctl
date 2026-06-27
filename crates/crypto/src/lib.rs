@@ -170,6 +170,90 @@ pub fn gen_wireguard_keypair() -> (String, String) {
     )
 }
 
+/// AmneziaWG obfuscation parameter set, minted PER SERVER. Rendered as
+/// decimal strings into both the server `awg0.conf` (the `amnezia_wg`
+/// kernel) and the client artefact (`.conf` / `vpn://` deep-link).
+///
+/// **Bidirectional vs client-only** (verified against amneziawg-go's
+/// `magicHeader.Validate` + the AWG README): `s1`/`s2` (handshake-init /
+/// -response padding) and `h1`-`h4` (the magic message-type headers)
+/// rewrite REAL Noise packets and MUST be identical on both peers;
+/// `jc`/`jmin`/`jmax` (standalone junk packets) are client-only. The
+/// whole set is minted together so the bidirectional values stay
+/// internally coherent and the same minted values reach the client.
+///
+/// Constraints enforced:
+///   * `h1`-`h4` distinct + ≥ 5 — values 1-4 are the real WG message
+///     types (init/response/cookie/transport); a magic header colliding
+///     with them defeats the obfuscation.
+///   * `s2 != s1 + 56` — the real init packet is 148+s1 bytes and the
+///     response is 92+s2; equal lengths (s2 = s1+56) are a DPI tell.
+///   * `jmin <= jmax`, both bounded well under the MTU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmneziaObfs {
+    pub jc: u32,
+    pub jmin: u32,
+    pub jmax: u32,
+    pub s1: u32,
+    pub s2: u32,
+    pub h1: u32,
+    pub h2: u32,
+    pub h3: u32,
+    pub h4: u32,
+}
+
+/// Uniform-ish `u32` in `[lo, hi]` (inclusive). Modulo bias is
+/// irrelevant here — these are obfuscation constants, not key material.
+/// `hi` must be < `u32::MAX` so `hi - lo + 1` can't overflow (all
+/// callers below use `hi <= i32::MAX`).
+fn u32_in(rng: &mut OsRng, lo: u32, hi: u32) -> std::io::Result<u32> {
+    debug_assert!(lo <= hi && hi < u32::MAX);
+    let span = hi - lo + 1;
+    let mut b = [0u8; 4];
+    rng.try_fill_bytes(&mut b)
+        .map_err(|e| std::io::Error::other(format!("rng: {e}")))?;
+    Ok(lo + (u32::from_le_bytes(b) % span))
+}
+
+/// Mint a per-server [`AmneziaObfs`] set with the coherence constraints
+/// documented on the struct. Pure CSPRNG (OsRng); no I/O.
+pub fn gen_amnezia_obfs() -> std::io::Result<AmneziaObfs> {
+    let mut rng = OsRng;
+    let jc = u32_in(&mut rng, 4, 12)?;
+    let jmin = u32_in(&mut rng, 50, 100)?;
+    let jmax = u32_in(&mut rng, jmin + 50, jmin + 150)?;
+    let s1 = u32_in(&mut rng, 15, 150)?;
+    let mut s2 = u32_in(&mut rng, 15, 150)?;
+    // Avoid the equal-length init/response tell (s2 == s1 + 56).
+    while s2 == s1 + 56 {
+        s2 = u32_in(&mut rng, 15, 150)?;
+    }
+    // h1-h4: distinct, ≥ 5 (avoid the real WG message types 1-4), and
+    // safely within i32 range (some impls treat the header as signed).
+    const H_LO: u32 = 5;
+    const H_HI: u32 = i32::MAX as u32; // 2_147_483_647
+    let mut hs = [0u32; 4];
+    let mut i = 0;
+    while i < 4 {
+        let v = u32_in(&mut rng, H_LO, H_HI)?;
+        if !hs[..i].contains(&v) {
+            hs[i] = v;
+            i += 1;
+        }
+    }
+    Ok(AmneziaObfs {
+        jc,
+        jmin,
+        jmax,
+        s1,
+        s2,
+        h1: hs[0],
+        h2: hs[1],
+        h3: hs[2],
+        h4: hs[3],
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -271,6 +355,51 @@ mod tests {
         assert_eq!(s.len(), 8);
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
         Ok(())
+    }
+
+    #[test]
+    fn amnezia_obfs_respects_all_constraints() {
+        // 200 draws to exercise the constraint branches (s2 reroll,
+        // h-distinctness retry) and the range bounds.
+        for _ in 0..200 {
+            let o = gen_amnezia_obfs().unwrap();
+            assert!((4..=12).contains(&o.jc), "jc out of range: {}", o.jc);
+            assert!((50..=100).contains(&o.jmin), "jmin: {}", o.jmin);
+            assert!(
+                o.jmax >= o.jmin && o.jmax <= o.jmin + 150,
+                "jmax {} not in [{},{}]",
+                o.jmax,
+                o.jmin,
+                o.jmin + 150
+            );
+            assert!((15..=150).contains(&o.s1), "s1: {}", o.s1);
+            assert!((15..=150).contains(&o.s2), "s2: {}", o.s2);
+            // The equal-length init/response tell must never be emitted.
+            assert_ne!(o.s2, o.s1 + 56, "s2 == s1+56 (DPI tell)");
+            let hs = [o.h1, o.h2, o.h3, o.h4];
+            for h in hs {
+                assert!(h >= 5, "h {h} < 5 collides with a real WG msg type");
+                assert!(h <= i32::MAX as u32, "h {h} exceeds i32 range");
+            }
+            for i in 0..4 {
+                for j in (i + 1)..4 {
+                    assert_ne!(hs[i], hs[j], "h1-h4 must be distinct: {hs:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn amnezia_obfs_distinct_across_calls() {
+        // Two CSPRNG draws sharing all four 31-bit magic headers is
+        // astronomically unlikely — a regression to a fixed seed fires.
+        let a = gen_amnezia_obfs().unwrap();
+        let b = gen_amnezia_obfs().unwrap();
+        assert_ne!(
+            (a.h1, a.h2, a.h3, a.h4),
+            (b.h1, b.h2, b.h3, b.h4),
+            "magic headers must differ per server"
+        );
     }
 
     #[test]

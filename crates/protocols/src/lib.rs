@@ -25,6 +25,6 @@ pub use vless_reality::{DEFAULT_REALITY_SNI, VlessReality};
 pub use vless_ws::{DEFAULT_FRONT_PORT as VLESS_WS_DEFAULT_FRONT_PORT, VlessWs};
 pub use wgturn::{WGTURN_PORT, WgTurn};
 pub use wireguard::{
-    CLIENT_PRIVKEY_PLACEHOLDER, WIREGUARD_PORT, WireGuard, amnezia_share_link, is_valid_wg_pubkey,
-    render_client_conf_public,
+    CLIENT_PRIVKEY_PLACEHOLDER, WIREGUARD_PORT, WireGuard, amnezia_share_link, awg_share_link,
+    is_valid_wg_pubkey, render_client_conf_public,
 };

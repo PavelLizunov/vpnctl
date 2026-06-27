@@ -101,6 +101,40 @@ pub async fn bootstrap_server_secrets(
         minted.push("wgturn server wireguard keypair");
     }
 
+    // AmneziaWG obfuscation params — per-server, keyed on the `amneziawg`
+    // KERNEL (not the wireguard PROTOCOL): obfs is a property of the
+    // AmneziaWG daemon. A future vanilla wg-quick kernel serving the same
+    // `wireguard` protocol must NOT get obfs — it can't speak it, the
+    // handshake would fail. Minted as a COHERENT 9-param set (the
+    // bidirectional s1/s2/h1-h4 must stay internally consistent + reach
+    // the client artefact identically) — anchor on `amneziawg.h1`: absent
+    // ⇒ never minted ⇒ generate all 9; present ⇒ leave intact (idempotent,
+    // never rotate live clients). Closes the standing backlog bug: the
+    // kernel's hardcoded H1=1..H4=4 default otherwise bakes ONE DPI
+    // fingerprint into every vpnctl-deployed AmneziaWG node.
+    let needs_amnezia_obfs = server.kernels.iter().any(|k| k.0 == "amneziawg");
+    if needs_amnezia_obfs && !secrets.contains_key("amneziawg.h1") {
+        let o = vpnctl_crypto::gen_amnezia_obfs().map_err(|e| format!("gen_amnezia_obfs: {e}"))?;
+        for (k, val) in [
+            ("amneziawg.jc", o.jc),
+            ("amneziawg.jmin", o.jmin),
+            ("amneziawg.jmax", o.jmax),
+            ("amneziawg.s1", o.s1),
+            ("amneziawg.s2", o.s2),
+            ("amneziawg.h1", o.h1),
+            ("amneziawg.h2", o.h2),
+            ("amneziawg.h3", o.h3),
+            ("amneziawg.h4", o.h4),
+        ] {
+            let v = val.to_string();
+            inv.set_server_secret(&server.id, k, &v)
+                .await
+                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
+            secrets.insert(k.to_string(), v);
+        }
+        minted.push("amneziawg obfs params");
+    }
+
     Ok((secrets, minted))
 }
 

@@ -3441,6 +3441,58 @@ fn collect_amnezia_links(
     out
 }
 
+/// Sibling of [`collect_amnezia_links`] — one `awg://` link per
+/// WG-enabled granted server for the user-detail Flow E card (the
+/// operator's sing-box-lx-based client app). Servers without minted
+/// AmneziaWG obfs (i.e. not running the `amneziawg` kernel) or a user
+/// without a server-generated private key cause `awg_share_link` to
+/// error; those are LOGGED-AND-SKIPPED so the page still renders and the
+/// card naturally shows only AmneziaWG-capable servers.
+fn collect_awg_links(
+    user: &vpnctl_core::User,
+    servers: &[vpnctl_core::Server],
+    secrets_per_server: &std::collections::HashMap<
+        vpnctl_core::ServerId,
+        std::collections::HashMap<String, String>,
+    >,
+    peers_per_server: &std::collections::HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
+) -> Vec<(vpnctl_core::ServerId, String)> {
+    let mut out = Vec::new();
+    for server in servers {
+        // awg:// only makes sense for an AmneziaWG node (obfs minted)
+        // serving the wireguard protocol. Gate on BOTH so a vanilla
+        // sing-box WG server (no obfs) is skipped cleanly rather than
+        // hitting awg_share_link's error path on every page render.
+        let is_amnezia = server.kernels.iter().any(|k| k.0 == "amneziawg");
+        let serves_wg = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
+        if !is_amnezia || !serves_wg {
+            continue;
+        }
+        let Some(secrets) = secrets_per_server.get(&server.id) else {
+            continue;
+        };
+        let peers: &[vpnctl_core::User] = peers_per_server
+            .get(&server.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        let per_server_user = user_for_server_render(user, peers, &server.id);
+        match vpnctl_protocols::awg_share_link(&ctx, &per_server_user) {
+            Ok(link) => out.push((server.id.clone(), link)),
+            Err(e) => {
+                tracing::debug!(
+                    target = "vpnctld::admin",
+                    server = %server.id,
+                    user = %user.id,
+                    error = %e,
+                    "awg_share_link skipped (no obfs / no server-gen privkey)"
+                );
+            }
+        }
+    }
+    out
+}
+
 fn collect_share_links(
     state: &AppState,
     user: &vpnctl_core::User,
@@ -3627,6 +3679,9 @@ pub(crate) async fn user_detail(
     // (server_id, vpn://...) per WG-enabled granted server.
     let amnezia_links =
         collect_amnezia_links(&user, &servers, &secrets_per_server, &peers_per_server);
+    // Flow E — awg:// links for the operator's sing-box-lx client app.
+    // Only AmneziaWG-capable servers (obfs minted) yield a link.
+    let awg_links = collect_awg_links(&user, &servers, &secrets_per_server, &peers_per_server);
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     // Phase 3+ ninitux-compat URL: the production endpoint that mobile
@@ -4453,6 +4508,36 @@ pub(crate) async fn user_detail(
                                             ))
                                             em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
                                             (crate::i18n::tr(lang, " import path.", " import-путь AmneziaVPN."))
+                                        }))
+                                    }
+                                }
+                            }
+                        }
+                        // Flow F — AmneziaWG `awg://` link for the
+                        // operator's sing-box-lx-based client app. Carries
+                        // the per-server obfs (s1/s2/h1-h4 minted by
+                        // bootstrap) + the server-generated client key, so
+                        // it's a one-tap import. Only renders when at least
+                        // one granted server runs the amneziawg kernel
+                        // (obfs minted ⇒ a link was produced). Letter F:
+                        // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
+                        // D=wgturn, E=dns-tunnel — F is the next free one.
+                        @if !awg_links.is_empty() {
+                            div {
+                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                    (crate::i18n::tr(lang, "Flow F — AmneziaWG (awg://)", "Поток F — AmneziaWG (awg://)"))
+                                }
+                                @for (sid, link) in &awg_links {
+                                    div style="margin-bottom: 18px;" {
+                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
+                                        }
+                                        (share_link_card(link, &html! {
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "Opens in the sing-box-lx-based app — per-server AmneziaWG obfuscation (s1/s2/h1-h4) baked in; one-tap, no on-device key-gen.",
+                                                "Открывается в приложении на sing-box-lx — per-server AmneziaWG-обфускация (s1/s2/h1-h4) уже внутри; один тап, без генерации ключей на устройстве.",
+                                            ))
                                         }))
                                     }
                                 }
