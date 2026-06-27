@@ -1291,6 +1291,9 @@ mod tests {
             listening_ports_json: None,
             sing_box_log_bytes: log_b,
             kernel_versions_json: None,
+            nic_iface: None,
+            nic_rx_bytes: None,
+            nic_tx_bytes: None,
         }
     }
 

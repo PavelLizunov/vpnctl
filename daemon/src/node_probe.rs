@@ -105,6 +105,22 @@ pub struct Probe {
     /// `NULL` in that case rather than `{}`. Backs the admin UI's
     /// drift-detail card.
     pub kernel_versions: std::collections::BTreeMap<String, String>,
+
+    // ─── Traffic ground-truth — public-interface byte counters ───
+    /// Default-route interface name (e.g. `ens18`, `eth0`). `None` when
+    /// the node has no default route or `ip route` was unreadable.
+    pub nic_iface: Option<String>,
+    /// RAW cumulative `rx_bytes` / `tx_bytes` of the default-route
+    /// interface (`/sys/class/net/<iface>/statistics/`). NOT deltas —
+    /// the gap computation diffs consecutive stored readings with a
+    /// reboot/reset guard. This is the SERVER-WIDE ground truth: it
+    /// catches ALL traffic on the node (incl. non-sing-box protocols
+    /// clash-api can't see — naive/Caddy, dns-tunnel, wgturn), so it
+    /// reconciles with the hoster's billing. `None` when the counters
+    /// were unreadable (kept independent of `nic_iface` for parser
+    /// partial-success symmetry).
+    pub nic_rx_bytes: Option<u64>,
+    pub nic_tx_bytes: Option<u64>,
 }
 
 impl Probe {
@@ -214,6 +230,17 @@ fi
 sb_ver=$(sing-box version 2>/dev/null | awk '/version/{print $NF; exit}')
 [ -n "$sb_ver" ] && echo "VER sing-box $sb_ver"
 command -v caddy >/dev/null 2>&1 && echo "VER caddy $(caddy version 2>/dev/null | awk '{print $1; exit}')"
+# Public-interface byte counters — server-wide traffic ground truth.
+# Catches ALL protocols (incl. non-sing-box: naive/Caddy, dns-tunnel,
+# wgturn) so the total reconciles with the hoster's billing. Pick the
+# default-route interface (the one carrying internet egress/ingress);
+# emit its RAW cumulative rx/tx — the daemon diffs readings over time.
+nic=$(ip route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+if [ -n "$nic" ] && [ -d "/sys/class/net/$nic/statistics" ]; then
+    rx=$(cat "/sys/class/net/$nic/statistics/rx_bytes" 2>/dev/null || echo "")
+    tx=$(cat "/sys/class/net/$nic/statistics/tx_bytes" 2>/dev/null || echo "")
+    [ -n "$rx" ] && [ -n "$tx" ] && echo "NIC $nic $rx $tx"
+fi
 # Completion sentinel. Every `|| true` above can silently swallow
 # errors; without this line a totally-broken probe (no /proc, missing
 # `ss`, busybox stripped) returns empty stdout and the parser can't
@@ -394,6 +421,23 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
                     any_parsed = true;
                 }
             }
+            "NIC" => {
+                // NIC <iface> <rx_bytes> <tx_bytes> — RAW cumulative
+                // counters of the default-route interface. All three
+                // fields set together (partial-success not meaningful
+                // for a counter pair; either we read the iface's stats
+                // or we didn't).
+                if let (Some(ifc), Some(rx), Some(tx)) = (parts.next(), parts.next(), parts.next())
+                    && parts.next().is_none()
+                    && !ifc.is_empty()
+                    && let (Ok(r), Ok(t)) = (rx.parse::<u64>(), tx.parse::<u64>())
+                {
+                    probe.nic_iface = Some(ifc.to_string());
+                    probe.nic_rx_bytes = Some(r);
+                    probe.nic_tx_bytes = Some(t);
+                    any_parsed = true;
+                }
+            }
             _ => continue,
         }
     }
@@ -443,6 +487,7 @@ PORT udp 8443
 LOG_SB 308432
 VER sing-box 1.13.12
 VER caddy 2.8.4
+NIC ens18 123456789 987654321
 PROBE_OK
 ";
 
@@ -474,6 +519,24 @@ PROBE_OK
             Some("2.8.4")
         );
         assert_eq!(p.kernel_versions.len(), 2);
+        // Traffic ground-truth — NIC line parses into the cumulative
+        // counters used for the gap computation.
+        assert_eq!(p.nic_iface.as_deref(), Some("ens18"));
+        assert_eq!(p.nic_rx_bytes, Some(123_456_789));
+        assert_eq!(p.nic_tx_bytes, Some(987_654_321));
+    }
+
+    #[test]
+    fn nic_line_partial_or_malformed_leaves_fields_none() {
+        // No NIC line at all → all three None (node with no default route).
+        let none = parse_probe_output("SVC sing-box active\nPROBE_OK\n").unwrap();
+        assert_eq!(none.nic_iface, None);
+        assert_eq!(none.nic_rx_bytes, None);
+        assert_eq!(none.nic_tx_bytes, None);
+        // Non-numeric counter → the whole NIC line is rejected (no partial).
+        let bad = parse_probe_output("SVC sing-box active\nNIC ens18 abc 100\nPROBE_OK\n").unwrap();
+        assert_eq!(bad.nic_iface, None);
+        assert_eq!(bad.nic_rx_bytes, None);
     }
 
     // ─── Phase G chunk 2 — banned-self detector parser ─────────

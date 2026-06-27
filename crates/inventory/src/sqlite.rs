@@ -621,6 +621,38 @@ pub struct NodeHealthRow {
     /// ticks where no version command succeeded. Caller extracts the
     /// key it cares about (`"sing-box"`) for the drift-detail card.
     pub kernel_versions_json: Option<String>,
+    /// Traffic ground-truth (migration 0038) — default-route interface
+    /// name + its RAW cumulative `rx_bytes`/`tx_bytes`. NOT deltas; the
+    /// gap computation (`server_traffic_breakdown`) diffs consecutive
+    /// rows with a reboot/reset guard. `None` for rows predating this or
+    /// ticks where the counters were unreadable.
+    pub nic_iface: Option<String>,
+    pub nic_rx_bytes: Option<u64>,
+    pub nic_tx_bytes: Option<u64>,
+}
+
+/// Traffic-accounting breakdown for one server over a window, produced
+/// by [`SqliteInventory::server_traffic_breakdown`]. The GAP is the
+/// headline: real NIC traffic minus what clash-api could attribute to
+/// sing-box — i.e. non-sing-box protocols (naive/Caddy, dns-tunnel,
+/// wgturn) plus protocol/OS overhead that vpnctl currently can't break
+/// down per-user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrafficBreakdown {
+    /// NIC ground-truth total (rx+tx deltas) — ALL traffic on the node.
+    pub nic_total_bytes: u64,
+    pub nic_rx_bytes: u64,
+    pub nic_tx_bytes: u64,
+    /// Bytes attributed to sing-box via clash-api (up+dn) — the part
+    /// vpnctl can break down per-user.
+    pub attributed_bytes: u64,
+    /// `nic_total − attributed`, saturating at 0. The unattributed slice.
+    pub gap_bytes: u64,
+    /// NIC samples in the window (≥2 needed for any delta). 0/1 ⇒ no NIC
+    /// figure yet (fresh node / probe predates this feature).
+    pub nic_samples: usize,
+    /// Interface the counters came from (newest sample), for display.
+    pub nic_iface: Option<String>,
 }
 
 /// Phase H+ — rolling-window aggregate computed by
@@ -5406,6 +5438,9 @@ impl SqliteInventory {
         listening_ports_json: Option<&str>,
         sing_box_log_bytes: Option<u64>,
         kernel_versions_json: Option<&str>,
+        nic_iface: Option<&str>,
+        nic_rx_bytes: Option<u64>,
+        nic_tx_bytes: Option<u64>,
     ) -> Result<()> {
         // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
@@ -5416,9 +5451,9 @@ impl SqliteInventory {
               disk_used_mib, disk_total_mib,
               mem_available_mib, mem_total_mib,
               load_1min_x100, listening_ports_json, sing_box_log_bytes,
-              kernel_versions_json)
+              kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes)
              VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(&server_id.0)
         .bind(sb)
@@ -5431,6 +5466,9 @@ impl SqliteInventory {
         .bind(listening_ports_json)
         .bind(sing_box_log_bytes.and_then(|n| i64::try_from(n).ok()))
         .bind(kernel_versions_json)
+        .bind(nic_iface)
+        .bind(nic_rx_bytes.and_then(|n| i64::try_from(n).ok()))
+        .bind(nic_tx_bytes.and_then(|n| i64::try_from(n).ok()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -5448,7 +5486,7 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
@@ -5471,7 +5509,7 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
              FROM node_health
              WHERE server_id = ?1
              ORDER BY ts DESC, rowid DESC
@@ -5481,6 +5519,85 @@ impl SqliteInventory {
         .fetch_optional(&self.pool)
         .await?;
         row_opt.map(row_to_node_health).transpose()
+    }
+
+    /// Traffic accounting breakdown for one server over the window:
+    /// NIC ground-truth total (ALL protocols), the part attributed to
+    /// sing-box via clash-api, and the GAP between them (non-sing-box
+    /// protocols — naive/Caddy, dns-tunnel, wgturn — plus protocol/OS
+    /// overhead). Backs the «Traffic accounting» section on the
+    /// server-detail page; the gap is THE signal the operator wants
+    /// (how much real traffic vpnctl currently can't see per-user).
+    ///
+    /// NIC total = sum of per-interval deltas of the cumulative
+    /// `node_health.nic_*` counters (reboot/reset-guarded via
+    /// [`sum_nic_deltas`]). Attributed = `SUM(upload+download)` over ALL
+    /// `vpn_connection_stats` rows (per-user + the server-wide remainder)
+    /// — clash-api's total view of sing-box traffic.
+    pub async fn server_traffic_breakdown(
+        &self,
+        server_id: &ServerId,
+        since_hours: u32,
+    ) -> Result<TrafficBreakdown> {
+        // Cumulative NIC readings in the window, oldest→newest (need ≥2
+        // for a delta). Only rows that actually captured the counters.
+        let nic_rows = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<String>)>(
+            "SELECT nic_rx_bytes, nic_tx_bytes, nic_iface
+             FROM node_health
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+               AND nic_rx_bytes IS NOT NULL AND nic_tx_bytes IS NOT NULL
+             ORDER BY ts ASC, rowid ASC",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        let nic_iface = nic_rows.last().and_then(|(_, _, i)| i.clone());
+        // Carry the iface into each reading so sum_nic_deltas can break
+        // continuity on an iface change (rename / failover) — diffing two
+        // different counters would otherwise inflate the total.
+        let readings: Vec<(String, u64, u64)> = nic_rows
+            .iter()
+            .filter_map(|(rx, tx, ifc)| {
+                Some((
+                    ifc.clone().unwrap_or_default(),
+                    u64::try_from((*rx)?).ok()?,
+                    u64::try_from((*tx)?).ok()?,
+                ))
+            })
+            .collect();
+        let (nic_rx_bytes, nic_tx_bytes) = sum_nic_deltas(&readings);
+        let nic_total_bytes = nic_rx_bytes.saturating_add(nic_tx_bytes);
+
+        // Attributed (clash-api / sing-box) — sum of up+dn over ALL rows
+        // (per-user + the NULL server-wide remainder) in the window. These
+        // are DISJOINT by the clash poller's design (it emits per-user
+        // deltas plus a remainder = total − attributed), so summing both
+        // yields clash's true total view — not a double-count.
+        let (attributed,): (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0)
+             FROM vpn_connection_stats
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{since_hours} hours"))
+        .fetch_one(&self.pool)
+        .await?;
+        let attributed_bytes = u64::try_from(attributed).unwrap_or(0);
+
+        Ok(TrafficBreakdown {
+            nic_total_bytes,
+            nic_rx_bytes,
+            nic_tx_bytes,
+            attributed_bytes,
+            // Saturating: clash can briefly exceed NIC at window edges
+            // (sample boundaries don't align) — never show a negative gap.
+            gap_bytes: nic_total_bytes.saturating_sub(attributed_bytes),
+            nic_samples: readings.len(),
+            nic_iface,
+        })
     }
 
     /// Phase H+ — uptime aggregation for the per-server detail page.
@@ -6190,6 +6307,38 @@ fn row_to_user(r: sqlx::sqlite::SqliteRow) -> Result<User> {
     })
 }
 
+/// Sum per-interval deltas of cumulative NIC counters, `readings`
+/// oldest→newest as `(iface, rx, tx)` triples. Two discontinuity guards
+/// each count the new value itself as that interval's delta (a lower
+/// bound; the pre-discontinuity tail is unknowable): a reboot/reset (a
+/// reading LOWER than the previous — counter wrapped / NIC reset), and an
+/// interface change (`iface` differs from the previous reading — rename
+/// `eth0`→`ens18`, uplink failover; the two readings are DIFFERENT
+/// counters, so a plain subtraction would be garbage, and a higher new
+/// counter would otherwise inflate the total). Fewer than 2 readings ⇒
+/// `(0, 0)`. Pure + saturating, so it's spec-testable in isolation and
+/// can't overflow on a corrupt counter. Returns `(rx_total, tx_total)`.
+pub fn sum_nic_deltas(readings: &[(String, u64, u64)]) -> (u64, u64) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for w in readings.windows(2) {
+        let (piface, prx, ptx) = (&w[0].0, w[0].1, w[0].2);
+        let (ciface, crx, ctx) = (&w[1].0, w[1].1, w[1].2);
+        let continuous = piface == ciface;
+        rx = rx.saturating_add(if continuous && crx >= prx {
+            crx - prx
+        } else {
+            crx
+        });
+        tx = tx.saturating_add(if continuous && ctx >= ptx {
+            ctx - ptx
+        } else {
+            ctx
+        });
+    }
+    (rx, tx)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let ts_s: String = r.try_get("ts")?;
@@ -6209,6 +6358,9 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let ports: Option<String> = r.try_get("listening_ports_json")?;
     let log_b: Option<i64> = r.try_get("sing_box_log_bytes")?;
     let kernel_versions: Option<String> = r.try_get("kernel_versions_json")?;
+    let nic_iface: Option<String> = r.try_get("nic_iface")?;
+    let nic_rx: Option<i64> = r.try_get("nic_rx_bytes")?;
+    let nic_tx: Option<i64> = r.try_get("nic_tx_bytes")?;
     Ok(NodeHealthRow {
         ts,
         server_id: ServerId(server_id),
@@ -6222,6 +6374,9 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         listening_ports_json: ports,
         sing_box_log_bytes: log_b.and_then(|n| u64::try_from(n).ok()),
         kernel_versions_json: kernel_versions,
+        nic_iface,
+        nic_rx_bytes: nic_rx.and_then(|n| u64::try_from(n).ok()),
+        nic_tx_bytes: nic_tx.and_then(|n| u64::try_from(n).ok()),
     })
 }
 

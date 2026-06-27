@@ -61,6 +61,9 @@ async fn rec(
         ports,
         log_bytes,
         None, // kernel_versions_json — covered by the dedicated PR-Q test
+        None, // nic_iface
+        None, // nic_rx_bytes
+        None, // nic_tx_bytes
     )
     .await
     .expect("record_node_health");
@@ -393,6 +396,9 @@ async fn record_for_unknown_server_fails_fk() {
             Some("[]"),
             Some(0),
             None,
+            None,
+            None,
+            None,
         )
         .await;
     assert!(
@@ -564,6 +570,9 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
         None,
         None,
         Some(kv),
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();

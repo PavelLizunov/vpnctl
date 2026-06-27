@@ -13825,6 +13825,27 @@ pub(crate) async fn server_detail(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
+    // Traffic accounting — NIC ground-truth (ALL protocols) vs the
+    // sing-box part clash-api attributed vs the GAP between them. The
+    // gap is the operator's headline: real traffic vpnctl can't yet
+    // break down per-user (naive/Caddy, dns-tunnel, wgturn + overhead).
+    let traffic = state
+        .inv
+        .server_traffic_breakdown(&sid, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server_traffic_breakdown failed");
+            vpnctl_inventory::TrafficBreakdown {
+                nic_total_bytes: 0,
+                nic_rx_bytes: 0,
+                nic_tx_bytes: 0,
+                attributed_bytes: 0,
+                gap_bytes: 0,
+                nic_samples: 0,
+                nic_iface: None,
+            }
+        });
+
     // Phase 4c+4d — last clash-api snapshot + log-derived
     // attribution for the «Live connections» drill-down. None
     // when the poller has never reached this server (fresh
@@ -14210,6 +14231,9 @@ pub(crate) async fn server_detail(
         // upstream, dashboard tile shows zero «attributed users»
         // intentionally to make the limit explicit).
         (server_detail_live_activity_section(&live_activity, lang))
+
+        // Traffic accounting — NIC ground-truth vs clash-attributed vs gap.
+        (server_detail_gap_section(&traffic, lang))
 
         // Phase 4c + 4d + 5a-2 — per-connection drill-down (top
         // destinations enriched with reverse-DNS hostnames + top
@@ -14939,6 +14963,77 @@ fn server_detail_live_activity_section(
             " · "
             (activity.distinct_users_attributed)
             (tr(lang, " users attributed (NM-11: sing-box upstream strips per-user from clash-api; server-wide totals work)", " юзеров attributed (NM-11: sing-box upstream удаляет per-user из clash-api; сервер-агрегатные totals работают)"))
+        }
+    }
+}
+
+/// Traffic accounting — NIC ground-truth vs clash-attributed vs the GAP.
+/// The NIC total catches ALL protocols (the operator's reconciliation
+/// with the hoster's billing); the gap is the slice vpnctl can't yet
+/// break down per-user (non-sing-box protocols + protocol overhead).
+/// Empty-state until ≥2 NIC probe samples exist (a delta needs two).
+fn server_detail_gap_section(
+    t: &vpnctl_inventory::TrafficBreakdown,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if t.nic_samples < 2 {
+        return html! {
+            div.ed-rule {}
+            div.ed-art-eyebrow { (tr(lang, "Traffic accounting · last 24h", "Учёт трафика · 24 часа")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+                (tr(
+                    lang,
+                    "No NIC ground-truth yet — the node probe captures interface byte counters every ~10 minutes; come back after a couple of probes.",
+                    "Пока нет данных NIC — probe ноды снимает байт-счётчики интерфейса каждые ~10 минут; вернись через пару проверок.",
+                ))
+            }
+        };
+    }
+    // Gap as a share of real traffic — how much vpnctl can't attribute.
+    let gap_pct = t
+        .gap_bytes
+        .saturating_mul(100)
+        .checked_div(t.nic_total_bytes)
+        .unwrap_or(0)
+        .min(100);
+    // A big gap (≥50%) is a real blind spot → accent it.
+    let gap_colour = if gap_pct >= 50 {
+        "var(--acc)"
+    } else {
+        "var(--ink)"
+    };
+    let iface = t.nic_iface.as_deref().unwrap_or("?").to_string();
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Traffic accounting · last 24h", "Учёт трафика · 24 часа")) }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+            (tr(
+                lang,
+                "Real interface traffic (NIC ground-truth — catches ALL protocols, reconciles with the hoster) vs the sing-box part clash-api could attribute. The GAP is everything clash-api can't see: non-sing-box protocols (naive/Caddy, dns-tunnel, wgturn) plus TLS/QUIC overhead.",
+                "Реальный трафик интерфейса (NIC — ловит ВСЕ протоколы, сходится с хостером) против sing-box-части, которую смог атрибутировать clash-api. ГЭП — всё, что clash-api не видит: не-sing-box протоколы (naive/Caddy, dns-tunnel, wgturn) плюс оверхед TLS/QUIC.",
+            ))
+        }
+        div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 8px;" {
+            div title=(tr(lang, "Total bytes (rx+tx) on the node's default-route interface over 24h, summed from the probe's cumulative counters. This is the real traffic — every protocol, plus overhead.", "Всего байт (rx+tx) на default-route интерфейсе ноды за 24ч, сумма дельт кумулятивных счётчиков probe. Это реальный трафик — все протоколы плюс оверхед.")) {
+                (status_tile(tr(lang, "NIC total", "NIC всего"), &humanize_bytes(t.nic_total_bytes), "var(--ink)"))
+            }
+            div title=(tr(lang, "Bytes clash-api attributed to sing-box protocols (VLESS/REALITY, TUIC, hy2, Trojan, …) over 24h — the part vpnctl can break down per-user.", "Байт, которые clash-api атрибутировал sing-box-протоколам (VLESS/REALITY, TUIC, hy2, Trojan…) за 24ч — часть, которую vpnctl раскладывает по юзерам.")) {
+                (status_tile(tr(lang, "sing-box (attributed)", "sing-box (атриб.)"), &humanize_bytes(t.attributed_bytes), "var(--ink)"))
+            }
+            div title=(tr(lang, "NIC total minus the attributed part: non-sing-box protocols (naive/Caddy, dns-tunnel, wgturn) + protocol/OS overhead. This is what vpnctl currently can't see per-user.", "NIC всего минус атрибутированное: не-sing-box протоколы (naive/Caddy, dns-tunnel, wgturn) + оверхед протокола/ОС. Это то, что vpnctl сейчас не видит по юзерам.")) {
+                (status_tile(tr(lang, "GAP (unattributed)", "ГЭП (неатриб.)"), &humanize_bytes(t.gap_bytes), gap_colour))
+            }
+        }
+        p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 4px 0 14px;" {
+            (tr(lang, "interface ", "интерфейс "))
+            b style="color: var(--ink);" { (iface) }
+            " · "
+            (tr(lang, "gap ", "гэп "))
+            b style=(format!("color: {gap_colour};")) { (gap_pct) "%" }
+            (tr(lang, " of real traffic not attributed per-user", " реального трафика не разложено по юзерам"))
+            " · rx " (humanize_bytes(t.nic_rx_bytes))
+            " · tx " (humanize_bytes(t.nic_tx_bytes))
         }
     }
 }

@@ -32,6 +32,6 @@ pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, HeavyUser, NodeHealthRow, ServerLiveActivity,
     SharingSignals, SqliteInventory, SqliteInventoryError, SubAccessAggregates, SubAccessEntry,
     SubDeviceFp, SubOriginAsn, SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest,
-    UaCluster, UptimeStat, UserLifecycle, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow,
-    VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow,
+    TrafficBreakdown, UaCluster, UptimeStat, UserLifecycle, VpnStatsDelta, VpnStatsRow,
+    VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
 };

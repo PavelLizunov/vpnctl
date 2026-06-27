@@ -83,6 +83,10 @@ const DEFAULT_UNREACHABLE_THRESHOLD: u32 = 3;
 /// or-shell-broken ⇒ `SshFailed`; probe parsed but row insert failed
 /// ⇒ `RowWriteFailed` (the failure is logged but doesn't count
 /// against the unreachable detector — the node IS reachable).
+// `Ok(Probe)` is much larger than the error variants, but a ProbeOutcome
+// is created once per probe + matched immediately (never bulk-stored), so
+// boxing would add indirection for no real memory benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// Probe succeeded; carries the parsed snapshot so the caller can
@@ -1123,6 +1127,9 @@ async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) -
             listening_json.as_deref(),
             probe.sing_box_log_bytes,
             kernel_versions_json.as_deref(),
+            probe.nic_iface.as_deref(),
+            probe.nic_rx_bytes,
+            probe.nic_tx_bytes,
         )
         .await;
 

@@ -311,6 +311,9 @@ async fn q4e_latest_json_per_server() {
         None,
         None,
         Some(r#"{"sing-box":"1.13.0"}"#),
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -327,6 +330,9 @@ async fn q4e_latest_json_per_server() {
         None,
         None,
         Some(r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#),
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -334,6 +340,9 @@ async fn q4e_latest_json_per_server() {
     inv.record_node_health(
         &ServerId("s2".into()),
         Some(true),
+        None,
+        None,
+        None,
         None,
         None,
         None,
