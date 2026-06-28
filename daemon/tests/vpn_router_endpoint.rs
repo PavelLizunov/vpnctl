@@ -32,8 +32,8 @@ use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_kernels::{Caddy, SingBox};
-use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox};
+use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, WireGuard};
 use vpnctld::{AppState, router};
 
 const TEST_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
@@ -1511,5 +1511,284 @@ async fn vpn_router_dns_tunnel_missing_fingerprint_skips_server_keeps_vless() {
     assert!(
         !lines.iter().any(|l| l.starts_with("dns-tunnel://")),
         "a fingerprint-less dns-tunnel server must be skipped: {lines:?}"
+    );
+}
+
+// ─────────────────────────── AmneziaWG (awg://) — A5 ───────────────────────
+// `awg://` is delivered in the ninitux blob via a dedicated collector
+// (`collect_awg_subscription_uris`) — special-cased because it renders
+// through `awg_share_link` with a per-peer context, not the generic
+// `Protocol::share_link`.
+
+const AWG_DEVICE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+async fn seed_state_with_awg(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(AmneziaWg::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(WireGuard::new())).unwrap();
+
+    // vless server — proves vless stays first + intact.
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    // amneziawg server — wireguard protocol + per-server obfs + server key.
+    let aw = Server {
+        id: ServerId("aw".into()),
+        address: "203.0.113.50".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("amneziawg".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&aw).await.unwrap();
+    for (k, v) in [
+        (
+            "wireguard.server_public_key",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
+        ("amneziawg.jc", "7"),
+        ("amneziawg.jmin", "60"),
+        ("amneziawg.jmax", "140"),
+        ("amneziawg.s1", "30"),
+        ("amneziawg.s2", "90"),
+        ("amneziawg.h1", "1111111111"),
+        ("amneziawg.h2", "2022222222"),
+        ("amneziawg.h3", "333333333"),
+        ("amneziawg.h4", "444444444"),
+    ] {
+        inv.set_server_secret(&aw.id, k, v).await.unwrap();
+    }
+    inv.set_server_display_name(&aw.id, Some("Iceland"))
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, AWG_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("aw".into())).await.unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+/// An amneziawg-granted user gets the `awg://` URI — AFTER every vless,
+/// carrying the server key (userinfo), the per-peer `/32` (octet 2 for the
+/// sole peer, from `with_peers`), the minted obfs, and `s3=s4=0` (1.x).
+#[tokio::test]
+async fn vpn_router_awg_uri_appended_after_vless() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg(&dir).await;
+    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+
+    assert_eq!(lines.len(), 2, "expected 1 vless + 1 awg: {lines:?}");
+    assert!(lines[0].starts_with("vless://"), "vless first: {lines:?}");
+    let awg = lines.last().unwrap();
+    assert!(awg.starts_with("awg://"), "awg must be last: {lines:?}");
+    assert!(awg.contains("@203.0.113.50:51820"), "awg host:port: {awg}");
+    // Required fields the client's parser hard-requires.
+    assert!(
+        awg.contains("private_key=") && awg.contains("address=10.66.0.2/32"),
+        "awg must carry private_key + the per-peer /32 (octet 2): {awg}"
+    );
+    // Obfs come straight from the minted server secrets.
+    assert!(
+        awg.contains("jc=7") && awg.contains("s1=30") && awg.contains("h1=1111111111"),
+        "awg obfs must mirror the server secrets: {awg}"
+    );
+    assert!(
+        awg.contains("s3=0") && awg.contains("s4=0"),
+        "s3/s4 must be 0 (vpnctl serves AWG 1.x): {awg}"
+    );
+    assert!(
+        awg.ends_with("#Iceland%20AWG%20~tester-1"),
+        "awg fragment must carry the server display label: {awg}"
+    );
+    let first_awg = lines.iter().position(|l| l.starts_with("awg://")).unwrap();
+    let last_vless = lines
+        .iter()
+        .rposition(|l| l.starts_with("vless://"))
+        .unwrap();
+    assert!(
+        first_awg > last_vless,
+        "every vless precedes the awg line: {lines:?}"
+    );
+}
+
+/// Kill-switch: hiding `wireguard` on the server (NM-10) drops `awg://`
+/// from the subscription on the next request; vless stays intact.
+#[tokio::test]
+async fn vpn_router_hidden_wireguard_excludes_awg_vless_intact() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg(&dir).await;
+    state
+        .inv
+        .set_server_protocol_hidden(
+            &ServerId("aw".into()),
+            &ProtocolId("wireguard".into()),
+            true,
+        )
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+
+    assert!(
+        !lines.iter().any(|l| l.starts_with("awg://")),
+        "hidden wireguard must drop awg://: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("vless://")),
+        "vless must remain after hiding wireguard: {lines:?}"
+    );
+}
+
+/// Opt-in by grant: a user not granted the amneziawg server gets a
+/// vless-only blob — awg:// cannot break vless for un-opted users.
+#[tokio::test]
+async fn vpn_router_user_without_awg_grant_gets_no_awg() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg(&dir).await;
+    state
+        .inv
+        .revoke(&UserId("tester-1".into()), &ServerId("aw".into()))
+        .await
+        .unwrap();
+    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+
+    assert!(
+        !lines.iter().any(|l| l.starts_with("awg://")),
+        "un-granted user must get no awg://: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("vless://")),
+        "vless must remain: {lines:?}"
+    );
+}
+
+/// REGRESSION GUARD for the awg:// octet ↔ server `awg0.conf` match.
+/// The subscription octet = `2 + position in the FULL users_for_server list`
+/// (ORDER BY id), counting granted users WITHOUT a wireguard_pubkey — because
+/// the kernel's `awg0.conf` [Peer] octet enumerates the SAME full list,
+/// skipping pubkey-less users from OUTPUT but NOT from the index. A
+/// pubkey-less user sorting before the awg user therefore shifts the octet to
+/// `.3`. If anyone "fixes" one side to skip pubkey-less peers, the two octets
+/// diverge and the tunnel routes to the wrong /32 — this test fails first.
+#[tokio::test]
+async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(AmneziaWg::new())).unwrap();
+    reg.register_protocol(Box::new(WireGuard::new())).unwrap();
+    let aw = Server {
+        id: ServerId("aw".into()),
+        address: "203.0.113.50".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("amneziawg".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&aw).await.unwrap();
+    for (k, v) in [
+        (
+            "wireguard.server_public_key",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
+        ("amneziawg.jc", "7"),
+        ("amneziawg.jmin", "60"),
+        ("amneziawg.jmax", "140"),
+        ("amneziawg.s1", "30"),
+        ("amneziawg.s2", "90"),
+        ("amneziawg.h1", "1111111111"),
+        ("amneziawg.h2", "2022222222"),
+        ("amneziawg.h3", "333333333"),
+        ("amneziawg.h4", "444444444"),
+    ] {
+        inv.set_server_secret(&aw.id, k, v).await.unwrap();
+    }
+    // Pubkey-less granted user with a LOWER id ("aaa-novg" < "tester-1") →
+    // sorts first in users_for_server, shifting tester-1's octet to .3.
+    let novg = User {
+        id: UserId("aaa-novg".into()),
+        uuid: "00000000-0000-0000-0000-000000000000".into(),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&novg).await.unwrap();
+    inv.grant(&novg.id, &aw.id).await.unwrap();
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, AWG_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &aw.id).await.unwrap();
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+
+    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+    let awg = lines
+        .iter()
+        .find(|l| l.starts_with("awg://"))
+        .expect("awg line present");
+    assert!(
+        awg.contains("address=10.66.0.3/32"),
+        "octet must count the pubkey-less peer ahead of tester-1 (→ .3, \
+         matching the kernel's enumerate-over-all-users): {awg}"
     );
 }

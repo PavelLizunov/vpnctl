@@ -590,6 +590,114 @@ async fn collect_extra_protocol_uris(
     Ok(uris)
 }
 
+/// Collect `awg://` AmneziaWG links for the ninitux subscription blob —
+/// one per granted server that (a) runs the `amneziawg` kernel, (b) has
+/// `wireguard` VISIBLE for this (user, server) (NM-10 hidden/deny gate —
+/// `hidden=1` is the operator's advertise kill-switch), and (c) is
+/// provisioned with the per-server obfs + server keypair.
+///
+/// Special-cased (NOT in `EXTRA_PROTOCOLS`) because `awg://` is rendered
+/// by [`vpnctl_protocols::awg_share_link`], not the generic
+/// `Protocol::share_link`, and needs a per-peer [`RenderCtx::with_peers`]:
+/// the client's `/32` octet must match the server's live `awg0.conf`
+/// `[Peer]` block 1:1. Both sides derive the octet from the SAME
+/// `users_for_server` (ORDER BY id) list, so the subscription octet
+/// matches the deployed config on every pull — a polling client
+/// self-heals after any user-churn redeploy (the only stale-octet case
+/// is a never-re-pulled one-shot artefact, which this endpoint isn't).
+///
+/// The `awg://` line lands strictly AFTER every vless (and the other
+/// extras), so a client build without AmneziaWG support ignores the
+/// trailing line and keeps every vless (forward-compatible rollout, same
+/// posture as `dns-tunnel`). Failure-isolated: a server's render error is
+/// logged + skipped, never dropping a user's vless. Returns a Vec (never
+/// an error) for the same "serve what we have" contract.
+async fn collect_awg_subscription_uris(state: &AppState, user: &User) -> Vec<String> {
+    let servers = match state.inv.servers_for_user(&user.id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "awg: servers_for_user failed");
+            return Vec::new();
+        }
+    };
+    let wg_pid = vpnctl_core::ProtocolId("wireguard".to_string());
+    let mut uris: Vec<String> = Vec::new();
+    for server in &servers {
+        // `awg://` only makes sense on an AmneziaWG node (obfs is a
+        // property of that kernel); skip cleanly so a vanilla sing-box
+        // WG server never hits awg_share_link's missing-obfs error path.
+        if !server.kernels.iter().any(|k| k.0 == "amneziawg") {
+            continue;
+        }
+        // Same auto-suppress (migration 0030) skip as the vless path.
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        // NM-10 visibility: server-hidden OR per-user-denied → no awg://
+        // for this (user, server). This is the operator's kill-switch.
+        match state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+        {
+            Ok(vis) if vis.contains(&wg_pid) => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg: visibility lookup failed; skipping");
+                continue;
+            }
+        }
+        let secrets = match state.inv.list_server_secrets(&server.id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg: list_server_secrets failed; skipping");
+                continue;
+            }
+        };
+        // `with_peers` so the per-user octet matches the kernel's awg0.conf.
+        let peers = match state.inv.users_for_server(&server.id).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg: users_for_server failed; skipping");
+                continue;
+            }
+        };
+        let ctx = RenderCtx::with_peers(server, &secrets, &peers);
+        // Pass the global `user` (not a per-server-UUID-resolved copy like
+        // the vless / admin-card paths): `awg_share_link` keys off
+        // `wireguard_private`/`wireguard_pubkey` + the peer octet, never
+        // `user.uuid`, so the per-server-uuid step is intentionally omitted.
+        // The octet (2 + position in this full peers list) matches the
+        // kernel's awg0.conf [Peer] octet, which enumerates the SAME list
+        // and counts pubkey-less granted users in the index too.
+        match vpnctl_protocols::awg_share_link(&ctx, user) {
+            Ok(link) => {
+                // Re-label the fragment to the ninitux house style
+                // "{label} AWG ~{client}", matching the vless / extra lines.
+                let custom = state
+                    .inv
+                    .server_display_name(&server.id)
+                    .await
+                    .ok()
+                    .flatten();
+                let label = server_display_label(&server.id.0, custom.as_deref());
+                let fragment = format!("{label} AWG ~{}", user.id.0);
+                let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
+                uris.push(relabel_uri_fragment(&link, &encoded));
+            }
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg share_link failed; skipping this server");
+            }
+        }
+    }
+    uris
+}
+
 /// Swap the `#fragment` of a share-link URI for `encoded_fragment` (already
 /// percent-encoded). The protocols percent-encode every other `#`, so the
 /// first literal `#` is the fragment separator; a URI with no `#` just gets
@@ -934,6 +1042,11 @@ pub(crate) async fn get_config(
             }
         }
     }
+    // AmneziaWG (awg://) — special-cased after the generic extras because
+    // it renders via `awg_share_link` with a per-peer context, not the
+    // registry's `share_link`. Strictly additive + failure-isolated, lands
+    // after every vless/extra line.
+    uris.extend(collect_awg_subscription_uris(&state, &user).await);
 
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);
