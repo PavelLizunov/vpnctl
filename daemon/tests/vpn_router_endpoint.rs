@@ -550,16 +550,31 @@ async fn seed_state_with_naive(dir: &TempDir) -> AppState {
 
 /// Decode the raw-base64 (VPN-client UA) subscription into its lines.
 async fn subscription_lines(app: axum::Router, device_id: &str) -> Vec<String> {
-    let (status, body, _ct) = get(
-        app,
-        &format!("/api/v1/app/config/{device_id}"),
-        "v2rayN/6.62",
-    )
-    .await;
+    subscription_lines_for_ua(app, device_id, "v2rayN/6.62").await
+}
+
+/// Like `subscription_lines` but with a caller-chosen UA, handling BOTH
+/// response shapes: a v2ray-family UA gets raw base64; the `VPNRouter` UA
+/// gets the JSON wrapper (`{"config":"<base64>"}`) — extract `config` first.
+async fn subscription_lines_for_ua(app: axum::Router, device_id: &str, ua: &str) -> Vec<String> {
+    let (status, body, _ct) = get(app, &format!("/api/v1/app/config/{device_id}"), ua).await;
     assert_eq!(status, StatusCode::OK);
-    let decoded = BASE64_STANDARD.decode(&body).unwrap();
-    let s = String::from_utf8(decoded).unwrap();
-    s.split('\n').map(str::to_owned).collect()
+    let body_str = String::from_utf8(body).unwrap();
+    let b64 = if body_str.trim_start().starts_with('{') {
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        v.get("config")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        body_str
+    };
+    let decoded = BASE64_STANDARD.decode(b64.as_bytes()).unwrap();
+    String::from_utf8(decoded)
+        .unwrap()
+        .split('\n')
+        .map(str::to_owned)
+        .collect()
 }
 
 /// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
@@ -1617,7 +1632,7 @@ async fn seed_state_with_awg(dir: &TempDir) -> AppState {
 async fn vpn_router_awg_uri_appended_after_vless() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_awg(&dir).await;
-    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "VPNRouter").await;
 
     assert_eq!(lines.len(), 2, "expected 1 vless + 1 awg: {lines:?}");
     assert!(lines[0].starts_with("vless://"), "vless first: {lines:?}");
@@ -1668,7 +1683,7 @@ async fn vpn_router_hidden_wireguard_excludes_awg_vless_intact() {
         )
         .await
         .unwrap();
-    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "VPNRouter").await;
 
     assert!(
         !lines.iter().any(|l| l.starts_with("awg://")),
@@ -1691,7 +1706,7 @@ async fn vpn_router_user_without_awg_grant_gets_no_awg() {
         .revoke(&UserId("tester-1".into()), &ServerId("aw".into()))
         .await
         .unwrap();
-    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "VPNRouter").await;
 
     assert!(
         !lines.iter().any(|l| l.starts_with("awg://")),
@@ -1781,7 +1796,7 @@ async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
     inv.grant(&user.id, &aw.id).await.unwrap();
     let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
 
-    let lines = subscription_lines(router(state), AWG_DEVICE_ID).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "VPNRouter").await;
     let awg = lines
         .iter()
         .find(|l| l.starts_with("awg://"))
@@ -1790,5 +1805,26 @@ async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
         awg.contains("address=10.66.0.3/32"),
         "octet must count the pubkey-less peer ahead of tester-1 (→ .3, \
          matching the kernel's enumerate-over-all-users): {awg}"
+    );
+}
+
+/// UA-gate: awg:// is delivered ONLY to the custom VPNRouter client (the
+/// only consumer that parses the scheme). A generic v2ray-family client —
+/// even with wireguard visible AND the user holding WG keys — gets a blob
+/// with NO awg:// line, so advertising wireguard can't break a v2ray/clash
+/// parser fleet-wide. The VPNRouter UA (covered by the tests above) DOES
+/// receive it.
+#[tokio::test]
+async fn vpn_router_awg_ua_gated_out_for_generic_client() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "v2rayN/6.62").await;
+    assert!(
+        !lines.iter().any(|l| l.starts_with("awg://")),
+        "generic client must NOT receive awg:// (UA-gated to VPNRouter): {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("vless://")),
+        "vless must remain for the generic client: {lines:?}"
     );
 }
