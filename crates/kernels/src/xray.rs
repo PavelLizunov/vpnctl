@@ -1,0 +1,478 @@
+//! Xray-core — prebuilt static-binary kernel serving VLESS+Reality+xhttp.
+//!
+//! ## Why a separate Kernel (not sing-box)
+//!
+//! sing-box has no server-side xhttp inbound — sing-box-lx's xhttp/AWG
+//! additions are CLIENT-only (see plans/xray-xhttp.md §2). Xray-core
+//! (XTLS/Xray-core) is the only daemon that serves xhttp server-side.
+//! Different daemon ⇒ different Kernel, same split as amneziawg / caddy /
+//! wgturn vs sing-box.
+//!
+//! ## Install — prebuilt GitHub-release static binary (NOT apt, NOT an
+//! on-node build)
+//!
+//! `XTLS/Xray-core/releases/download/<tag>/Xray-linux-<arch>.zip`. A
+//! single static binary (no CGO), small enough (~20 MB) that curl-on-node
+//! is fine — unlike caddy/dns-tunnel's Go builds, there's no on-node-build
+//! RAM pressure to work around with a control-host cache. Installed to
+//! `/usr/local/bin/xray` + a hardened `xray.service` unit + config at
+//! `/usr/local/etc/xray/config.json`.
+//!
+//! [`XRAY_VERSION`] is an EXACT pin, not a floor — unlike sing-box/
+//! amneziawg's apt-channel "candidate ≥ floor" idiom, every fresh install
+//! here downloads the SAME pinned release asset, so the install gate
+//! compares for equality (reinstall on absent OR mismatched version, not
+//! "below a floor").
+//!
+//! ## Port
+//!
+//! 9443/TCP, standalone — NOT 443 (sing-box vless+reality owns it on
+//! every node that runs sing-box) and NOT 8443 (double-claimed on the
+//! `is` pilot: caddy/vless-ws TCP/8443 + sing-box tuic-v5 UDP/8443).
+//! See plans/xray-xhttp.md §6 (resolved: standalone port, option A).
+//!
+//! ## Kernel × Protocol orthogonality
+//!
+//! Adding this kernel touches ONLY this file, `crates/kernels/src/lib.rs`
+//! (`mod` + `pub use`), the companion `crates/protocols/src/vless_xhttp.rs`
+//! and its `lib.rs` entry, and one `register_kernel` line each in
+//! `daemon/src/app.rs::build_registry()` / `cli/src/registry.rs`. No edits
+//! to `core`, `ssh`, `crypto`, `inventory`, `hosters`, or `cli` beyond the
+//! registration line, per CLAUDE.md's Kernel × Protocol invariant.
+
+use async_trait::async_trait;
+use serde_json::json;
+use vpnctl_core::{
+    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
+    SshTransport, User,
+};
+
+#[derive(Debug, Default)]
+pub struct Xray;
+
+impl Xray {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Pinned `XTLS/Xray-core` release tag — the download URL embeds this
+/// exact tag (NOT "latest"), so every fresh install is reproducible.
+/// Confirmed live against the GitHub releases API on 2026-06-30 (asset
+/// names `Xray-linux-64.zip` / `Xray-linux-arm64-v8a.zip`). Bump
+/// deliberately; re-verify asset names haven't changed before bumping.
+const XRAY_VERSION: &str = "v26.3.27";
+
+const XRAY_BIN: &str = "/usr/local/bin/xray";
+const XRAY_CONFIG_DIR: &str = "/usr/local/etc/xray";
+const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
+
+/// Idempotent node-setup script run by [`Xray::ensure_installed`] on
+/// every deploy. Installs the pinned [`XRAY_VERSION`] release binary when
+/// ABSENT or at a DIFFERENT version (exact-pin equality, not a floor —
+/// see this module's doc comment), provisions a dedicated `xray` system
+/// user + config dir, and writes a hardened systemd unit (profile mirrors
+/// `wgturn.rs`'s 2026-05-18 audit-hardened unit — both are prebuilt-binary
+/// kernels with no apt-packaged unit to inherit from).
+///
+/// Built once via `LazyLock` so the version pin is interpolated exactly
+/// once and the composed script can be asserted directly in tests
+/// (`XRAY_SETUP_SCRIPT.as_str()`) without an SSH round-trip — same idiom
+/// as `sing_box::SING_BOX_SETUP_SCRIPT` / `amnezia_wg::AMNEZIAWG_SETUP_SCRIPT`.
+static XRAY_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        r#"
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
+            NEED=0
+            if ! command -v xray >/dev/null 2>&1; then
+                NEED=1
+            else
+                CUR=$(xray version 2>/dev/null | head -1 | awk '{{print $2}}')
+                [ "$CUR" = "{bare_version}" ] || NEED=1
+            fi
+            if [ "$NEED" = 1 ]; then
+                apt-get update -qq
+                apt-get install -y --no-install-recommends curl unzip ca-certificates
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                    x86_64) XASSET="Xray-linux-64.zip" ;;
+                    aarch64) XASSET="Xray-linux-arm64-v8a.zip" ;;
+                    *) echo "unsupported arch '$ARCH' for Xray-core" >&2; exit 1 ;;
+                esac
+                TMPDIR=$(mktemp -d)
+                curl -fsSL -o "$TMPDIR/xray.zip" \
+                    "https://github.com/XTLS/Xray-core/releases/download/{version}/${{XASSET}}"
+                unzip -o -q "$TMPDIR/xray.zip" -d "$TMPDIR"
+                install -o root -g root -m 0755 "$TMPDIR/xray" {bin}
+                rm -rf "$TMPDIR"
+            fi
+
+            id -u xray >/dev/null 2>&1 \
+                || useradd --system --no-create-home --shell /usr/sbin/nologin xray
+            install -d -m 0750 -o xray -g xray {config_dir}
+
+            cat > /etc/systemd/system/xray.service <<'UNIT'
+[Unit]
+Description=Xray-core (vpnctl-managed VLESS+Reality+xhttp)
+Documentation=https://github.com/XTLS/Xray-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xray
+Group=xray
+ExecStart={bin} run -c {config_path}
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={config_dir}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @raw-io @reboot @swap @debug @cpu-emulation @mount
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable xray >/dev/null 2>&1 || true
+
+            command -v xray
+            test -x {bin}
+        "#,
+        version = XRAY_VERSION,
+        bare_version = XRAY_VERSION.trim_start_matches('v'),
+        bin = XRAY_BIN,
+        config_dir = XRAY_CONFIG_DIR,
+        config_path = XRAY_CONFIG_PATH,
+    )
+});
+
+/// Validate-before-swap apply script: `xray run -test` rejects a
+/// malformed config BEFORE it touches the live file (Xray-core's `-test`
+/// flag — "Test config file only, without launching the server", verified
+/// against `main/run.go` source 2026-06-30); snapshot-swap-poll-rollback
+/// otherwise mirrors `sing_box_apply_script` / `amnezia_wg`'s
+/// `apply_config` byte-for-byte (CLAUDE.md staging-deploy lesson #3:
+/// `reload-or-restart` returning 0 does NOT mean the service stayed up).
+fn xray_apply_script() -> String {
+    format!(
+        r#"
+            set -eu
+            xray run -test -c {config_path}.new
+            if [ -f {config_path} ]; then
+                cp -a {config_path} {config_path}.bak 2>/dev/null || true
+            fi
+            mv {config_path}.new {config_path}
+            chown xray:xray {config_path}
+            chmod 0640 {config_path}
+            systemctl reload-or-restart xray
+
+            for i in 1 2 3 4 5 6 7 8; do
+                state=$(systemctl is-active xray || true)
+                if [ "$state" = "active" ]; then
+                    rm -f {config_path}.bak
+                    exit 0
+                fi
+                sleep 1
+            done
+
+            echo "xray did not become active. Last 20 log lines:" >&2
+            journalctl -u xray --no-pager -n 20 >&2 || true
+            if [ -f {config_path}.bak ]; then
+                echo "rolling back to previous xray config" >&2
+                mv {config_path}.bak {config_path} || true
+                chown xray:xray {config_path} || true
+                chmod 0640 {config_path} || true
+                systemctl reload-or-restart xray || true
+            fi
+            exit 1
+        "#,
+        config_path = XRAY_CONFIG_PATH,
+    )
+}
+
+/// Idempotent, ufw-guarded shell snippet opening every `(transport, port)`
+/// in `ports`. Deliberately duplicated from `sing_box::firewall_open_script`
+/// rather than shared — this codebase prefers small duplication over
+/// cross-kernel coupling at this boundary (see `wgturn.rs`'s `WGTURN_PORT`
+/// constant, duplicated from its protocol-side mirror for the same reason).
+fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
+    let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
+    if uniq.is_empty() {
+        return None;
+    }
+    let mut s = String::from("if command -v ufw >/dev/null 2>&1; then\n");
+    for (transport, port) in &uniq {
+        s.push_str(&format!(
+            "  ufw allow {port}/{transport} >/dev/null 2>&1 || true\n"
+        ));
+    }
+    s.push_str("fi\n");
+    Some(s)
+}
+
+#[async_trait]
+impl Kernel for Xray {
+    fn id(&self) -> KernelId {
+        KernelId("xray".to_string())
+    }
+
+    fn supported_protocols(&self) -> Vec<ProtocolId> {
+        vec![ProtocolId("vless+xhttp".to_string())]
+    }
+
+    async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
+        ssh.exec(XRAY_SETUP_SCRIPT.as_str()).await?;
+        Ok(())
+    }
+
+    fn render_config(
+        &self,
+        ctx: &RenderCtx<'_>,
+        users: &[User],
+        protocols: &[&dyn Protocol],
+    ) -> Result<Vec<u8>> {
+        // Locate the vless+xhttp protocol — this kernel serves nothing
+        // else. Registry::validate_server should have caught a mismatch
+        // earlier; this is the defense-in-depth layer (mirrors
+        // amnezia_wg::render_config).
+        let proto = protocols
+            .iter()
+            .find(|p| p.id() == ProtocolId("vless+xhttp".to_string()))
+            .ok_or_else(|| {
+                CoreError::Render(
+                    "xray kernel requires the vless+xhttp protocol in `protocols`".into(),
+                )
+            })?;
+        let inbound = proto.server_inbound(ctx, users)?;
+
+        // Xray-core's top-level config shape differs from sing-box's:
+        // `log.loglevel` (not `log.level`), `outbounds[].protocol` (not
+        // `.type`) — verified against `infra/conf` 2026-06-30, NOT a
+        // copy-paste of the sing-box shape.
+        let cfg = json!({
+            "log": { "loglevel": "warning" },
+            "inbounds": [inbound],
+            "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+        });
+        serde_json::to_vec_pretty(&cfg).map_err(CoreError::from)
+    }
+
+    async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
+        ssh.upload(&format!("{XRAY_CONFIG_PATH}.new"), config)
+            .await?;
+        ssh.exec(&xray_apply_script()).await?;
+        Ok(())
+    }
+
+    async fn open_firewall(
+        &self,
+        ssh: &dyn SshTransport,
+        protocols: &[&dyn Protocol],
+    ) -> Result<()> {
+        let ports: Vec<(&str, u16)> = protocols
+            .iter()
+            .flat_map(|p| p.listen_ports().iter().copied())
+            .collect();
+        if let Some(script) = firewall_open_script(&ports) {
+            ssh.exec(&script).await?;
+        }
+        Ok(())
+    }
+
+    async fn restart(&self, ssh: &dyn SshTransport) -> Result<()> {
+        ssh.exec("systemctl restart xray").await?;
+        Ok(())
+    }
+
+    async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
+        let active = ssh
+            .exec("systemctl is-active xray")
+            .await?
+            .trim()
+            .eq("active");
+        let version = ssh.exec("xray version 2>&1 | head -1").await.ok();
+        Ok(KernelStatus {
+            active,
+            version,
+            uptime_seconds: None,
+        })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use vpnctl_core::{Server, ServerId};
+
+    fn dummy_server() -> Server {
+        Server {
+            id: ServerId("xray-node-1".into()),
+            address: "203.0.113.9".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("xray".into())],
+            enabled_protocols: vec![ProtocolId("vless+xhttp".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    #[test]
+    fn id_returns_xray() {
+        assert_eq!(Xray::new().id(), KernelId("xray".into()));
+    }
+
+    #[test]
+    fn supported_protocols_only_vless_xhttp() {
+        assert_eq!(
+            Xray::new().supported_protocols(),
+            vec![ProtocolId("vless+xhttp".into())]
+        );
+    }
+
+    #[test]
+    fn render_config_missing_protocol_returns_render_error() {
+        let s = dummy_server();
+        let secrets = HashMap::new();
+        let ctx = RenderCtx::new(&s, &secrets);
+        let err = Xray::new().render_config(&ctx, &[], &[]).unwrap_err();
+        match err {
+            CoreError::Render(msg) => {
+                assert!(
+                    msg.contains("vless+xhttp"),
+                    "msg should mention vless+xhttp: {msg}"
+                );
+            }
+            other => panic!("expected Render error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_config_happy_path_uses_xray_top_level_shape() {
+        use vpnctl_protocols::VlessXhttp;
+
+        let s = dummy_server();
+        let mut secrets = HashMap::new();
+        secrets.insert("vless.private_key".into(), "priv".into());
+        secrets.insert("vless.public_key".into(), "pub".into());
+        secrets.insert("vless.short_id".into(), "deadbeef".into());
+        secrets.insert("vlessxhttp.path".into(), "Ab3x9Zq2Kp7Lm".into());
+        let ctx = RenderCtx::new(&s, &secrets);
+        let proto = VlessXhttp::new();
+        let bytes = Xray::new()
+            .render_config(&ctx, &[], &[&proto as &dyn Protocol])
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Xray-core shape, NOT sing-box's (log.loglevel not log.level,
+        // outbounds[].protocol not .type).
+        assert_eq!(cfg["log"]["loglevel"], "warning");
+        assert_eq!(cfg["outbounds"][0]["protocol"], "freedom");
+        assert_eq!(cfg["inbounds"][0]["protocol"], "vless");
+        assert_eq!(cfg["inbounds"][0]["port"], 9443);
+        assert_eq!(cfg["inbounds"][0]["streamSettings"]["network"], "xhttp");
+        // Kernel passes the protocol's envelope through untouched —
+        // single-inbound passthrough, no merging.
+        assert_eq!(cfg["inbounds"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn setup_script_pins_exact_version_not_a_floor() {
+        let s = XRAY_SETUP_SCRIPT.as_str();
+        assert!(
+            s.contains(&format!(
+                "[ \"$CUR\" = \"{}\" ]",
+                XRAY_VERSION.trim_start_matches('v')
+            )),
+            "install gate must compare for EXACT equality against the bare pinned version: {s}"
+        );
+        assert!(
+            !s.contains("dpkg --compare-versions"),
+            "xray is not apt-installed — no package version to compare against a floor: {s}"
+        );
+        assert!(
+            s.contains(XRAY_VERSION),
+            "the pinned tag must appear in the download URL: {s}"
+        );
+        assert!(s.contains("Xray-linux-64.zip"), "x86_64 asset name: {s}");
+        assert!(
+            s.contains("Xray-linux-arm64-v8a.zip"),
+            "arm64 asset name: {s}"
+        );
+        assert!(s.contains("set -eu"), "fail-fast shell flags: {s}");
+    }
+
+    #[test]
+    fn setup_script_provisions_dedicated_system_user_and_hardened_unit() {
+        let s = XRAY_SETUP_SCRIPT.as_str();
+        assert!(s.contains("useradd --system"), "must not run as root: {s}");
+        assert!(s.contains("User=xray") && s.contains("Group=xray"));
+        assert!(s.contains("NoNewPrivileges=true"));
+        assert!(s.contains("ProtectSystem=strict"));
+    }
+
+    #[test]
+    fn apply_script_validates_before_swap() {
+        let s = xray_apply_script();
+        let test_idx = s.find("xray run -test").expect("must validate before swap");
+        let swap_idx = s.find("mv ").expect("must swap the config into place");
+        assert!(
+            test_idx < swap_idx,
+            "validation must happen BEFORE the mv swap: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_snapshots_before_overwrite_and_rolls_back_on_failure() {
+        let s = xray_apply_script();
+        assert!(s.contains("cp -a"), "must snapshot the live config: {s}");
+        assert!(s.contains(".bak"), "snapshot must use a .bak suffix: {s}");
+        assert!(
+            s.contains("rolling back"),
+            "must roll back on activation failure: {s}"
+        );
+        assert!(
+            s.contains("journalctl -u xray"),
+            "must dump diagnostics on failure: {s}"
+        );
+    }
+
+    #[test]
+    fn firewall_open_script_opens_each_port_idempotently_guarded() {
+        let s = firewall_open_script(&[("tcp", 9443)]).unwrap();
+        assert!(s.contains("command -v ufw"));
+        assert!(s.contains("ufw allow 9443/tcp"));
+        assert!(s.contains("|| true"));
+    }
+
+    #[test]
+    fn firewall_open_script_empty_ports_is_none() {
+        assert!(firewall_open_script(&[]).is_none());
+    }
+}

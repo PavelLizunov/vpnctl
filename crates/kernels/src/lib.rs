@@ -4,7 +4,8 @@
 //!
 //!   1. Создаёшь `crates/kernels/src/<my_kernel>.rs` с `impl Kernel for MyKernel`.
 //!   2. `pub use <my_kernel>::MyKernel;` ниже.
-//!   3. В `cli/src/main.rs` добавляешь одну строку `reg.register_kernel(...)`.
+//!   3. В `cli/src/registry.rs` (и `daemon/src/app.rs::build_registry()`)
+//!      добавляешь одну строку `reg.register_kernel(...)`.
 //!
 //! Никакие другие крейты править не надо.
 
@@ -13,12 +14,14 @@ mod caddy;
 mod dns_tunnel;
 mod sing_box;
 mod wgturn;
+mod xray;
 
 pub use amnezia_wg::AmneziaWg;
 pub use caddy::Caddy;
 pub use dns_tunnel::DnsTunnel;
 pub use sing_box::SingBox;
 pub use wgturn::WgTurn;
+pub use xray::Xray;
 
 /// Reserved-ports pre-apply guard (migration 0028). Re-exported here
 /// so the daemon's deploy handler + the CLI's `vpnctl deploy` can

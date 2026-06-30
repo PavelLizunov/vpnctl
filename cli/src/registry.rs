@@ -3,11 +3,11 @@
 
 use vpnctl_core::Registry;
 use vpnctl_kernels::{
-    AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel,
+    AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel, Xray,
 };
 use vpnctl_protocols::{
     AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-    VlessReality, VlessWs, WgTurn as WgTurnProtocol, WireGuard,
+    VlessReality, VlessWs, VlessXhttp, WgTurn as WgTurnProtocol, WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -41,6 +41,8 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // `dns-tunnel:fingerprint`, `dns-tunnel:resolvers` (opt),
     // `dns-tunnel:engine` (opt).
     reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
+    // Xray-core — see crates/kernels/src/xray.rs module doc-comment.
+    reg.register_kernel(Box::new(Xray::new()))?;
 
     // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
     // All stateless — real REALITY keys / TUIC certs / WG private keys
@@ -85,6 +87,8 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // user's per-user `User.uuid`, same one used for VLESS-REALITY). DPI
     // risk Moderate (last-resort; НСДИ is monitored).
     reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
+    // vless+xhttp — see crates/protocols/src/vless_xhttp.rs.
+    reg.register_protocol(Box::new(VlessXhttp::new()))?;
 
     Ok(reg)
 }
