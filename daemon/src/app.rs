@@ -1482,11 +1482,11 @@ fn admin_router(state: AppState) -> Router {
 /// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     use vpnctl_kernels::{
-        AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel,
+        AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel, Xray,
     };
     use vpnctl_protocols::{
         AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-        VlessReality, VlessWs, WgTurn as WgTurnProtocol, WireGuard,
+        VlessReality, VlessWs, VlessXhttp, WgTurn as WgTurnProtocol, WireGuard,
     };
 
     let mut reg = Registry::new();
@@ -1504,6 +1504,10 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // Owns TWO units (slipstream-server UDP:53 + loopback VLESS sing-box).
     // MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
+    // Xray-core — serves VLESS+Reality+xhttp on a standalone port
+    // (9443/TCP), companion to sing-box-lx's client-side xhttp support.
+    // MUST stay in lockstep with cli/registry.rs.
+    reg.register_kernel(Box::new(Xray::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
@@ -1524,6 +1528,10 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // client → appears_in_sing_box_sub() is false. MUST stay in lockstep
     // with cli/registry.rs.
     reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
+    // vless+xhttp — Xray-core-served xhttp transport, reuses the REALITY
+    // keypair vless+reality already mints. MUST stay in lockstep with
+    // cli/registry.rs.
+    reg.register_protocol(Box::new(VlessXhttp::new()))?;
     Ok(reg)
 }
 
@@ -1556,6 +1564,7 @@ mod registry_drift_guard {
             "trojan",
             "tuic-v5",
             "vless+reality",
+            "vless+xhttp",
             "vless-ws",
             "wgturn",
             "wireguard",
@@ -1564,9 +1573,16 @@ mod registry_drift_guard {
         .to_vec();
         want_protos.sort();
 
-        let mut want_kernels = ["amneziawg", "caddy", "dns-tunnel", "sing-box", "wgturn"]
-            .map(String::from)
-            .to_vec();
+        let mut want_kernels = [
+            "amneziawg",
+            "caddy",
+            "dns-tunnel",
+            "sing-box",
+            "wgturn",
+            "xray",
+        ]
+        .map(String::from)
+        .to_vec();
         want_kernels.sort();
 
         assert_eq!(protos, want_protos, "daemon protocol registry drifted");
