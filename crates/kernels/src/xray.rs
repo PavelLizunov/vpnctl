@@ -67,6 +67,16 @@ const XRAY_BIN: &str = "/usr/local/bin/xray";
 const XRAY_CONFIG_DIR: &str = "/usr/local/etc/xray";
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 
+/// Staging path for the uploaded-but-not-yet-applied config. MUST end in
+/// `.json` — unlike sing-box/amneziawg's validators, Xray-core's `run
+/// -test` auto-detects the config FORMAT from the file extension (see
+/// `main/run.go`'s `getRegepxByFormat`), so a `config.json.new`-style
+/// staging name fails with "Failed to get format of ..." even though the
+/// content is valid JSON. Caught live on the `is` pilot 2026-06-30 — same
+/// bug class as the AWG2 `apply_config` fix (PR #74): a CLI tool that
+/// infers behavior from the path string, not just its content.
+const XRAY_CONFIG_STAGING_PATH: &str = "/usr/local/etc/xray/config.staging.json";
+
 /// Idempotent node-setup script run by [`Xray::ensure_installed`] on
 /// every deploy. Installs the pinned [`XRAY_VERSION`] release binary when
 /// ABSENT or at a DIFFERENT version (exact-pin equality, not a floor —
@@ -175,15 +185,25 @@ UNIT
 /// otherwise mirrors `sing_box_apply_script` / `amnezia_wg`'s
 /// `apply_config` byte-for-byte (CLAUDE.md staging-deploy lesson #3:
 /// `reload-or-restart` returning 0 does NOT mean the service stayed up).
+///
+/// Validates [`XRAY_CONFIG_STAGING_PATH`] (a `.json`-suffixed path), NOT
+/// `{config_path}.new` — see that constant's doc comment for why the
+/// extension matters to Xray-core's own format auto-detection. The `1>&2`
+/// on the test invocation matters too: Xray prints its actual failure
+/// reason ("Failed to start: ...") via `fmt.Println` to STDOUT, not
+/// stderr, so without the redirect a failed validation surfaces an empty
+/// `stderr=""` in the deploy's error payload — exactly what happened on
+/// the live `is` failure this fixes (the real reason was invisible until
+/// reproduced manually over SSH).
 fn xray_apply_script() -> String {
     format!(
         r#"
             set -eu
-            xray run -test -c {config_path}.new
+            xray run -test -c {staging_path} 1>&2
             if [ -f {config_path} ]; then
                 cp -a {config_path} {config_path}.bak 2>/dev/null || true
             fi
-            mv {config_path}.new {config_path}
+            mv {staging_path} {config_path}
             chown xray:xray {config_path}
             chmod 0640 {config_path}
             systemctl reload-or-restart xray
@@ -208,6 +228,7 @@ fn xray_apply_script() -> String {
             fi
             exit 1
         "#,
+        staging_path = XRAY_CONFIG_STAGING_PATH,
         config_path = XRAY_CONFIG_PATH,
     )
 }
@@ -280,8 +301,7 @@ impl Kernel for Xray {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        ssh.upload(&format!("{XRAY_CONFIG_PATH}.new"), config)
-            .await?;
+        ssh.upload(XRAY_CONFIG_STAGING_PATH, config).await?;
         ssh.exec(&xray_apply_script()).await?;
         Ok(())
     }
@@ -445,6 +465,38 @@ mod tests {
         assert!(
             test_idx < swap_idx,
             "validation must happen BEFORE the mv swap: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_validates_a_json_suffixed_staging_path_not_dot_new() {
+        // Regression guard for the live `is` failure (2026-06-30): Xray-
+        // core's `run -test` infers config FORMAT from the file
+        // extension, so validating a `.new`-suffixed path fails with
+        // "Failed to get format of ..." even on valid JSON content. The
+        // staging path must end in `.json`.
+        let s = xray_apply_script();
+        assert!(
+            s.contains("xray run -test -c /usr/local/etc/xray/config.staging.json"),
+            "must validate the .json-suffixed staging path, not a .new-suffixed one: {s}"
+        );
+        assert!(
+            !s.contains("config.json.new"),
+            "must not reintroduce the .new-suffixed staging path: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_redirects_test_command_stdout_to_stderr() {
+        // Xray prints its real failure reason ("Failed to start: ...")
+        // via fmt.Println to STDOUT, not stderr — without `1>&2` on this
+        // exact command, a failed validation surfaces an empty stderr to
+        // the operator (exactly what happened on the live `is` failure
+        // this regression test pins).
+        let s = xray_apply_script();
+        assert!(
+            s.contains("xray run -test -c /usr/local/etc/xray/config.staging.json 1>&2"),
+            "the validate command must redirect its stdout to stderr: {s}"
         );
     }
 
