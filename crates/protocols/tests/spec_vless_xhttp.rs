@@ -158,7 +158,7 @@ fn server_inbound_happy_path_full_shape() {
     assert_eq!(v["streamSettings"]["security"].as_str(), Some("reality"));
     assert_eq!(
         v["streamSettings"]["xhttpSettings"]["path"].as_str(),
-        Some(&*format!("/{PATH_SECRET}"))
+        Some(&*format!("/{PATH_SECRET}/"))
     );
     assert_eq!(
         v["streamSettings"]["xhttpSettings"]["mode"].as_str(),
@@ -332,7 +332,7 @@ fn client_config_happy_path_full_shape() {
     assert_eq!(v["transport"]["type"].as_str(), Some("xhttp"));
     assert_eq!(
         v["transport"]["path"].as_str(),
-        Some(&*format!("/{PATH_SECRET}"))
+        Some(&*format!("/{PATH_SECRET}/"))
     );
     assert_eq!(v["transport"]["mode"].as_str(), Some("auto"));
 }
@@ -419,7 +419,7 @@ fn share_link_happy_path_byte_exact() {
     let link = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
     let expected = format!(
         "vless://uuid-alice@203.0.113.42:9443?encryption=none&security=reality&sni=yahoo.com\
-         &fp=randomized&pbk={PUBLIC_KEY}&sid={SHORT_ID}&type=xhttp&path=%2F{PATH_SECRET}&mode=auto#alice"
+         &fp=randomized&pbk={PUBLIC_KEY}&sid={SHORT_ID}&type=xhttp&path=%2F{PATH_SECRET}%2F&mode=auto#alice"
     );
     assert_eq!(link, expected);
 }
