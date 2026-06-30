@@ -45,6 +45,28 @@
 //! `vless_reality.rs` that every test in this file's companion spec
 //! exists to pin.
 //!
+//! ## Trailing slash on `path` — REQUIRED, not cosmetic
+//!
+//! Every rendered path ends in `/` (`/<secret>/`, not `/<secret>`). Live
+//! failure on `is` (2026-07-01, caught by the VPNRouter client dev): with
+//! NO trailing slash, EVERY xhttp request 404'd. Root cause, sourced from
+//! both ends —
+//!   * Xray-core's server-side `GetNormalizedPath()`
+//!     (`infra/conf/splithttp/config.go`) ALWAYS appends a trailing slash
+//!     to the configured path before doing `strings.HasPrefix` matching
+//!     in `hub.go`'s `ServeHTTP`.
+//!   * `auto` mode + REALITY resolves to `stream-one` in sing-box-lx
+//!     (matching genuine Xray client behavior, see their SPECS/011 fix),
+//!     which sends a single request to the BARE configured path with NO
+//!     trailing slash added on top.
+//!
+//! A path with no trailing slash is therefore always strictly SHORTER
+//! than the server's normalized match target, so `HasPrefix` can never
+//! succeed — guaranteed 404 on every request, not a flaky/partial
+//! failure. Baking the slash into every rendered occurrence (server
+//! inbound, client outbound, share-link) closes the gap from both ends
+//! at once.
+//!
 //! **Stateless**, like every other Protocol in this crate.
 
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -213,7 +235,7 @@ impl Protocol for VlessXhttp {
                 "network": "xhttp",
                 "security": "reality",
                 "xhttpSettings": {
-                    "path": format!("/{path}"),
+                    "path": format!("/{path}/"),
                     "mode": mode
                 },
                 "realitySettings": {
@@ -259,7 +281,7 @@ impl Protocol for VlessXhttp {
             },
             "transport": {
                 "type": "xhttp",
-                "path": format!("/{path}"),
+                "path": format!("/{path}/"),
                 "mode": mode
             }
         }))
@@ -279,7 +301,7 @@ impl Protocol for VlessXhttp {
         // family; there is no legacy bash link to match byte-for-byte
         // (xhttp has no bash-era predecessor).
         Ok(format!(
-            "vless://{uuid}@{addr}:{port}?encryption=none&security=reality&sni={sni}&fp={fp}&pbk={pbk}&sid={sid}&type=xhttp&path=%2F{path}&mode={mode}#{name}",
+            "vless://{uuid}@{addr}:{port}?encryption=none&security=reality&sni={sni}&fp={fp}&pbk={pbk}&sid={sid}&type=xhttp&path=%2F{path}%2F&mode={mode}#{name}",
             uuid = user.uuid,
             addr = host_for_url(&ctx.server.address),
             port = VLESS_XHTTP_PORT,
@@ -388,7 +410,7 @@ mod tests {
         assert_eq!(inbound["streamSettings"]["security"], "reality");
         assert_eq!(
             inbound["streamSettings"]["xhttpSettings"]["path"],
-            "/Ab3x9Zq2Kp7Lm"
+            "/Ab3x9Zq2Kp7Lm/"
         );
         assert_eq!(
             inbound["streamSettings"]["realitySettings"]["dest"],
@@ -413,7 +435,7 @@ mod tests {
             .unwrap();
         assert_eq!(cfg["type"], "vless");
         assert_eq!(cfg["transport"]["type"], "xhttp");
-        assert_eq!(cfg["transport"]["path"], "/Ab3x9Zq2Kp7Lm");
+        assert_eq!(cfg["transport"]["path"], "/Ab3x9Zq2Kp7Lm/");
         assert_eq!(cfg["transport"]["mode"], "auto");
         assert!(
             cfg.get("flow").is_none(),
@@ -429,11 +451,47 @@ mod tests {
         let link = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
         assert_eq!(
             link,
-            "vless://uuid-alice@203.0.113.9:9443?encryption=none&security=reality&sni=yahoo.com&fp=randomized&pbk=pub-key-material&sid=deadbeef&type=xhttp&path=%2FAb3x9Zq2Kp7Lm&mode=auto#alice"
+            "vless://uuid-alice@203.0.113.9:9443?encryption=none&security=reality&sni=yahoo.com&fp=randomized&pbk=pub-key-material&sid=deadbeef&type=xhttp&path=%2FAb3x9Zq2Kp7Lm%2F&mode=auto#alice"
         );
         assert!(
             !link.contains("flow="),
             "xhttp share-link must NOT contain a flow param: {link}"
+        );
+    }
+
+    #[test]
+    fn path_always_carries_a_trailing_slash_in_every_render() {
+        // Regression guard for the live `is` failure (2026-07-01): Xray's
+        // server-side GetNormalizedPath() always appends a trailing slash
+        // before prefix-matching, while sing-box-lx's stream-one (the
+        // mode `auto`+reality resolves to) sends a bare path with NO
+        // trailing slash added — a configured path missing the trailing
+        // slash 404s on EVERY request, deterministically.
+        let s = dummy_server();
+        let secrets = full_secrets();
+        let ctx = RenderCtx::new(&s, &secrets);
+        let p = VlessXhttp::new();
+
+        let inbound = p.server_inbound(&ctx, &[]).unwrap();
+        let inbound_path = inbound["streamSettings"]["xhttpSettings"]["path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            inbound_path.ends_with('/'),
+            "server_inbound path must end in '/': {inbound_path:?}"
+        );
+
+        let client = p.client_config(&ctx, &user("alice")).unwrap();
+        let client_path = client["transport"]["path"].as_str().unwrap();
+        assert!(
+            client_path.ends_with('/'),
+            "client_config path must end in '/': {client_path:?}"
+        );
+
+        let link = p.share_link(&ctx, &user("alice")).unwrap();
+        assert!(
+            link.contains("path=%2FAb3x9Zq2Kp7Lm%2F"),
+            "share_link path query param must end in an (encoded) trailing slash: {link}"
         );
     }
 
