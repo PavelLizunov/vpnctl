@@ -313,6 +313,10 @@ mod tests {
         );
     }
 
+    // ponytail: unix-only — spawns `/bin/echo`, absent on Windows (spawn
+    // errors before the stdout→Step→Ok wiring under test can run). vpnctld
+    // is Linux-only in prod; skip on Windows so the local dev gate passes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_update_streams_subprocess_stdout_then_ok_on_success() {
         let _serial = test_gate_serializer().lock().await;
@@ -374,6 +378,9 @@ mod tests {
         assert!(stream.next().await.is_none(), "stream must end after Error");
     }
 
+    // ponytail: unix-only — spawns `/bin/false`, absent on Windows. Same
+    // Linux-only rationale as the /bin/echo test above.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_update_emits_error_when_subprocess_exits_nonzero() {
         let _serial = test_gate_serializer().lock().await;
