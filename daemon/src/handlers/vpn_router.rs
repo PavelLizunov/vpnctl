@@ -169,19 +169,18 @@ pub(crate) fn is_vpn_client_ua_v2ray_family(ua: &str) -> bool {
     VPN_CLIENT_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
-/// UAs of clients that can parse the `awg://` (AmneziaWG) scheme. ONLY the
-/// operator's custom VPNRouter app understands it; every generic
-/// v2ray/clash/sing-box client on this endpoint would at best ignore the
-/// unknown trailing line and at worst (strict base64-list parser) drop the
-/// whole config. So `awg://` is UA-gated to these clients only — a generic
-/// client never sees it, eliminating the forward-compat risk of advertising
-/// a custom scheme fleet-wide. The marker is the operator client's UA
-/// (`VPNRouter`); extend the list if a second AWG-aware client appears.
-const AWG_CAPABLE_CLIENT_UAS: &[&str] = &["vpnrouter"];
+/// UAs of the operator's custom VPNRouter client — the only one that speaks
+/// the custom subscription schemes (`awg://` AmneziaWG + `vless://…type=xhttp`).
+/// A generic v2ray/clash/sing-box client on this endpoint would at best ignore
+/// such a line and at worst (strict parser) drop the whole config, so those
+/// schemes are UA-gated to VPNRouter only — a generic client never sees them,
+/// eliminating the forward-compat risk of advertising a custom transport
+/// fleet-wide. Extend the list if a second custom-scheme-aware client appears.
+const VPNROUTER_CLIENT_UAS: &[&str] = &["vpnrouter"];
 
-fn is_awg_capable_client_ua(ua: &str) -> bool {
+fn is_vpnrouter_client_ua(ua: &str) -> bool {
     let lower = ua.to_ascii_lowercase();
-    AWG_CAPABLE_CLIENT_UAS.iter().any(|kw| lower.contains(kw))
+    VPNROUTER_CLIENT_UAS.iter().any(|kw| lower.contains(kw))
 }
 
 /// V2Ray/Xray-core clients in the v2ray family that do NOT speak the
@@ -1057,14 +1056,31 @@ pub(crate) async fn get_config(
             }
         }
     }
-    // AmneziaWG (awg://) — special-cased after the generic extras because
-    // it renders via `awg_share_link` with a per-peer context, not the
-    // registry's `share_link`. Strictly additive + failure-isolated, lands
-    // after every vless/extra line. UA-gated to the custom VPNRouter client
-    // (the only consumer that parses `awg://`); generic clients never see it,
-    // so advertising wireguard fleet-wide can't break a v2ray/clash parser.
-    if is_awg_capable_client_ua(ua) {
+    // Custom schemes — UA-gated to the operator's VPNRouter client, the only
+    // consumer that parses them; generic v2ray/clash clients never see them,
+    // so advertising a custom transport fleet-wide can't break their parser.
+    if is_vpnrouter_client_ua(ua) {
+        // AmneziaWG (awg://) — special renderer (`awg_share_link`, per-peer
+        // context), gated on `wireguard` visibility + the minted obfs.
         uris.extend(collect_awg_subscription_uris(&state, &user).await);
+        // vless+xhttp — renders via the generic `share_link` (a `vless://…
+        // type=xhttp` URI), gated on `vlessxhttp.path` + NM-10 visibility.
+        // Same failure-isolation as the other extras; lands after every vless.
+        let xhttp_pid = vpnctl_core::ProtocolId("vless+xhttp".to_string());
+        match collect_extra_protocol_uris(
+            &state,
+            &user,
+            &xhttp_pid,
+            "XHTTP",
+            Some("vlessxhttp.path"),
+        )
+        .await
+        {
+            Ok(extra) => uris.extend(extra),
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "vless+xhttp uri collection failed; skipping");
+            }
+        }
     }
 
     let Some(config) = make_config_blob(&uris) else {
