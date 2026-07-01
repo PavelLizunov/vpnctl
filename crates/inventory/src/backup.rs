@@ -1032,6 +1032,12 @@ mod tests {
         assert!(removed > 0, "should have removed some old snapshots");
     }
 
+    // ponytail: unix-only — restore_from renames tmp over db_path; POSIX
+    // allows rename over a just-closed SQLite path, NTFS refuses it (async
+    // close + lingering -wal/-shm handles). vpnctld is Linux-only in prod,
+    // so this asserts POSIX fs semantics. Skipped on Windows so the local
+    // dev gate passes; still runs on Linux + CI.
+    #[cfg(unix)]
     #[tokio::test]
     async fn restore_swaps_db_when_snapshot_valid() {
         let dir = tempfile::tempdir().unwrap();
