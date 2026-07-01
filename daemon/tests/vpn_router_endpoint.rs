@@ -32,8 +32,8 @@ use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_kernels::{AmneziaWg, Caddy, SingBox};
-use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, WireGuard};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
+use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, VlessXhttp, WireGuard};
 use vpnctld::{AppState, router};
 
 const TEST_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
@@ -1826,5 +1826,144 @@ async fn vpn_router_awg_ua_gated_out_for_generic_client() {
     assert!(
         lines.iter().any(|l| l.starts_with("vless://")),
         "vless must remain for the generic client: {lines:?}"
+    );
+}
+
+// ───────────────────────── vless+xhttp (Xray) in subscription ─────────────
+// Delivered via the generic share_link path but UA-gated to VPNRouter, same
+// as awg — a `vless://…type=xhttp` line only the VPNRouter client can use.
+
+const XHTTP_DEVICE_ID: &str = "abcdef0123456789abcdef0123456789";
+
+async fn seed_state_with_xhttp(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_kernel(Box::new(Xray::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(VlessXhttp::new())).unwrap();
+
+    // vless+reality server (proves vless stays first).
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    // xray server serving vless+xhttp (reuses the reality secrets + path).
+    let xr = Server {
+        id: ServerId("xr".into()),
+        address: "203.0.113.60".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("xray".into())],
+        enabled_protocols: vec![ProtocolId("vless+xhttp".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&xr).await.unwrap();
+    for (k, v) in [
+        ("vless.public_key", "PUB_xr"),
+        ("vless.private_key", "PRIV_xr"),
+        ("vless.short_id", "abcdef12"),
+        ("vless.sni", "yahoo.com"),
+        ("vlessxhttp.path", "somepath"),
+    ] {
+        inv.set_server_secret(&xr.id, k, v).await.unwrap();
+    }
+    inv.set_server_display_name(&xr.id, Some("Iceland"))
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, XHTTP_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("xr".into())).await.unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+/// VPNRouter gets the `vless://…type=xhttp` line (after vless), carrying the
+/// reality pbk/sid + the xhttp path.
+#[tokio::test]
+async fn vpn_router_xhttp_delivered_to_vpnrouter_after_vless() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_xhttp(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), XHTTP_DEVICE_ID, "VPNRouter").await;
+
+    let xhttp = lines
+        .iter()
+        .find(|l| l.contains("type=xhttp"))
+        .expect("expected a vless://…type=xhttp line for VPNRouter");
+    assert!(
+        xhttp.starts_with("vless://"),
+        "xhttp line is a vless URI: {xhttp}"
+    );
+    assert!(
+        xhttp.contains("@203.0.113.60:9443"),
+        "xhttp host:port: {xhttp}"
+    );
+    assert!(
+        xhttp.contains("pbk=PUB_xr") && xhttp.contains("sid=abcdef12"),
+        "xhttp reuses the reality pbk/sid: {xhttp}"
+    );
+    // Lands after every vless+reality line.
+    let first_x = lines.iter().position(|l| l.contains("type=xhttp")).unwrap();
+    let last_reality = lines
+        .iter()
+        .rposition(|l| l.starts_with("vless://") && !l.contains("type=xhttp"))
+        .unwrap();
+    assert!(
+        first_x > last_reality,
+        "xhttp must land after vless: {lines:?}"
+    );
+}
+
+/// A generic client (v2ray) must NOT get the xhttp line (UA-gated), but keeps
+/// its vless+reality.
+#[tokio::test]
+async fn vpn_router_xhttp_ua_gated_out_for_generic_client() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_xhttp(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), XHTTP_DEVICE_ID, "v2rayN/6.62").await;
+    assert!(
+        !lines.iter().any(|l| l.contains("type=xhttp")),
+        "generic client must NOT receive type=xhttp (UA-gated): {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("vless://")),
+        "vless+reality must remain for the generic client: {lines:?}"
     );
 }
