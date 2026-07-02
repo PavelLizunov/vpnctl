@@ -1023,6 +1023,7 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
 
     let app = router(s);
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/admin/users/u0")
@@ -1056,16 +1057,38 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
         occurrences, 1,
         "sub_token should appear exactly once (inside the sub URL), got {occurrences}"
     );
-    // Both granted servers appear in the "Granted servers" list.
+    // ui-audit §4 — the granted-server grid lives on the access tab
+    // (lists EVERY granted server, incl. s1 which has no secrets); the
+    // rendered share-links live on the delivery tab (only s0 renders).
+    let fetch_tab = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("host", "192.168.0.236:18402")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+    };
+    let html_access = fetch_tab("/admin/users/u0/access").await;
+    // Both granted servers appear in the access grid.
     for id in ["s0", "s1"] {
-        assert!(html.contains(id), "granted server {id} missing");
+        assert!(html_access.contains(id), "granted server {id} missing");
     }
     // At least one share-link rendered (s0 has VLESS secrets); s1 should
     // be skipped silently (its share_link will fail on missing secrets).
+    let html_delivery = fetch_tab("/admin/users/u0/delivery").await;
     assert!(
-        html.contains("vless://") || html.contains("Per-protocol share links"),
+        html_delivery.contains("vless://") || html_delivery.contains("Per-protocol share links"),
         "expected share-links section, got snippet: {}",
-        &html[..html.len().min(800)]
+        &html_delivery[..html_delivery.len().min(800)]
     );
 
     // Regression for the 2026-05-19 QR-jump bug Pavel screenshotted:
@@ -1135,7 +1158,7 @@ async fn user_detail_renders_dns_tunnel_flow_e_card_for_granted_user() {
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/delivery").await;
 
     // The Flow E delivery card renders.
     assert!(
@@ -1180,7 +1203,7 @@ async fn user_detail_omits_dns_tunnel_flow_e_card_for_non_granted_user() {
     seed_dns_tunnel_server(&s.inv, "dt", "u0").await;
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/u1").await;
+    let html = fetch_html(app, "/admin/users/u1/delivery").await;
 
     assert!(
         !html.contains("Flow E"),
@@ -1394,7 +1417,7 @@ async fn admin_user_detail_handles_missing_sub_token() {
         "open() should have backfilled — None branch is currently unreachable via public API"
     );
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/overview").await;
     assert!(
         html.contains("Subscription"),
         "subscription section heading missing"
@@ -1441,7 +1464,7 @@ async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned(
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/overview").await;
 
     let expected_ninitux =
         format!("https://ninitux.com/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}");
@@ -1474,7 +1497,7 @@ async fn admin_user_detail_qr_encodes_ninitux_url_not_lan_url_when_device_id_pin
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/overview").await;
 
     // QR SVG embeds the URL via the qrcode crate. The textContent isn't
     // in the SVG, but the URL appears in the <details> form action OR
@@ -1505,7 +1528,7 @@ async fn admin_user_detail_falls_back_to_lan_url_when_no_device_id() {
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
     assert!(u0.vpn_router_device_id.is_none());
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/overview").await;
     // Ninitux URL MUST NOT appear at all — no device_id → no production URL.
     assert!(
         !html.contains("https://ninitux.com/api/v1/app/config/"),
@@ -2131,9 +2154,11 @@ async fn admin_frontend_section_headlines_match_voice() {
         "user-detail legacy-fallback copy drifted (no-device_id branch)"
     );
     // abuse-origins — pin the "Subscription origins" headline (EN) so a
-    // copy edit has to update this contract in lockstep.
+    // copy edit has to update this contract in lockstep. Lives on the
+    // activity tab now (ui-audit §4).
+    let detail_activity = fetch_html(app.clone(), "/admin/users/u0/activity").await;
     assert!(
-        detail.contains("Subscription origins"),
+        detail_activity.contains("Subscription origins"),
         "user-detail 'Subscription origins' section headline drifted"
     );
 }
@@ -2296,7 +2321,7 @@ async fn admin_user_regen_sub_token_mutates_and_audits() {
     );
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/admin/users/u0",
+        "/admin/users/u0/overview",
         "redirect target must be the user-detail page"
     );
 
@@ -2361,7 +2386,7 @@ async fn admin_user_detail_renders_rotate_button() {
     seed(&s.inv, 0, 1, &[]).await;
     let app = router(s);
 
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/overview").await;
     assert!(
         html.contains(r#"action="/admin/users/u0/sub-token/regenerate""#),
         "rotate-button form must POST to /admin/users/u0/sub-token/regenerate"
@@ -2417,7 +2442,7 @@ async fn admin_user_detail_after_regen_shows_new_token() {
         .sub_token
         .unwrap();
 
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/overview").await;
     assert!(
         html.contains(&after),
         "detail page must render the NEW sub_token after regenerate"
@@ -2450,7 +2475,7 @@ async fn admin_user_detail_track1_empty_state_renders_nudge() {
     seed(&s.inv, 0, 1, &[]).await;
     let app = router(s);
 
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/activity").await;
     assert!(
         html.contains("Subscription access"),
         "section eyebrow 'Subscription access' missing"
@@ -2514,7 +2539,7 @@ async fn admin_user_detail_track1_renders_counters_and_recent_table() {
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/activity").await;
 
     // Counters reflect the data: 2 distinct IPs in both windows
     // (24h and 7d), 3 recent fetches.
@@ -2568,7 +2593,7 @@ async fn admin_user_detail_track1_heat_flag_fires_at_threshold() {
             .unwrap();
     }
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         html.contains("abuse signal"),
         "heat flag must fire at exactly the threshold (5 IPs/24h)"
@@ -2597,7 +2622,7 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/u1").await;
+    let html = fetch_html(router(s), "/admin/users/u1/activity").await;
     // u1 has no fetches.
     assert!(
         html.contains("No subscription fetches recorded yet"),
@@ -2654,7 +2679,7 @@ async fn admin_user_grant_server_happy_path() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/admin/users/u0"
+        "/admin/users/u0/access"
     );
 
     let granted = inv.servers_for_user(&UserId("u0".into())).await.unwrap();
@@ -3418,6 +3443,127 @@ async fn admin_user_grant_unknown_server_404() {
     assert_eq!(body, "vpnctl admin: no such server 'no-such-server'\n");
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  ui-audit Phase 2 — user_detail split into 5 sub-route tabs
+//  (overview / delivery / access / activity / traffic). Each tab renders
+//  ONLY its own sections; bare /admin/users/{id} == overview.
+// ════════════════════════════════════════════════════════════════════
+
+/// Each tab route → 200, renders the `.ed-tabs` bar, marks the right tab
+/// active, shows a section unique to that tab, and does NOT leak a
+/// foreign tab's section. (`Server access` text also appears in a Flow B
+/// card on delivery, so the access marker is the `id="server-access"`
+/// anchor, which is unique to the access tab.)
+#[tokio::test]
+async fn user_detail_tabs_render_gate_and_mark_active() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0)]).await; // u0 granted s0
+    let app = router(s);
+    let cases = [
+        (
+            "/admin/users/u0/overview",
+            "overview",
+            "Access state",
+            "WireGuard keypair",
+        ),
+        (
+            "/admin/users/u0/delivery",
+            "delivery",
+            "WireGuard keypair",
+            r#"id="server-access""#,
+        ),
+        (
+            "/admin/users/u0/access",
+            "access",
+            r#"id="server-access""#,
+            "WireGuard keypair",
+        ),
+        (
+            "/admin/users/u0/activity",
+            "activity",
+            "Subscription access",
+            "WireGuard keypair",
+        ),
+        (
+            "/admin/users/u0/traffic",
+            "traffic",
+            "Live VPN stats",
+            "WireGuard keypair",
+        ),
+    ];
+    for (path, slug, present, absent) in cases {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            html.contains(r#"class="ed-tabs""#),
+            "{path}: tab bar (.ed-tabs) missing"
+        );
+        let active = format!(r#"ed-tab--on" href="/admin/users/u0/{slug}""#);
+        assert!(
+            html.contains(&active),
+            "{path}: {slug} tab not marked active"
+        );
+        assert!(
+            html.contains(present),
+            "{path}: missing its own section marker {present:?}"
+        );
+        assert!(
+            !html.contains(absent),
+            "{path}: leaked a foreign tab's section {absent:?}"
+        );
+    }
+}
+
+/// Bare `/admin/users/{id}` renders the overview tab directly.
+#[tokio::test]
+async fn user_detail_bare_url_renders_overview_tab() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0").await;
+    assert!(
+        html.contains(r#"ed-tab--on" href="/admin/users/u0/overview""#),
+        "bare URL must mark the overview tab active"
+    );
+    assert!(
+        html.contains("Access state"),
+        "bare URL must render the overview tab's sections"
+    );
+    assert!(
+        !html.contains("WireGuard keypair"),
+        "bare URL (overview) must not render the delivery tab"
+    );
+}
+
+/// Copy-contract — pin the 5 user-detail tab labels in both locales.
+#[tokio::test]
+async fn user_detail_tab_labels_copy_contract() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+    let app = router(s);
+    let en = fetch_html(app.clone(), "/admin/users/u0").await;
+    for label in [
+        ">Overview</a>",
+        ">Delivery</a>",
+        ">Access</a>",
+        ">Activity</a>",
+        ">Traffic</a>",
+    ] {
+        assert!(en.contains(label), "EN tab label drifted: {label:?}");
+    }
+    let ru = fetch_html_with_cookie(app, "/admin/users/u0", "vpnctl_lang=ru").await;
+    for label in [
+        ">Обзор</a>",
+        ">Выдача</a>",
+        ">Доступ</a>",
+        ">Активность</a>",
+        ">Трафик</a>",
+    ] {
+        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+    }
+}
+
 #[tokio::test]
 async fn admin_user_detail_renders_grant_revoke_buttons() {
     let dir = TempDir::new().unwrap();
@@ -3426,7 +3572,7 @@ async fn admin_user_detail_renders_grant_revoke_buttons() {
     seed(&s.inv, 2, 1, &[(0, 0)]).await;
     let app = router(s);
 
-    let html = fetch_html(app, "/admin/users/u0").await;
+    let html = fetch_html(app, "/admin/users/u0/access").await;
 
     // Granted row: revoke form + ✓ access marker.
     assert!(
@@ -6194,7 +6340,7 @@ async fn admin_user_detail_track4_ua_section_hidden_when_empty() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         !html.contains("UA fingerprint"),
         "UA section must be hidden for users with no /sub fetches"
@@ -6221,7 +6367,7 @@ async fn admin_user_detail_track4_ua_section_renders_likely_shared() {
             .unwrap();
     }
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
 
     // Section headline + deck (copy contract).
     assert!(
@@ -6896,7 +7042,7 @@ async fn admin_user_detail_track4_ua_section_detects_roaming() {
             .unwrap();
     }
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         html.contains("likely roaming"),
         "expected 'likely roaming' verdict for 3 IPs in 1 /16; html (truncated): {}",
@@ -6926,7 +7072,7 @@ async fn admin_user_detail_track3_empty_state_quotes_chunk4_status() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
     assert!(
         html.contains("Live VPN stats"),
         "section headline must appear even in empty state"
@@ -6989,7 +7135,7 @@ async fn admin_user_detail_track3_renders_kpis_and_per_server_breakdown() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
 
     // Aggregated totals appear (rendered via humanize_bytes — KiB/MiB).
     // Sum of u0's bytes: up = 1_500_000 (~1.4 MiB), dn = 7_000_000 (~6.7 MiB).
@@ -7037,7 +7183,7 @@ async fn admin_user_detail_track3_does_not_leak_other_users_stats() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/u1").await;
+    let html = fetch_html(router(s), "/admin/users/u1/traffic").await;
     // u1 must show empty state, not u0's bytes.
     assert!(
         html.contains("No live stats yet"),
@@ -7351,7 +7497,7 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         .unwrap();
 
     // Detail page must show that pubkey verbatim + a rotate form.
-    let html = fetch_html(app, "/admin/users/carol").await;
+    let html = fetch_html(app, "/admin/users/carol/delivery").await;
     assert!(html.contains("WireGuard keypair"), "section heading");
     assert!(
         html.contains(pk.as_str()),
@@ -7475,7 +7621,7 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
         .await
         .unwrap();
 
-    let html = fetch_html(app, "/admin/users/brat").await;
+    let html = fetch_html(app, "/admin/users/brat/delivery").await;
     // The misleading message MUST NOT appear (case A copy).
     assert!(
         !html.contains("No servers granted to this user yet"),
@@ -7555,7 +7701,7 @@ async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
         .await
         .unwrap();
 
-    let html = fetch_html(app, "/admin/users/brat").await;
+    let html = fetch_html(app, "/admin/users/brat/delivery").await;
     assert!(
         html.contains("WG-capable servers in the inventory you could grant"),
         "suggestion line missing"
@@ -8931,7 +9077,7 @@ async fn admin_user_detail_shows_traffic_limit_section() {
         .await
         .unwrap();
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/alice").await;
+    let html = fetch_html(app, "/admin/users/alice/overview").await;
     // Section heading + the form's action URL + default threshold.
     assert!(html.contains("Traffic limit"), "section heading missing");
     assert!(
@@ -9179,7 +9325,7 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/flowtest").await;
+    let html = fetch_html(app, "/admin/users/flowtest/delivery").await;
 
     // Flow A card MUST contain the click-to-select-all textarea
     // attribute that ships in `share_link_card`.
@@ -9274,7 +9420,7 @@ async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea(
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/flowtest2").await;
+    let html = fetch_html(app, "/admin/users/flowtest2/delivery").await;
 
     // The wireguard:// link must appear in full inside the page —
     // this is the operator's only way to copy the conf to AmneziaVPN.
@@ -9352,7 +9498,7 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/amztest").await;
+    let html = fetch_html(app, "/admin/users/amztest/delivery").await;
 
     // Flow C label is present even when empty; with a granted WG
     // server + secrets it now has a real vpn:// link.
@@ -9438,7 +9584,7 @@ async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/awgtest").await;
+    let html = fetch_html(app, "/admin/users/awgtest/delivery").await;
     // Dash-agnostic label match (the card eyebrow is "Flow F — AmneziaWG
     // (awg://)" with an em-dash).
     assert!(
@@ -9512,7 +9658,7 @@ async fn admin_user_detail_no_flow_f_without_amneziawg_obfs() {
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/sbwguser").await;
+    let html = fetch_html(app, "/admin/users/sbwguser/delivery").await;
     assert!(
         !html.contains("AmneziaWG (awg://)"),
         "Flow F must not render without minted AmneziaWG obfs"
@@ -9944,7 +10090,7 @@ async fn admin_user_detail_flow_b_links_to_conf_download() {
         .unwrap();
 
     let app = router(s);
-    let html = fetch_html(app, "/admin/users/conftest").await;
+    let html = fetch_html(app, "/admin/users/conftest/delivery").await;
     assert!(
         html.contains("/admin/users/conftest/wireguard/conf/wgX"),
         "Flow B server header must link to the .conf download endpoint"
@@ -10389,7 +10535,7 @@ async fn nm10_user_detail_per_protocol_grid_renders_for_granted_server() {
         .grant(&UserId("alice".into()), &ServerId("gridsrv".into()))
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/alice").await;
+    let html = fetch_html(router(s), "/admin/users/alice/access").await;
     assert!(
         html.contains("Per-protocol delivery"),
         "grid heading must appear under the granted server's row"
@@ -10445,7 +10591,7 @@ async fn nm10_user_detail_grid_hides_when_server_not_granted() {
         .await
         .unwrap();
     // No grant() call.
-    let html = fetch_html(router(s), "/admin/users/bob").await;
+    let html = fetch_html(router(s), "/admin/users/bob/access").await;
     assert!(
         !html.contains(r#"/admin/users/bob/grants/notgranted/protocols/vless%2Breality/disable"#),
         "ungranted server must NOT expose the per-protocol disable form"
@@ -10496,7 +10642,7 @@ async fn nm10_user_detail_grid_marks_server_hidden_readonly() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/carol").await;
+    let html = fetch_html(router(s), "/admin/users/carol/access").await;
     // Server-hidden + no override → read-only label, NO block button.
     assert!(
         html.contains("server-hidden (read-only here)"),
@@ -10553,7 +10699,7 @@ async fn nm10_user_detail_grid_shows_user_blocked_marker_and_unblock_form() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/dave").await;
+    let html = fetch_html(router(s), "/admin/users/dave/access").await;
     assert!(
         html.contains("✗ user-blocked"),
         "user-blocked override must surface the ✗ marker"
@@ -10625,7 +10771,7 @@ async fn nm10_user_detail_post_block_persists_and_redirects() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/users/erin#server-access",
+        location, "/admin/users/erin/access#server-access",
         "303 must redirect back to /admin/users/{{uid}}#server-access so the browser scrolls the operator back to the per-protocol grid they just clicked in"
     );
     let overrides = inv
@@ -10715,7 +10861,7 @@ async fn nm10_user_detail_grid_renders_both_axes_branch() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/frank").await;
+    let html = fetch_html(router(s), "/admin/users/frank/access").await;
     assert!(
         html.contains("server-hidden + user-blocked"),
         "both-axes-deny branch must render the compound label"
@@ -10774,7 +10920,7 @@ async fn nm10_user_detail_grid_iterates_table_not_in_memory_enabled_protocols() 
         .grant(&UserId("gina".into()), &ServerId("gsrv".into()))
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/gina").await;
+    let html = fetch_html(router(s), "/admin/users/gina/access").await;
     let tuic_pos = html.find("tuic-v5").expect("tuic row present");
     let vless_pos = html.find("vless+reality").expect("vless row present");
     assert!(
@@ -11090,7 +11236,7 @@ async fn nm12_user_detail_grid_renders_dpi_chip_and_weak_shrinks_to_10px() {
         .grant(&UserId("hank".into()), &ServerId("hsrv".into()))
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/hank").await;
+    let html = fetch_html(router(s), "/admin/users/hank/access").await;
     assert!(
         html.contains("DPI: strong") && html.contains("DPI: weak"),
         "grid must render risk chips matching the protocol tiers"
@@ -11166,7 +11312,7 @@ async fn nm12_followup_user_detail_section_carries_server_access_anchor() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/ivy").await;
+    let html = fetch_html(router(s), "/admin/users/ivy/access").await;
     assert!(
         html.contains(r#"id="server-access""#),
         "user-detail must carry an id=\"server-access\" anchor for the grant-toggle handlers to scroll back into"
@@ -11293,7 +11439,7 @@ async fn nm12_followup_grant_protocol_enable_redirects_with_fragment() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert_eq!(loc, "/admin/users/ji#server-access");
+    assert_eq!(loc, "/admin/users/ji/access#server-access");
 }
 
 #[tokio::test]
@@ -11658,7 +11804,7 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     // User detail — PR-User cards. The presence badge (user#1) always
     // renders (online or offline), so its RU eyebrow is a reliable
     // walker anchor for the new user-detail surface.
-    let h = fetch("/admin/users/u0").await;
+    let h = fetch("/admin/users/u0/activity").await;
     assert!(
         h.contains("Присутствие"),
         "PR-User presence eyebrow must be translated under ru"
@@ -11833,7 +11979,7 @@ async fn tooltips_user_detail_traffic_limit_fields_explain_units() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/tip").await;
+    let html = fetch_html(router(s), "/admin/users/tip/overview").await;
     assert!(
         html.contains("Monthly cap in GiB"),
         "limit_gib input must explain unit + 0=no cap semantic"
@@ -11945,7 +12091,7 @@ async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
     .await
     .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/zoidberg").await;
+    let html = fetch_html(router(s), "/admin/users/zoidberg/activity").await;
     assert!(html.contains("8.8.8.8"), "raw IP must render");
     assert!(
         html.contains(">US<"),
@@ -11992,7 +12138,7 @@ async fn track_1_2_subscription_access_legacy_row_renders_bare_ip() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/nibbler").await;
+    let html = fetch_html(router(s), "/admin/users/nibbler/activity").await;
     assert!(html.contains("1.2.3.4"), "raw IP must render");
     // No geo_country / geo_asn chips since both are NULL — render
     // must NOT emit empty `>` `<` placeholders.
@@ -12210,7 +12356,7 @@ async fn track_1_4_subscription_access_renders_ja3_ja4_chips_when_set() {
     .await
     .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/fry").await;
+    let html = fetch_html(router(s), "/admin/users/fry/activity").await;
     // JA3 chip — first 8 chars of the fingerprint, prefixed «JA3 ».
     assert!(
         html.contains("JA3 769,4919"),
@@ -12262,7 +12408,7 @@ async fn track_1_4_subscription_access_omits_ja_chips_when_null() {
     inv.log_sub_access(&UserId("bender".into()), "1.2.3.4", None, 200, 0)
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/bender").await;
+    let html = fetch_html(router(s), "/admin/users/bender/activity").await;
     assert!(
         !html.contains("JA3 ") && !html.contains("JA4 "),
         "JA chips must not render when columns are NULL"
@@ -12545,7 +12691,7 @@ async fn phase4a_user_detail_renders_30d_aggregates_above_table() {
         .unwrap();
     }
 
-    let html = fetch_html(router(s), "/admin/users/agg-user").await;
+    let html = fetch_html(router(s), "/admin/users/agg-user/activity").await;
     // Card labels (en defaults — i18n test covers ru elsewhere).
     assert!(
         html.contains("distinct IPs · 30 days"),
@@ -12590,7 +12736,7 @@ async fn phase4a_user_detail_default_hides_vpn_egress_rows_and_shows_counter_tog
         .await
         .unwrap();
 
-    let html = fetch_html(router(s.clone()), "/admin/users/egress-user").await;
+    let html = fetch_html(router(s.clone()), "/admin/users/egress-user/activity").await;
     // The «N VPN-egress rows hidden» counter proves the trigger
     // flagged the row AND that the user-detail handler is calling
     // recent_sub_access_filtered with include_egress=false. NOTE:
@@ -12614,7 +12760,7 @@ async fn phase4a_user_detail_default_hides_vpn_egress_rows_and_shows_counter_tog
     // The «Show them» link with the show_egress=1 query (handler
     // builds it relative to /admin/users/<id>).
     assert!(
-        html.contains("/admin/users/egress-user?show_egress=1"),
+        html.contains("/admin/users/egress-user/activity?show_egress=1"),
         "missing «Show them» link with ?show_egress=1"
     );
 }
@@ -12648,7 +12794,7 @@ async fn phase4a_user_detail_show_egress_param_includes_vpn_egress_rows_and_flip
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users/egress-on?show_egress=1").await;
+    let html = fetch_html(router(s), "/admin/users/egress-on/activity?show_egress=1").await;
     assert!(
         html.contains("10.20.30.40"),
         "show_egress=1 must include the VPN-egress IP in the table"
@@ -12660,7 +12806,7 @@ async fn phase4a_user_detail_show_egress_param_includes_vpn_egress_rows_and_flip
     );
     // «Hide them» link points back at the bare URL (no query).
     assert!(
-        html.contains("href=\"/admin/users/egress-on\""),
+        html.contains("href=\"/admin/users/egress-on/activity\""),
         "missing «Hide them» link back to egress-free URL"
     );
 }
@@ -12695,7 +12841,7 @@ async fn phase4a_user_detail_counter_uses_plural_rows_when_more_than_one_hidden(
             .unwrap();
     }
 
-    let html = fetch_html(router(s), "/admin/users/plur").await;
+    let html = fetch_html(router(s), "/admin/users/plur/activity").await;
     assert!(
         html.contains("3 VPN-egress rows hidden"),
         "counter must use plural «rows» when N=3, got HTML around «VPN-egress»: …{}…",
@@ -15805,7 +15951,7 @@ async fn dashboard_abuse_summary_links_to_origins_anchor() {
     seed_dashboard_signals(&s.inv).await;
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("/admin/users/u0#origins"),
+        html.contains("/admin/users/u0/activity#origins"),
         "abuse-summary user link must anchor to the #origins section"
     );
 }
@@ -15888,7 +16034,7 @@ async fn admin_user_detail_origins_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         html.contains(r#"id="origins""#),
         "origins anchor must always render"
@@ -15948,7 +16094,7 @@ async fn admin_user_detail_origins_renders_country_isp_ip_breakdown() {
             .await
             .unwrap();
     }
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
 
     // Section + per-table sub-eyebrows.
     assert!(
@@ -16016,7 +16162,7 @@ async fn admin_user_detail_origins_empty_state_when_only_egress() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         html.contains("No external subscription fetches recorded"),
         "egress-only history must render the origins empty-state"
@@ -16750,7 +16896,7 @@ async fn pr_user_traffic_by_server_empty_state_explains_nm11() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
     assert!(
         html.contains("Traffic by server · last 24h"),
         "traffic-by-server eyebrow missing"
@@ -16780,7 +16926,7 @@ async fn pr_user_traffic_by_server_renders_per_server_rows() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
     assert!(
         html.contains("Traffic by server · last 24h"),
         "traffic-by-server eyebrow missing"
@@ -16945,14 +17091,14 @@ async fn pr_user_live_stats_folds_in_user_scoped_window_picker() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
     // The window picker links are scoped to the user's detail page.
     assert!(
-        html.contains("/admin/users/u0?vpn_window=7d"),
+        html.contains("/admin/users/u0/traffic?vpn_window=7d"),
         "window picker must offer a 7d link scoped to this user"
     );
     assert!(
-        html.contains("/admin/users/u0?vpn_window=30d"),
+        html.contains("/admin/users/u0/traffic?vpn_window=30d"),
         "window picker must offer a 30d link scoped to this user"
     );
     // The trend sub-heading renders when there's traffic.
@@ -16986,7 +17132,7 @@ async fn pr_user_ua_section_carries_geo_and_last_seen_footer() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/u0").await;
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(
         html.contains("UA fingerprint"),
         "UA section must render with /sub history"
@@ -17018,13 +17164,18 @@ async fn pr_user_info_cards_headlines_en() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/users/u0").await;
-    for needle in [
-        "Presence",                     // user#1
-        "Traffic by server · last 24h", // user#2
-        "Sharing verdict",              // user#4
-        "Lifecycle",                    // user#5
-        "Traffic limit",                // user#3
+    // ui-audit §4 — these cards span tabs: Presence (chrome, every tab),
+    // verdict/lifecycle/traffic-limit on overview, traffic-by-server on
+    // the traffic tab. Fetch each and pin its subset.
+    let app = router(s);
+    let overview = fetch_html(app.clone(), "/admin/users/u0").await;
+    let traffic = fetch_html(app, "/admin/users/u0/traffic").await;
+    for (html, needle) in [
+        (&overview, "Presence"),                    // user#1 (chrome)
+        (&traffic, "Traffic by server · last 24h"), // user#2
+        (&overview, "Sharing verdict"),             // user#4
+        (&overview, "Lifecycle"),                   // user#5
+        (&overview, "Traffic limit"),               // user#3
     ] {
         assert!(
             html.contains(needle),
@@ -17050,13 +17201,15 @@ async fn pr_user_info_cards_headlines_ru() {
         )
         .await
         .unwrap();
-    let html = fetch_html_with_cookie(router(s), "/admin/users/u0", "vpnctl_lang=ru").await;
-    for needle in [
-        "Присутствие",                 // user#1
-        "Трафик по серверам · за 24ч", // user#2
-        "Вердикт по расшариванию",     // user#4
-        "Жизненный цикл",              // user#5
-        "Лимит трафика",               // user#3
+    let app = router(s);
+    let overview = fetch_html_with_cookie(app.clone(), "/admin/users/u0", "vpnctl_lang=ru").await;
+    let traffic = fetch_html_with_cookie(app, "/admin/users/u0/traffic", "vpnctl_lang=ru").await;
+    for (html, needle) in [
+        (&overview, "Присутствие"),                // user#1 (chrome)
+        (&traffic, "Трафик по серверам · за 24ч"), // user#2
+        (&overview, "Вердикт по расшариванию"),    // user#4
+        (&overview, "Жизненный цикл"),             // user#5
+        (&overview, "Лимит трафика"),              // user#3
     ] {
         assert!(
             html.contains(needle),

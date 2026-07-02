@@ -1163,6 +1163,15 @@ fn admin_router(state: AppState) -> Router {
         // `/admin/users/` continues to hit the list above.
         .route("/admin/users/{id}", get(admin::user_detail))
         .route("/admin/users/{id}/", get(admin::user_detail))
+        // ui-audit §3-§4 — user_detail split into 5 sub-route tabs.
+        // Explicit routes; bare `/admin/users/{id}` + `/overview` render
+        // the overview tab. Existing GET sub-paths (delete-confirm,
+        // wireguard/conf/{sid}, deploy-all/sse) can't collide.
+        .route("/admin/users/{id}/overview", get(admin::user_detail))
+        .route("/admin/users/{id}/delivery", get(admin::user_detail_delivery))
+        .route("/admin/users/{id}/access", get(admin::user_detail_access))
+        .route("/admin/users/{id}/activity", get(admin::user_detail_activity))
+        .route("/admin/users/{id}/traffic", get(admin::user_detail_traffic))
         // Phase C-3 writes (Users). Each write goes via POST so a casual
         // GET (link preview, prefetch, search-bot) cannot mutate state.
         .route(
