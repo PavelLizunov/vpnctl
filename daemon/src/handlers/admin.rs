@@ -1109,7 +1109,7 @@ fn dashboard_abuse_summary(
                             (sc.score)
                         }
                         // Link to the user's "Subscription origins" section.
-                        a href=(format!("/admin/users/{}#origins", path_segment_encode(&uid.0)))
+                        a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0)))
                           style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
                             (uid.0)
                         }
@@ -3561,11 +3561,84 @@ impl UserDetailQuery {
     }
 }
 
+/// user_detail's in-page tabs (ui-audit §3-§4). Same recipe as
+/// `ServerTab`: real sub-routes (`/admin/users/{id}/{slug}`), plain
+/// `<a href>` links, each tab renders only its own sections. `Overview`
+/// is the default (bare `/admin/users/{id}`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UserTab {
+    Overview,
+    Delivery,
+    Access,
+    Activity,
+    Traffic,
+}
+
+impl UserTab {
+    fn slug(self) -> &'static str {
+        match self {
+            UserTab::Overview => "overview",
+            UserTab::Delivery => "delivery",
+            UserTab::Access => "access",
+            UserTab::Activity => "activity",
+            UserTab::Traffic => "traffic",
+        }
+    }
+}
+
+// Thin axum handlers — one per tab route in app.rs. Bare
+// `/admin/users/{id}` (+ trailing slash) + `/overview` both land here.
 pub(crate) async fn user_detail(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
     axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
+) -> Result<Markup, Response> {
+    user_detail_render(headers, state, user_id_str, query, UserTab::Overview).await
+}
+
+pub(crate) async fn user_detail_delivery(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
+) -> Result<Markup, Response> {
+    user_detail_render(headers, state, user_id_str, query, UserTab::Delivery).await
+}
+
+pub(crate) async fn user_detail_access(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
+) -> Result<Markup, Response> {
+    user_detail_render(headers, state, user_id_str, query, UserTab::Access).await
+}
+
+pub(crate) async fn user_detail_activity(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
+) -> Result<Markup, Response> {
+    user_detail_render(headers, state, user_id_str, query, UserTab::Activity).await
+}
+
+pub(crate) async fn user_detail_traffic(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UserDetailQuery>,
+) -> Result<Markup, Response> {
+    user_detail_render(headers, state, user_id_str, query, UserTab::Traffic).await
+}
+
+async fn user_detail_render(
+    headers: HeaderMap,
+    state: AppState,
+    user_id_str: String,
+    query: UserDetailQuery,
+    tab: UserTab,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
@@ -3918,1371 +3991,1393 @@ pub(crate) async fn user_detail(
     .await;
 
     let body = html! {
-        div.ed-art-eyebrow {
-            a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
-                (crate::i18n::tr(lang, "← all users", "← все пользователи"))
+            div.ed-art-eyebrow {
+                a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
+                    (crate::i18n::tr(lang, "← all users", "← все пользователи"))
+                }
+                (crate::i18n::tr(lang, "  ·  user", "  ·  пользователь"))
             }
-            (crate::i18n::tr(lang, "  ·  user", "  ·  пользователь"))
-        }
-        h1.ed-art-h1 { (user.id.0) }
-        p.ed-art-deck {
-            "uuid " span.ed-mono { (user.uuid) }
-        }
+            h1.ed-art-h1 { (user.id.0) }
+            p.ed-art-deck {
+                "uuid " span.ed-mono { (user.uuid) }
+            }
 
-        // PR-User user#1 — online-now presence badge, directly under
-        // the user header so «is this person connected right now» is
-        // the first thing the operator sees.
-        (online_badge)
+            // PR-User user#1 — online-now presence badge, directly under
+            // the user header so «is this person connected right now» is
+            // the first thing the operator sees.
+            (online_badge)
 
-        // 2026-05-23 quickfix follow-up — pending-deploy banner.
-        // Surfaces servers whose running config doesn't yet include
-        // this user's current state. Hidden when empty (quiet
-        // dashboard contract). Each server name links straight to
-        // its detail page's #deploy-button anchor so one click moves
-        // the operator from «I see the warning» to «I'm one click
-        // from fixing it».
-        //
-        // Visual: amber border, prominent at the top so it's
-        // noticed before the operator starts copying the QR.
-        @if !pending_deploy_servers.is_empty() {
-            div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
-                div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px; margin-bottom: 4px;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "⚠ Config not yet deployed to:",
-                        "⚠ Конфиг ещё не задеплоен на:",
-                    ))
-                    " "
-                    @for (i, sid) in pending_deploy_servers.iter().enumerate() {
-                        @if i > 0 { ", " }
-                        a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0)))
-                          style="color: var(--acc); font-family: var(--mono); font-weight: 600;" {
-                            (sid.0)
+            // 2026-05-23 quickfix follow-up — pending-deploy banner.
+            // Surfaces servers whose running config doesn't yet include
+            // this user's current state. Hidden when empty (quiet
+            // dashboard contract). Each server name links straight to
+            // its detail page's #deploy-button anchor so one click moves
+            // the operator from «I see the warning» to «I'm one click
+            // from fixing it».
+            //
+            // Visual: amber border, prominent at the top so it's
+            // noticed before the operator starts copying the QR.
+            @if !pending_deploy_servers.is_empty() {
+                div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
+                    div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px; margin-bottom: 4px;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "⚠ Config not yet deployed to:",
+                            "⚠ Конфиг ещё не задеплоен на:",
+                        ))
+                        " "
+                        @for (i, sid) in pending_deploy_servers.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0)))
+                              style="color: var(--acc); font-family: var(--mono); font-weight: 600;" {
+                                (sid.0)
+                            }
+                        }
+                    }
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0; font-size: 12px;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "Until you deploy each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss. Or just hit the one-click button below.",
+                            "Пока не задеплоишь каждый сервер выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23. Либо просто нажми кнопку ниже.",
+                        ))
+                    }
+                    // One-click fix right here in the user view: deploy every
+                    // server (pushes THIS user's UUID onto each granted node).
+                    // Reuses the fleet-wide SSE deploy; `data-reload-self`
+                    // reloads this user page on done so the banner re-computes
+                    // and clears. A down node (fi etc.) is reported ✗ in the
+                    // log; the rest still deploy.
+                    div style="margin-top: 10px;" {
+                        button type="button"
+                               data-sse-url="/admin/servers/deploy-all/sse"
+                               data-log="user-deploy-log"
+                               data-reload-self="true"
+                               data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
+                               data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
+                               title=(crate::i18n::tr(
+                                   lang,
+                                   "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
+                                   "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
+                               ))
+                               style="padding: 6px 14px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                            (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
+                        }
+                        pre id="user-deploy-log" hidden
+                            style="margin-top: 10px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
+                    }
+                }
+            }
+
+    @let tab_base = format!("/admin/users/{}", path_segment_encode(&user.id.0));
+    (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", crate::i18n::tr(lang, "Access", "Доступ")), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))]))
+    @if tab == UserTab::Overview {
+            // Subscription URL + QR — the headline for this page.
+            //
+            // Two URLs may exist per user post-Phase-5 (ninitux cutover,
+            // 2026-05-19):
+            //   * PRIMARY: the ninitux production URL
+            //     `https://ninitux.com/api/v1/app/config/<device_id>` —
+            //     the URL clients actually fetch. Only present when the
+            //     user has a `vpn_router_device_id` pinned (33/33
+            //     production users do; legacy bash-only or freshly-
+            //     created users may not).
+            //   * SECONDARY / LAN fallback: the legacy `/sub/<token>`
+            //     URL served by vpnctld directly on port 18402. Useful
+            //     for LAN debugging and as the fallback artefact for
+            //     users without a device_id.
+            //
+            // The QR encodes the PRIMARY URL when available — that's
+            // what a mobile-app user must scan. Showing the LAN URL in
+            // the QR (the pre-Phase-5 behaviour) silently broke any
+            // share-via-QR workflow because the client app can't reach
+            // 192.168.0.236 from outside the operator's LAN. Caught by
+            // visual review 2026-05-19; this block is the fix.
+            div.ed-art-eyebrow style="margin-top: 28px;" {
+                (crate::i18n::tr(lang, "Subscription", "Подписка"))
+            }
+            @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
+                (Some(device_id), Some(ninitux), _, _) => {
+                    // Primary: ninitux production URL — QR scans this.
+                    div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                        (qr_svg(ninitux))
+                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                            div { span style="color: var(--mute);" { "url        " } (ninitux) }
+                            div { span style="color: var(--mute);" { "device_id  " } (device_id) }
+                            div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
+                                (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
+                                span.ed-mono { "ninitux.com" }
+                                (crate::i18n::tr(lang, " → vpnctld. ", " → vpnctld. "))
+                                (crate::i18n::tr(
+                                    lang,
+                                    "The user's mobile app polls this URL on a fixed schedule (3600s). ",
+                                    "Мобильное приложение опрашивает этот URL по таймеру (3600 сек). ",
+                                ))
+                                (crate::i18n::tr(
+                                    lang,
+                                    "Share the QR or the URL — both encode the same thing.",
+                                    "Отдай QR или URL — кодируют одно и то же.",
+                                ))
+                            }
+                        }
+                    }
+                    // Legacy LAN fallback — collapsed below the primary,
+                    // muted styling, only useful for LAN debugging.
+                    @if let (Some(token), Some(legacy_url)) = (sub_token.as_ref(), sub_url_str.as_ref()) {
+                        details style="margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            summary style="cursor: pointer;" { "legacy /sub/<token> fallback (LAN-only)" }
+                            div style="padding: 8px 0 0 16px; line-height: 1.7;" {
+                                div { span style="color: var(--mute);" { "url   " } (legacy_url) }
+                                div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
+                                form method="post"
+                                     action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                                     style="margin-top: 10px;" {
+                                    button type="submit"
+                                           title=(crate::i18n::tr(
+                                               lang,
+                                               "Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable.",
+                                               "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
+                                           ))
+                                           style="padding: 4px 10px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                        (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0; font-size: 12px;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "Until you deploy each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss. Or just hit the one-click button below.",
-                        "Пока не задеплоишь каждый сервер выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23. Либо просто нажми кнопку ниже.",
-                    ))
-                }
-                // One-click fix right here in the user view: deploy every
-                // server (pushes THIS user's UUID onto each granted node).
-                // Reuses the fleet-wide SSE deploy; `data-reload-self`
-                // reloads this user page on done so the banner re-computes
-                // and clears. A down node (fi etc.) is reported ✗ in the
-                // log; the rest still deploy.
-                div style="margin-top: 10px;" {
-                    button type="button"
-                           data-sse-url="/admin/servers/deploy-all/sse"
-                           data-log="user-deploy-log"
-                           data-reload-self="true"
-                           data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
-                           data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
-                           title=(crate::i18n::tr(
-                               lang,
-                               "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
-                               "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
-                           ))
-                           style="padding: 6px 14px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
-                    }
-                    pre id="user-deploy-log" hidden
-                        style="margin-top: 10px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
-                }
-            }
-        }
-
-        // Subscription URL + QR — the headline for this page.
-        //
-        // Two URLs may exist per user post-Phase-5 (ninitux cutover,
-        // 2026-05-19):
-        //   * PRIMARY: the ninitux production URL
-        //     `https://ninitux.com/api/v1/app/config/<device_id>` —
-        //     the URL clients actually fetch. Only present when the
-        //     user has a `vpn_router_device_id` pinned (33/33
-        //     production users do; legacy bash-only or freshly-
-        //     created users may not).
-        //   * SECONDARY / LAN fallback: the legacy `/sub/<token>`
-        //     URL served by vpnctld directly on port 18402. Useful
-        //     for LAN debugging and as the fallback artefact for
-        //     users without a device_id.
-        //
-        // The QR encodes the PRIMARY URL when available — that's
-        // what a mobile-app user must scan. Showing the LAN URL in
-        // the QR (the pre-Phase-5 behaviour) silently broke any
-        // share-via-QR workflow because the client app can't reach
-        // 192.168.0.236 from outside the operator's LAN. Caught by
-        // visual review 2026-05-19; this block is the fix.
-        div.ed-art-eyebrow style="margin-top: 28px;" {
-            (crate::i18n::tr(lang, "Subscription", "Подписка"))
-        }
-        @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
-            (Some(device_id), Some(ninitux), _, _) => {
-                // Primary: ninitux production URL — QR scans this.
-                div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
-                    (qr_svg(ninitux))
-                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                        div { span style="color: var(--mute);" { "url        " } (ninitux) }
-                        div { span style="color: var(--mute);" { "device_id  " } (device_id) }
-                        div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
-                            (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
-                            span.ed-mono { "ninitux.com" }
-                            (crate::i18n::tr(lang, " → vpnctld. ", " → vpnctld. "))
-                            (crate::i18n::tr(
-                                lang,
-                                "The user's mobile app polls this URL on a fixed schedule (3600s). ",
-                                "Мобильное приложение опрашивает этот URL по таймеру (3600 сек). ",
-                            ))
-                            (crate::i18n::tr(
-                                lang,
-                                "Share the QR or the URL — both encode the same thing.",
-                                "Отдай QR или URL — кодируют одно и то же.",
-                            ))
-                        }
-                    }
-                }
-                // Legacy LAN fallback — collapsed below the primary,
-                // muted styling, only useful for LAN debugging.
-                @if let (Some(token), Some(legacy_url)) = (sub_token.as_ref(), sub_url_str.as_ref()) {
-                    details style="margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                        summary style="cursor: pointer;" { "legacy /sub/<token> fallback (LAN-only)" }
-                        div style="padding: 8px 0 0 16px; line-height: 1.7;" {
-                            div { span style="color: var(--mute);" { "url   " } (legacy_url) }
-                            div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
+                (None, _, Some(token), Some(url)) => {
+                    // No device_id pinned — fall back to legacy /sub/<token>
+                    // as the primary. Operator should pin a device_id to
+                    // unlock the ninitux URL (import script or future web
+                    // action).
+                    div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                        (qr_svg(url))
+                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                            div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "url   ", "url   ")) } (url) }
+                            div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "token ", "token ")) } (mask_secret(token)) }
+                            div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
+                                (crate::i18n::tr(lang, "Legacy ", "Легаси ")) span.ed-mono { "/sub/<token>" }
+                                (crate::i18n::tr(lang, " URL — LAN-only. No ", " URL — только LAN. У этого пользователя нет "))
+                                span.ed-mono { "vpn_router_device_id" }
+                                (crate::i18n::tr(
+                                    lang,
+                                    " pinned for this user, so the production ",
+                                    ", поэтому production-URL ",
+                                ))
+                                span.ed-mono { "ninitux.com" }
+                                (crate::i18n::tr(lang, " URL is not available yet. Pin one via ", " пока недоступен. Привяжи через "))
+                                span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
+                            }
                             form method="post"
                                  action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
-                                 style="margin-top: 10px;" {
+                                 style="margin-top: 14px;" {
                                 button type="submit"
                                        title=(crate::i18n::tr(
                                            lang,
-                                           "Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable.",
-                                           "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
+                                           "Mint a new sub_token; the previous URL stops working immediately",
+                                           "Сгенерировать новый sub_token; предыдущий URL перестанет работать немедленно",
                                        ))
-                                       style="padding: 4px 10px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                       style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                                     (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                 }
                             }
                         }
                     }
                 }
-            }
-            (None, _, Some(token), Some(url)) => {
-                // No device_id pinned — fall back to legacy /sub/<token>
-                // as the primary. Operator should pin a device_id to
-                // unlock the ninitux URL (import script or future web
-                // action).
-                div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
-                    (qr_svg(url))
-                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                        div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "url   ", "url   ")) } (url) }
-                        div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "token ", "token ")) } (mask_secret(token)) }
-                        div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
-                            (crate::i18n::tr(lang, "Legacy ", "Легаси ")) span.ed-mono { "/sub/<token>" }
-                            (crate::i18n::tr(lang, " URL — LAN-only. No ", " URL — только LAN. У этого пользователя нет "))
-                            span.ed-mono { "vpn_router_device_id" }
-                            (crate::i18n::tr(
-                                lang,
-                                " pinned for this user, so the production ",
-                                ", поэтому production-URL ",
-                            ))
-                            span.ed-mono { "ninitux.com" }
-                            (crate::i18n::tr(lang, " URL is not available yet. Pin one via ", " пока недоступен. Привяжи через "))
-                            span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
-                        }
+                _ => {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                        "No sub-token assigned to this user. "
                         form method="post"
                              action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
-                             style="margin-top: 14px;" {
+                             style="display: inline; margin-left: 8px;" {
                             button type="submit"
-                                   title=(crate::i18n::tr(
-                                       lang,
-                                       "Mint a new sub_token; the previous URL stops working immediately",
-                                       "Сгенерировать новый sub_token; предыдущий URL перестанет работать немедленно",
-                                   ))
+                                   title="Generate this user's FIRST sub-token + the public /sub/<token> URL. Safe — no existing config to invalidate; the user's QR + clients will start working after this."
                                    style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
-                            }
+                                    "mint sub-token"
+                                }
                         }
                     }
                 }
             }
-            _ => {
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "No sub-token assigned to this user. "
-                    form method="post"
-                         action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
-                         style="display: inline; margin-left: 8px;" {
-                        button type="submit"
-                               title="Generate this user's FIRST sub-token + the public /sub/<token> URL. Safe — no existing config to invalidate; the user's QR + clients will start working after this."
-                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                "mint sub-token"
-                            }
-                    }
-                }
-            }
-        }
 
-        // Extra-protocol per-user password — TUIC / naive / Hysteria2 all
-        // reuse `tuic_password`. Shown ONLY when absent: a user without it
-        // silently gets NO naive/HY2/TUIC links (the cdn 2026-06-07
-        // incident). One-click mint turns that silent skip into a fix.
-        @if user.tuic_password.is_none() {
-            div.ed-rule {}
-            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
-            div style="padding: 12px 0;" {
-                p style="font-family: var(--serif); color: var(--acc); font-size: 13px; line-height: 1.6;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "⚠ No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
-                        "⚠ Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
-                    ))
-                }
-                form method="post"
-                     action=(format!("/admin/users/{}/tuic-password/mint", path_segment_encode(&user.id.0)))
-                     style="margin-top: 10px;" {
-                    button type="submit"
-                           title=(crate::i18n::tr(
-                               lang,
-                               "Mint this user's per-user password used by TUIC / naive / Hysteria2. Safe — no existing secret to invalidate. Redeploy the user's servers afterwards so the node accepts it.",
-                               "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
-                           ))
-                           style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                        (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
-                    }
-                }
-                p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "After minting, redeploy the affected server(s) so the node accepts the new password.",
-                        "После генерации передеплой затронутые серверы, чтобы узел принял новый пароль.",
-                    ))
-                }
-            }
-        }
-
-        // WireGuard / AmneziaWG key material + distribution. Always
-        // shows the pubkey verbatim (it's public). Private key marker
-        // only — actual value flows through `/sub/<token>` (sing-box-
-        // style clients) AND as inline QR/share-links below for
-        // WG-native clients (AmneziaVPN, official WireGuard app).
-        // Per CLAUDE.md "users are low-tech" — the operator must see
-        // every artefact needed to onboard the user in one place.
-        div.ed-rule {}
-        div.ed-art-eyebrow { (crate::i18n::tr(lang, "WireGuard keypair", "WireGuard-пара ключей")) }
-        @match (&user.wireguard_pubkey, &user.wireguard_private) {
-            (Some(pub_b64), Some(_priv_marker)) => {
+            // Extra-protocol per-user password — TUIC / naive / Hysteria2 all
+            // reuse `tuic_password`. Shown ONLY when absent: a user without it
+            // silently gets NO naive/HY2/TUIC links (the cdn 2026-06-07
+            // incident). One-click mint turns that silent skip into a fix.
+            @if user.tuic_password.is_none() {
+                div.ed-rule {}
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
                 div style="padding: 12px 0;" {
-                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                        div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
-                        div {
-                            span style="color: var(--mute);" { "private " }
-                            span.ed-mono style="color: var(--acc);" { "✓ stored — served via /sub/<token> only" }
+                    p style="font-family: var(--serif); color: var(--acc); font-size: 13px; line-height: 1.6;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "⚠ No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
+                            "⚠ Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
+                        ))
+                    }
+                    form method="post"
+                         action=(format!("/admin/users/{}/tuic-password/mint", path_segment_encode(&user.id.0)))
+                         style="margin-top: 10px;" {
+                        button type="submit"
+                               title=(crate::i18n::tr(
+                                   lang,
+                                   "Mint this user's per-user password used by TUIC / naive / Hysteria2. Safe — no existing secret to invalidate. Redeploy the user's servers afterwards so the node accepts it.",
+                                   "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
+                               ))
+                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                            (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
                         }
                     }
                     p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
-                        "Both halves were generated when the user was created. Pick the distribution flow matching the user's client app:"
+                        (crate::i18n::tr(
+                            lang,
+                            "After minting, redeploy the affected server(s) so the node accepts the new password.",
+                            "После генерации передеплой затронутые серверы, чтобы узел принял новый пароль.",
+                        ))
                     }
-                    form method="post"
-                         action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
-                         style="margin-top: 12px;" {
-                        button type="submit"
-                               title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
-                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                            "rotate WG keypair"
-                        }
-                    }
+                }
+            }
 
-                    // Distribution panel — one column per client app.
-                    // Same secret material, several wire formats:
-                    //   * Flow A — sing-box JSON via /sub/<token> URL
-                    //   * Flow B — wireguard:// (official WG app, Hiddify)
-                    //   * Flow C — vpn://    (AmneziaVPN)
-                    //   * Flow D — wgturn:// (wgturn-cli, VK-TURN relay)
-                    //                  — only when a granted server has
-                    //                  the wgturn protocol enabled. Lives
-                    //                  here so the operator hands the
-                    //                  user one artefact per client app,
-                    //                  same UX as A/B/C.
-                    //
-                    // Plus a .conf-file download per WG-capable server
-                    // as a universal fallback (drag-drop into ANY WG
-                    // client incl AmneziaVPN's "File with settings"
-                    // button).
-                    //
-                    // Pre-2026-05-17 (commit `799e28b`) Flow B claimed
-                    // to cover BOTH AmneziaVPN and the WG app, but the
-                    // `wireguard://?conf=` format AmneziaVPN rejects
-                    // with ErrorCode 900 («нет контейнеров») — Amnezia
-                    // expects its own `vpn://<base64(qCompress(json))>`
-                    // deep-link. Split into B + C; honest labels.
-                    //
-                    // Grid uses `auto-fit minmax(340px, 1fr)` so the
-                    // column count adapts to viewport + Flow D's
-                    // conditional presence (3 cols for non-wgturn
-                    // users, 4 for wgturn users; wraps to 2x2 on
-                    // narrower viewports).
-                    div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
-                        // Flow A — sing-box / Hiddify subscription URL.
-                        // The QR renders the same sub_url shown in the
-                        // Subscription block at the top of the page;
-                        // duplicated here on purpose so the operator
-                        // copies the WG-via-Hiddify link from the same
-                        // distribution panel as the WG-native link.
-                        div {
-                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                (crate::i18n::tr(lang, "Flow A — Hiddify / Sing-box", "Поток A — Hiddify / Sing-box"))
-                            }
-                            @match (&sub_token, &sub_url_str) {
-                                (Some(_), Some(url)) => {
-                                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                        (crate::i18n::tr(
-                                            lang,
-                                            "all granted servers · refreshes on its own",
-                                            "все выданные серверы · обновляется само",
-                                        ))
-                                    }
-                                    (share_link_card(url, &html! {
-                                        (crate::i18n::tr(
-                                            lang,
-                                            "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. ",
-                                            "Sing-box / Hiddify тянет полный конфиг (все протоколы на всех выданных серверах, включая WireGuard с приватным ключом) и обновляет сам по расписанию. ",
-                                        ))
-                                        b { (crate::i18n::tr(
-                                            lang,
-                                            "Recommended default — one URL covers everything.",
-                                            "Рекомендованный default — один URL покрывает всё.",
-                                        )) }
-                                    }))
-                                }
-                                _ => {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(lang, "Mint a sub-token in the ", "Сгенерируй sub-token в блоке "))
-                                        b { (crate::i18n::tr(lang, "Subscription", "Подписка")) }
-                                        (crate::i18n::tr(lang, " block above to populate this card.", " выше, чтобы заполнить эту карточку.", ))
-                                    }
-                                }
+            // WireGuard / AmneziaWG key material + distribution. Always
+            // shows the pubkey verbatim (it's public). Private key marker
+            // only — actual value flows through `/sub/<token>` (sing-box-
+            // style clients) AND as inline QR/share-links below for
+            // WG-native clients (AmneziaVPN, official WireGuard app).
+            // Per CLAUDE.md "users are low-tech" — the operator must see
+            // every artefact needed to onboard the user in one place.
+    }
+    @if tab == UserTab::Delivery {
+            div.ed-rule {}
+            div.ed-art-eyebrow { (crate::i18n::tr(lang, "WireGuard keypair", "WireGuard-пара ключей")) }
+            @match (&user.wireguard_pubkey, &user.wireguard_private) {
+                (Some(pub_b64), Some(_priv_marker)) => {
+                    div style="padding: 12px 0;" {
+                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                            div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
+                            div {
+                                span style="color: var(--mute);" { "private " }
+                                span.ed-mono style="color: var(--acc);" { "✓ stored — served via /sub/<token> only" }
                             }
                         }
-                        // Flow B — official WireGuard app + Hiddify.
-                        // The `wireguard://?conf=<base64>` link works
-                        // in the official WG mobile/desktop apps and
-                        // in Hiddify, NOT in AmneziaVPN (separate Flow
-                        // C below covers that).
-                        div {
-                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                (crate::i18n::tr(lang, "Flow B — official WireGuard app / Hiddify", "Поток B — официальное WireGuard / Hiddify"))
+                        p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
+                            "Both halves were generated when the user was created. Pick the distribution flow matching the user's client app:"
+                        }
+                        form method="post"
+                             action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                             style="margin-top: 12px;" {
+                            button type="submit"
+                                   title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
+                                   style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "rotate WG keypair"
                             }
-                            @let wg_links: Vec<_> = share_links
-                                .iter()
-                                .filter(|(_, pid, _)| pid.0 == "wireguard")
-                                .collect();
-                            @if wg_links.is_empty() {
-                                @if servers.is_empty() {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(
-                                            lang,
-                                            "No servers granted to this user yet. Grant a server in the ",
-                                            "У пользователя пока нет грантов. Выдай сервер в секции ",
-                                        ))
-                                        b { (crate::i18n::tr(lang, "Server access", "Доступ к серверам")) }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " section below — if it runs WireGuard, the QR appears here.",
-                                            " ниже — если сервер крутит WireGuard, QR появится здесь.",
-                                        ))
-                                    }
-                                } @else if wg_capable_granted.is_empty() {
-                                    // Case B — granted servers exist but
-                                    // NONE declare wireguard. Most
-                                    // common case for bash-imported
-                                    // users (vps-is-01 et al. run
-                                    // VLESS/TUIC/Hy2, not WG).
-                                    p style="font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink); margin: 0 0 8px;" {
-                                        b { (crate::i18n::tr(
-                                            lang,
-                                            "Keys exist, but no granted server runs WireGuard.",
-                                            "Ключи есть, но ни на одном выданном сервере не крутится WireGuard.",
-                                        )) }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " The user has a WG keypair (see pubkey above), so the moment a WG-capable server is granted — or ",
-                                            " У пользователя есть WG-пара ключей (см. pubkey выше), так что в момент когда WG-сервер будет выдан — либо ",
-                                        ))
-                                        span.ed-mono { "wireguard" }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " is added to an existing server's ",
-                                            " добавится в ",
-                                        ))
-                                        span.ed-mono { "enabled_protocols" }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " — the QR will appear here.",
-                                            " существующего сервера — QR появится здесь.",
-                                        ))
-                                    }
-                                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 6px;" {
-                                        (crate::i18n::tr(lang, "Currently granted: ", "Текущие гранты: "))
-                                        @for (i, s) in servers.iter().enumerate() {
-                                            @if i > 0 { ", " }
-                                            span.ed-mono { (s.id.0) }
-                                        }
-                                        (crate::i18n::tr(lang, " — none have ", " — ни у одного нет "))
-                                        span.ed-mono { "wireguard" }
-                                        (crate::i18n::tr(lang, " in their protocol list.", " в списке протоколов."))
-                                    }
-                                    @if !wg_capable_inventory.is_empty() {
-                                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                        }
+
+                        // Distribution panel — one column per client app.
+                        // Same secret material, several wire formats:
+                        //   * Flow A — sing-box JSON via /sub/<token> URL
+                        //   * Flow B — wireguard:// (official WG app, Hiddify)
+                        //   * Flow C — vpn://    (AmneziaVPN)
+                        //   * Flow D — wgturn:// (wgturn-cli, VK-TURN relay)
+                        //                  — only when a granted server has
+                        //                  the wgturn protocol enabled. Lives
+                        //                  here so the operator hands the
+                        //                  user one artefact per client app,
+                        //                  same UX as A/B/C.
+                        //
+                        // Plus a .conf-file download per WG-capable server
+                        // as a universal fallback (drag-drop into ANY WG
+                        // client incl AmneziaVPN's "File with settings"
+                        // button).
+                        //
+                        // Pre-2026-05-17 (commit `799e28b`) Flow B claimed
+                        // to cover BOTH AmneziaVPN and the WG app, but the
+                        // `wireguard://?conf=` format AmneziaVPN rejects
+                        // with ErrorCode 900 («нет контейнеров») — Amnezia
+                        // expects its own `vpn://<base64(qCompress(json))>`
+                        // deep-link. Split into B + C; honest labels.
+                        //
+                        // Grid uses `auto-fit minmax(340px, 1fr)` so the
+                        // column count adapts to viewport + Flow D's
+                        // conditional presence (3 cols for non-wgturn
+                        // users, 4 for wgturn users; wraps to 2x2 on
+                        // narrower viewports).
+                        div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
+                            // Flow A — sing-box / Hiddify subscription URL.
+                            // The QR renders the same sub_url shown in the
+                            // Subscription block at the top of the page;
+                            // duplicated here on purpose so the operator
+                            // copies the WG-via-Hiddify link from the same
+                            // distribution panel as the WG-native link.
+                            div {
+                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                    (crate::i18n::tr(lang, "Flow A — Hiddify / Sing-box", "Поток A — Hiddify / Sing-box"))
+                                }
+                                @match (&sub_token, &sub_url_str) {
+                                    (Some(_), Some(url)) => {
+                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
                                             (crate::i18n::tr(
                                                 lang,
-                                                "WG-capable servers in the inventory you could grant: ",
-                                                "WG-серверы в инвентаре, которые можно выдать: ",
+                                                "all granted servers · refreshes on its own",
+                                                "все выданные серверы · обновляется само",
                                             ))
-                                            @for (i, sid) in wg_capable_inventory.iter().enumerate() {
-                                                @if i > 0 { ", " }
-                                                span.ed-mono { (sid.0) }
-                                            }
-                                            "."
                                         }
-                                    } @else {
-                                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                                        (share_link_card(url, &html! {
                                             (crate::i18n::tr(
                                                 lang,
-                                                "No WG-capable server in the entire inventory. The ",
-                                                "В инвентаре нет ни одного WG-сервера. ",
+                                                "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. ",
+                                                "Sing-box / Hiddify тянет полный конфиг (все протоколы на всех выданных серверах, включая WireGuard с приватным ключом) и обновляет сам по расписанию. ",
                                             ))
-                                            span.ed-mono { "amneziawg" }
-                                            (crate::i18n::tr(lang, " kernel + ", " kernel + "))
+                                            b { (crate::i18n::tr(
+                                                lang,
+                                                "Recommended default — one URL covers everything.",
+                                                "Рекомендованный default — один URL покрывает всё.",
+                                            )) }
+                                        }))
+                                    }
+                                    _ => {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(lang, "Mint a sub-token in the ", "Сгенерируй sub-token в блоке "))
+                                            b { (crate::i18n::tr(lang, "Subscription", "Подписка")) }
+                                            (crate::i18n::tr(lang, " block above to populate this card.", " выше, чтобы заполнить эту карточку.", ))
+                                        }
+                                    }
+                                }
+                            }
+                            // Flow B — official WireGuard app + Hiddify.
+                            // The `wireguard://?conf=<base64>` link works
+                            // in the official WG mobile/desktop apps and
+                            // in Hiddify, NOT in AmneziaVPN (separate Flow
+                            // C below covers that).
+                            div {
+                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                    (crate::i18n::tr(lang, "Flow B — official WireGuard app / Hiddify", "Поток B — официальное WireGuard / Hiddify"))
+                                }
+                                @let wg_links: Vec<_> = share_links
+                                    .iter()
+                                    .filter(|(_, pid, _)| pid.0 == "wireguard")
+                                    .collect();
+                                @if wg_links.is_empty() {
+                                    @if servers.is_empty() {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "No servers granted to this user yet. Grant a server in the ",
+                                                "У пользователя пока нет грантов. Выдай сервер в секции ",
+                                            ))
+                                            b { (crate::i18n::tr(lang, "Server access", "Доступ к серверам")) }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " section below — if it runs WireGuard, the QR appears here.",
+                                                " ниже — если сервер крутит WireGuard, QR появится здесь.",
+                                            ))
+                                        }
+                                    } @else if wg_capable_granted.is_empty() {
+                                        // Case B — granted servers exist but
+                                        // NONE declare wireguard. Most
+                                        // common case for bash-imported
+                                        // users (vps-is-01 et al. run
+                                        // VLESS/TUIC/Hy2, not WG).
+                                        p style="font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink); margin: 0 0 8px;" {
+                                            b { (crate::i18n::tr(
+                                                lang,
+                                                "Keys exist, but no granted server runs WireGuard.",
+                                                "Ключи есть, но ни на одном выданном сервере не крутится WireGuard.",
+                                            )) }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " The user has a WG keypair (see pubkey above), so the moment a WG-capable server is granted — or ",
+                                                " У пользователя есть WG-пара ключей (см. pubkey выше), так что в момент когда WG-сервер будет выдан — либо ",
+                                            ))
                                             span.ed-mono { "wireguard" }
                                             (crate::i18n::tr(
                                                 lang,
-                                                " protocol need to be enabled on a node first (CLI: ",
-                                                " протокол должны быть сначала включены на ноде (CLI: ",
+                                                " is added to an existing server's ",
+                                                " добавится в ",
                                             ))
-                                            span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
-                                            ")."
+                                            span.ed-mono { "enabled_protocols" }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " — the QR will appear here.",
+                                                " существующего сервера — QR появится здесь.",
+                                            ))
                                         }
-                                    }
-                                } @else {
-                                    // Case C — at least one granted
-                                    // server DOES declare wireguard but
-                                    // share_link failed (most likely:
-                                    // missing wireguard.server_public_key
-                                    // secret). Existing journalctl
-                                    // pointer remains the right action.
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(lang, "Granted servers ", "Выданные серверы "))
-                                        @for (i, sid) in wg_capable_granted.iter().enumerate() {
-                                            @if i > 0 { ", " }
-                                            span.ed-mono { (sid.0) }
+                                        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 6px;" {
+                                            (crate::i18n::tr(lang, "Currently granted: ", "Текущие гранты: "))
+                                            @for (i, s) in servers.iter().enumerate() {
+                                                @if i > 0 { ", " }
+                                                span.ed-mono { (s.id.0) }
+                                            }
+                                            (crate::i18n::tr(lang, " — none have ", " — ни у одного нет "))
+                                            span.ed-mono { "wireguard" }
+                                            (crate::i18n::tr(lang, " in their protocol list.", " в списке протоколов."))
                                         }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " declare wireguard but the share-link render failed. Likely missing ",
-                                            " объявляют wireguard, но рендер share-link провалился. Скорее всего нет ",
-                                        ))
-                                        span.ed-mono { "wireguard.server_public_key" }
-                                        " / "
-                                        span.ed-mono { "wireguard.server_private_key" }
-                                        (crate::i18n::tr(lang, " server secret — check ", " серверного секрета — проверь "))
-                                        span.ed-mono { "journalctl -u vpnctld" }
-                                        "."
-                                    }
-                                }
-                            } @else {
-                                @for (sid, _pid, link) in &wg_links {
-                                    div style="margin-bottom: 18px;" {
-                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
-                                            " · "
-                                            a href=(format!("/admin/users/{}/wireguard/conf/{}",
-                                                            path_segment_encode(&user.id.0),
-                                                            path_segment_encode(&sid.0)))
-                                              download=(format!("{}-{}.conf", user.id.0, sid.0))
-                                              style="color: var(--mute); text-decoration: underline;" {
-                                                ".conf"
+                                        @if !wg_capable_inventory.is_empty() {
+                                            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    "WG-capable servers in the inventory you could grant: ",
+                                                    "WG-серверы в инвентаре, которые можно выдать: ",
+                                                ))
+                                                @for (i, sid) in wg_capable_inventory.iter().enumerate() {
+                                                    @if i > 0 { ", " }
+                                                    span.ed-mono { (sid.0) }
+                                                }
+                                                "."
+                                            }
+                                        } @else {
+                                            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0;" {
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    "No WG-capable server in the entire inventory. The ",
+                                                    "В инвентаре нет ни одного WG-сервера. ",
+                                                ))
+                                                span.ed-mono { "amneziawg" }
+                                                (crate::i18n::tr(lang, " kernel + ", " kernel + "))
+                                                span.ed-mono { "wireguard" }
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    " protocol need to be enabled on a node first (CLI: ",
+                                                    " протокол должны быть сначала включены на ноде (CLI: ",
+                                                ))
+                                                span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
+                                                ")."
                                             }
                                         }
-                                        (share_link_card(link, &html! {
-                                            (crate::i18n::tr(
-                                                lang,
-                                                "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is ",
-                                                "Открывается в официальном WireGuard (mobile + desktop) и Hiddify. Длина ссылки ",
-                                            ))
-                                            (link.len())
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " chars (the private key is base64-embedded inside). Click the box above to select-all + copy.",
-                                                " символов (приватный ключ закодирован base64 внутри). Кликни на блок выше, чтобы выделить и скопировать.",
-                                            ))
-                                        }))
-                                    }
-                                }
-                            }
-                        }
-                        // Flow C — AmneziaVPN-native deep link.
-                        // Same secret material as Flow B but wrapped
-                        // in AmneziaVPN's `vpn://<base64(qCompress(json))>`
-                        // container format. Without this card,
-                        // AmneziaVPN rejects the Flow B link with
-                        // ErrorCode 900 («нет контейнеров»).
-                        div {
-                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                (crate::i18n::tr(lang, "Flow C — AmneziaVPN", "Поток C — AmneziaVPN"))
-                            }
-                            @let amnezia_links: Vec<_> = amnezia_links
-                                .iter()
-                                .collect();
-                            @if amnezia_links.is_empty() {
-                                @if servers.is_empty() {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(
-                                            lang,
-                                            "Grant a WireGuard-capable server to populate this card.",
-                                            "Выдай сервер с WireGuard, чтобы заполнить эту карточку.",
-                                        ))
-                                    }
-                                } @else if wg_capable_granted.is_empty() {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(
-                                            lang,
-                                            "No granted server runs WireGuard yet — add ",
-                                            "Ни на одном выданном сервере не крутится WireGuard — добавь ",
-                                        ))
-                                        span.ed-mono { "wireguard" }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " to an existing server's protocols on its detail page.",
-                                            " в протоколы существующего сервера на странице деталей.",
-                                        ))
-                                    }
-                                } @else {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(lang, "Granted WG servers ", "Выданные WG-серверы "))
-                                        @for (i, sid) in wg_capable_granted.iter().enumerate() {
-                                            @if i > 0 { ", " }
-                                            span.ed-mono { (sid.0) }
-                                        }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " — but AmneziaVPN link rendering failed (check ",
-                                            " — но рендер AmneziaVPN-ссылки провалился (проверь ",
-                                        ))
-                                        span.ed-mono { "journalctl -u vpnctld" }
-                                        ")."
-                                    }
-                                }
-                            } @else {
-                                @for (sid, link) in &amnezia_links {
-                                    div style="margin-bottom: 18px;" {
-                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
-                                            " · "
-                                            a href=(format!("/admin/users/{}/wireguard/conf/{}",
-                                                            path_segment_encode(&user.id.0),
-                                                            path_segment_encode(&sid.0)))
-                                              download=(format!("{}-{}.conf", user.id.0, sid.0))
-                                              style="color: var(--mute); text-decoration: underline;" {
-                                                ".conf"
+                                    } @else {
+                                        // Case C — at least one granted
+                                        // server DOES declare wireguard but
+                                        // share_link failed (most likely:
+                                        // missing wireguard.server_public_key
+                                        // secret). Existing journalctl
+                                        // pointer remains the right action.
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(lang, "Granted servers ", "Выданные серверы "))
+                                            @for (i, sid) in wg_capable_granted.iter().enumerate() {
+                                                @if i > 0 { ", " }
+                                                span.ed-mono { (sid.0) }
                                             }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " declare wireguard but the share-link render failed. Likely missing ",
+                                                " объявляют wireguard, но рендер share-link провалился. Скорее всего нет ",
+                                            ))
+                                            span.ed-mono { "wireguard.server_public_key" }
+                                            " / "
+                                            span.ed-mono { "wireguard.server_private_key" }
+                                            (crate::i18n::tr(lang, " server secret — check ", " серверного секрета — проверь "))
+                                            span.ed-mono { "journalctl -u vpnctld" }
+                                            "."
                                         }
-                                        (share_link_card(link, &html! {
-                                            (crate::i18n::tr(
-                                                lang,
-                                                "QR / paste opens in AmneziaVPN; the deep link is ",
-                                                "QR или вставка открывается в AmneziaVPN; deep-link ",
-                                            ))
-                                            (link.len())
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " chars (zlib-compressed JSON-container inside). The ",
-                                                " символов (внутри zlib-сжатый JSON-контейнер). Ссылка ",
-                                            ))
-                                            span.ed-mono { ".conf" }
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " link above is a fallback for AmneziaVPN's ",
-                                                " выше — резерв через ",
-                                            ))
-                                            em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
-                                            (crate::i18n::tr(lang, " import path.", " import-путь AmneziaVPN."))
-                                        }))
-                                    }
-                                }
-                            }
-                        }
-                        // Flow F — AmneziaWG `awg://` link for the
-                        // operator's sing-box-lx-based client app. Carries
-                        // the per-server obfs (s1/s2/h1-h4 minted by
-                        // bootstrap) + the server-generated client key, so
-                        // it's a one-tap import. Only renders when at least
-                        // one granted server runs the amneziawg kernel
-                        // (obfs minted ⇒ a link was produced). Letter F:
-                        // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
-                        // D=wgturn, E=dns-tunnel — F is the next free one.
-                        @if !awg_links.is_empty() {
-                            div {
-                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                    (crate::i18n::tr(lang, "Flow F — AmneziaWG (awg://)", "Поток F — AmneziaWG (awg://)"))
-                                }
-                                @for (sid, link) in &awg_links {
-                                    div style="margin-bottom: 18px;" {
-                                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                            (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
-                                        }
-                                        (share_link_card(link, &html! {
-                                            (crate::i18n::tr(
-                                                lang,
-                                                "Opens in the sing-box-lx-based app — per-server AmneziaWG obfuscation (s1/s2/h1-h4) baked in; one-tap, no on-device key-gen.",
-                                                "Открывается в приложении на sing-box-lx — per-server AmneziaWG-обфускация (s1/s2/h1-h4) уже внутри; один тап, без генерации ключей на устройстве.",
-                                            ))
-                                        }))
-                                    }
-                                }
-                            }
-                        }
-                        // Flow D — wgturn (VK-TURN relayed WG).
-                        // Separate from Flow A/B/C because:
-                        //   * sing-box CAN'T parse `type: wgturn` —
-                        //     the protocol is filtered out of /sub
-                        //     (`appears_in_sing_box_sub() = false`),
-                        //     so Flow A doesn't deliver it.
-                        //   * wgturn:// URL is consumed by the
-                        //     dedicated `wgturn-cli` client, not the
-                        //     official WireGuard app (Flow B) or
-                        //     AmneziaVPN (Flow C).
-                        // The card ONLY renders when at least one
-                        // granted server has the wgturn protocol; for
-                        // most users (sing-box-only) this column is
-                        // omitted entirely (grid auto-fits).
-                        @if !wgturn_capable_granted.is_empty() {
-                            div {
-                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                    (crate::i18n::tr(lang, "Flow D — wgturn-cli (VK-TURN relay)", "Поток D — wgturn-cli (VK-TURN relay)"))
-                                }
-                                @let wgt_links: Vec<_> = share_links
-                                    .iter()
-                                    .filter(|(_, pid, _)| pid.0 == "wgturn")
-                                    .collect();
-                                @if wgt_links.is_empty() {
-                                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                        (crate::i18n::tr(lang, "Granted wgturn servers ", "Выданные wgturn-серверы "))
-                                        @for (i, sid) in wgturn_capable_granted.iter().enumerate() {
-                                            @if i > 0 { ", " }
-                                            span.ed-mono { (sid.0) }
-                                        }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " — but the share-link render failed. Most likely missing ",
-                                            " — но рендер share-link провалился. Скорее всего нет ",
-                                        ))
-                                        span.ed-mono { "wgturn:server_wg_public" }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " server secret or the user has no ",
-                                            " серверного секрета или у пользователя отсутствует ",
-                                        ))
-                                        span.ed-mono { "wireguard_private" }
-                                        (crate::i18n::tr(
-                                            lang,
-                                            " (create the user with ",
-                                            " (создай пользователя с ",
-                                        ))
-                                        span.ed-mono { "--gen-wireguard" }
-                                        ")."
                                     }
                                 } @else {
-                                    @for (sid, _pid, link) in &wgt_links {
+                                    @for (sid, _pid, link) in &wg_links {
                                         div style="margin-bottom: 18px;" {
                                             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                                "server " (sid.0)
-                                                " · ~200 KB/s emergency"
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
+                                                " · "
+                                                a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                                path_segment_encode(&user.id.0),
+                                                                path_segment_encode(&sid.0)))
+                                                  download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                                  style="color: var(--mute); text-decoration: underline;" {
+                                                    ".conf"
+                                                }
                                             }
                                             (share_link_card(link, &html! {
-                                                "Opens in "
-                                                span.ed-mono { "wgturn-cli" }
-                                                " — the user pastes the link AND their own VK Calls invite at connect time: "
-                                                br {}
-                                                span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10.5px;" {
-                                                    "wgturn-cli connect-url '<this-link>' --vk-link '<https://vk.com/call/join/...>'"
-                                                }
-                                                br {}
-                                                "Each VK call has a limited concurrent-stream count, so each user supplies their own. ~200 KB/s ceiling per device — position as an emergency channel beside Flow A/B/C, not a daily driver."
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is ",
+                                                    "Открывается в официальном WireGuard (mobile + desktop) и Hiddify. Длина ссылки ",
+                                                ))
+                                                (link.len())
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    " chars (the private key is base64-embedded inside). Click the box above to select-all + copy.",
+                                                    " символов (приватный ключ закодирован base64 внутри). Кликни на блок выше, чтобы выделить и скопировать.",
+                                                ))
                                             }))
                                         }
                                     }
                                 }
                             }
+                            // Flow C — AmneziaVPN-native deep link.
+                            // Same secret material as Flow B but wrapped
+                            // in AmneziaVPN's `vpn://<base64(qCompress(json))>`
+                            // container format. Without this card,
+                            // AmneziaVPN rejects the Flow B link with
+                            // ErrorCode 900 («нет контейнеров»).
+                            div {
+                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                    (crate::i18n::tr(lang, "Flow C — AmneziaVPN", "Поток C — AmneziaVPN"))
+                                }
+                                @let amnezia_links: Vec<_> = amnezia_links
+                                    .iter()
+                                    .collect();
+                                @if amnezia_links.is_empty() {
+                                    @if servers.is_empty() {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "Grant a WireGuard-capable server to populate this card.",
+                                                "Выдай сервер с WireGuard, чтобы заполнить эту карточку.",
+                                            ))
+                                        }
+                                    } @else if wg_capable_granted.is_empty() {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(
+                                                lang,
+                                                "No granted server runs WireGuard yet — add ",
+                                                "Ни на одном выданном сервере не крутится WireGuard — добавь ",
+                                            ))
+                                            span.ed-mono { "wireguard" }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " to an existing server's protocols on its detail page.",
+                                                " в протоколы существующего сервера на странице деталей.",
+                                            ))
+                                        }
+                                    } @else {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(lang, "Granted WG servers ", "Выданные WG-серверы "))
+                                            @for (i, sid) in wg_capable_granted.iter().enumerate() {
+                                                @if i > 0 { ", " }
+                                                span.ed-mono { (sid.0) }
+                                            }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " — but AmneziaVPN link rendering failed (check ",
+                                                " — но рендер AmneziaVPN-ссылки провалился (проверь ",
+                                            ))
+                                            span.ed-mono { "journalctl -u vpnctld" }
+                                            ")."
+                                        }
+                                    }
+                                } @else {
+                                    @for (sid, link) in &amnezia_links {
+                                        div style="margin-bottom: 18px;" {
+                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
+                                                " · "
+                                                a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                                path_segment_encode(&user.id.0),
+                                                                path_segment_encode(&sid.0)))
+                                                  download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                                  style="color: var(--mute); text-decoration: underline;" {
+                                                    ".conf"
+                                                }
+                                            }
+                                            (share_link_card(link, &html! {
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    "QR / paste opens in AmneziaVPN; the deep link is ",
+                                                    "QR или вставка открывается в AmneziaVPN; deep-link ",
+                                                ))
+                                                (link.len())
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    " chars (zlib-compressed JSON-container inside). The ",
+                                                    " символов (внутри zlib-сжатый JSON-контейнер). Ссылка ",
+                                                ))
+                                                span.ed-mono { ".conf" }
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    " link above is a fallback for AmneziaVPN's ",
+                                                    " выше — резерв через ",
+                                                ))
+                                                em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
+                                                (crate::i18n::tr(lang, " import path.", " import-путь AmneziaVPN."))
+                                            }))
+                                        }
+                                    }
+                                }
+                            }
+                            // Flow F — AmneziaWG `awg://` link for the
+                            // operator's sing-box-lx-based client app. Carries
+                            // the per-server obfs (s1/s2/h1-h4 minted by
+                            // bootstrap) + the server-generated client key, so
+                            // it's a one-tap import. Only renders when at least
+                            // one granted server runs the amneziawg kernel
+                            // (obfs minted ⇒ a link was produced). Letter F:
+                            // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
+                            // D=wgturn, E=dns-tunnel — F is the next free one.
+                            @if !awg_links.is_empty() {
+                                div {
+                                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                        (crate::i18n::tr(lang, "Flow F — AmneziaWG (awg://)", "Поток F — AmneziaWG (awg://)"))
+                                    }
+                                    @for (sid, link) in &awg_links {
+                                        div style="margin-bottom: 18px;" {
+                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
+                                            }
+                                            (share_link_card(link, &html! {
+                                                (crate::i18n::tr(
+                                                    lang,
+                                                    "Opens in the sing-box-lx-based app — per-server AmneziaWG obfuscation (s1/s2/h1-h4) baked in; one-tap, no on-device key-gen.",
+                                                    "Открывается в приложении на sing-box-lx — per-server AmneziaWG-обфускация (s1/s2/h1-h4) уже внутри; один тап, без генерации ключей на устройстве.",
+                                                ))
+                                            }))
+                                        }
+                                    }
+                                }
+                            }
+                            // Flow D — wgturn (VK-TURN relayed WG).
+                            // Separate from Flow A/B/C because:
+                            //   * sing-box CAN'T parse `type: wgturn` —
+                            //     the protocol is filtered out of /sub
+                            //     (`appears_in_sing_box_sub() = false`),
+                            //     so Flow A doesn't deliver it.
+                            //   * wgturn:// URL is consumed by the
+                            //     dedicated `wgturn-cli` client, not the
+                            //     official WireGuard app (Flow B) or
+                            //     AmneziaVPN (Flow C).
+                            // The card ONLY renders when at least one
+                            // granted server has the wgturn protocol; for
+                            // most users (sing-box-only) this column is
+                            // omitted entirely (grid auto-fits).
+                            @if !wgturn_capable_granted.is_empty() {
+                                div {
+                                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
+                                        (crate::i18n::tr(lang, "Flow D — wgturn-cli (VK-TURN relay)", "Поток D — wgturn-cli (VK-TURN relay)"))
+                                    }
+                                    @let wgt_links: Vec<_> = share_links
+                                        .iter()
+                                        .filter(|(_, pid, _)| pid.0 == "wgturn")
+                                        .collect();
+                                    @if wgt_links.is_empty() {
+                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                                            (crate::i18n::tr(lang, "Granted wgturn servers ", "Выданные wgturn-серверы "))
+                                            @for (i, sid) in wgturn_capable_granted.iter().enumerate() {
+                                                @if i > 0 { ", " }
+                                                span.ed-mono { (sid.0) }
+                                            }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " — but the share-link render failed. Most likely missing ",
+                                                " — но рендер share-link провалился. Скорее всего нет ",
+                                            ))
+                                            span.ed-mono { "wgturn:server_wg_public" }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " server secret or the user has no ",
+                                                " серверного секрета или у пользователя отсутствует ",
+                                            ))
+                                            span.ed-mono { "wireguard_private" }
+                                            (crate::i18n::tr(
+                                                lang,
+                                                " (create the user with ",
+                                                " (создай пользователя с ",
+                                            ))
+                                            span.ed-mono { "--gen-wireguard" }
+                                            ")."
+                                        }
+                                    } @else {
+                                        @for (sid, _pid, link) in &wgt_links {
+                                            div style="margin-bottom: 18px;" {
+                                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                    "server " (sid.0)
+                                                    " · ~200 KB/s emergency"
+                                                }
+                                                (share_link_card(link, &html! {
+                                                    "Opens in "
+                                                    span.ed-mono { "wgturn-cli" }
+                                                    " — the user pastes the link AND their own VK Calls invite at connect time: "
+                                                    br {}
+                                                    span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10.5px;" {
+                                                        "wgturn-cli connect-url '<this-link>' --vk-link '<https://vk.com/call/join/...>'"
+                                                    }
+                                                    br {}
+                                                    "Each VK call has a limited concurrent-stream count, so each user supplies their own. ~200 KB/s ceiling per device — position as an emergency channel beside Flow A/B/C, not a daily driver."
+                                                }))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(pub_b64), None) => {
+                    // Operator-paranoid path (CLI `--wireguard-pubkey`): only
+                    // pubkey present, private stays on the user device. No
+                    // rotate button — that'd overwrite the user's privkey
+                    // pairing. Operator can `vpnctl user remove` + `add`
+                    // to switch flows.
+                    div style="padding: 12px 0;" {
+                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                            div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
+                            div {
+                                span style="color: var(--mute);" { "private " }
+                                span.ed-mono style="color: var(--mute);" { "on user device (operator-paranoid path)" }
+                            }
+                        }
+                    }
+                }
+                (None, _) => {
+                    // Should be impossible for users created via the web
+                    // form (always auto-gens both). Falls through for
+                    // legacy users imported pre-2026-05-16 — show a
+                    // self-heal button.
+                    div style="padding: 12px 0;" {
+                        p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                            (crate::i18n::tr(
+                                lang,
+                                "No WireGuard keypair on this user. Imported from the legacy bash project, or created before the auto-gen default.",
+                                "У этого пользователя нет WireGuard-пары. Импортирован из старого bash-проекта или создан до того как auto-gen стал дефолтом.",
+                            ))
+                        }
+                        form method="post"
+                             action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                             style="margin-top: 8px;" {
+                            button type="submit"
+                                   title="Mint a fresh Curve25519 keypair for this user (legacy self-heal — only shown when the user has no key on file). No existing WireGuard client config to break."
+                                   style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                "generate WG keypair"
+                            }
                         }
                     }
                 }
             }
-            (Some(pub_b64), None) => {
-                // Operator-paranoid path (CLI `--wireguard-pubkey`): only
-                // pubkey present, private stays on the user device. No
-                // rotate button — that'd overwrite the user's privkey
-                // pairing. Operator can `vpnctl user remove` + `add`
-                // to switch flows.
-                div style="padding: 12px 0;" {
-                    div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                        div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
-                        div {
-                            span style="color: var(--mute);" { "private " }
-                            span.ed-mono style="color: var(--mute);" { "on user device (operator-paranoid path)" }
+
+            // Server access (Phase C-3.3) — full server inventory with a
+            // per-row grant/revoke form. Granted rows show "✓ access ·
+            // [revoke]"; ungranted rows show "[grant]". One POST per
+            // click, server returns 303 to this same detail page so the
+            // operator sees the post-mutation state immediately.
+    }
+    @if tab == UserTab::Access {
+            div.ed-rule {}
+            // NM-12 follow-up: the per-grant disable/enable buttons in
+            // the per-protocol grid below redirect with the
+            // `#server-access` fragment so the operator stays anchored
+            // here after a click instead of being scrolled to the top.
+            div.ed-art-eyebrow id="server-access" {
+                (crate::i18n::t(lang, crate::i18n::K::EyebrowServerAccess))
+            }
+            @if all_servers.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "No servers in the inventory yet. Run ",
+                        "Серверов в инвентаре ещё нет. Запусти ",
+                    ))
+                    span.ed-mono { "vpnctl bootstrap <id> --address <ip> --root-password <pw>" }
+                    (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
+                }
+            } @else {
+                ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
+                    @for s in &all_servers {
+                        // Outer li wraps BOTH the grant toggle row AND
+                        // (for granted servers only) the per-protocol
+                        // delivery grid. Single `border-bottom` keeps the
+                        // visual rule between *servers*, not between the
+                        // grant toggle and its own grid below.
+                        li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                            div style="display: flex; align-items: baseline; gap: 12px;" {
+                                // Server id → link to /admin/servers/{id} in a
+                                // new tab (Pavel 2026-05-19: «хочу чтоб через
+                                // пользователя можно было открыть страницу
+                                // сервера в отдельном окне»). `target="_blank"`
+                                // + `rel="noopener"` so the new tab doesn't
+                                // share window.opener with the user-detail
+                                // page (security hygiene + tab-isolation).
+                                span style="flex: 1;" {
+                                    a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
+                                      target="_blank"
+                                      rel="noopener"
+                                      title=(match lang {
+                                          crate::i18n::Locale::En => format!("Open /admin/servers/{} in a new tab", s.id.0),
+                                          crate::i18n::Locale::Ru => format!("Открыть /admin/servers/{} в новой вкладке", s.id.0),
+                                      })
+                                      style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
+                                        b { (s.id.0) }
+                                    }
+                                    " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
+                                    (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+                                    ")"
+                                }
+                                @if granted_ids.contains(&s.id) {
+                                    span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
+                                        (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
+                                    }
+                                    form method="post"
+                                         action=(format!("/admin/users/{}/grants/{}/revoke",
+                                                         path_segment_encode(&user.id.0),
+                                                         path_segment_encode(&s.id.0)))
+                                         style="margin: 0;" {
+                                        @let title_str = match lang {
+                                            crate::i18n::Locale::En => format!("Revoke {}'s access to {}", user.id.0, s.id.0),
+                                            crate::i18n::Locale::Ru => format!("Отозвать доступ {} к {}", user.id.0, s.id.0),
+                                        };
+                                        button type="submit"
+                                               title=(title_str)
+                                               style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                            (crate::i18n::tr(lang, "revoke", "отозвать"))
+                                        }
+                                    }
+                                } @else {
+                                    span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
+                                    form method="post"
+                                         action=(format!("/admin/users/{}/grants/{}",
+                                                         path_segment_encode(&user.id.0),
+                                                         path_segment_encode(&s.id.0)))
+                                         style="margin: 0;" {
+                                        @let title_str = match lang {
+                                            crate::i18n::Locale::En => format!("Grant {} access to {}", user.id.0, s.id.0),
+                                            crate::i18n::Locale::Ru => format!("Выдать доступ {} к {}", user.id.0, s.id.0),
+                                        };
+                                        button type="submit"
+                                               title=(title_str)
+                                               style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                            (crate::i18n::tr(lang, "grant", "выдать"))
+                                        }
+                                    }
+                                }
+                            }
+                            // Per-(user, server, protocol) delivery grid
+                            // (migration 0018 / NM-10). Renders ONLY for
+                            // GRANTED servers — ungranted ones have no
+                            // (user, server) row to attach overrides to,
+                            // so `set_grant_protocol_override` would
+                            // refuse with Invalid. Each protocol cell
+                            // shows its current delivery state +
+                            // block/unblock button. Server-hidden
+                            // protocols are flagged read-only (operator
+                            // adjusts those on /admin/servers/{id}).
+                            @if granted_ids.contains(&s.id) {
+                                (user_detail_per_protocol_grid(
+                                    &user.id,
+                                    s,
+                                    hidden_per_server.get(&s.id),
+                                    &user_overrides,
+                                    &state.registry,
+                                    lang,
+                                ))
+                            }
                         }
                     }
                 }
             }
-            (None, _) => {
-                // Should be impossible for users created via the web
-                // form (always auto-gens both). Falls through for
-                // legacy users imported pre-2026-05-16 — show a
-                // self-heal button.
-                div style="padding: 12px 0;" {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+
+    }
+    @if tab == UserTab::Delivery {
+            // Flow E — dns-tunnel (slipstream DNS-over-НСДИ last resort).
+            // Mirror of Flow D (wgturn) — a SEPARATE delivery card because:
+            //   * sing-box CAN'T parse `type: dns-tunnel` — the protocol is
+            //     filtered out of /sub (`appears_in_sing_box_sub() = false`),
+            //     so Flow A doesn't deliver it.
+            //   * the `dns-tunnel://` URL is consumed by a TWO-process client
+            //     bundle (slipstream-client local TCP listener + a sing-box
+            //     VLESS outbound → that listener), NOT a single sing-box
+            //     outbound URI — so it can't ride the JSON envelope or the
+            //     V2Ray base64 sub.
+            // The per-user `dns-tunnel://<…uuid=user.uuid…>` link is rendered
+            // by the generic `collect_share_links` (it iterates every enabled
+            // protocol and calls `share_link`, no `appears_in_sing_box_sub`
+            // filter — same as the CLI `vpnctl sub` path), so it already lands
+            // in the "Per-protocol share links" list below; this card lifts it
+            // into its own QR + consumption instructions, exactly like wgturn.
+            // The card ONLY renders when at least one granted server runs the
+            // dns-tunnel protocol; sing-box-only users never see it.
+            @if !dns_tunnel_capable_granted.is_empty() {
+                div.ed-art-eyebrow style="margin-top: 24px;" {
+                    (crate::i18n::tr(lang, "Flow E — dns-tunnel (slipstream, last resort)", "Поток E — dns-tunnel (slipstream, последний резерв)"))
+                }
+                @let dnst_links: Vec<_> = share_links
+                    .iter()
+                    .filter(|(_, pid, _)| pid.0 == "dns-tunnel")
+                    .collect();
+                @if dnst_links.is_empty() {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
+                        (crate::i18n::tr(lang, "Granted dns-tunnel servers ", "Выданные dns-tunnel-серверы "))
+                        @for (i, sid) in dns_tunnel_capable_granted.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            span.ed-mono { (sid.0) }
+                        }
                         (crate::i18n::tr(
                             lang,
-                            "No WireGuard keypair on this user. Imported from the legacy bash project, or created before the auto-gen default.",
-                            "У этого пользователя нет WireGuard-пары. Импортирован из старого bash-проекта или создан до того как auto-gen стал дефолтом.",
+                            " — but the share-link render failed. Most likely missing ",
+                            " — но рендер share-link провалился. Скорее всего нет ",
+                        ))
+                        span.ed-mono { "dns-tunnel:domain" }
+                        (crate::i18n::tr(lang, " or ", " или "))
+                        span.ed-mono { "dns-tunnel:fingerprint" }
+                        (crate::i18n::tr(
+                            lang,
+                            " server secret — set them via the server's secrets page.",
+                            " серверного секрета — задай их на странице секретов сервера.",
+                        ))
+                    }
+                } @else {
+                    @for (sid, _pid, link) in &dnst_links {
+                        div style="margin-bottom: 18px;" {
+                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                "server " (sid.0)
+                                (crate::i18n::tr(lang, " · break-glass when everything else is blocked", " · break-glass когда всё остальное заблокировано"))
+                            }
+                            (share_link_card(link, &html! {
+                                (crate::i18n::tr(
+                                    lang,
+                                    "Two-process bundle: a local slipstream-client tunnels TCP-over-DNS to НСДИ resolvers, and a sing-box VLESS outbound points at that local listener. The link carries this user's own ",
+                                    "Двухпроцессный бандл: локальный slipstream-client тоннелирует TCP-over-DNS к НСДИ-резолверам, а sing-box VLESS-outbound смотрит на этот локальный listener. В ссылке — собственный ",
+                                ))
+                                span.ed-mono { "uuid" }
+                                (crate::i18n::tr(
+                                    lang,
+                                    " (the same one used for VLESS-REALITY), the tunnel domain, the multipath resolver list and the cert-pin fingerprint — nothing for the user to fill in. ",
+                                    " (тот же, что и для VLESS-REALITY), домен тоннеля, multipath-список резолверов и fingerprint-пин сертификата — пользователю ничего вводить не нужно. ",
+                                ))
+                                b { (crate::i18n::tr(
+                                    lang,
+                                    "Last-resort transport — position beside Flow A/B/C/D, not as a daily driver.",
+                                    "Транспорт последнего резерва — рядом с потоками A/B/C/D, не для повседневного использования.",
+                                )) }
+                            }))
+                        }
+                    }
+                }
+            }
+
+            // Per-protocol share-links — only meaningful for granted servers.
+            // ponytail: collapsed <details> — the Flow cards above already deliver
+            // every link with a QR; this raw server×protocol dump (up to ~32 lines)
+            // is the copy-all / debug view, not prime-scroll content. Content stays
+            // in the DOM (just collapsed), so copy-contract + smoke tests still see it.
+            @if !servers.is_empty() {
+                details style="margin-top: 24px;" {
+                    summary style="cursor: pointer;" {
+                        span.ed-art-eyebrow {
+                            (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
+                        }
+                    }
+                    @if share_links.is_empty() {
+                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
+                            "No share-links could be rendered (missing secrets or unregistered protocols). "
+                            "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
+                        }
+                    } @else {
+                        ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
+                            @for (sid, pid, link) in &share_links {
+                                li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                                    span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
+                                    (link)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+    }
+    @if tab == UserTab::Activity {
+            div.ed-rule {}
+            div.ed-art-eyebrow {
+                (crate::i18n::tr(lang, "Subscription access", "Обращения к подписке"))
+                @if heat_24h {
+                    span style="color: var(--acc); margin-left: 12px; letter-spacing: 0;" {
+                        (crate::i18n::tr(lang, "· abuse signal: ", "· abuse-сигнал: "))
+                        (ips_24h)
+                        (crate::i18n::tr(
+                            lang,
+                            " distinct IPs in 24h (≥",
+                            " уникальных IP за 24ч (≥",
+                        ))
+                        (ABUSE_HEAT_THRESHOLD)
+                        (crate::i18n::tr(lang, " threshold)", " порог)"))
+                    }
+                }
+            }
+            // Phase 4a hero row 1 — 30-day aggregates from
+            // sub_access_aggregates_for_user. Cards excluded VPN-egress
+            // rows; the `last_seen` chip uses the 30d max ts.
+            div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 12px 0 6px; font-family: var(--serif);" {
+                div title=(crate::i18n::tr(lang, "Distinct real-client IPs over the last 30 days. VPN-egress rows (where src IP = one of our VPN servers, full-tunnel mode) excluded.", "Уникальные клиентские IP за 30 дней. Строки VPN-egress (когда src IP — один из наших VPN-серверов в full-tunnel) исключены.")) {
+                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_ips) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "distinct IPs · 30 days", "уникальных IP · 30 дней"))
+                    }
+                }
+                div title=(crate::i18n::tr(lang, "Distinct ISO country codes from GeoIP enrichment (DB-IP Lite City). Rows where GeoIP didn't resolve a country stay uncounted.", "Уникальные ISO-коды стран из GeoIP-обогащения (DB-IP Lite City). Строки где GeoIP не определил страну — не учтены.")) {
+                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_countries) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "countries · 30 days", "стран · 30 дней"))
+                    }
+                }
+                div title=(crate::i18n::tr(lang, "Distinct ASN labels (full AS-number + operator name) from GeoIP-ASN. High distinct_ASNs with low distinct_countries = single user roaming ISPs. High both = shared subscription URL.", "Уникальные ASN (номер AS + название оператора) из GeoIP-ASN. Много ASN при малом числе стран = один юзер мигрирует между провайдерами. Много и того и другого = расшаренная подписка.")) {
+                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_asns) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "ASNs · 30 days", "ASN · 30 дней"))
+                    }
+                }
+                div title=(crate::i18n::tr(lang, "Sum of subscription payload bytes served over the last 30 days. Subscription JSON itself, NOT actual VPN traffic.", "Сумма байт payload подписки за 30 дней. Это сам JSON-конфиг подписки, НЕ реальный VPN-трафик.")) {
+                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (humanize_bytes(access_aggregates.total_bytes)) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "served · 30 days", "отдано · 30 дней"))
+                    }
+                }
+                div title=(crate::i18n::tr(lang, "Most recent subscription fetch (any IP, including VPN-egress). If older than a few days, the user's client probably isn't auto-updating — they may have imported the URL once and forgotten about it.", "Последнее обращение к подписке (любой IP, включая VPN-egress). Если старше нескольких дней — клиент не auto-update'ит подписку; возможно, юзер импортировал URL один раз и забыл.")) {
+                    @match access_aggregates.last_seen {
+                        Some(ts) => {
+                            div style="font-size: 18px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
+                                (format_msk_iso(ts))
+                            }
+                        }
+                        None => {
+                            div style="font-size: 18px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
+                                (crate::i18n::tr(lang, "never", "никогда"))
+                            }
+                        }
+                    }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "last fetch", "последнее обращение"))
+                    }
+                }
+            }
+            // Phase 4a — VPN-egress filter toggle. Default state hides
+            // rows where src IP is one of our own VPN-server addresses
+            // (full-tunnel egress noise). Clicking the link adds /
+            // removes `?show_egress=1`. Counter shows how many rows are
+            // currently hidden so the operator knows what the filter is
+            // catching.
+            div style="display: flex; gap: 36px; padding: 4px 0 14px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                @if show_egress {
+                    span {
+                        (crate::i18n::tr(lang, "Showing VPN-egress rows. ", "Показаны строки VPN-egress. "))
+                        a href=(format!("/admin/users/{}/activity", user.id.0))
+                          style="color: var(--ink); text-decoration: underline;" {
+                            (crate::i18n::tr(lang, "Hide them", "Скрыть"))
+                        }
+                    }
+                } @else {
+                    @if access_aggregates.egress_rows > 0 {
+                        // English needs singular/plural agreement
+                        // («1 row hidden» vs «12 rows hidden»); Russian
+                        // sidesteps with the genitive-plural «строк» that
+                        // works for 1, 2, 5, … (technically «строка» for 1
+                        // is more natural but the gen-plural reads fine in
+                        // context and keeps the i18n surface flat).
+                        @let en_suffix = if access_aggregates.egress_rows == 1 {
+                            " VPN-egress row hidden (src IP = our own VPN server, full-tunnel mode). "
+                        } else {
+                            " VPN-egress rows hidden (src IP = our own VPN server, full-tunnel mode). "
+                        };
+                        span {
+                            (access_aggregates.egress_rows)
+                            (crate::i18n::tr(lang, en_suffix, " строк VPN-egress скрыто (src IP — наш VPN-сервер, full-tunnel). "))
+                            a href=(format!("/admin/users/{}/activity?show_egress=1", user.id.0))
+                              style="color: var(--ink); text-decoration: underline;" {
+                                (crate::i18n::tr(lang, "Show them", "Показать"))
+                            }
+                        }
+                    } @else {
+                        span {
+                            (crate::i18n::tr(lang, "No VPN-egress rows for this user (no full-tunnel traffic observed).", "Строк VPN-egress нет (full-tunnel-трафик не наблюдался)."))
+                        }
+                    }
+                }
+            }
+            // Hero row 2 — the legacy 24h/7d/recent counters live here
+            // because they're shorter-window vs the 30-day aggregates
+            // above. Kept for continuity with the old abuse-detection
+            // workflow.
+            div style="display: flex; gap: 36px; padding: 4px 0 18px; font-family: var(--serif);" {
+                div {
+                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
+                    }
+                }
+                div {
+                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
+                    }
+                }
+                div {
+                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
+                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                        (crate::i18n::tr(lang, "rows in table", "строк в таблице"))
+                    }
+                }
+            }
+            @if recent_access.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
+                    (crate::i18n::tr(
+                        lang,
+                        "No subscription fetches recorded yet. Hits will appear here as soon as a client pulls the URL above.",
+                        "Обращений к подписке пока не записано. Строки появятся сразу как только клиент дёрнет URL выше.",
+                    ))
+                }
+            } @else {
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                    thead {
+                        tr style="border-bottom: 1px solid var(--ink);" {
+                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (crate::i18n::tr(lang, "when", "когда"))
+                            }
+                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (crate::i18n::tr(lang, "ip", "ip"))
+                            }
+                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (crate::i18n::tr(lang, "user-agent", "user-agent"))
+                            }
+                            th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (crate::i18n::tr(lang, "status", "статус"))
+                            }
+                            th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
+                                (crate::i18n::tr(lang, "bytes", "байт"))
+                            }
+                        }
+                    }
+                    tbody {
+                        @for row in &recent_access {
+                            @let ip_kind = classify_ip(&row.ip);
+                            // Prefer persisted device_class from
+                            // sub_access_log (migration 0019) — that
+                            // way future parser changes don't rewrite
+                            // history. Fallback to live parse for
+                            // pre-migration NULL rows.
+                            @let ua_summary = row
+                                .device_class
+                                .as_deref()
+                                .or_else(|| crate::ua::parse_ua_short(row.ua.as_deref()));
+                            tr style="border-bottom: 1px dotted var(--rule);" {
+                                td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
+                                    (format_msk_iso(row.ts))
+                                }
+                                td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind_tooltip(ip_kind, lang)) {
+                                    (row.ip)
+                                    @if let Some(tag) = ip_kind_tag(ip_kind, lang) {
+                                        " "
+                                        span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind_color(ip_kind))) {
+                                            (tag)
+                                        }
+                                    }
+                                    // Track-1.2 (migration 0019) — country
+                                    // ISO + ASN chips from GeoIP enrichment.
+                                    // Both columns are NULL for old rows or
+                                    // when VPNCTLD_GEOIP_DIR isn't set;
+                                    // render only what we have.
+                                    @if let Some(cc) = row.geo_country.as_deref() {
+                                        " "
+                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid var(--acc-good, #2c5f2d); color: var(--acc-good, #2c5f2d); margin-left: 2px;"
+                                             title=(crate::i18n::tr(lang, "Country (ISO 3166-1 alpha-2) from MaxMind GeoLite2 City", "Страна (ISO 3166-1 alpha-2) из MaxMind GeoLite2 City")) {
+                                            (cc)
+                                        }
+                                    }
+                                    @if let Some(asn) = row.geo_asn.as_deref() {
+                                        " "
+                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; color: var(--mute); margin-left: 2px;"
+                                             title=(crate::i18n::tr(lang, "Autonomous System / ISP from MaxMind GeoLite2 ASN", "Автономная система / ISP из MaxMind GeoLite2 ASN")) {
+                                            (asn)
+                                        }
+                                    }
+                                    @if let Some(http_v) = row.http_version.as_deref() {
+                                        " "
+                                        span style="font-family: var(--mono); font-size: 9px; color: var(--mute); margin-left: 2px;"
+                                             title=(crate::i18n::tr(lang, "HTTP version negotiated", "Согласованная версия HTTP")) {
+                                            (http_v)
+                                        }
+                                    }
+                                    // Track-1.4 — TLS JA3 / JA4 fingerprint chip
+                                    // (migration 0020). NULL until an nginx-side
+                                    // JA3 module forwards `X-SSL-JA3` /
+                                    // `X-SSL-JA4` headers. Hash itself is long;
+                                    // render the first JA_CHIP_PREFIX_CHARS only,
+                                    // full value lives in the title= tooltip.
+                                    @if let Some(ja3) = row.tls_ja3.as_deref() {
+                                        " "
+                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
+                                             title=(format!("{}\n{}",
+                                                crate::i18n::tr(lang, "JA3 TLS ClientHello fingerprint (Salesforce). Same device through IP changes = same JA3.", "JA3 — отпечаток TLS ClientHello (Salesforce). Одно и то же устройство через смену IP = тот же JA3."),
+                                                ja3)) {
+                                            "JA3 " ((ja3.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
+                                        }
+                                    }
+                                    @if let Some(ja4) = row.tls_ja4.as_deref() {
+                                        " "
+                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
+                                             title=(format!("{}\n{}",
+                                                crate::i18n::tr(lang, "JA4 TLS fingerprint (FoxIO 2023). Protocol-aware, harder to randomise than JA3.", "JA4 — отпечаток TLS (FoxIO 2023). Знает протокол, сложнее рандомизируется чем JA3."),
+                                                ja4)) {
+                                            "JA4 " ((ja4.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
+                                        }
+                                    }
+                                }
+                                td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere; word-break: break-all;" {
+                                    @match &row.ua {
+                                        Some(s) => {
+                                            // Parsed summary if recognised, else raw string.
+                                            @if let Some(label) = ua_summary {
+                                                span title=(s) style="border-bottom: 1px dotted var(--rule-s); cursor: help;" {
+                                                    (label)
+                                                }
+                                            } @else {
+                                                (s)
+                                            }
+                                        }
+                                        None => em style="color: var(--mute);" { (crate::i18n::tr(lang, "(none)", "(нет)")) },
+                                    }
+                                }
+                                td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (row.status) }
+                                td style="padding: 5px 8px; text-align: right; color: var(--soft);" { (row.bytes) }
+                            }
+                        }
+                    }
+                }
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
+                    (crate::i18n::tr(lang, "Showing the ", "Показано "))
+                    (recent_access.len())
+                    (crate::i18n::tr(
+                        lang,
+                        " most recent fetches. Rows are auto-purged after 30 days (default retention).",
+                        " последних обращений. Строки автоудаляются через 30 дней (retention по умолчанию).",
+                    ))
+                }
+            }
+    }
+    @if tab == UserTab::Overview || tab == UserTab::Activity {
+
+            // ── PR-User user#4 — sharing-evidence verdict ────────────
+            // ONE consolidated verdict line above the per-UA evidence
+            // table, folding the 30-day access spread with the UA-cluster
+            // /16 spread (reusing the Track-4 ua_verdict thresholds).
+            (user_sharing_verdict_section(&access_aggregates, &ua_clusters, lang))
+
+    }
+    @if tab == UserTab::Activity {
+            // ── abuse-origins — "Subscription origins" (#origins) ────
+            // WHO is sharing: country / ISP / IP breakdown + a rough
+            // device-count line. Anchored so the dashboard likely-shared
+            // card links straight here. Sits below the verdict (the
+            // headline) and above the per-UA table (the /16 evidence).
+            (user_subscription_origins_section(
+                &origins_by_country,
+                &origins_by_asn,
+                &origins_by_ip,
+                &origins_device_fp,
+                lang,
+            ))
+
+            // ── UA fingerprint (Phase Track-4) + user#7 geo footer ───
+            (ua_clusters_section(&state, &uid, &access_aggregates, lang).await)
+
+    }
+    @if tab == UserTab::Traffic {
+            // ── PR-User user#2 — traffic split by server (24h) ───────
+            (user_detail_traffic_by_server_section(&traffic_by_server, lang))
+
+            // ── Live VPN stats (Track-3 chunk 3) + user#6 trend ──────
+            // The window picker (24h/7d/30d/all) is now folded INTO this
+            // section — it re-fetches the picked window's rows once and
+            // drives both the compact `sparkline_svg` trend and the full
+            // chart, so the previous page-level picker is gone (it would
+            // have rendered a second, duplicate picker).
+            (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
+            (user_top_destinations_section(&state, &uid, lang).await)
+
+    }
+    @if tab == UserTab::Activity {
+            // ── Source IPs (2026-06-14) — «откуда» counterpart to the
+            // «куда» destinations table: per-client-IP activity grounded
+            // in real VPN connections, GeoIP-labelled + reserved-range
+            // classified (the «проработай (неизвестно)» + «разбей трафик
+            // по IP» deliverable). Pre-fetched above.
+            (user_source_ips_section(&source_ips, &source_ip_geo, lang))
+
+            (user_sessions_section(&state, &uid, lang).await)
+
+    }
+    @if tab == UserTab::Overview {
+            // ── PR-User user#5 — lifecycle facts ─────────────────────
+            (user_lifecycle_section(&lifecycle, access_aggregates.last_seen, lang))
+
+            // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
+            // Show current month-to-date usage + the configured cap
+            // (if any) + an inline form to change both, plus the user#3
+            // month-end projection when a cap is set. Re-runs the usage
+            // query so the page-after-redirect immediately reflects new
+            // limits.
+            (user_traffic_limit_section(&state, &uid, lang).await)
+
+            // B1.user (audit 2026-05-22) — soft suspend. Banner +
+            // toggle button. When user.disabled = true, an amber banner
+            // says «this user is paused»; button reads «enable». When
+            // false, just the «disable» button as part of the normal
+            // user-detail card flow. No double-submit confirm because
+            // the action is fully reversible (one click in either
+            // direction, no secrets rotated, no grants lost).
+            div.ed-rule {}
+            div.ed-art-eyebrow style="margin-top: 24px;" {
+                (crate::i18n::tr(lang, "Access state", "Состояние доступа"))
+            }
+            @if user.disabled {
+                div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 8px 0;" {
+                    div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px;" {
+                        (crate::i18n::tr(lang, "user is DISABLED", "пользователь ОТКЛЮЧЁН"))
+                    }
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "Subscription endpoints return an empty config. Secrets, sub-token, WG keypair and grants are unchanged — re-enable to restore access byte-for-byte.",
+                            "Endpoints подписки возвращают пустой config. Секреты, sub-token, WG-пара и гранты не тронуты — включи обратно, чтобы вернуть доступ байт-в-байт.",
                         ))
                     }
                     form method="post"
-                         action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
-                         style="margin-top: 8px;" {
+                         action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0)))
+                         style="display: inline; margin-top: 8px;" {
                         button type="submit"
-                               title="Mint a fresh Curve25519 keypair for this user (legacy self-heal — only shown when the user has no key on file). No existing WireGuard client config to break."
-                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                            "generate WG keypair"
+                               style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                            (crate::i18n::tr(lang, "enable user", "включить пользователя"))
                         }
-                    }
-                }
-            }
-        }
-
-        // Server access (Phase C-3.3) — full server inventory with a
-        // per-row grant/revoke form. Granted rows show "✓ access ·
-        // [revoke]"; ungranted rows show "[grant]". One POST per
-        // click, server returns 303 to this same detail page so the
-        // operator sees the post-mutation state immediately.
-        div.ed-rule {}
-        // NM-12 follow-up: the per-grant disable/enable buttons in
-        // the per-protocol grid below redirect with the
-        // `#server-access` fragment so the operator stays anchored
-        // here after a click instead of being scrolled to the top.
-        div.ed-art-eyebrow id="server-access" {
-            (crate::i18n::t(lang, crate::i18n::K::EyebrowServerAccess))
-        }
-        @if all_servers.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                (crate::i18n::tr(
-                    lang,
-                    "No servers in the inventory yet. Run ",
-                    "Серверов в инвентаре ещё нет. Запусти ",
-                ))
-                span.ed-mono { "vpnctl bootstrap <id> --address <ip> --root-password <pw>" }
-                (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
-            }
-        } @else {
-            ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
-                @for s in &all_servers {
-                    // Outer li wraps BOTH the grant toggle row AND
-                    // (for granted servers only) the per-protocol
-                    // delivery grid. Single `border-bottom` keeps the
-                    // visual rule between *servers*, not between the
-                    // grant toggle and its own grid below.
-                    li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        div style="display: flex; align-items: baseline; gap: 12px;" {
-                            // Server id → link to /admin/servers/{id} in a
-                            // new tab (Pavel 2026-05-19: «хочу чтоб через
-                            // пользователя можно было открыть страницу
-                            // сервера в отдельном окне»). `target="_blank"`
-                            // + `rel="noopener"` so the new tab doesn't
-                            // share window.opener with the user-detail
-                            // page (security hygiene + tab-isolation).
-                            span style="flex: 1;" {
-                                a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
-                                  target="_blank"
-                                  rel="noopener"
-                                  title=(match lang {
-                                      crate::i18n::Locale::En => format!("Open /admin/servers/{} in a new tab", s.id.0),
-                                      crate::i18n::Locale::Ru => format!("Открыть /admin/servers/{} в новой вкладке", s.id.0),
-                                  })
-                                  style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                    b { (s.id.0) }
-                                }
-                                " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
-                                (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
-                                ")"
-                            }
-                            @if granted_ids.contains(&s.id) {
-                                span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
-                                    (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
-                                }
-                                form method="post"
-                                     action=(format!("/admin/users/{}/grants/{}/revoke",
-                                                     path_segment_encode(&user.id.0),
-                                                     path_segment_encode(&s.id.0)))
-                                     style="margin: 0;" {
-                                    @let title_str = match lang {
-                                        crate::i18n::Locale::En => format!("Revoke {}'s access to {}", user.id.0, s.id.0),
-                                        crate::i18n::Locale::Ru => format!("Отозвать доступ {} к {}", user.id.0, s.id.0),
-                                    };
-                                    button type="submit"
-                                           title=(title_str)
-                                           style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                        (crate::i18n::tr(lang, "revoke", "отозвать"))
-                                    }
-                                }
-                            } @else {
-                                span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
-                                form method="post"
-                                     action=(format!("/admin/users/{}/grants/{}",
-                                                     path_segment_encode(&user.id.0),
-                                                     path_segment_encode(&s.id.0)))
-                                     style="margin: 0;" {
-                                    @let title_str = match lang {
-                                        crate::i18n::Locale::En => format!("Grant {} access to {}", user.id.0, s.id.0),
-                                        crate::i18n::Locale::Ru => format!("Выдать доступ {} к {}", user.id.0, s.id.0),
-                                    };
-                                    button type="submit"
-                                           title=(title_str)
-                                           style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                        (crate::i18n::tr(lang, "grant", "выдать"))
-                                    }
-                                }
-                            }
-                        }
-                        // Per-(user, server, protocol) delivery grid
-                        // (migration 0018 / NM-10). Renders ONLY for
-                        // GRANTED servers — ungranted ones have no
-                        // (user, server) row to attach overrides to,
-                        // so `set_grant_protocol_override` would
-                        // refuse with Invalid. Each protocol cell
-                        // shows its current delivery state +
-                        // block/unblock button. Server-hidden
-                        // protocols are flagged read-only (operator
-                        // adjusts those on /admin/servers/{id}).
-                        @if granted_ids.contains(&s.id) {
-                            (user_detail_per_protocol_grid(
-                                &user.id,
-                                s,
-                                hidden_per_server.get(&s.id),
-                                &user_overrides,
-                                &state.registry,
-                                lang,
-                            ))
-                        }
-                    }
-                }
-            }
-        }
-
-        // Flow E — dns-tunnel (slipstream DNS-over-НСДИ last resort).
-        // Mirror of Flow D (wgturn) — a SEPARATE delivery card because:
-        //   * sing-box CAN'T parse `type: dns-tunnel` — the protocol is
-        //     filtered out of /sub (`appears_in_sing_box_sub() = false`),
-        //     so Flow A doesn't deliver it.
-        //   * the `dns-tunnel://` URL is consumed by a TWO-process client
-        //     bundle (slipstream-client local TCP listener + a sing-box
-        //     VLESS outbound → that listener), NOT a single sing-box
-        //     outbound URI — so it can't ride the JSON envelope or the
-        //     V2Ray base64 sub.
-        // The per-user `dns-tunnel://<…uuid=user.uuid…>` link is rendered
-        // by the generic `collect_share_links` (it iterates every enabled
-        // protocol and calls `share_link`, no `appears_in_sing_box_sub`
-        // filter — same as the CLI `vpnctl sub` path), so it already lands
-        // in the "Per-protocol share links" list below; this card lifts it
-        // into its own QR + consumption instructions, exactly like wgturn.
-        // The card ONLY renders when at least one granted server runs the
-        // dns-tunnel protocol; sing-box-only users never see it.
-        @if !dns_tunnel_capable_granted.is_empty() {
-            div.ed-art-eyebrow style="margin-top: 24px;" {
-                (crate::i18n::tr(lang, "Flow E — dns-tunnel (slipstream, last resort)", "Поток E — dns-tunnel (slipstream, последний резерв)"))
-            }
-            @let dnst_links: Vec<_> = share_links
-                .iter()
-                .filter(|(_, pid, _)| pid.0 == "dns-tunnel")
-                .collect();
-            @if dnst_links.is_empty() {
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                    (crate::i18n::tr(lang, "Granted dns-tunnel servers ", "Выданные dns-tunnel-серверы "))
-                    @for (i, sid) in dns_tunnel_capable_granted.iter().enumerate() {
-                        @if i > 0 { ", " }
-                        span.ed-mono { (sid.0) }
-                    }
-                    (crate::i18n::tr(
-                        lang,
-                        " — but the share-link render failed. Most likely missing ",
-                        " — но рендер share-link провалился. Скорее всего нет ",
-                    ))
-                    span.ed-mono { "dns-tunnel:domain" }
-                    (crate::i18n::tr(lang, " or ", " или "))
-                    span.ed-mono { "dns-tunnel:fingerprint" }
-                    (crate::i18n::tr(
-                        lang,
-                        " server secret — set them via the server's secrets page.",
-                        " серверного секрета — задай их на странице секретов сервера.",
-                    ))
-                }
-            } @else {
-                @for (sid, _pid, link) in &dnst_links {
-                    div style="margin-bottom: 18px;" {
-                        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                            "server " (sid.0)
-                            (crate::i18n::tr(lang, " · break-glass when everything else is blocked", " · break-glass когда всё остальное заблокировано"))
-                        }
-                        (share_link_card(link, &html! {
-                            (crate::i18n::tr(
-                                lang,
-                                "Two-process bundle: a local slipstream-client tunnels TCP-over-DNS to НСДИ resolvers, and a sing-box VLESS outbound points at that local listener. The link carries this user's own ",
-                                "Двухпроцессный бандл: локальный slipstream-client тоннелирует TCP-over-DNS к НСДИ-резолверам, а sing-box VLESS-outbound смотрит на этот локальный listener. В ссылке — собственный ",
-                            ))
-                            span.ed-mono { "uuid" }
-                            (crate::i18n::tr(
-                                lang,
-                                " (the same one used for VLESS-REALITY), the tunnel domain, the multipath resolver list and the cert-pin fingerprint — nothing for the user to fill in. ",
-                                " (тот же, что и для VLESS-REALITY), домен тоннеля, multipath-список резолверов и fingerprint-пин сертификата — пользователю ничего вводить не нужно. ",
-                            ))
-                            b { (crate::i18n::tr(
-                                lang,
-                                "Last-resort transport — position beside Flow A/B/C/D, not as a daily driver.",
-                                "Транспорт последнего резерва — рядом с потоками A/B/C/D, не для повседневного использования.",
-                            )) }
-                        }))
-                    }
-                }
-            }
-        }
-
-        // Per-protocol share-links — only meaningful for granted servers.
-        // ponytail: collapsed <details> — the Flow cards above already deliver
-        // every link with a QR; this raw server×protocol dump (up to ~32 lines)
-        // is the copy-all / debug view, not prime-scroll content. Content stays
-        // in the DOM (just collapsed), so copy-contract + smoke tests still see it.
-        @if !servers.is_empty() {
-            details style="margin-top: 24px;" {
-                summary style="cursor: pointer;" {
-                    span.ed-art-eyebrow {
-                        (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
-                    }
-                }
-                @if share_links.is_empty() {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
-                        "No share-links could be rendered (missing secrets or unregistered protocols). "
-                        "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
-                    }
-                } @else {
-                    ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
-                        @for (sid, pid, link) in &share_links {
-                            li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                                span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
-                                (link)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        div.ed-rule {}
-        div.ed-art-eyebrow {
-            (crate::i18n::tr(lang, "Subscription access", "Обращения к подписке"))
-            @if heat_24h {
-                span style="color: var(--acc); margin-left: 12px; letter-spacing: 0;" {
-                    (crate::i18n::tr(lang, "· abuse signal: ", "· abuse-сигнал: "))
-                    (ips_24h)
-                    (crate::i18n::tr(
-                        lang,
-                        " distinct IPs in 24h (≥",
-                        " уникальных IP за 24ч (≥",
-                    ))
-                    (ABUSE_HEAT_THRESHOLD)
-                    (crate::i18n::tr(lang, " threshold)", " порог)"))
-                }
-            }
-        }
-        // Phase 4a hero row 1 — 30-day aggregates from
-        // sub_access_aggregates_for_user. Cards excluded VPN-egress
-        // rows; the `last_seen` chip uses the 30d max ts.
-        div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 12px 0 6px; font-family: var(--serif);" {
-            div title=(crate::i18n::tr(lang, "Distinct real-client IPs over the last 30 days. VPN-egress rows (where src IP = one of our VPN servers, full-tunnel mode) excluded.", "Уникальные клиентские IP за 30 дней. Строки VPN-egress (когда src IP — один из наших VPN-серверов в full-tunnel) исключены.")) {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_ips) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "distinct IPs · 30 days", "уникальных IP · 30 дней"))
-                }
-            }
-            div title=(crate::i18n::tr(lang, "Distinct ISO country codes from GeoIP enrichment (DB-IP Lite City). Rows where GeoIP didn't resolve a country stay uncounted.", "Уникальные ISO-коды стран из GeoIP-обогащения (DB-IP Lite City). Строки где GeoIP не определил страну — не учтены.")) {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_countries) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "countries · 30 days", "стран · 30 дней"))
-                }
-            }
-            div title=(crate::i18n::tr(lang, "Distinct ASN labels (full AS-number + operator name) from GeoIP-ASN. High distinct_ASNs with low distinct_countries = single user roaming ISPs. High both = shared subscription URL.", "Уникальные ASN (номер AS + название оператора) из GeoIP-ASN. Много ASN при малом числе стран = один юзер мигрирует между провайдерами. Много и того и другого = расшаренная подписка.")) {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_asns) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "ASNs · 30 days", "ASN · 30 дней"))
-                }
-            }
-            div title=(crate::i18n::tr(lang, "Sum of subscription payload bytes served over the last 30 days. Subscription JSON itself, NOT actual VPN traffic.", "Сумма байт payload подписки за 30 дней. Это сам JSON-конфиг подписки, НЕ реальный VPN-трафик.")) {
-                div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (humanize_bytes(access_aggregates.total_bytes)) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "served · 30 days", "отдано · 30 дней"))
-                }
-            }
-            div title=(crate::i18n::tr(lang, "Most recent subscription fetch (any IP, including VPN-egress). If older than a few days, the user's client probably isn't auto-updating — they may have imported the URL once and forgotten about it.", "Последнее обращение к подписке (любой IP, включая VPN-egress). Если старше нескольких дней — клиент не auto-update'ит подписку; возможно, юзер импортировал URL один раз и забыл.")) {
-                @match access_aggregates.last_seen {
-                    Some(ts) => {
-                        div style="font-size: 18px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                            (format_msk_iso(ts))
-                        }
-                    }
-                    None => {
-                        div style="font-size: 18px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
-                            (crate::i18n::tr(lang, "never", "никогда"))
-                        }
-                    }
-                }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "last fetch", "последнее обращение"))
-                }
-            }
-        }
-        // Phase 4a — VPN-egress filter toggle. Default state hides
-        // rows where src IP is one of our own VPN-server addresses
-        // (full-tunnel egress noise). Clicking the link adds /
-        // removes `?show_egress=1`. Counter shows how many rows are
-        // currently hidden so the operator knows what the filter is
-        // catching.
-        div style="display: flex; gap: 36px; padding: 4px 0 14px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-            @if show_egress {
-                span {
-                    (crate::i18n::tr(lang, "Showing VPN-egress rows. ", "Показаны строки VPN-egress. "))
-                    a href=(format!("/admin/users/{}", user.id.0))
-                      style="color: var(--ink); text-decoration: underline;" {
-                        (crate::i18n::tr(lang, "Hide them", "Скрыть"))
                     }
                 }
             } @else {
-                @if access_aggregates.egress_rows > 0 {
-                    // English needs singular/plural agreement
-                    // («1 row hidden» vs «12 rows hidden»); Russian
-                    // sidesteps with the genitive-plural «строк» that
-                    // works for 1, 2, 5, … (technically «строка» for 1
-                    // is more natural but the gen-plural reads fine in
-                    // context and keeps the i18n surface flat).
-                    @let en_suffix = if access_aggregates.egress_rows == 1 {
-                        " VPN-egress row hidden (src IP = our own VPN server, full-tunnel mode). "
-                    } else {
-                        " VPN-egress rows hidden (src IP = our own VPN server, full-tunnel mode). "
-                    };
-                    span {
-                        (access_aggregates.egress_rows)
-                        (crate::i18n::tr(lang, en_suffix, " строк VPN-egress скрыто (src IP — наш VPN-сервер, full-tunnel). "))
-                        a href=(format!("/admin/users/{}?show_egress=1", user.id.0))
-                          style="color: var(--ink); text-decoration: underline;" {
-                            (crate::i18n::tr(lang, "Show them", "Показать"))
-                        }
-                    }
-                } @else {
-                    span {
-                        (crate::i18n::tr(lang, "No VPN-egress rows for this user (no full-tunnel traffic observed).", "Строк VPN-egress нет (full-tunnel-трафик не наблюдался)."))
-                    }
-                }
-            }
-        }
-        // Hero row 2 — the legacy 24h/7d/recent counters live here
-        // because they're shorter-window vs the 30-day aggregates
-        // above. Kept for continuity with the old abuse-detection
-        // workflow.
-        div style="display: flex; gap: 36px; padding: 4px 0 18px; font-family: var(--serif);" {
-            div {
-                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
-                }
-            }
-            div {
-                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
-                }
-            }
-            div {
-                div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (crate::i18n::tr(lang, "rows in table", "строк в таблице"))
-                }
-            }
-        }
-        @if recent_access.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                (crate::i18n::tr(
-                    lang,
-                    "No subscription fetches recorded yet. Hits will appear here as soon as a client pulls the URL above.",
-                    "Обращений к подписке пока не записано. Строки появятся сразу как только клиент дёрнет URL выше.",
-                ))
-            }
-        } @else {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
-                thead {
-                    tr style="border-bottom: 1px solid var(--ink);" {
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (crate::i18n::tr(lang, "when", "когда"))
-                        }
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (crate::i18n::tr(lang, "ip", "ip"))
-                        }
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (crate::i18n::tr(lang, "user-agent", "user-agent"))
-                        }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (crate::i18n::tr(lang, "status", "статус"))
-                        }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (crate::i18n::tr(lang, "bytes", "байт"))
-                        }
-                    }
-                }
-                tbody {
-                    @for row in &recent_access {
-                        @let ip_kind = classify_ip(&row.ip);
-                        // Prefer persisted device_class from
-                        // sub_access_log (migration 0019) — that
-                        // way future parser changes don't rewrite
-                        // history. Fallback to live parse for
-                        // pre-migration NULL rows.
-                        @let ua_summary = row
-                            .device_class
-                            .as_deref()
-                            .or_else(|| crate::ua::parse_ua_short(row.ua.as_deref()));
-                        tr style="border-bottom: 1px dotted var(--rule);" {
-                            td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
-                                (format_msk_iso(row.ts))
-                            }
-                            td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind_tooltip(ip_kind, lang)) {
-                                (row.ip)
-                                @if let Some(tag) = ip_kind_tag(ip_kind, lang) {
-                                    " "
-                                    span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind_color(ip_kind))) {
-                                        (tag)
-                                    }
-                                }
-                                // Track-1.2 (migration 0019) — country
-                                // ISO + ASN chips from GeoIP enrichment.
-                                // Both columns are NULL for old rows or
-                                // when VPNCTLD_GEOIP_DIR isn't set;
-                                // render only what we have.
-                                @if let Some(cc) = row.geo_country.as_deref() {
-                                    " "
-                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid var(--acc-good, #2c5f2d); color: var(--acc-good, #2c5f2d); margin-left: 2px;"
-                                         title=(crate::i18n::tr(lang, "Country (ISO 3166-1 alpha-2) from MaxMind GeoLite2 City", "Страна (ISO 3166-1 alpha-2) из MaxMind GeoLite2 City")) {
-                                        (cc)
-                                    }
-                                }
-                                @if let Some(asn) = row.geo_asn.as_deref() {
-                                    " "
-                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; color: var(--mute); margin-left: 2px;"
-                                         title=(crate::i18n::tr(lang, "Autonomous System / ISP from MaxMind GeoLite2 ASN", "Автономная система / ISP из MaxMind GeoLite2 ASN")) {
-                                        (asn)
-                                    }
-                                }
-                                @if let Some(http_v) = row.http_version.as_deref() {
-                                    " "
-                                    span style="font-family: var(--mono); font-size: 9px; color: var(--mute); margin-left: 2px;"
-                                         title=(crate::i18n::tr(lang, "HTTP version negotiated", "Согласованная версия HTTP")) {
-                                        (http_v)
-                                    }
-                                }
-                                // Track-1.4 — TLS JA3 / JA4 fingerprint chip
-                                // (migration 0020). NULL until an nginx-side
-                                // JA3 module forwards `X-SSL-JA3` /
-                                // `X-SSL-JA4` headers. Hash itself is long;
-                                // render the first JA_CHIP_PREFIX_CHARS only,
-                                // full value lives in the title= tooltip.
-                                @if let Some(ja3) = row.tls_ja3.as_deref() {
-                                    " "
-                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
-                                         title=(format!("{}\n{}",
-                                            crate::i18n::tr(lang, "JA3 TLS ClientHello fingerprint (Salesforce). Same device through IP changes = same JA3.", "JA3 — отпечаток TLS ClientHello (Salesforce). Одно и то же устройство через смену IP = тот же JA3."),
-                                            ja3)) {
-                                        "JA3 " ((ja3.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
-                                    }
-                                }
-                                @if let Some(ja4) = row.tls_ja4.as_deref() {
-                                    " "
-                                    span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
-                                         title=(format!("{}\n{}",
-                                            crate::i18n::tr(lang, "JA4 TLS fingerprint (FoxIO 2023). Protocol-aware, harder to randomise than JA3.", "JA4 — отпечаток TLS (FoxIO 2023). Знает протокол, сложнее рандомизируется чем JA3."),
-                                            ja4)) {
-                                        "JA4 " ((ja4.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
-                                    }
-                                }
-                            }
-                            td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere; word-break: break-all;" {
-                                @match &row.ua {
-                                    Some(s) => {
-                                        // Parsed summary if recognised, else raw string.
-                                        @if let Some(label) = ua_summary {
-                                            span title=(s) style="border-bottom: 1px dotted var(--rule-s); cursor: help;" {
-                                                (label)
-                                            }
-                                        } @else {
-                                            (s)
-                                        }
-                                    }
-                                    None => em style="color: var(--mute);" { (crate::i18n::tr(lang, "(none)", "(нет)")) },
-                                }
-                            }
-                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (row.status) }
-                            td style="padding: 5px 8px; text-align: right; color: var(--soft);" { (row.bytes) }
-                        }
-                    }
-                }
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
-                (crate::i18n::tr(lang, "Showing the ", "Показано "))
-                (recent_access.len())
-                (crate::i18n::tr(
-                    lang,
-                    " most recent fetches. Rows are auto-purged after 30 days (default retention).",
-                    " последних обращений. Строки автоудаляются через 30 дней (retention по умолчанию).",
-                ))
-            }
-        }
-
-        // ── PR-User user#4 — sharing-evidence verdict ────────────
-        // ONE consolidated verdict line above the per-UA evidence
-        // table, folding the 30-day access spread with the UA-cluster
-        // /16 spread (reusing the Track-4 ua_verdict thresholds).
-        (user_sharing_verdict_section(&access_aggregates, &ua_clusters, lang))
-
-        // ── abuse-origins — "Subscription origins" (#origins) ────
-        // WHO is sharing: country / ISP / IP breakdown + a rough
-        // device-count line. Anchored so the dashboard likely-shared
-        // card links straight here. Sits below the verdict (the
-        // headline) and above the per-UA table (the /16 evidence).
-        (user_subscription_origins_section(
-            &origins_by_country,
-            &origins_by_asn,
-            &origins_by_ip,
-            &origins_device_fp,
-            lang,
-        ))
-
-        // ── UA fingerprint (Phase Track-4) + user#7 geo footer ───
-        (ua_clusters_section(&state, &uid, &access_aggregates, lang).await)
-
-        // ── PR-User user#2 — traffic split by server (24h) ───────
-        (user_detail_traffic_by_server_section(&traffic_by_server, lang))
-
-        // ── Live VPN stats (Track-3 chunk 3) + user#6 trend ──────
-        // The window picker (24h/7d/30d/all) is now folded INTO this
-        // section — it re-fetches the picked window's rows once and
-        // drives both the compact `sparkline_svg` trend and the full
-        // chart, so the previous page-level picker is gone (it would
-        // have rendered a second, duplicate picker).
-        (live_vpn_stats_section(&state, &uid, query.vpn_window.as_deref(), lang).await)
-        (user_top_destinations_section(&state, &uid, lang).await)
-
-        // ── Source IPs (2026-06-14) — «откуда» counterpart to the
-        // «куда» destinations table: per-client-IP activity grounded
-        // in real VPN connections, GeoIP-labelled + reserved-range
-        // classified (the «проработай (неизвестно)» + «разбей трафик
-        // по IP» deliverable). Pre-fetched above.
-        (user_source_ips_section(&source_ips, &source_ip_geo, lang))
-
-        (user_sessions_section(&state, &uid, lang).await)
-
-        // ── PR-User user#5 — lifecycle facts ─────────────────────
-        (user_lifecycle_section(&lifecycle, access_aggregates.last_seen, lang))
-
-        // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
-        // Show current month-to-date usage + the configured cap
-        // (if any) + an inline form to change both, plus the user#3
-        // month-end projection when a cap is set. Re-runs the usage
-        // query so the page-after-redirect immediately reflects new
-        // limits.
-        (user_traffic_limit_section(&state, &uid, lang).await)
-
-        // B1.user (audit 2026-05-22) — soft suspend. Banner +
-        // toggle button. When user.disabled = true, an amber banner
-        // says «this user is paused»; button reads «enable». When
-        // false, just the «disable» button as part of the normal
-        // user-detail card flow. No double-submit confirm because
-        // the action is fully reversible (one click in either
-        // direction, no secrets rotated, no grants lost).
-        div.ed-rule {}
-        div.ed-art-eyebrow style="margin-top: 24px;" {
-            (crate::i18n::tr(lang, "Access state", "Состояние доступа"))
-        }
-        @if user.disabled {
-            div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 8px 0;" {
-                div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px;" {
-                    (crate::i18n::tr(lang, "user is DISABLED", "пользователь ОТКЛЮЧЁН"))
-                }
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0;" {
+                p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
                     (crate::i18n::tr(
                         lang,
-                        "Subscription endpoints return an empty config. Secrets, sub-token, WG keypair and grants are unchanged — re-enable to restore access byte-for-byte.",
-                        "Endpoints подписки возвращают пустой config. Секреты, sub-token, WG-пара и гранты не тронуты — включи обратно, чтобы вернуть доступ байт-в-байт.",
+                        "Pause a user's subscription without rotating secrets or revoking grants. Re-enable later restores access byte-for-byte. Useful for: forgotten phone, paused billing, temporary access freeze.",
+                        "Поставь подписку на паузу без ротации секретов и без отзыва грантов. Повторное включение вернёт доступ байт-в-байт. Полезно для: забытого телефона, паузы в оплате, временной заморозки доступа.",
                     ))
                 }
                 form method="post"
-                     action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0)))
-                     style="display: inline; margin-top: 8px;" {
+                     action=(format!("/admin/users/{}/disable", path_segment_encode(&user.id.0)))
+                     style="display: inline;" {
                     button type="submit"
-                           style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        (crate::i18n::tr(lang, "enable user", "включить пользователя"))
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
+                               "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
+                           ))
+                           style="padding: 4px 12px; border: 1px solid var(--mute); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                        (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
                     }
                 }
             }
-        } @else {
+
+            div.ed-rule {}
+            div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" {
+                (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
+            }
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
                 (crate::i18n::tr(
                     lang,
-                    "Pause a user's subscription without rotating secrets or revoking grants. Re-enable later restores access byte-for-byte. Useful for: forgotten phone, paused billing, temporary access freeze.",
-                    "Поставь подписку на паузу без ротации секретов и без отзыва грантов. Повторное включение вернёт доступ байт-в-байт. Полезно для: забытого телефона, паузы в оплате, временной заморозки доступа.",
+                    "Deleting drops the user, cascades to grants, and clears the FK on ",
+                    "Удаление сносит пользователя, каскадно убирает grants и очищает FK в ",
+                ))
+                span.ed-mono { "sub_access_log" }
+                (crate::i18n::tr(
+                    lang,
+                    " rows (forensics survive with NULL user_id).",
+                    " (forensics остаётся с NULL user_id).",
                 ))
             }
-            form method="post"
-                 action=(format!("/admin/users/{}/disable", path_segment_encode(&user.id.0)))
-                 style="display: inline;" {
-                button type="submit"
-                       title=(crate::i18n::tr(
-                           lang,
-                           "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
-                           "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
-                       ))
-                       style="padding: 4px 12px; border: 1px solid var(--mute); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
-                }
+            a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
+              style="display: inline-block; padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+                (crate::i18n::tr(lang, "delete user…", "удалить пользователя…"))
             }
-        }
-
-        div.ed-rule {}
-        div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" {
-            (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
-        }
-        p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-            (crate::i18n::tr(
-                lang,
-                "Deleting drops the user, cascades to grants, and clears the FK on ",
-                "Удаление сносит пользователя, каскадно убирает grants и очищает FK в ",
-            ))
-            span.ed-mono { "sub_access_log" }
-            (crate::i18n::tr(
-                lang,
-                " rows (forensics survive with NULL user_id).",
-                " (forensics остаётся с NULL user_id).",
-            ))
-        }
-        a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
-          style="display: inline-block; padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-            (crate::i18n::tr(lang, "delete user…", "удалить пользователя…"))
-        }
-    };
+    }
+        };
     Ok(shell("users", &theme, &accent, lang, body))
 }
 
@@ -7094,7 +7189,7 @@ async fn live_vpn_stats_section(
         // full PowerBI-style chart still renders below; this is the
         // at-a-glance shape so a 30-day trend is one click away.
         (window_picker_section(
-            &format!("/admin/users/{}", path_segment_encode(&uid.0)),
+            &format!("/admin/users/{}/traffic", path_segment_encode(&uid.0)),
             window.slug,
             lang,
         ))
@@ -7468,7 +7563,7 @@ pub(crate) async fn user_regen_sub_token(
     // Step 4: redirect. `path_segment_encode` so the redirect target
     // matches the URL the operator clicked from.
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/overview",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -7513,7 +7608,7 @@ pub(crate) async fn user_mint_tuic_password(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/overview",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -7577,7 +7672,7 @@ pub(crate) async fn user_regen_wireguard(
     }
 
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/delivery",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -8235,7 +8330,7 @@ pub(crate) async fn user_set_traffic_limit(
     }
 
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/overview",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -9135,7 +9230,7 @@ pub(crate) async fn user_grant_server(
         );
     }
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/access",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -9199,7 +9294,7 @@ pub(crate) async fn user_revoke_server(
         );
     }
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/access",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -9909,7 +10004,7 @@ async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: b
         spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), action);
     }
     Redirect::to(&format!(
-        "/admin/users/{}",
+        "/admin/users/{}/overview",
         path_segment_encode(&user_id_str)
     ))
     .into_response()
@@ -17816,7 +17911,7 @@ pub(crate) async fn grant_protocol_disable(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/users/{}#server-access",
+            "/admin/users/{}/access#server-access",
             path_segment_encode(&user_id_str)
         ))
         .into_response(),
@@ -17841,7 +17936,7 @@ pub(crate) async fn grant_protocol_enable(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/users/{}#server-access",
+            "/admin/users/{}/access#server-access",
             path_segment_encode(&user_id_str)
         ))
         .into_response(),
