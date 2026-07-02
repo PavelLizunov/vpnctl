@@ -1822,7 +1822,7 @@ async fn admin_server_detail_naive_section_renders_when_enabled() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv.add_server(&naive_server("nv")).await.unwrap();
-    let html = fetch_html(router(s), "/admin/servers/nv").await;
+    let html = fetch_html(router(s), "/admin/servers/nv/protocols").await;
     assert!(
         html.contains(r#"action="/admin/servers/nv/naive-config""#),
         "naive config form must POST to the right route"
@@ -1846,7 +1846,7 @@ async fn admin_server_detail_naive_section_absent_when_not_enabled() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await; // seeded server is vless+reality only
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
     assert!(
         !html.contains("/naive-config"),
         "naive section must not render on a non-naive server"
@@ -3112,7 +3112,7 @@ async fn admin_auto_suppress_and_display_name_post_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let html = fetch_html(app, "/admin/servers/s0").await;
+    let html = fetch_html(app, "/admin/servers/s0/setup").await;
     assert!(
         html.contains("Frankfurt Box"),
         "display name must round-trip to the detail page"
@@ -4435,7 +4435,7 @@ async fn server_detail_renders_push_deploy_key_section() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/vps-de1")
+                .uri("/admin/servers/vps-de1/setup")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4566,7 +4566,7 @@ async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/dx")
+                .uri("/admin/servers/dx/protocols")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4665,7 +4665,7 @@ async fn server_detail_renders_wgturn_info_when_kernel_enabled() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/wt-1")
+                .uri("/admin/servers/wt-1/protocols")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7175,7 +7175,7 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/servers/driftnode").await;
+    let html = fetch_html(router(s), "/admin/servers/driftnode/protocols").await;
     assert!(
         html.contains("drift detected"),
         "must surface drift banner; got: {}",
@@ -7653,7 +7653,7 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
         .await
         .unwrap();
     let app = router(s);
-    let html = fetch_html(app, "/admin/servers/nowg").await;
+    let html = fetch_html(app, "/admin/servers/nowg/protocols").await;
     assert!(html.contains("Enabled protocols"), "section heading");
     // Every registered protocol appears as a row (sing-box ships 6,
     // amneziawg ships 1 — total 7 unique ids in the registry).
@@ -7879,7 +7879,7 @@ async fn admin_server_detail_kernels_section_shows_every_registered_kernel() {
         .await
         .unwrap();
     let app = router(s);
-    let html = fetch_html(app, "/admin/servers/sb-only").await;
+    let html = fetch_html(app, "/admin/servers/sb-only/protocols").await;
     assert!(html.contains("Kernels"), "Kernels heading missing");
     // sing-box is registered AND enabled → disable form
     assert!(
@@ -8009,7 +8009,7 @@ async fn admin_multi_kernel_server_enables_wireguard_protocol() {
         .await
         .unwrap();
     let app = router(s);
-    let html = fetch_html(app.clone(), "/admin/servers/dual").await;
+    let html = fetch_html(app.clone(), "/admin/servers/dual/protocols").await;
     // wireguard MUST now show an enable form (previously was
     // "incompatible" under the sing-box-only kernel).
     assert!(
@@ -8263,7 +8263,7 @@ async fn admin_server_detail_lists_all_users_with_grant_buttons() {
         .await
         .unwrap();
     let app = router(s);
-    let html = fetch_html(app, "/admin/servers/sb").await;
+    let html = fetch_html(app, "/admin/servers/sb/grants").await;
     // Alice = granted → revoke form
     assert!(
         html.contains("/admin/servers/sb/grants/alice/revoke"),
@@ -8332,7 +8332,7 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    assert_eq!(loc, "/admin/servers/sb");
+    assert_eq!(loc, "/admin/servers/sb/grants");
     // Mutation landed.
     let users_on_server = inv.users_for_server(&ServerId("sb".into())).await.unwrap();
     assert!(users_on_server.iter().any(|u| u.id.0 == "alice"));
@@ -10230,7 +10230,7 @@ async fn nm10_server_detail_visible_protocol_shows_hide_button() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/hidesrv").await;
+    let html = fetch_html(router(s), "/admin/servers/hidesrv/protocols").await;
     // Visible (hidden=0) protocol: shows "✓ on" without the "· hidden"
     // suffix AND offers a hide button (no unhide).
     assert!(
@@ -10274,7 +10274,7 @@ async fn nm10_server_detail_hidden_protocol_shows_unhide_button() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/hidesrv").await;
+    let html = fetch_html(router(s), "/admin/servers/hidesrv/protocols").await;
     assert!(
         html.contains("✓ on · hidden"),
         "hidden protocol must surface the · hidden suffix on its status chip"
@@ -10329,7 +10329,7 @@ async fn nm10_server_detail_post_hide_persists_and_redirects() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/servers/hsrv#enabled-protocols",
+        location, "/admin/servers/hsrv/protocols#enabled-protocols",
         "303 must redirect back to /admin/servers/{{id}}#enabled-protocols so the browser scrolls the operator back to the section they just clicked in (Pavel 2026-05-20: «каждый раз когда я жму disable меня выкидывает в верх страницы»)"
     );
     assert!(
@@ -10811,7 +10811,7 @@ async fn nm12_server_detail_renders_dpi_strong_chip_for_vless_reality() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/strongsrv").await;
+    let html = fetch_html(router(s), "/admin/servers/strongsrv/protocols").await;
     assert!(
         html.contains("DPI: strong"),
         "vless+reality row must surface its Strong DPI-risk chip"
@@ -10845,7 +10845,7 @@ async fn nm12_server_detail_renders_dpi_weak_chip_and_smaller_font_for_wireguard
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/weaksrv").await;
+    let html = fetch_html(router(s), "/admin/servers/weaksrv/protocols").await;
     assert!(
         html.contains("DPI: weak"),
         "wireguard row must surface its Weak DPI-risk chip"
@@ -10892,7 +10892,7 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/allsrv").await;
+    let html = fetch_html(router(s), "/admin/servers/allsrv/protocols").await;
     // Tier distribution across the FULL production registry (the test
     // `state` mirrors `build_registry` — naive + dns-tunnel included):
     //   Strong:   vless+reality, wgturn, naive     (3)
@@ -10942,7 +10942,7 @@ async fn nm12_server_detail_renders_dpi_moderate_chip_for_tuic_v5() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/modsrv").await;
+    let html = fetch_html(router(s), "/admin/servers/modsrv/protocols").await;
     assert!(
         html.contains("DPI: moderate"),
         "tuic-v5 row must surface its Moderate DPI-risk chip"
@@ -10987,7 +10987,7 @@ async fn nm12_server_detail_hidden_weak_protocol_still_shows_chip() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/hwsrv").await;
+    let html = fetch_html(router(s), "/admin/servers/hwsrv/protocols").await;
     assert!(
         html.contains("DPI: weak"),
         "hidden Weak protocol must STILL show the chip — chip is about the wire format, not visibility"
@@ -11032,7 +11032,7 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/unksrv").await;
+    let html = fetch_html(router(s), "/admin/servers/unksrv/protocols").await;
     // 10 registered protocols → 10 chips (Strong + Moderate + Weak
     // sum). If the chip-or-no-chip decision branches on something
     // OTHER than "registry knows this id", the count drifts.
@@ -11142,7 +11142,7 @@ async fn nm12_followup_server_detail_section_carries_enabled_protocols_anchor() 
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/anchsrv").await;
+    let html = fetch_html(router(s), "/admin/servers/anchsrv/protocols").await;
     assert!(
         html.contains(r#"id="enabled-protocols""#),
         "server-detail must carry an id=\"enabled-protocols\" anchor for the visibility-toggle handlers to scroll back into"
@@ -11224,7 +11224,7 @@ async fn nm12_followup_server_protocol_unhide_redirects_with_fragment() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert_eq!(loc, "/admin/servers/uhsrv#enabled-protocols");
+    assert_eq!(loc, "/admin/servers/uhsrv/protocols#enabled-protocols");
 }
 
 #[tokio::test]
@@ -11341,7 +11341,7 @@ async fn nm12_followup_legacy_server_disable_protocol_also_carries_fragment() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert_eq!(loc, "/admin/servers/lsrv#enabled-protocols");
+    assert_eq!(loc, "/admin/servers/lsrv/protocols#enabled-protocols");
 }
 
 #[tokio::test]
@@ -11649,7 +11649,7 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     // Server detail — PR-Server cards. The drift-detail eyebrow always
     // renders (default load shows the «check live drift» link), so its
     // RU arm is a reliable walker anchor for the new server-detail cards.
-    let h = fetch("/admin/servers/s0").await;
+    let h = fetch("/admin/servers/s0/protocols").await;
     assert!(
         h.contains("Детальный дрейф · UUID на ноде"),
         "PR-Server drift-detail eyebrow must be translated under ru"
@@ -11898,7 +11898,7 @@ async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert_eq!(loc, "/admin/servers/esrv2#enabled-protocols");
+    assert_eq!(loc, "/admin/servers/esrv2/protocols#enabled-protocols");
 }
 
 #[tokio::test]
@@ -12737,7 +12737,7 @@ async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/servers/emptynode").await;
+    let html = fetch_html(router(s), "/admin/servers/emptynode/activity").await;
     assert!(
         html.contains("Live activity · last 24h"),
         "server-detail must surface the Phase 4b live-activity section eyebrow"
@@ -12889,7 +12889,7 @@ async fn phase4c_server_detail_renders_empty_state_when_no_snapshot() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/emptynode").await;
+    let html = fetch_html(router(s), "/admin/servers/emptynode/activity").await;
     assert!(
         html.contains("Live connections"),
         "server-detail must surface the Phase 4c section eyebrow even without data"
@@ -12936,11 +12936,11 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
         })
         .await
         .unwrap();
-    // brat fetched subscription from 83.97.108.34 → correlation
-    // should surface that user_id when 83.97.108.34 appears as
+    // brat fetched subscription from 9.9.9.9 → correlation
+    // should surface that user_id when 9.9.9.9 appears as
     // sourceIP in the live snapshot.
     s.inv
-        .log_sub_access(&UserId("brat".into()), "83.97.108.34", None, 200, 100)
+        .log_sub_access(&UserId("brat".into()), "9.9.9.9", None, 200, 100)
         .await
         .unwrap();
 
@@ -12958,7 +12958,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
                     network: "tcp".into(),
                     destination_ip: "172.217.16.142".into(),
                     destination_port: "443".into(),
-                    source_ip: "83.97.108.34".into(),
+                    source_ip: "9.9.9.9".into(),
                     source_port: "55555".into(),
                     host: "youtube.com".into(),
                     user: None,
@@ -12973,7 +12973,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
                     network: "udp".into(),
                     destination_ip: "1.1.1.1".into(),
                     destination_port: "53".into(),
-                    source_ip: "83.97.108.34".into(),
+                    source_ip: "9.9.9.9".into(),
                     source_port: "55556".into(),
                     host: String::new(),
                     user: None,
@@ -12983,7 +12983,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
     };
     s.snapshot_cache.store(ServerId("active".into()), snap);
 
-    let html = fetch_html(router(s), "/admin/servers/active").await;
+    let html = fetch_html(router(s), "/admin/servers/active/activity").await;
     assert!(html.contains("Live connections"));
     // Top destinations must include youtube.com (preferred over IP).
     assert!(
@@ -12992,13 +12992,13 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
     );
     // Top sources must include the real client IP.
     assert!(
-        html.contains("83.97.108.34"),
+        html.contains("9.9.9.9"),
         "top sources must render the real source IP"
     );
-    // Correlation should resolve `83.97.108.34` → `brat`.
+    // Correlation should resolve `9.9.9.9` → `brat`.
     assert!(
         html.contains("href=\"/admin/users/brat\""),
-        "source-IP-to-user correlation must surface brat as the likely owner of 83.97.108.34"
+        "source-IP-to-user correlation must surface brat as the likely owner of 9.9.9.9"
     );
     // Network breakdown tiles (TCP 1 / UDP 1).
     assert!(html.contains(">tcp<") || html.contains("tcp"));
@@ -13078,7 +13078,7 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
     };
     s.snapshot_cache.store(ServerId("phase4d-srv".into()), snap);
 
-    let html = fetch_html(router(s), "/admin/servers/phase4d-srv").await;
+    let html = fetch_html(router(s), "/admin/servers/phase4d-srv/activity").await;
     // Exact match link to main-brat — now sourced from metadata.user
     // (the patched sing-box clash-api), not the removed log-scrape map.
     assert!(
@@ -13152,7 +13152,7 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
     // EMPTY attribution map — Phase 4d had nothing for this IP.
     s.snapshot_cache.store(ServerId("phase4d-fb".into()), snap);
 
-    let html = fetch_html(router(s), "/admin/servers/phase4d-fb").await;
+    let html = fetch_html(router(s), "/admin/servers/phase4d-fb/activity").await;
     // Must link to falluser via sub_access fallback.
     assert!(
         html.contains("href=\"/admin/users/falluser\""),
@@ -13218,7 +13218,7 @@ async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribu
     s.snapshot_cache
         .store(ServerId("phase4d-none".into()), snap);
 
-    let html = fetch_html(router(s), "/admin/servers/phase4d-none").await;
+    let html = fetch_html(router(s), "/admin/servers/phase4d-none/activity").await;
     // Source IP must render in the top-sources row.
     assert!(
         html.contains("203.0.113.99"),
@@ -13354,7 +13354,7 @@ async fn server_detail_renders_traffic_gap_section() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/gaptest")
+                .uri("/admin/servers/gaptest/activity")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -14928,7 +14928,7 @@ async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/srv")
+                .uri("/admin/servers/srv/grants")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -15371,7 +15371,7 @@ async fn admin_server_detail_has_delete_link() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/setup").await;
     assert!(
         html.contains(r#"href="/admin/servers/s0/delete-confirm""#),
         "server-detail must link to the delete-confirm page"
@@ -16116,7 +16116,7 @@ async fn server_detail_drift_detail_default_shows_check_link_no_ssh() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await; // server s0
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
     assert!(
         html.contains("Drift detail · on-node UUIDs"),
         "drift-detail eyebrow missing on default load"
@@ -16160,7 +16160,7 @@ async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
         })
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/blackhole?drift=live").await;
+    let html = fetch_html(router(s), "/admin/servers/blackhole/protocols?drift=live").await;
     // 200 (fetch_html asserts) + the policy-safe empty-state.
     assert!(
         html.contains("Couldn't read the live config"),
@@ -16198,7 +16198,7 @@ async fn server_detail_top_users_renders_nm11_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("Top users · last 24h"),
         "top-users eyebrow missing"
@@ -16228,7 +16228,7 @@ async fn server_detail_top_users_lists_users_with_links_when_present() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains(r#"href="/admin/users/u0""#),
         "top-users row must link to the user-detail page"
@@ -16261,7 +16261,7 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("Server traffic · "),
         "server-traffic eyebrow missing"
@@ -16272,7 +16272,7 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
     );
     // Window picker links scoped to THIS server.
     assert!(
-        html.contains("/admin/servers/s0?vpn_window=7d"),
+        html.contains("/admin/servers/s0/activity?vpn_window=7d"),
         "window picker must be scoped to /admin/servers/s0"
     );
     // An <svg> sparkline rendered for the populated window.
@@ -16290,7 +16290,7 @@ async fn server_detail_traffic_section_empty_state_when_no_stats() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await; // no vpn stats recorded
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("No traffic recorded in this window yet"),
         "empty traffic window must render the empty-state copy"
@@ -16342,7 +16342,7 @@ async fn server_detail_network_split_renders_from_snapshot() {
         ],
     };
     s.snapshot_cache.store(ServerId("s0".into()), snap);
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("TCP / UDP split"),
         "network-split eyebrow missing"
@@ -16359,7 +16359,7 @@ async fn server_detail_network_split_empty_state_when_no_snapshot() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await; // no snapshot cached
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("TCP / UDP split"),
         "network-split eyebrow must render even with no snapshot"
@@ -16436,7 +16436,7 @@ async fn server_detail_kernel_rollup_renders_version_for_this_node() {
         )
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
     assert!(
         html.contains("Kernel rollup · sing-box"),
         "per-server kernel-rollup eyebrow missing"
@@ -16458,14 +16458,20 @@ async fn server_detail_info_cards_headlines_match_voice() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
-    for needle in [
-        "Drift detail · on-node UUIDs", // server#1
-        "Kernel rollup · sing-box",     // server#2
-        "Top users · last 24h",         // server#3
-        "Server traffic · ",            // server#4
-        "TCP / UDP split",              // server#5
-        "Audit timeline · this server", // server#7
+    // ui-audit §4 — these cards now live across tabs: server#1/#2 on
+    // protocols, server#3/#4/#5 on activity, server#7 (audit) on the
+    // default status tab. Fetch each tab and pin its subset.
+    let app = router(s);
+    let proto = fetch_html(app.clone(), "/admin/servers/s0/protocols").await;
+    let act = fetch_html(app.clone(), "/admin/servers/s0/activity").await;
+    let status = fetch_html(app, "/admin/servers/s0").await;
+    for (html, needle) in [
+        (&proto, "Drift detail · on-node UUIDs"),  // server#1
+        (&proto, "Kernel rollup · sing-box"),      // server#2
+        (&act, "Top users · last 24h"),            // server#3
+        (&act, "Server traffic · "),               // server#4
+        (&act, "TCP / UDP split"),                 // server#5
+        (&status, "Audit timeline · this server"), // server#7
     ] {
         assert!(
             html.contains(needle),
@@ -16481,19 +16487,173 @@ async fn server_detail_info_cards_headlines_ru() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    let html = fetch_html_with_cookie(router(s), "/admin/servers/s0", "vpnctl_lang=ru").await;
-    for needle in [
-        "Детальный дрейф · UUID на ноде", // server#1
-        "Версии ядер · sing-box",         // server#2
-        "Топ пользователей · за 24ч",     // server#3
-        "Трафик сервера · ",              // server#4
-        "Разбивка TCP / UDP",             // server#5
-        "Лента аудита · этот сервер",     // server#7
+    let app = router(s);
+    let proto =
+        fetch_html_with_cookie(app.clone(), "/admin/servers/s0/protocols", "vpnctl_lang=ru").await;
+    let act =
+        fetch_html_with_cookie(app.clone(), "/admin/servers/s0/activity", "vpnctl_lang=ru").await;
+    let status = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
+    for (html, needle) in [
+        (&proto, "Детальный дрейф · UUID на ноде"), // server#1
+        (&proto, "Версии ядер · sing-box"),         // server#2
+        (&act, "Топ пользователей · за 24ч"),       // server#3
+        (&act, "Трафик сервера · "),                // server#4
+        (&act, "Разбивка TCP / UDP"),               // server#5
+        (&status, "Лента аудита · этот сервер"),    // server#7
     ] {
         assert!(
             html.contains(needle),
             "PR-Server RU headline drifted — missing: {needle:?}"
         );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  ui-audit Phase 1 — server_detail split into 5 sub-route tabs
+//  (status / activity / protocols / grants / setup). Each tab renders
+//  ONLY its own sections; the deploy chrome is on every tab; the active
+//  tab carries `.ed-tab--on`; bare `/admin/servers/{id}` == status.
+// ════════════════════════════════════════════════════════════════════
+
+/// Each tab route → 200, renders the `.ed-tabs` bar, marks the right tab
+/// active, shows a section unique to that tab, and does NOT leak a
+/// foreign tab's section (proves the gating actually gates).
+#[tokio::test]
+async fn server_detail_tabs_render_gate_and_mark_active() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    // (path, active-slug, present-on-this-tab, absent-on-this-tab)
+    let cases = [
+        (
+            "/admin/servers/s0/status",
+            "status",
+            "Audit timeline · this server",
+            "Enabled protocols",
+        ),
+        (
+            "/admin/servers/s0/activity",
+            "activity",
+            "Live activity · last 24h",
+            "Enabled protocols",
+        ),
+        (
+            "/admin/servers/s0/protocols",
+            "protocols",
+            "Enabled protocols",
+            "Audit timeline · this server",
+        ),
+        (
+            "/admin/servers/s0/grants",
+            "grants",
+            "have access on this server",
+            "Enabled protocols",
+        ),
+        (
+            "/admin/servers/s0/setup",
+            "setup",
+            "delete this server",
+            "Enabled protocols",
+        ),
+    ];
+    for (path, slug, present, absent) in cases {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            html.contains(r#"class="ed-tabs""#),
+            "{path}: tab bar (.ed-tabs) missing"
+        );
+        let active = format!(r#"ed-tab--on" href="/admin/servers/s0/{slug}""#);
+        assert!(
+            html.contains(&active),
+            "{path}: {slug} tab not marked active"
+        );
+        assert!(
+            html.contains(present),
+            "{path}: missing its own section marker {present:?}"
+        );
+        assert!(
+            !html.contains(absent),
+            "{path}: leaked a foreign tab's section {absent:?}"
+        );
+    }
+}
+
+/// Bare `/admin/servers/{id}` renders the status tab directly — no
+/// redirect — so old bookmarks + internal links keep working.
+#[tokio::test]
+async fn server_detail_bare_url_renders_status_tab() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(
+        html.contains(r#"ed-tab--on" href="/admin/servers/s0/status""#),
+        "bare URL must mark the status tab active"
+    );
+    assert!(
+        html.contains("Audit timeline · this server"),
+        "bare URL must render the status tab's sections"
+    );
+    assert!(
+        !html.contains("Enabled protocols"),
+        "bare URL (status) must not render the protocols tab"
+    );
+}
+
+/// §9 discoverability — the daily deploy action must never hide behind a
+/// tab. The deploy SSE button lives in the chrome above the tab bar, so
+/// it renders on every tab (bare + all 5).
+#[tokio::test]
+async fn server_detail_deploy_chrome_present_on_every_tab() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let deploy = r#"data-sse-url="/admin/servers/s0/deploy/sse""#;
+    for path in [
+        "/admin/servers/s0",
+        "/admin/servers/s0/status",
+        "/admin/servers/s0/activity",
+        "/admin/servers/s0/protocols",
+        "/admin/servers/s0/grants",
+        "/admin/servers/s0/setup",
+    ] {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            html.contains(deploy),
+            "{path}: deploy button missing from chrome (regressed §9)"
+        );
+    }
+}
+
+/// Copy-contract — pin the 5 tab labels in both locales so a future
+/// edit (or a half-translation) has to update this test in lockstep.
+#[tokio::test]
+async fn server_detail_tab_labels_copy_contract() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let en = fetch_html(app.clone(), "/admin/servers/s0").await;
+    for label in [
+        ">Status</a>",
+        ">Activity</a>",
+        ">Protocols</a>",
+        ">Grants</a>",
+        ">Setup</a>",
+    ] {
+        assert!(en.contains(label), "EN tab label drifted: {label:?}");
+    }
+    let ru = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
+    for label in [
+        ">Статус</a>",
+        ">Активность</a>",
+        ">Протоколы</a>",
+        ">Гранты</a>",
+        ">Настройка</a>",
+    ] {
+        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
     }
 }
 

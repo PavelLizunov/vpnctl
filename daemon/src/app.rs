@@ -940,6 +940,19 @@ fn admin_router(state: AppState) -> Router {
         // empty-state until chunk 4 wires the periodic poller.
         .route("/admin/servers/{id}", get(admin::server_detail))
         .route("/admin/servers/{id}/", get(admin::server_detail))
+        // ui-audit §3-§4 — server_detail split into 5 sub-route tabs.
+        // Explicit routes (not a `{tab}` catch-all) so existing GET
+        // sub-paths (delete-confirm, deploy/sse…) can't collide and an
+        // unknown tab 404s through the normal fallback. Bare
+        // `/admin/servers/{id}` + `/status` both render the status tab.
+        .route("/admin/servers/{id}/status", get(admin::server_detail))
+        .route("/admin/servers/{id}/activity", get(admin::server_detail_activity))
+        .route(
+            "/admin/servers/{id}/protocols",
+            get(admin::server_detail_protocols_tab),
+        )
+        .route("/admin/servers/{id}/grants", get(admin::server_detail_grants_tab))
+        .route("/admin/servers/{id}/setup", get(admin::server_detail_setup))
         // Phase v0.8 — TOFU pin via web. Manual paste OR auto-detect
         // via ssh-keyscan (form's `mode` field).
         .route(
