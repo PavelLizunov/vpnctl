@@ -4857,21 +4857,29 @@ pub(crate) async fn user_detail(
         }
 
         // Per-protocol share-links — only meaningful for granted servers.
+        // ponytail: collapsed <details> — the Flow cards above already deliver
+        // every link with a QR; this raw server×protocol dump (up to ~32 lines)
+        // is the copy-all / debug view, not prime-scroll content. Content stays
+        // in the DOM (just collapsed), so copy-contract + smoke tests still see it.
         @if !servers.is_empty() {
-            div.ed-art-eyebrow style="margin-top: 24px;" {
-                (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
-            }
-            @if share_links.is_empty() {
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "No share-links could be rendered (missing secrets or unregistered protocols). "
-                    "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
+            details style="margin-top: 24px;" {
+                summary style="cursor: pointer;" {
+                    span.ed-art-eyebrow {
+                        (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
+                    }
                 }
-            } @else {
-                ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
-                    @for (sid, pid, link) in &share_links {
-                        li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                            span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
-                            (link)
+                @if share_links.is_empty() {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
+                        "No share-links could be rendered (missing secrets or unregistered protocols). "
+                        "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
+                    }
+                } @else {
+                    ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
+                        @for (sid, pid, link) in &share_links {
+                            li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                                span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
+                                (link)
+                            }
                         }
                     }
                 }
@@ -17564,9 +17572,13 @@ fn server_detail_drift_section(
                         (tr(lang, "(probe ran but no sockets listed)", "(probe прошёл, но сокетов не нашлось)"))
                     }
                 } @else {
-                    ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
+                    // ponytail: 4 CSS columns — an amneziawg/wgturn/xray node
+                    // opens 100+ per-peer sockets; one <li>-per-line was ~4.5k px
+                    // of pure scroll. `columns: 4` (not 8 — too narrow for the
+                    // ~590px grid cell, would wrap `hysteria2/8444`) cuts it ~4×.
+                    ul style="list-style: none; padding: 0; margin: 0; font-family: var(--mono); font-size: 12px; columns: 4; column-gap: 16px;" {
                         @for (proto, port) in observed {
-                            li style="padding: 2px 0;" { (proto) "/" (port) }
+                            li style="padding: 2px 0; break-inside: avoid;" { (proto) "/" (port) }
                         }
                     }
                 }
