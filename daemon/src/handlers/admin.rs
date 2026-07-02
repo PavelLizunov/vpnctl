@@ -8101,7 +8101,7 @@ pub(crate) async fn server_enable_protocol(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}#enabled-protocols",
+        "/admin/servers/{}/protocols#enabled-protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -8156,7 +8156,7 @@ pub(crate) async fn server_disable_protocol(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}#enabled-protocols",
+        "/admin/servers/{}/protocols#enabled-protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -8302,7 +8302,7 @@ pub(crate) async fn server_grant_user(
         tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.grant");
     }
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -8360,7 +8360,7 @@ pub(crate) async fn server_revoke_user(
         tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.revoke");
     }
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -8763,7 +8763,7 @@ pub(crate) async fn server_enable_kernel(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -8817,7 +8817,7 @@ pub(crate) async fn server_disable_kernel(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -9348,7 +9348,7 @@ pub(crate) async fn server_grant_all_users(
         "bulk-grant complete"
     );
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -9463,7 +9463,7 @@ pub(crate) async fn server_revoke_all_users(
         "bulk-revoke complete"
     );
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
     ))
     .into_response()
@@ -12318,7 +12318,7 @@ pub(crate) async fn server_push_deploy_key(
                     );
                 }
                 return Redirect::to(&format!(
-                    "/admin/servers/{}#push-deploy-key",
+                    "/admin/servers/{}/setup#push-deploy-key",
                     path_segment_encode(&server_id_str)
                 ))
                 .into_response();
@@ -12438,7 +12438,7 @@ pub(crate) async fn server_push_deploy_key(
             // happens organically the next time the node probe
             // poller runs.
             Redirect::to(&format!(
-                "/admin/servers/{}#push-deploy-key",
+                "/admin/servers/{}/setup#push-deploy-key",
                 path_segment_encode(&server_id_str)
             ))
             .into_response()
@@ -13823,11 +13823,104 @@ impl ServerDetailQuery {
     }
 }
 
+/// server_detail's in-page tabs (ui-audit §3-§4). Each is a real
+/// sub-route (`/admin/servers/{id}/{slug}`) so navigation is plain
+/// `<a href>` — zero JS, back-button-correct, deep-linkable — and each
+/// tab renders only its own sections. `Status` is the default (bare
+/// `/admin/servers/{id}`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerTab {
+    Status,
+    Activity,
+    Protocols,
+    Grants,
+    Setup,
+}
+
+impl ServerTab {
+    fn slug(self) -> &'static str {
+        match self {
+            ServerTab::Status => "status",
+            ServerTab::Activity => "activity",
+            ServerTab::Protocols => "protocols",
+            ServerTab::Grants => "grants",
+            ServerTab::Setup => "setup",
+        }
+    }
+}
+
+/// The `.ed-tabs` bar — dead CSS since Phase A (admin.css:608), worn
+/// here for the first time. `base` must already be path-segment-encoded;
+/// `active` is the current tab's slug (its link gets `.ed-tab--on`).
+/// `cursor`/`text-decoration` are set inline because the dead CSS was
+/// authored for JS toggles (cursor:default, no link reset).
+fn detail_tabs(base: &str, active: &str, tabs: &[(&str, &str)]) -> Markup {
+    html! {
+        div.ed-tabs {
+            @for (slug, label) in tabs {
+                a class=(if *slug == active { "ed-tab ed-tab--on" } else { "ed-tab" })
+                  href=(format!("{base}/{slug}"))
+                  style="cursor: pointer; text-decoration: none;" {
+                    (label)
+                }
+            }
+        }
+    }
+}
+
+// Thin axum handlers — one per tab route in app.rs. Bare
+// `/admin/servers/{id}` (+ trailing slash) + `/status` both land here.
 pub(crate) async fn server_detail(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
     axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
+) -> Result<Markup, Response> {
+    server_detail_render(headers, state, server_id_str, query, ServerTab::Status).await
+}
+
+pub(crate) async fn server_detail_activity(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
+) -> Result<Markup, Response> {
+    server_detail_render(headers, state, server_id_str, query, ServerTab::Activity).await
+}
+
+pub(crate) async fn server_detail_protocols_tab(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
+) -> Result<Markup, Response> {
+    server_detail_render(headers, state, server_id_str, query, ServerTab::Protocols).await
+}
+
+pub(crate) async fn server_detail_grants_tab(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
+) -> Result<Markup, Response> {
+    server_detail_render(headers, state, server_id_str, query, ServerTab::Grants).await
+}
+
+pub(crate) async fn server_detail_setup(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ServerDetailQuery>,
+) -> Result<Markup, Response> {
+    server_detail_render(headers, state, server_id_str, query, ServerTab::Setup).await
+}
+
+async fn server_detail_render(
+    headers: HeaderMap,
+    state: AppState,
+    server_id_str: String,
+    query: ServerDetailQuery,
+    tab: ServerTab,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let sid = vpnctl_core::ServerId(server_id_str.clone());
@@ -14115,7 +14208,12 @@ pub(crate) async fn server_detail(
     // `users` (already loaded; `.uuid` resolves COALESCE(client_uuid,
     // users.uuid)) so an orphan = a UUID the node serves that no
     // granted user accounts for.
-    let drift_live: Option<DriftLiveResult> = if query.drift_live() {
+    // Gate on the tab too, not just the query flag: the drift-detail
+    // card (with its `?drift=live` arm link) only renders on the
+    // protocols tab, so `/status?drift=live` (bookmark / hand-typed /
+    // crawler) must NOT trigger the 6s SSH read and throw the result
+    // away. review-agent Phase 1.
+    let drift_live: Option<DriftLiveResult> = if tab == ServerTab::Protocols && query.drift_live() {
         Some(load_drift_live(&server, &users, &all_users).await)
     } else {
         None
@@ -14304,145 +14402,93 @@ pub(crate) async fn server_detail(
         // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
 
-        // Phase H+ — rolling uptime SLO (24h / 7d / 30d) over the
-        // probe data the hero showed «right-now». Renders nothing
-        // when ALL three windows have no data (fresh server, no
-        // probes yet — hero already covers that case with the
-        // empty-state).
-        (server_detail_uptime_section(
-            uptime_24h.as_ref(),
-            uptime_7d.as_ref(),
-            uptime_30d.as_ref(),
-            lang,
-        ))
+        // ── in-page tabs (ui-audit §3-§4). Chrome above (nav / hero /
+        // deploy / update-kernels / pending-deploy banner) shows on
+        // EVERY tab so the daily deploy action never hides behind one;
+        // each group below renders only on its own tab. Bare
+        // /admin/servers/{id} == the `status` tab.
+        @let tab_base = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
+        (detail_tabs(&tab_base, tab.slug(), &[
+            ("status", crate::i18n::tr(lang, "Status", "Статус")),
+            ("activity", crate::i18n::tr(lang, "Activity", "Активность")),
+            ("protocols", crate::i18n::tr(lang, "Protocols", "Протоколы")),
+            ("grants", crate::i18n::tr(lang, "Grants", "Гранты")),
+            ("setup", crate::i18n::tr(lang, "Setup", "Настройка")),
+        ]))
 
-        // A3 — 24h resource trend sparklines (disk, mem, log size).
-        (server_detail_resource_trend_section(&trend_rows, lang))
+        // ── STATUS (default) — "is the node healthy, what changed".
+        @if tab == ServerTab::Status {
+            // Rolling uptime SLO (24h/7d/30d); nothing when no probes.
+            (server_detail_uptime_section(
+                uptime_24h.as_ref(),
+                uptime_7d.as_ref(),
+                uptime_30d.as_ref(),
+                lang,
+            ))
+            // A3 — 24h resource trend sparklines (disk, mem, log size).
+            (server_detail_resource_trend_section(&trend_rows, lang))
+            // Drift SUMMARY only — the verdict + counts. The full
+            // declared-vs-observed grid + observed-socket list (100+
+            // rows on wgturn/xray nodes) live on the protocols tab.
+            (server_detail_drift_summary(&missing, &extra, latest.is_some(), &tab_base, lang))
+            // server#7 — server-scoped audit timeline (last 20).
+            (server_detail_audit_section(&server_audit, lang))
+        }
 
-        // Phase 4b — live activity tile (server-wide totals from
-        // clash-api; per-user attribution blocked by NM-11 sing-box
-        // upstream, dashboard tile shows zero «attributed users»
-        // intentionally to make the limit explicit).
-        (server_detail_live_activity_section(&live_activity, lang))
+        // ── ACTIVITY — clash-api-snapshot-derived, read-only.
+        @if tab == ServerTab::Activity {
+            // Phase 4b — live activity tile (server-wide clash-api totals).
+            (server_detail_live_activity_section(&live_activity, lang))
+            // Traffic accounting — NIC ground-truth vs clash-attributed vs gap.
+            (server_detail_gap_section(&traffic, lang))
+            // Phase 4c/4d/5a-2 — per-connection drill-down (top dests +
+            // reverse-DNS, source IPs with user correlation, TCP/UDP split).
+            (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
+            // server#4 — per-server traffic 24h/7d sparkline (?vpn_window=).
+            (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
+            // server#3 — top users on this server (24h); NM-11 empty-state.
+            (server_detail_top_users_section(&top_users, lang))
+            // server#5 — TCP/UDP split from the live clash-api snapshot.
+            (server_detail_network_split_section(last_server_snap.as_deref(), lang))
+        }
 
-        // Traffic accounting — NIC ground-truth vs clash-attributed vs gap.
-        (server_detail_gap_section(&traffic, lang))
+        // ── PROTOCOLS — "what does this node serve, on which ports".
+        @if tab == ServerTab::Protocols {
+            // Kernels — multi-kernel runtime selection + version-floor rollup.
+            // Enable amneziawg kernel here → enable wireguard protocol
+            // below → deploy. The `update kernels →` button lives in the
+            // chrome above (adjacent to Deploy).
+            (kernel_floor_rollup(&server_kernel_versions, lang))
+            (server_detail_kernels_section(&server, &state.registry, lang))
+            // Enabled protocols — enable/disable/hide (NM-10 hidden_map:
+            // hidden=1 keeps the inbound running but stops emitting the
+            // protocol from /sub + /api/v1/app/config). Changes take
+            // effect on the NEXT deploy.
+            (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
+            // Naive (Caddy) + vless-ws per-server config (domain + ACME).
+            (server_detail_naive_config_section(&server, &server_secrets, lang))
+            (server_detail_vlessws_config_section(&server, &server_secrets, lang))
+            // naive↔HY2 UDP pairing opt-in (UX-3) — shared `pair=` so a
+            // client routes UDP over the co-located HY2.
+            (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
+            // Reserved ports — operator port allowlist the apply-guard skips.
+            (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
+            // wgturn VK-link — only when the wgturn kernel is enabled.
+            (server_detail_wgturn_section(&server, &server_secrets, lang))
+            // Declared vs observed drift — full grid incl. the observed
+            // listening-socket list (port-level, probe-derived).
+            (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
+            // Drift DETAIL — on-node orphan UUIDs; `?drift=live` arms a
+            // best-effort 6s SSH read of the node's sing-box config.
+            (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
+        }
 
-        // Phase 4c + 4d + 5a-2 — per-connection drill-down (top
-        // destinations enriched with reverse-DNS hostnames + top
-        // source IPs with user correlation + TCP/UDP split).
-        (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
-
-        // Declared vs observed drift (port-level — fast, probe-derived)
-        (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
-
-        // server#1 (PR-Server) — drift DETAIL: which on-node UUIDs the
-        // node serves that inventory doesn't account for. Default load
-        // renders a «[check live drift →]» link (no SSH); `?drift=live`
-        // arms a best-effort live read of the node's sing-box config.
-        (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
-
-        // server#4 (PR-Server) — per-server traffic 24h/7d sparkline.
-        // Window-scoped to /admin/servers/{id}; reuses sparkline_svg.
-        (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
-
-        // server#3 (PR-Server) — top users on this server (24h). Carries
-        // the NM-11 empty-state since prod per-user attribution is NULL.
-        (server_detail_top_users_section(&top_users, lang))
-
-        // server#5 (PR-Server) — TCP/UDP split from the live clash-api
-        // snapshot (clash has no per-protocol tag, only network).
-        (server_detail_network_split_section(last_server_snap.as_deref(), lang))
-
-        // server#7 (PR-Server) — server-scoped audit timeline (last 20).
-        (server_detail_audit_section(&server_audit, lang))
-
-        // Kernels — multi-kernel runtime selection. Mirrors the
-        // Protocols section right below; same enable/disable shape.
-        // Adding wireguard support to a node that today runs only
-        // sing-box now means: enable amneziawg kernel here →
-        // enable wireguard protocol below → `vpnctl deploy`.
-        // server#2 (PR-Server) — kernel-floor rollup for THIS node
-        // (sing-box version + ✓/stale) renders just above the kernel
-        // enable/disable list; the `update kernels →` button already
-        // lives at the top of the page (adjacent to Deploy).
-        (kernel_floor_rollup(&server_kernel_versions, lang))
-        (server_detail_kernels_section(&server, &state.registry, lang))
-
-        // Enabled protocols — checkbox list of every registered protocol
-        // with current enable state. Toggle posts back to this same
-        // page (303 redirect). Changes take effect on the NEXT
-        // `vpnctl deploy <server>` — inventory mutation alone doesn't
-        // touch the live sing-box config (deliberate: we never push
-        // without operator-initiated deploy).
-        // `hidden_map` (migration 0018 / NM-10) drives the per-row
-        // hide / unhide chip: hidden=1 keeps the sing-box inbound
-        // running but stops emitting the protocol from `/sub/<token>`
-        // and `/api/v1/app/config/<device_id>`.
-        (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
-
-        // Naive (Caddy) per-server config — domain + ACME email for the
-        // caddy kernel's Caddyfile + Caddy's built-in ACME. Renders only
-        // when the `naive` protocol is enabled on this server; carries the
-        // DNS-A-record + open-80/443 prerequisite reminder vpnctl can't
-        // do for the operator.
-        (server_detail_naive_config_section(&server, &server_secrets, lang))
-        (server_detail_vlessws_config_section(&server, &server_secrets, lang))
-
-        // Trusted host fingerprint — TOFU pin for the daemon's SSH
-        // probe + clash-api poller + deploy. Both the web action below
-        // and the `vpnctl server set-fingerprint <id>` CLI shipped
-        // 2026-05-17 (`2fda5c6`) + 2026-05-18 (`ec275c5` — extracted
-        // `vpnctl-host-fingerprint` crate as single source of truth);
-        // operator never needs to drop to shell + raw SQL just to pin
-        // a host key. (Stale «TODO for vpnctl» note cleaned 2026-05-22.)
-        (server_detail_fingerprint_section(&server, lang))
-
-        // Display name — operator-friendly subscription label
-        // (migration 0029). The `{Country}` part end users see in their
-        // client's server list; blank → ISO-code→country map → uppercased id.
-        (server_detail_display_name_section(&server, display_name.as_deref(), lang))
-
-        // Auto-suppress from subscription when unreachable (migration
-        // 0030). Per-server opt-in + live "suppressed since X" status.
-        (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
-
-        // naive↔HY2 UDP pairing opt-in (migration 0031, UX-3). Tags the
-        // node's naive + HY2 share-links with a shared `pair=` so a client
-        // can route UDP (which naive can't carry) over the co-located HY2.
-        (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
-
-        // Reserved ports — operator-pinned port allowlist that the
-        // sing-box pre-apply guard refuses to bind. Use when this
-        // node has a co-tenant service (legacy 3x-ui Docker on :443,
-        // a separate xray on :2053, etc.) that vpnctl must NEVER
-        // overwrite. The chip + form render even when empty so the
-        // operator has a place to add ports for newly-discovered
-        // co-tenants without hunting through the CLI.
-        (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
-
-        // wgturn-specific settings — only renders when the server has
-        // the wgturn kernel enabled. The VK Calls invite URL is
-        // captcha-gated (can't be auto-minted server-side), so the
-        // operator pastes it once here; subsequent deploys read it
-        // from `server_secrets["wgturn:vk_link"]`.
-        (server_detail_wgturn_section(&server, &server_secrets, lang))
-
-        // Push deploy key — recovery action for servers added via
-        // quick-add / migrate-from-bash where the wizard's step-3
-        // pubkey push never ran. Phase G chunk 3.5 follow-up; the
-        // user's «почему это не делается автоматически» surfaced
-        // the gap.
-        (server_detail_push_deploy_key_section(&server, lang))
-
-        // Grants — centralised per-server view (Pavel iter B).
-        // Lists EVERY user with a per-row grant/revoke form, so the
-        // operator doesn't have to bounce through each user's page
-        // to manage access on a node. Same shape as the per-user
-        // Server-access section, just transposed.
-        div.ed-rule {}
-        div.ed-art-eyebrow { (crate::i18n::tr(lang, "Grants", "Выданные доступы")) }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+        // ── GRANTS — 2nd-most-frequent action; its own uncluttered page.
+        @if tab == ServerTab::Grants {
+            // Centralised per-server view (Pavel iter B): every user with
+            // a per-row grant/revoke form + bulk grant/revoke.
+            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Grants", "Выданные доступы")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len()) " "
             @if all_users.len() == 1 { (crate::i18n::tr(lang, "user", "пользователь")) }
             @else { (crate::i18n::tr(lang, "users", "пользователей")) }
@@ -14583,22 +14629,39 @@ pub(crate) async fn server_detail(
                 }
             }
         }
+        }
 
-        // Danger zone — remove this server from inventory entirely.
-        // Retype-to-confirm page (mirrors user delete). Grants, secrets,
-        // protocols, probe history + alerts cascade-delete; if another
-        // server uses this as a ProxyJump host that link clears. The
-        // node's own sing-box is NOT touched.
-        div.ed-rule {}
-        div style="margin: 18px 0 8px;" {
-            a href=(format!("/admin/servers/{}/delete-confirm", path_segment_encode(&server.id.0)))
-              title=(crate::i18n::tr(
-                  lang,
-                  "Remove this server from the inventory (grants + secrets + protocols cascade). Opens a retype-to-confirm page.",
-                  "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
-              ))
-              style="display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--acc-bad, #97233f); text-decoration: none; border: 1px solid var(--acc-bad, #97233f); padding: 5px 12px;" {
-                (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
+        // ── SETUP — the 0-2-uses/month config tail (ui-audit §4),
+        // deliberately last.
+        @if tab == ServerTab::Setup {
+            // Trusted host fingerprint — TOFU pin for the SSH probe +
+            // clash-api poller + deploy (web action + the
+            // `vpnctl server set-fingerprint <id>` CLI, one source of truth).
+            (server_detail_fingerprint_section(&server, lang))
+            // Display name — operator subscription label (migration 0029).
+            (server_detail_display_name_section(&server, display_name.as_deref(), lang))
+            // Auto-suppress from subscription when unreachable (migration 0030).
+            (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
+            // Push deploy key — recovery for quick-add/migrate nodes whose
+            // wizard step-3 pubkey push never ran.
+            (server_detail_push_deploy_key_section(&server, lang))
+
+            // Danger zone — remove this server from inventory entirely.
+            // Retype-to-confirm page (mirrors user delete). Grants, secrets,
+            // protocols, probe history + alerts cascade-delete; if another
+            // server uses this as a ProxyJump host that link clears. The
+            // node's own sing-box is NOT touched.
+            div.ed-rule {}
+            div style="margin: 18px 0 8px;" {
+                a href=(format!("/admin/servers/{}/delete-confirm", path_segment_encode(&server.id.0)))
+                  title=(crate::i18n::tr(
+                      lang,
+                      "Remove this server from the inventory (grants + secrets + protocols cascade). Opens a retype-to-confirm page.",
+                      "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
+                  ))
+                  style="display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--acc-bad, #97233f); text-decoration: none; border: 1px solid var(--acc-bad, #97233f); padding: 5px 12px;" {
+                    (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
+                }
             }
         }
     };
@@ -16240,7 +16303,7 @@ pub(crate) async fn server_set_fingerprint(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/setup",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16321,7 +16384,7 @@ pub(crate) async fn server_set_naive_config(
         .await;
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16403,7 +16466,7 @@ pub(crate) async fn server_set_vlessws_config(
         .await;
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16442,7 +16505,7 @@ pub(crate) async fn server_set_display_name(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/setup",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16470,7 +16533,7 @@ pub(crate) async fn server_set_auto_suppress(
         return internal_error(anyhow::Error::new(e));
     }
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/setup",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16496,7 +16559,7 @@ pub(crate) async fn server_set_udp_pair(
         return internal_error(anyhow::Error::new(e));
     }
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16558,7 +16621,7 @@ pub(crate) async fn server_set_reserved_ports(
     }
 
     Redirect::to(&format!(
-        "/admin/servers/{}",
+        "/admin/servers/{}/protocols",
         path_segment_encode(&server_id)
     ))
     .into_response()
@@ -16676,7 +16739,7 @@ fn server_detail_protocols_section(
         // NM-12 follow-up (Pavel 2026-05-20: «каждый раз когда я
         // жму disable меня выкидывает в верх страницы»): all 4
         // visibility-toggle handlers below this row redirect to
-        // `/admin/servers/{id}#enabled-protocols`. The browser
+        // `/admin/servers/{id}/protocols#enabled-protocols`. The browser
         // honours the fragment and scrolls the operator back to
         // THIS section instead of resetting to the page top.
         div.ed-art-eyebrow id="enabled-protocols" { (t(lang, K::EyebrowEnabledProtocols)) }
@@ -17195,7 +17258,7 @@ fn server_detail_drift_detail_section(
                 // Default fast path — link to arm the live read. No SSH
                 // was attempted on this render.
                 p style="font-family: var(--mono); font-size: 12px; margin: 8px 0;" {
-                    a href=(format!("/admin/servers/{sid_enc}?drift=live#drift-detail"))
+                    a href=(format!("/admin/servers/{sid_enc}/protocols?drift=live#drift-detail"))
                       style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
                         (tr(lang, "check live drift →", "проверить живой дрейф →"))
                     }
@@ -17341,7 +17404,12 @@ fn server_detail_traffic_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    let base_url = format!("/admin/servers/{}", path_segment_encode(&server_id.0));
+    // This section lives on the `activity` tab — the `?vpn_window=`
+    // switcher links must keep the operator there, not bounce to status.
+    let base_url = format!(
+        "/admin/servers/{}/activity",
+        path_segment_encode(&server_id.0)
+    );
     let window_label = match lang {
         crate::i18n::Locale::En => window.label_en,
         crate::i18n::Locale::Ru => window.label_ru,
@@ -17518,6 +17586,56 @@ fn server_detail_audit_section(
     }
 }
 
+/// STATUS-tab drift glance (ui-audit §4): the declared-vs-observed
+/// verdict + drift counts, linking to the full grid + observed-socket
+/// list on the protocols tab. The list itself (100+ rows on wgturn/xray
+/// nodes) stays off the status wall — that's the whole point of the tab
+/// split. Counts come from the same `missing`/`extra` the full section
+/// uses, so the two can never disagree.
+fn server_detail_drift_summary(
+    missing: &[(String, u16)],
+    extra: &[(String, u16)],
+    have_probe: bool,
+    base: &str,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    html! {
+        div.ed-rule {}
+        div id="drift-summary" style="margin: 14px 0; font-family: var(--serif); font-size: 13px;" {
+            @if !have_probe {
+                span style="color: var(--mute); font-style: italic;" {
+                    (tr(
+                        lang,
+                        "Drift — no probe yet (poller runs every 10 min; sing-box nodes only).",
+                        "Дрейф — probe ещё нет (поллер ходит раз в 10 минут; только sing-box ноды).",
+                    ))
+                }
+            } @else if missing.is_empty() && extra.is_empty() {
+                span style="color: var(--soft);" {
+                    (tr(
+                        lang,
+                        "✓ Declared and observed match. No drift.",
+                        "✓ Заявленное и наблюдаемое совпадают. Дрейфа нет.",
+                    ))
+                }
+            } @else {
+                span style="color: var(--acc);" {
+                    "⚠ " (tr(lang, "drift — ", "дрейф — "))
+                    (missing.len()) " " (tr(lang, "declared-but-silent", "заявлено-но-молчит"))
+                    " · "
+                    (extra.len()) " " (tr(lang, "listening-but-undeclared", "слушает-но-не-заявлено"))
+                }
+                " "
+                a href=(format!("{base}/protocols#drift-detail"))
+                  style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                    (tr(lang, "full grid on protocols tab →", "полная таблица на вкладке протоколы →"))
+                }
+            }
+        }
+    }
+}
+
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
     observed: &std::collections::BTreeSet<(String, u16)>,
@@ -17648,7 +17766,7 @@ pub(crate) async fn server_protocol_hide(
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
     match state.inv.set_server_protocol_hidden(&sid, &pid, true).await {
         Ok(()) => Redirect::to(&format!(
-            "/admin/servers/{}#enabled-protocols",
+            "/admin/servers/{}/protocols#enabled-protocols",
             path_segment_encode(&server_id_str)
         ))
         .into_response(),
@@ -17672,7 +17790,7 @@ pub(crate) async fn server_protocol_unhide(
         .await
     {
         Ok(()) => Redirect::to(&format!(
-            "/admin/servers/{}#enabled-protocols",
+            "/admin/servers/{}/protocols#enabled-protocols",
             path_segment_encode(&server_id_str)
         ))
         .into_response(),
