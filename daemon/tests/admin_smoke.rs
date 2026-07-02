@@ -1596,6 +1596,111 @@ async fn admin_tweaks_no_longer_float_on_dashboard() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  ui-audit Phase 3 — settings split into 4 sub-route tabs
+//  (appearance / backups / notifications / system). Each tab renders
+//  ONLY its own sections; bare /admin/settings == appearance.
+// ════════════════════════════════════════════════════════════════════
+
+/// Each tab route → 200, renders the `.ed-tabs` bar, marks the right tab
+/// active, shows a section unique to that tab, and does NOT leak a
+/// foreign tab's section.
+#[tokio::test]
+async fn settings_tabs_render_gate_and_mark_active() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let cases = [
+        (
+            "/admin/settings/appearance",
+            "appearance",
+            "Appearance — theme + accent",
+            "Backups — inventory snapshots",
+        ),
+        (
+            "/admin/settings/backups",
+            "backups",
+            "Backups — inventory snapshots",
+            "Appearance — theme + accent",
+        ),
+        (
+            "/admin/settings/notifications",
+            "notifications",
+            r#"id="telegram-notifications""#,
+            "Appearance — theme + accent",
+        ),
+        (
+            "/admin/settings/system",
+            "system",
+            r#"id="deploy-ssh-key""#,
+            "Appearance — theme + accent",
+        ),
+    ];
+    for (path, slug, present, absent) in cases {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            html.contains(r#"class="ed-tabs""#),
+            "{path}: tab bar (.ed-tabs) missing"
+        );
+        let active = format!(r#"ed-tab--on" href="/admin/settings/{slug}""#);
+        assert!(
+            html.contains(&active),
+            "{path}: {slug} tab not marked active"
+        );
+        assert!(
+            html.contains(present),
+            "{path}: missing its own section marker {present:?}"
+        );
+        assert!(
+            !html.contains(absent),
+            "{path}: leaked a foreign tab's section {absent:?}"
+        );
+    }
+}
+
+/// Bare `/admin/settings` renders the appearance tab directly.
+#[tokio::test]
+async fn settings_bare_url_renders_appearance_tab() {
+    let dir = TempDir::new().unwrap();
+    let html = fetch_html(router(state(&dir).await), "/admin/settings").await;
+    assert!(
+        html.contains(r#"ed-tab--on" href="/admin/settings/appearance""#),
+        "bare URL must mark the appearance tab active"
+    );
+    assert!(
+        html.contains("Appearance — theme + accent"),
+        "bare URL must render the appearance tab's sections"
+    );
+    assert!(
+        !html.contains("Backups — inventory snapshots"),
+        "bare URL (appearance) must not render the backups tab"
+    );
+}
+
+/// Copy-contract — pin the 4 settings tab labels in both locales.
+#[tokio::test]
+async fn settings_tab_labels_copy_contract() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let en = fetch_html(app.clone(), "/admin/settings").await;
+    for label in [
+        ">Appearance</a>",
+        ">Backups</a>",
+        ">Notifications</a>",
+        ">System</a>",
+    ] {
+        assert!(en.contains(label), "EN tab label drifted: {label:?}");
+    }
+    let ru = fetch_html_with_cookie(app, "/admin/settings", "vpnctl_lang=ru").await;
+    for label in [
+        ">Внешний вид</a>",
+        ">Бэкапы</a>",
+        ">Уведомления</a>",
+        ">Система</a>",
+    ] {
+        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+    }
+}
+
 #[tokio::test]
 async fn admin_settings_page_hosts_theme_and_accent_pickers() {
     let dir = TempDir::new().unwrap();
@@ -4203,7 +4308,7 @@ async fn settings_telegram_section_renders_with_disabled_status_by_default() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4270,7 +4375,7 @@ async fn settings_telegram_save_roundtrip_masks_token_on_render() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4519,7 +4624,7 @@ async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/system")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4948,7 +5053,7 @@ async fn settings_telegram_proxy_dropdown_lists_inventory_servers() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4978,7 +5083,7 @@ async fn settings_telegram_proxy_dropdown_shows_hint_when_no_servers() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5037,7 +5142,7 @@ async fn settings_telegram_save_persists_proxy_via_server_id() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5068,7 +5173,7 @@ async fn settings_telegram_test_send_button_appears_only_when_enabled() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5093,7 +5198,7 @@ async fn settings_telegram_test_send_button_appears_only_when_enabled() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5155,7 +5260,7 @@ async fn settings_telegram_partial_config_renders_red_warning() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5215,7 +5320,7 @@ async fn settings_telegram_clear_both_disables_transport() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/settings")
+                .uri("/admin/settings/notifications")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -10158,7 +10263,7 @@ async fn admin_server_detail_deploy_caption_describes_ssh_push() {
 async fn admin_settings_shows_backups_section_with_snapshot_button() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
-    let html = fetch_html(app, "/admin/settings").await;
+    let html = fetch_html(app, "/admin/settings/backups").await;
     assert!(
         html.contains("Backups — inventory snapshots"),
         "Settings page must have a Backups section heading"
@@ -12300,7 +12405,7 @@ async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
     // the `vpnctl geoip-update` instruction.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    let html = fetch_html(router(s), "/admin/settings").await;
+    let html = fetch_html(router(s), "/admin/settings/system").await;
     assert!(
         html.contains("GeoIP — IP enrichment"),
         "Settings page must include the GeoIP eyebrow"
@@ -12430,7 +12535,7 @@ async fn phase3c_settings_renders_geoip_update_now_button_and_eventsource_wiring
     // a terminal; `vpnctl geoip-update` must stay one click.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    let html = fetch_html(router(s), "/admin/settings").await;
+    let html = fetch_html(router(s), "/admin/settings/system").await;
 
     assert!(
         html.contains("id=\"geoip-update-now-btn\""),

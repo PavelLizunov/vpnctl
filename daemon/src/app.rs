@@ -1275,6 +1275,17 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts/ack-all", post(admin::alert_ack_all))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
+        // ui-audit §5 Phase 3 — settings split into 4 sub-route tabs.
+        // Explicit routes; bare `/admin/settings` + `/appearance` render
+        // the appearance tab. Existing POST sub-paths (telegram, timezone,
+        // geoip/update-now, digest-now, notification-language) can't collide.
+        .route("/admin/settings/appearance", get(admin::settings))
+        .route("/admin/settings/backups", get(admin::settings_backups))
+        .route(
+            "/admin/settings/notifications",
+            get(admin::settings_notifications),
+        )
+        .route("/admin/settings/system", get(admin::settings_system))
         // 2026-05-23 — operator-configurable display TZ. POST writes
         // inventory + invalidates the global cache so subsequent
         // page renders use the new zone immediately.
