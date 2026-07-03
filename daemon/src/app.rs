@@ -930,6 +930,11 @@ fn admin_router(state: AppState) -> Router {
     let with_admin = Router::new()
         .route("/admin", get(admin::dashboard))
         .route("/admin/", get(admin::dashboard))
+        // ui-audit follow-up — dashboard split into 2 sub-route tabs
+        // (overview / activity), KPI glance stays as chrome. Explicit
+        // routes; bare `/admin/` + `/admin/overview` render overview.
+        .route("/admin/overview", get(admin::dashboard))
+        .route("/admin/activity", get(admin::dashboard_activity))
         .route("/admin/monitoring", get(admin::monitoring))
         .route("/admin/monitoring/", get(admin::monitoring))
         .route("/admin/servers", get(admin::servers))
