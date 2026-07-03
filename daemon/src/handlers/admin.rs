@@ -1380,10 +1380,49 @@ pub(crate) struct DashboardQuery {
     pub vpn_window: Option<String>,
 }
 
+/// dashboard's in-page tabs (ui-audit follow-up). The at-a-glance KPI
+/// metrics + today-digest + fleet table stay as CHROME (visible on every
+/// tab — the landing page's whole point is the glance); the two tabs
+/// split only the deeper drill-downs. `Overview` is the default (bare
+/// `/admin/`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DashboardTab {
+    Overview,
+    Activity,
+}
+
+impl DashboardTab {
+    fn slug(self) -> &'static str {
+        match self {
+            DashboardTab::Overview => "overview",
+            DashboardTab::Activity => "activity",
+        }
+    }
+}
+
+// Thin axum handlers — one per tab route in app.rs. Bare `/admin/`
+// (+ `/admin`, `/admin/overview`) render the overview tab.
 pub(crate) async fn dashboard(
     headers: HeaderMap,
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
+) -> Result<Markup, Response> {
+    dashboard_render(headers, state, query, DashboardTab::Overview).await
+}
+
+pub(crate) async fn dashboard_activity(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
+) -> Result<Markup, Response> {
+    dashboard_render(headers, state, query, DashboardTab::Activity).await
+}
+
+async fn dashboard_render(
+    headers: HeaderMap,
+    state: AppState,
+    query: DashboardQuery,
+    tab: DashboardTab,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     // 2026-05-23 — ONE window picker drives every time-series
@@ -1638,43 +1677,56 @@ pub(crate) async fn dashboard(
         // PR-Dash dash#1 — fleet-at-a-glance table, after the metrics
         // deck and before the window picker.
         (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
-        // 2026-05-23 — global time-window picker. ONE control
-        // drives VPN activity + Heavy users + Fleet traffic chart.
-        // Tabs use #timeframe anchor so click → scroll back to
-        // picker (not page top). Date range follows in a separate
-        // commit (Pavel «таки конкретного таймфрема, то есть
-        // промежутка дать» — picker shows them via tabs first,
-        // arbitrary from/to next session).
-        (window_picker_section("/admin/", window.slug, lang))
-        (dashboard_fleet_uptime(&fleet_uptime, lang))
-        (dashboard_vpn_activity(&live_activity, window, lang))
-        // Fleet-wide traffic chart. Uses the same `window` the
-        // tiles above use — single picker, three tiles, one
-        // mental model.
-        div id="vpn-traffic" style="margin-top: 24px;" {
-            div.ed-art-eyebrow {
-                (crate::i18n::tr(lang, "Fleet traffic", "Трафик флота"))
-                " · "
-                (match lang {
-                    crate::i18n::Locale::En => window.label_en,
-                    crate::i18n::Locale::Ru => window.label_ru,
-                })
-            }
-            (vpn_traffic_chart(&fleet_rows, window, lang))
-            // PR-Dash dash#2 — real ↑↓ totals + Δ% beside the chart.
-            (dashboard_fleet_traffic_totals(&fleet_rows, &coeffs, window, lang))
+        // ── in-page tabs (ui-audit follow-up). The KPI metrics +
+        // today-digest + fleet table ABOVE are chrome (every tab — the
+        // landing glance is never hidden); the two tabs below split only
+        // the deeper drill-downs. Bare /admin/ == overview.
+        (detail_tabs(
+            "/admin",
+            tab.slug(),
+            &[
+                ("overview", crate::i18n::tr(lang, "Overview", "Обзор")),
+                ("activity", crate::i18n::tr(lang, "Activity", "Активность")),
+            ],
+        ))
+
+        // ── OVERVIEW (default) — what needs attention + what happened.
+        @if tab == DashboardTab::Overview {
+            // PR-Dash dash#4 — alerts breakdown. Quiet when no unacked.
+            (dashboard_alerts_breakdown(&alerts_breakdown, lang))
+            // PR-Dash dash#5 — abuse summary (likely-shared subs).
+            (dashboard_abuse_summary(&likely_shared, lang))
+            (dashboard_idle_users(&idle_users, lang))
+            (dashboard_limit_alerts(&alerting, lang))
+            (dashboard_audit(&audit, lang))
         }
-        // PR-Dash dash#3 — kernel-floor rollup (shared helper).
-        (kernel_floor_rollup(&kernel_versions, lang))
-        // PR-Dash dash#4 — alerts breakdown (replaces the count-only
-        // tile). Quiet when there are no unacked alerts.
-        (dashboard_alerts_breakdown(&alerts_breakdown, lang))
-        // PR-Dash dash#5 — abuse summary (likely-shared subs).
-        (dashboard_abuse_summary(&likely_shared, lang))
-        (dashboard_idle_users(&idle_users, lang))
-        (dashboard_limit_alerts(&alerting, lang))
-        (dashboard_heavy_users(&heavy_users, window, lang))
-        (dashboard_audit(&audit, lang))
+
+        // ── ACTIVITY — the window-driven charts (traffic / uptime / usage).
+        @if tab == DashboardTab::Activity {
+            // Global time-window picker — ONE control drives VPN activity
+            // + Fleet traffic + Heavy users, all on this tab. Base is the
+            // activity tab so `?vpn_window=` reloads keep the operator here.
+            (window_picker_section("/admin/activity", window.slug, lang))
+            (dashboard_fleet_uptime(&fleet_uptime, lang))
+            (dashboard_vpn_activity(&live_activity, window, lang))
+            // Fleet-wide traffic chart (same window as the tiles above).
+            div id="vpn-traffic" style="margin-top: 24px;" {
+                div.ed-art-eyebrow {
+                    (crate::i18n::tr(lang, "Fleet traffic", "Трафик флота"))
+                    " · "
+                    (match lang {
+                        crate::i18n::Locale::En => window.label_en,
+                        crate::i18n::Locale::Ru => window.label_ru,
+                    })
+                }
+                (vpn_traffic_chart(&fleet_rows, window, lang))
+                // PR-Dash dash#2 — real ↑↓ totals + Δ% beside the chart.
+                (dashboard_fleet_traffic_totals(&fleet_rows, &coeffs, window, lang))
+            }
+            // PR-Dash dash#3 — kernel-floor rollup (shared helper).
+            (kernel_floor_rollup(&kernel_versions, lang))
+            (dashboard_heavy_users(&heavy_users, window, lang))
+        }
     };
     Ok(shell("dashboard", &theme, &accent, lang, body))
 }

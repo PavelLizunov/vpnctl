@@ -11833,9 +11833,11 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     );
     // PR-Dash — the kernel-rollup eyebrow always renders (its no-data
     // empty-state appears even on a fresh, server-less fleet), so its
-    // RU arm is a reliable walker anchor for the new info cards.
+    // RU arm is a reliable walker anchor. It moved to the dashboard's
+    // activity tab (ui-audit follow-up), so fetch that tab for it.
+    let h_activity = fetch("/admin/activity").await;
     assert!(
-        h.contains("Версии ядер · sing-box"),
+        h_activity.contains("Версии ядер · sing-box"),
         "PR-Dash kernel-rollup eyebrow must be translated under ru"
     );
 
@@ -13060,7 +13062,7 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/").await;
+    let html = fetch_html(router(s), "/admin/activity").await;
     // Heading uses the active window label (default 24h, post-
     // 2026-05-23 global window picker). «VPN activity · 24h»
     // — same tile, just generic-windowed.
@@ -13105,7 +13107,7 @@ async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     // No servers at all → list is empty.
-    let html = fetch_html(router(s), "/admin/").await;
+    let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
         html.contains("VPN activity · 24h"),
         "tile must always render"
@@ -13752,7 +13754,7 @@ async fn dashboard_fleet_uptime_section_omitted_when_no_servers_polled() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/")
+                .uri("/admin/activity")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -13820,7 +13822,7 @@ async fn dashboard_fleet_uptime_section_renders_with_probe_data() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/")
+                .uri("/admin/activity")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -13907,7 +13909,7 @@ async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/")
+                .uri("/admin/activity")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -15914,7 +15916,7 @@ async fn dashboard_fleet_traffic_totals_render_beside_chart() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    let html = fetch_html(router(s), "/admin/").await;
+    let html = fetch_html(router(s), "/admin/activity").await;
     // The vs-prior delta tile label is distinctive to dash#2.
     assert!(
         html.contains("vs prior"),
@@ -15935,7 +15937,7 @@ async fn dashboard_kernel_rollup_shows_version() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     seed_dashboard_signals(&s.inv).await;
-    let html = fetch_html(router(s), "/admin/").await;
+    let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
         html.contains("Kernel rollup"),
         "kernel-rollup eyebrow missing"
@@ -15962,7 +15964,7 @@ async fn dashboard_kernel_rollup_empty_state_when_no_versions() {
     let s = state(&dir).await;
     // Server exists but NO node_health row with kernel versions.
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    let html = fetch_html(router(s), "/admin/").await;
+    let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
         html.contains("No on-node version data yet"),
         "kernel-rollup must show the quiet no-data line"
@@ -16302,6 +16304,103 @@ async fn dashboard_today_digest_hidden_when_quiet() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  ui-audit follow-up — dashboard split into 2 sub-route tabs
+//  (overview / activity). The KPI metrics + today-digest + fleet table
+//  stay as CHROME (every tab — the glance is never hidden); the two tabs
+//  split only the deeper drill-downs. Bare /admin/ == overview.
+// ════════════════════════════════════════════════════════════════════
+
+/// Each tab route → 200, renders the `.ed-tabs` bar, keeps the KPI glance
+/// (fleet table) as chrome on BOTH tabs, marks the right tab active,
+/// shows a section unique to that tab, and does NOT leak the other tab's.
+#[tokio::test]
+async fn dashboard_tabs_render_gate_and_mark_active() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let app = router(s);
+    let cases = [
+        (
+            "/admin/overview",
+            "overview",
+            "Homelab health · open alerts",
+            "Fleet traffic",
+        ),
+        (
+            "/admin/activity",
+            "activity",
+            "Fleet traffic",
+            "Homelab health · open alerts",
+        ),
+    ];
+    for (path, slug, present, absent) in cases {
+        let html = fetch_html(app.clone(), path).await;
+        assert!(
+            html.contains(r#"class="ed-tabs""#),
+            "{path}: tab bar (.ed-tabs) missing"
+        );
+        // KPI glance stays chrome — the fleet table renders on BOTH tabs.
+        assert!(
+            html.contains("Fleet at a glance"),
+            "{path}: KPI glance (fleet table) must stay as chrome on every tab"
+        );
+        let active = format!(r#"ed-tab--on" href="/admin/{slug}""#);
+        assert!(
+            html.contains(&active),
+            "{path}: {slug} tab not marked active"
+        );
+        assert!(
+            html.contains(present),
+            "{path}: missing its own section marker {present:?}"
+        );
+        assert!(
+            !html.contains(absent),
+            "{path}: leaked a foreign tab's section {absent:?}"
+        );
+    }
+}
+
+/// Bare `/admin/` renders the overview tab directly.
+#[tokio::test]
+async fn dashboard_bare_url_renders_overview_tab() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains(r#"ed-tab--on" href="/admin/overview""#),
+        "bare URL must mark the overview tab active"
+    );
+    assert!(
+        html.contains("Homelab health · open alerts"),
+        "bare URL must render the overview tab's sections"
+    );
+    assert!(
+        !html.contains("Fleet traffic"),
+        "bare URL (overview) must not render the activity tab"
+    );
+}
+
+/// Copy-contract — pin the 2 dashboard tab labels in both locales.
+#[tokio::test]
+async fn dashboard_tab_labels_copy_contract() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+    let app = router(s);
+    let en = fetch_html(app.clone(), "/admin/").await;
+    for label in [">Overview</a>", ">Activity</a>"] {
+        assert!(en.contains(label), "EN tab label drifted: {label:?}");
+    }
+    let ru = fetch_html_with_cookie(app, "/admin/", "vpnctl_lang=ru").await;
+    for label in [">Обзор</a>", ">Активность</a>"] {
+        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+    }
+}
+
 /// Copy-contract — pin every new PR-Dash eyebrow/headline (EN) so a
 /// future copy edit has to update this test in lockstep. Mirrors
 /// `admin_frontend_section_headlines_match_voice`.
@@ -16311,14 +16410,18 @@ async fn dashboard_info_cards_headlines_match_voice() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     seed_dashboard_signals(&s.inv).await;
-    let html = fetch_html(router(s), "/admin/").await;
-    for needle in [
-        "Fleet at a glance",            // dash#1
-        "vs prior",                     // dash#2
-        "Kernel rollup · sing-box",     // dash#3
-        "Homelab health · open alerts", // dash#4
-        "Likely-shared subscriptions",  // dash#5
-        "Today:",                       // dash#6
+    // ui-audit follow-up — dash#2/#3 (traffic totals + kernel rollup)
+    // moved to the activity tab; the rest stay on the overview/chrome.
+    let app = router(s);
+    let overview = fetch_html(app.clone(), "/admin/").await;
+    let activity = fetch_html(app, "/admin/activity").await;
+    for (html, needle) in [
+        (&overview, "Fleet at a glance"),            // dash#1 (chrome)
+        (&activity, "vs prior"),                     // dash#2 (activity)
+        (&activity, "Kernel rollup · sing-box"),     // dash#3 (activity)
+        (&overview, "Homelab health · open alerts"), // dash#4 (overview)
+        (&overview, "Likely-shared subscriptions"),  // dash#5 (overview)
+        (&overview, "Today:"),                       // dash#6 (chrome)
     ] {
         assert!(
             html.contains(needle),
@@ -16335,14 +16438,16 @@ async fn dashboard_info_cards_headlines_ru() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     seed_dashboard_signals(&s.inv).await;
-    let html = fetch_html_with_cookie(router(s), "/admin/", "vpnctl_lang=ru").await;
-    for needle in [
-        "Флот одним взглядом",                // dash#1
-        "против пред.",                       // dash#2
-        "Версии ядер · sing-box",             // dash#3
-        "Здоровье homelab · открытые алерты", // dash#4
-        "Похоже на расшаренные подписки",     // dash#5
-        "Сегодня:",                           // dash#6
+    let app = router(s);
+    let overview = fetch_html_with_cookie(app.clone(), "/admin/", "vpnctl_lang=ru").await;
+    let activity = fetch_html_with_cookie(app, "/admin/activity", "vpnctl_lang=ru").await;
+    for (html, needle) in [
+        (&overview, "Флот одним взглядом"),    // dash#1 (chrome)
+        (&activity, "против пред."),           // dash#2 (activity)
+        (&activity, "Версии ядер · sing-box"), // dash#3 (activity)
+        (&overview, "Здоровье homelab · открытые алерты"), // dash#4 (overview)
+        (&overview, "Похоже на расшаренные подписки"), // dash#5 (overview)
+        (&overview, "Сегодня:"),               // dash#6 (chrome)
     ] {
         assert!(
             html.contains(needle),
