@@ -16304,9 +16304,6 @@ async fn dashboard_today_digest_hidden_when_quiet() {
     );
 }
 
-/// Copy-contract — pin every new PR-Dash eyebrow/headline (EN) so a
-/// future copy edit has to update this test in lockstep. Mirrors
-/// `admin_frontend_section_headlines_match_voice`.
 // ════════════════════════════════════════════════════════════════════
 //  ui-audit follow-up — dashboard split into 2 sub-route tabs
 //  (overview / activity). The KPI metrics + today-digest + fleet table
@@ -16404,6 +16401,9 @@ async fn dashboard_tab_labels_copy_contract() {
     }
 }
 
+/// Copy-contract — pin every new PR-Dash eyebrow/headline (EN) so a
+/// future copy edit has to update this test in lockstep. Mirrors
+/// `admin_frontend_section_headlines_match_voice`.
 #[tokio::test]
 async fn dashboard_info_cards_headlines_match_voice() {
     let dir = TempDir::new().unwrap();
