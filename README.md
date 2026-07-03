@@ -191,3 +191,4 @@ VPNCTL_TEST_KEY=$HOME/.ssh/id_ed25519 \
 ## License
 
 AGPL-3.0-or-later.
+<!-- hermes accept test -->
