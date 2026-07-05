@@ -4748,10 +4748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vpnctl-hosters"
-version = "0.8.0"
-
-[[package]]
 name = "vpnctl-inventory"
 version = "0.8.0"
 dependencies = [

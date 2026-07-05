@@ -19,7 +19,6 @@ protocol/ssh/wizard unit suites = ~500 tests** across the workspace.
 | `crates/ssh` | 1 103 | 6 | `SshTransport` trait + `russh` impl + `MockTransport` for tests. |
 | `crates/protocols` | 4 139 | 14 | 7 protocols × ~600 LOC each + helpers (`vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`). |
 | `crates/kernels` | 824 | 3 | `sing-box` kernel (install + render + apply); `amneziawg` kernel. |
-| `crates/hosters` | 67 | 1 | DigitalOcean / Cloudzy / Generic notes (mostly metadata). |
 | `crates/inventory` | 7 425 | 14 | SQLite store + 11 migrations + audit log + sub-access log + traffic stats + node-health + admin-alerts + bash migration planner + backup/restore. |
 | `cli` | 2 411 | 15 | `vpnctl` binary: 14 subcommands (server, user, grant, revoke, deploy, status, sub, bootstrap, render, backup, restore, migrate, uuid, registry). |
 | `daemon` | 20 180 | 24 | `vpnctld` binary: admin UI + /sub/<token> + /api/v1 + 4 background pollers (retention, clash-api, node-probe, health-monitor, backup-scheduler, rate-limit-cleanup). |

@@ -26,7 +26,7 @@ Caddy закрывает обе проблемы разом, поэтому prod
 - **Регистрация:** по одной строке в `cli/src/registry.rs` (`register_kernel(Caddy)`, `register_protocol(Naive)`) + `daemon/src/app.rs::build_registry`.
 - **Server model:** к `Server.kernels` добавляется `caddy`, к `enabled_protocols` — `naive`. Мульти-kernel на хост уже поддержан (`deploy.rs` итерирует kernels, фильтруя протоколы по `supported_protocols()`).
 
-Инвариант сохраняется: трогаем только `crates/kernels/`, `crates/protocols/`, по строке в registry, + миграция БД + UI-поля. `core/ssh/crypto/hosters` не трогаем.
+Инвариант сохраняется: трогаем только `crates/kernels/`, `crates/protocols/`, по строке в registry, + миграция БД + UI-поля. `core/ssh/crypto` не трогаем.
 
 ---
 

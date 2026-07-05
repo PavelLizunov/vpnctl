@@ -71,7 +71,7 @@
 //!   * `cli/src/registry.rs` + `daemon/src/app.rs::build_registry`
 //!     — one `register_*` line each
 //!
-//! No edits to `core`, `ssh`, `crypto`, `inventory`, `hosters`, or
+//! No edits to `core`, `ssh`, `crypto`, `inventory`, or
 //! `cli/src/cmd/*` per CLAUDE.md's Kernel × Protocol invariant.
 
 use async_trait::async_trait;

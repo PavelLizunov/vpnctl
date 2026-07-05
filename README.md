@@ -119,7 +119,6 @@ vpnctl/
 │   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
 │   │                     anytls, trojan, wgturn
 │   ├── kernels/          sing-box (full), amneziawg, wgturn
-│   ├── hosters/          DigitalOcean / Cloudzy / Generic
 │   └── inventory/        SqliteInventory, migrations, audit_log
 ├── cli/                  clap binary `vpnctl`
 └── daemon/               axum binary `vpnctld` (admin UI + /sub + REST)

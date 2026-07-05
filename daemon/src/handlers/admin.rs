@@ -10290,10 +10290,9 @@ pub(crate) async fn audit(
     const PAGE_SIZE: i64 = 50;
 
     // Fetch one extra row to detect "is there a next page?".
-    // `saturating_mul` belt-and-braces — `page` is already clamped to
-    // MAX_PAGE so this can't actually saturate, but the explicit op
-    // makes the overflow story visible at the call site.
-    let offset = page.saturating_mul(PAGE_SIZE);
+    // `page` is already clamped to MAX_PAGE above, so `* PAGE_SIZE` can't
+    // overflow i64.
+    let offset = page * PAGE_SIZE;
     let entries = state
         .inv
         .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action)

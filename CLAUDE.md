@@ -757,7 +757,7 @@ push   ssh://git@192.168.0.207:18222/slovn/vpnctl.git      (Forgejo, mirror)
 
 Добавление нового ядра (wgturn, xray, hysteria-server) или протокола
 (WireGuard, Hysteria2, ShadowSocks-2022) **не требует правок** в `core`,
-`ssh`, `crypto`, `inventory`, `hosters` или `cli` — только новый файл-модуль
+`ssh`, `crypto`, `inventory` или `cli` — только новый файл-модуль
 + одна строка регистрации в `cli/src/main.rs`.
 
 ## Структура
@@ -775,7 +775,6 @@ vpnctl/
 │   ├── ssh/                  trait SshTransport + MockTransport (russh impl in v0.2)
 │   ├── protocols/            impl Protocol — vless+reality, tuic-v5
 │   ├── kernels/              impl Kernel — sing-box (полный)
-│   ├── hosters/              DigitalOcean / Cloudzy / Generic
 │   └── inventory/            InMemoryInventory (sqlx+sqlite in v0.2)
 └── cli/                      clap бинарь `vpnctl`, subcommands: uuid, registry
 ```
