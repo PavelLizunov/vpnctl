@@ -89,7 +89,7 @@
 //!   * `daemon/src/wizard_bootstrap.rs::bootstrap_server_secrets` —
 //!     mints `wgturn:server_wg_{private,public}` keypair
 //!
-//! No edits to `core`, `ssh`, `crypto`, `inventory`, `hosters`, or
+//! No edits to `core`, `ssh`, `crypto`, `inventory`, or
 //! `cli/src/cmd/*` per CLAUDE.md's Kernel × Protocol invariant.
 
 use async_trait::async_trait;

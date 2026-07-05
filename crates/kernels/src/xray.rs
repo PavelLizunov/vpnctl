@@ -37,7 +37,7 @@
 //! (`mod` + `pub use`), the companion `crates/protocols/src/vless_xhttp.rs`
 //! and its `lib.rs` entry, and one `register_kernel` line each in
 //! `daemon/src/app.rs::build_registry()` / `cli/src/registry.rs`. No edits
-//! to `core`, `ssh`, `crypto`, `inventory`, `hosters`, or `cli` beyond the
+//! to `core`, `ssh`, `crypto`, `inventory`, or `cli` beyond the
 //! registration line, per CLAUDE.md's Kernel × Protocol invariant.
 
 use async_trait::async_trait;

@@ -418,23 +418,3 @@ impl SshTransport for RusshTransport {
 // `shell_quote` moved to `vpnctl_core::shell::single_quote`
 // (2026-05-18) — was triplicated; consolidated for parity.
 use vpnctl_core::shell::single_quote as shell_quote;
-
-#[cfg(test)]
-mod tests {
-    // shell_quote tests moved to `crates/core/src/shell.rs::tests` —
-    // 8 cases including $HOME-literalness and the close-escape-reopen
-    // chain for multi-quote inputs. This module is now russh-specific
-    // and an explicit placeholder so future russh-transport tests have
-    // an obvious home.
-
-    // No tests here yet; russh interactive flows are exercised via
-    // testcontainers e2e in `crates/inventory/tests/...`.
-    // Placeholder so the `mod tests` block isn't empty (clippy
-    // dead-code complaint).
-    #[test]
-    fn _shell_quote_tests_moved_to_vpnctl_core_shell_module() {
-        // Asserts the re-export path that callers in this file rely
-        // on actually compiles and produces the expected output.
-        assert_eq!(super::shell_quote("a'b"), "'a'\\''b'");
-    }
-}

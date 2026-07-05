@@ -280,6 +280,23 @@ fn server_inbound_sni_and_mode_overridden_by_secrets() {
 }
 
 #[test]
+fn server_inbound_unknown_mode_is_render_error() {
+    // Coverage relocated here from the removed in-file `#[cfg(test)] mod
+    // tests`: `checked_mode` rejects anything outside Xray's known xhttp
+    // transport modes, so a bad `vlessxhttp.mode` secret fails loud at
+    // render — not opaquely at `xray -test` apply time.
+    let s = srv();
+    let mut sec = secrets();
+    sec.insert("vlessxhttp.mode".into(), "bogus-mode".into());
+    let ctx = RenderCtx::new(&s, &sec);
+    let err = VlessXhttp::new().server_inbound(&ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, CoreError::Render(_)),
+        "unknown mode must reject with Render, got {err:?}"
+    );
+}
+
+#[test]
 fn server_inbound_never_contains_a_flow_key_anywhere() {
     let s = srv();
     let sec = secrets();

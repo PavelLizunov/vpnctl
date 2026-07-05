@@ -74,31 +74,13 @@ use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-use crate::vless_reality::DEFAULT_REALITY_SNI;
+use crate::vless_reality::{DEFAULT_REALITY_SNI, REALITY_UTLS_FP};
 
 /// Listen port. Standalone, grep-verified unclaimed fleet-wide as of
 /// 2026-06-30 (see this module's doc comment). Public so the admin
 /// drift-detector and tests can reference it without duplicating the
 /// literal.
 pub const VLESS_XHTTP_PORT: u16 = 9443;
-
-/// uTLS ClientHello fingerprint for the REALITY handshake under xhttp.
-///
-/// Deliberately a SEPARATE constant from `vless_reality::REALITY_UTLS_FP`
-/// rather than importing it (that constant is crate-private to
-/// `vless_reality.rs`, and re-exposing it would mean editing an existing
-/// file beyond this protocol's two-new-files footprint — this crate's
-/// established convention at this kind of boundary is small duplication
-/// over coupling; see `wgturn.rs`'s duplicated `WGTURN_PORT`).
-///
-/// Set to match `vless_reality`'s current value (`"randomized"`, switched
-/// 2026-06-16 — RU TSPU fingerprints the static Chrome uTLS ClientHello).
-/// **UNVERIFIED for xhttp specifically**: xhttp HTTP-frames the handshake
-/// differently from raw-TCP REALITY, so it is not confirmed TSPU
-/// fingerprints it by the same rule. Flagged in plans/xray-xhttp.md §11
-/// for live RU verification alongside the client-session format sign-off;
-/// change this constant if that test shows xhttp needs different tuning.
-const XHTTP_UTLS_FP: &str = "randomized";
 
 /// Default xhttp transport mode when `vlessxhttp.mode` is unset. `auto`
 /// is Xray-core's own default (currently behaves as `stream-one`) and
@@ -272,7 +254,11 @@ impl Protocol for VlessXhttp {
             "tls": {
                 "enabled": true,
                 "server_name": sni,
-                "utls": { "enabled": true, "fingerprint": XHTTP_UTLS_FP },
+                // uTLS fp reuses REALITY's `randomized` (both identical). xhttp
+                // HTTP-frames the handshake, so this is UNVERIFIED for xhttp under
+                // RU TSPU — give it its own const if plans/xray-xhttp.md §11 shows
+                // xhttp needs different tuning.
+                "utls": { "enabled": true, "fingerprint": REALITY_UTLS_FP },
                 "reality": {
                     "enabled": true,
                     "public_key": public_key,
@@ -305,7 +291,7 @@ impl Protocol for VlessXhttp {
             uuid = user.uuid,
             addr = host_for_url(&ctx.server.address),
             port = VLESS_XHTTP_PORT,
-            fp = XHTTP_UTLS_FP,
+            fp = REALITY_UTLS_FP,
             pbk = public_key,
             sid = short_id,
             sni = sni,
@@ -313,229 +299,5 @@ impl Protocol for VlessXhttp {
             mode = mode,
             name = name,
         ))
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use vpnctl_core::{Server, ServerId, UserId};
-
-    fn dummy_server() -> Server {
-        Server {
-            id: ServerId("xray-node-1".into()),
-            address: "203.0.113.9".into(),
-            ssh_port: 22,
-            ssh_user: "root".into(),
-            kernels: vec![vpnctl_core::KernelId("xray".into())],
-            enabled_protocols: vec![ProtocolId("vless+xhttp".into())],
-            trusted_host_fingerprint: None,
-            hoster: "generic".into(),
-            jump_via: None,
-            usage_coefficient: 1.0,
-        }
-    }
-
-    fn full_secrets() -> HashMap<String, String> {
-        let mut s = HashMap::new();
-        s.insert("vless.private_key".into(), "priv-key-material".into());
-        s.insert("vless.public_key".into(), "pub-key-material".into());
-        s.insert("vless.short_id".into(), "deadbeef".into());
-        s.insert("vlessxhttp.path".into(), "Ab3x9Zq2Kp7Lm".into());
-        s
-    }
-
-    fn user(name: &str) -> User {
-        User {
-            id: UserId(name.into()),
-            uuid: format!("uuid-{name}"),
-            tuic_password: None,
-            wireguard_pubkey: None,
-            wireguard_private: None,
-            sub_token: None,
-            vpn_router_device_id: None,
-            disabled: false,
-        }
-    }
-
-    #[test]
-    fn id_and_port_and_dpi_tier() {
-        let p = VlessXhttp::new();
-        assert_eq!(p.id(), ProtocolId("vless+xhttp".into()));
-        assert_eq!(p.listen_ports(), &[("tcp", 9443)]);
-        assert_eq!(p.dpi_risk(), vpnctl_core::DpiRisk::Strong);
-    }
-
-    #[test]
-    fn secret_specs_mints_only_path_not_reality_keypair() {
-        let specs = VlessXhttp::new().server_secret_specs();
-        assert_eq!(specs.len(), 1, "must mint exactly one secret: {specs:?}");
-        match &specs[0] {
-            vpnctl_core::ServerSecretSpec::Password { key, entropy_bytes } => {
-                assert_eq!(*key, "vlessxhttp.path");
-                assert_eq!(*entropy_bytes, 16);
-            }
-            other => panic!("expected Password spec, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn server_inbound_missing_vless_secret_fails_loud() {
-        let s = dummy_server();
-        let mut secrets = HashMap::new();
-        secrets.insert("vlessxhttp.path".into(), "Ab3x9Zq2Kp7Lm".into());
-        let ctx = RenderCtx::new(&s, &secrets);
-        let err = VlessXhttp::new()
-            .server_inbound(&ctx, &[user("alice")])
-            .unwrap_err();
-        match err {
-            CoreError::MissingSecret { key, .. } => assert_eq!(key, "vless.private_key"),
-            other => panic!("expected MissingSecret, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn server_inbound_happy_path_has_no_flow_field() {
-        let s = dummy_server();
-        let secrets = full_secrets();
-        let ctx = RenderCtx::new(&s, &secrets);
-        let inbound = VlessXhttp::new()
-            .server_inbound(&ctx, &[user("alice")])
-            .unwrap();
-        assert_eq!(inbound["protocol"], "vless");
-        assert_eq!(inbound["port"], 9443);
-        assert_eq!(inbound["streamSettings"]["network"], "xhttp");
-        assert_eq!(inbound["streamSettings"]["security"], "reality");
-        assert_eq!(
-            inbound["streamSettings"]["xhttpSettings"]["path"],
-            "/Ab3x9Zq2Kp7Lm/"
-        );
-        assert_eq!(
-            inbound["streamSettings"]["realitySettings"]["dest"],
-            "yahoo.com:443"
-        );
-        let client = &inbound["settings"]["clients"][0];
-        assert_eq!(client["id"], "uuid-alice");
-        assert_eq!(client["email"], "alice");
-        assert!(
-            client.get("flow").is_none(),
-            "xhttp clients must NOT carry a flow field: {client:?}"
-        );
-    }
-
-    #[test]
-    fn client_config_has_no_flow_field() {
-        let s = dummy_server();
-        let secrets = full_secrets();
-        let ctx = RenderCtx::new(&s, &secrets);
-        let cfg = VlessXhttp::new()
-            .client_config(&ctx, &user("alice"))
-            .unwrap();
-        assert_eq!(cfg["type"], "vless");
-        assert_eq!(cfg["transport"]["type"], "xhttp");
-        assert_eq!(cfg["transport"]["path"], "/Ab3x9Zq2Kp7Lm/");
-        assert_eq!(cfg["transport"]["mode"], "auto");
-        assert!(
-            cfg.get("flow").is_none(),
-            "xhttp outbound must NOT carry a flow field: {cfg:?}"
-        );
-    }
-
-    #[test]
-    fn share_link_format_has_no_flow_param() {
-        let s = dummy_server();
-        let secrets = full_secrets();
-        let ctx = RenderCtx::new(&s, &secrets);
-        let link = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
-        assert_eq!(
-            link,
-            "vless://uuid-alice@203.0.113.9:9443?encryption=none&security=reality&sni=yahoo.com&fp=randomized&pbk=pub-key-material&sid=deadbeef&type=xhttp&path=%2FAb3x9Zq2Kp7Lm%2F&mode=auto#alice"
-        );
-        assert!(
-            !link.contains("flow="),
-            "xhttp share-link must NOT contain a flow param: {link}"
-        );
-    }
-
-    #[test]
-    fn path_always_carries_a_trailing_slash_in_every_render() {
-        // Regression guard for the live `is` failure (2026-07-01): Xray's
-        // server-side GetNormalizedPath() always appends a trailing slash
-        // before prefix-matching, while sing-box-lx's stream-one (the
-        // mode `auto`+reality resolves to) sends a bare path with NO
-        // trailing slash added — a configured path missing the trailing
-        // slash 404s on EVERY request, deterministically.
-        let s = dummy_server();
-        let secrets = full_secrets();
-        let ctx = RenderCtx::new(&s, &secrets);
-        let p = VlessXhttp::new();
-
-        let inbound = p.server_inbound(&ctx, &[]).unwrap();
-        let inbound_path = inbound["streamSettings"]["xhttpSettings"]["path"]
-            .as_str()
-            .unwrap();
-        assert!(
-            inbound_path.ends_with('/'),
-            "server_inbound path must end in '/': {inbound_path:?}"
-        );
-
-        let client = p.client_config(&ctx, &user("alice")).unwrap();
-        let client_path = client["transport"]["path"].as_str().unwrap();
-        assert!(
-            client_path.ends_with('/'),
-            "client_config path must end in '/': {client_path:?}"
-        );
-
-        let link = p.share_link(&ctx, &user("alice")).unwrap();
-        assert!(
-            link.contains("path=%2FAb3x9Zq2Kp7Lm%2F"),
-            "share_link path query param must end in an (encoded) trailing slash: {link}"
-        );
-    }
-
-    #[test]
-    fn share_link_mode_override() {
-        let s = dummy_server();
-        let mut secrets = full_secrets();
-        secrets.insert("vlessxhttp.mode".into(), "stream-up".into());
-        let ctx = RenderCtx::new(&s, &secrets);
-        let link = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
-        assert!(link.contains("mode=stream-up"));
-    }
-
-    #[test]
-    fn share_link_byte_stable_across_runs() {
-        let s = dummy_server();
-        let secrets = full_secrets();
-        let ctx = RenderCtx::new(&s, &secrets);
-        let a = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
-        let b = VlessXhttp::new().share_link(&ctx, &user("alice")).unwrap();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn checked_mode_rejects_unknown_values() {
-        let s = dummy_server();
-        let mut secrets = full_secrets();
-        secrets.insert("vlessxhttp.mode".into(), "custom-injected&mode".into());
-        let ctx = RenderCtx::new(&s, &secrets);
-        let err = VlessXhttp::new()
-            .share_link(&ctx, &user("alice"))
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Render(_)));
-    }
-
-    #[test]
-    fn checked_path_rejects_illegal_chars() {
-        let s = dummy_server();
-        let mut secrets = full_secrets();
-        secrets.insert("vlessxhttp.path".into(), "has a space".into());
-        let ctx = RenderCtx::new(&s, &secrets);
-        let err = VlessXhttp::new()
-            .share_link(&ctx, &user("alice"))
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Render(_)));
     }
 }

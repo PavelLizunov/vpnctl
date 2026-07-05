@@ -97,7 +97,7 @@ pub struct Server {
     /// На первый коннект может быть `None` (TOFU — записывается после auth).
     #[serde(default)]
     pub trusted_host_fingerprint: Option<String>,
-    /// Имя хостера (ключ в `vpnctl-hosters`): "digitalocean" / "cloudzy" / "generic".
+    /// Имя хостера (Hoster key): "digitalocean" / "cloudzy" / "generic".
     #[serde(default = "default_hoster")]
     pub hoster: String,
     /// SSH-jump host (ProxyJump). `None` — прямое подключение. ProxyJump

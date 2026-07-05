@@ -6,7 +6,6 @@ members = [
     "crates/ssh",
     "crates/protocols",
     "crates/kernels",
-    "crates/hosters",
     "crates/inventory",
     "crates/host-fingerprint",
     "cli",

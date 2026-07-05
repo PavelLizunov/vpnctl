@@ -29,7 +29,10 @@ const FRAGMENT: &AsciiSet = &CONTROLS
 /// `fp=randomized`. `randomized` makes each handshake a fresh randomized
 /// ClientHello, defeating the static-fingerprint rule. Validated against
 /// sing-box 1.13.12 (`sing-box check`) and Xray-core 26.3.27 (both accept it).
-const REALITY_UTLS_FP: &str = "randomized";
+///
+/// `pub(crate)` so `vless_xhttp` reuses this exact value instead of
+/// duplicating the literal.
+pub(crate) const REALITY_UTLS_FP: &str = "randomized";
 
 /// Default REALITY dest / `serverName` when the server carries no explicit
 /// `vless.sni` secret.
