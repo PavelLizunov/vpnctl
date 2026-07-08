@@ -8469,6 +8469,111 @@ async fn admin_server_quick_add_rejects_duplicate_id() {
     );
 }
 
+/// HANDOFF §6 #2 — duplicate-ADDRESS guard. Two inventory records for one
+/// physical node fight over its `users[]`; the second deploy trips the
+/// DG-1 user-removal guard (the `us` / `us1` incident, 2026-07-08).
+/// quick-add must 400 when the address already belongs to another server,
+/// naming the clashing id, and must NOT create the duplicate.
+#[tokio::test]
+async fn admin_server_quick_add_rejects_duplicate_address() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("us".into()),
+        address: "130.94.19.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+    // Different id, SAME address → rejected.
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/quick-add")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("id=us1&address=130.94.19.7&ssh_port=22"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let txt = std::str::from_utf8(&body).unwrap();
+    assert!(
+        txt.contains("already registered to server 'us'"),
+        "dup-address 400 must name the clashing server id, got: {txt}"
+    );
+    // The duplicate must NOT have been created.
+    assert!(
+        inv.get_server(&ServerId("us1".into()))
+            .await
+            .unwrap()
+            .is_none(),
+        "duplicate-address server must not be registered"
+    );
+}
+
+/// HANDOFF §6 #2 — the Phase-E wizard (step 1) must reject a duplicate
+/// address up-front, before the operator commits to a full bootstrap.
+#[tokio::test]
+async fn admin_wizard_step1_rejects_duplicate_address() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("us".into()),
+            address: "130.94.19.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=130.94.19.7&root_password=hunter2&ssh_port=22",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("already registered to server 'us'"),
+        "wizard step-1 must reject a duplicate address naming the clash"
+    );
+}
+
 // Pavel iter B — server-side grant/revoke (centralised view on
 // server detail). Same mutation as user-side, but redirect lands
 // back on the server page so the operator stays where they started.

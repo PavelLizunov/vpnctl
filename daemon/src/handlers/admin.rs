@@ -8785,6 +8785,21 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         }
     };
 
+    // Duplicate-address guard (HANDOFF §6 #2): refuse a second inventory
+    // record for a box that's already registered. Two records for one node
+    // fight over its `users[]`; the second deploy trips the DG-1
+    // user-removal guard (the `us` / `us1` incident, 2026-07-08). Report the
+    // clashing id so the operator edits that server instead of duplicating.
+    match state.inv.server_id_for_address(&address).await {
+        Ok(Some(existing)) => {
+            return bad_request(&format!(
+                "address '{address}' is already registered to server '{existing}' — one node = one server record; edit '{existing}' instead of adding a duplicate"
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
     let ssh_port: u16 = form_field(&body, "ssh_port")
         .and_then(|s| s.parse().ok())
         .unwrap_or(22);
@@ -13386,6 +13401,21 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
             return bad_request(&format!("invalid ssh_port — {why}"));
         }
     };
+
+    // Duplicate-address guard (HANDOFF §6 #2): reject at step 1 — before
+    // the operator commits to a full bootstrap — if this address already
+    // belongs to a registered server. Two records for one node fight over
+    // its `users[]` and the second deploy trips the DG-1 guard (the
+    // `us` / `us1` incident, 2026-07-08).
+    match state.inv.server_id_for_address(&address).await {
+        Ok(Some(existing)) => {
+            return bad_request(&format!(
+                "address '{address}' is already registered to server '{existing}' — one node = one server record; edit '{existing}' instead of bootstrapping a duplicate"
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
 
     let session_id = state.wizard.insert(address, password_raw, ssh_port);
 
