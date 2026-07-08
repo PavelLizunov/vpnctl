@@ -944,6 +944,23 @@ impl SqliteInventory {
         Ok(row.0 != 0)
     }
 
+    /// Return the id of the first server already registered with `addr`,
+    /// or `None`. Backs the add-server duplicate-address guard used by
+    /// both quick-add and the wizard: two inventory records for one
+    /// physical node fight over that node's `users[]`, and the second
+    /// deploy trips the DG-1 user-removal guard — the `us`/`us1` incident
+    /// (2026-07-08) where a duplicate record's empty-grants deploy would
+    /// have wiped the working record's users. Cheap — the servers table
+    /// is a handful of rows.
+    pub async fn server_id_for_address(&self, addr: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM servers WHERE address = ?1 ORDER BY id LIMIT 1")
+                .bind(addr)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
     /// Auto-suppress state for a server (migration 0030): the per-server
     /// opt-in + the current runtime `suppressed_at` timestamp. Returns
     /// `(opt_in, suppressed_at)`; `(false, None)` for an unknown id.

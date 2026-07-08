@@ -1113,6 +1113,24 @@ async fn bootstrap_pipeline(
     send_step!("verify-key", "ok — pubkey auth confirmed.");
 
     // ── 5. Register server in inventory ───────────────────────────
+    // Duplicate-address guard (HANDOFF §6 #2, review-agent important):
+    // this is the wizard's REAL add_server point. `wizard_new_submit`
+    // checks at step 1, but `find_available_server_id` suffixes the id
+    // (`id-2`) around a collision — so an address registered between step 1
+    // and here would still persist a second record for one box (the
+    // `us`/`us1` shape the fix targets). Guard the ADDRESS at the single
+    // write point every wizard bootstrap funnels through. SSH-gated path —
+    // not unit-testable without a node; `server_id_for_address` is
+    // unit-tested and the placement is review-verified.
+    match inv.server_id_for_address(&plan.address).await {
+        Ok(Some(existing)) => fail!(
+            "register",
+            "address {} is already registered to server '{existing}' — one node = one server record; redeploy '{existing}' from its server page instead of bootstrapping a duplicate",
+            plan.address
+        ),
+        Ok(None) => {}
+        Err(e) => fail!("register", "server_id_for_address: {e}"),
+    }
     send_step!(
         "register",
         "minting Server row in inv.db (id='{}')…",
