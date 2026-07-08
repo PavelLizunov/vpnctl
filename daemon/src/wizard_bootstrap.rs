@@ -231,6 +231,12 @@ impl Drop for DeployGuard {
     }
 }
 
+/// Skip/error copy shared between the deploy pipelines and the
+/// grant/revoke auto-deploy dispatcher (`admin.rs`), so the dispatcher's
+/// string checks can't drift from what the pipeline actually emits.
+pub(crate) const DEPLOY_KEY_ABSENT_MSG: &str = "deploy key absent; see /admin/settings/system";
+pub(crate) const DEPLOY_ALREADY_RUNNING_PREFIX: &str = "deploy already running";
+
 /// Re-deploy an EXISTING server, streaming per-step progress over SSE
 /// (item-1, 2026-05-31). Unlike `run_bootstrap` (a NEW server: probe →
 /// fingerprint → push-key → register), the server already exists and
@@ -268,7 +274,7 @@ pub fn run_redeploy(
             let _ = tx.try_send(BootstrapEvent::Error {
                 phase: "deploy",
                 message: format!(
-                    "deploy already running for server '{}' — wait for it to finish, then retry",
+                    "{DEPLOY_ALREADY_RUNNING_PREFIX} for server '{}' — wait for it to finish, then retry",
                     server.id.0
                 ),
             });
@@ -448,7 +454,7 @@ async fn redeploy_pipeline(
     // a `server.deploy` audit row carrying `ssh_skip_reason` (so the
     // timeline records the attempt), then end in a terminal Error.
     let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
-        Some("deploy key absent; see /admin/settings")
+        Some(DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
         Some("server has no kernels declared")
     } else {
@@ -778,7 +784,7 @@ async fn update_kernels_pipeline(
     // ── SSH preconditions — same skip-reasons as redeploy, MINUS the
     // secret-minting (no config is rendered here, so no secrets needed).
     let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
-        Some("deploy key absent; see /admin/settings")
+        Some(DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
         Some("server has no kernels declared")
     } else {

@@ -2518,6 +2518,16 @@ impl SqliteInventory {
     /// this as «pending» if the user has ANY mutation — operator
     /// resolves by clicking deploy at least once, which then sets
     /// a baseline timestamp.
+    ///
+    /// **Only SUCCESSFUL deploys count as a baseline** (review
+    /// 2026-07-08, auto-deploy-on-grant follow-up): every deploy path
+    /// writes a `server.deploy` row even when it failed or was skipped
+    /// (`ssh_errors` non-empty / `ssh_skip_reason` set) — before this
+    /// filter, a failed deploy cleared the pending banner while the
+    /// node's `users[]` stayed stale, hiding the exact «connects but
+    /// no internet» class the banner exists to expose. Rows without
+    /// those payload fields (wizard-bootstrap success rows, legacy /
+    /// test-seeded baselines) keep counting as successes.
     pub async fn servers_pending_deploy_for_user(
         &self,
         user_id: &UserId,
@@ -2550,7 +2560,10 @@ impl SqliteInventory {
         for sid in granted_server_ids {
             let row = sqlx::query(
                 "SELECT MAX(ts) AS ts FROM audit_log
-                 WHERE target = ?1 AND action = 'server.deploy'",
+                 WHERE target = ?1 AND action = 'server.deploy'
+                   AND json_extract(payload, '$.ssh_skip_reason') IS NULL
+                   AND (json_extract(payload, '$.ssh_errors') IS NULL
+                        OR json_array_length(payload, '$.ssh_errors') = 0)",
             )
             .bind(&sid.0)
             .fetch_one(&self.pool)
@@ -2589,6 +2602,9 @@ impl SqliteInventory {
     /// (disable, device-id) surface through the per-user banner on
     /// every granted server — duplicating them here would make the
     /// server banner near-permanent on busy inventories.
+    ///
+    /// Only SUCCESSFUL deploys count as a baseline — same filter and
+    /// rationale as `servers_pending_deploy_for_user`.
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
             "SELECT MAX(ts) AS ts FROM audit_log
@@ -2604,7 +2620,10 @@ impl SqliteInventory {
         };
         let row = sqlx::query(
             "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE target = ?1 AND action = 'server.deploy'",
+             WHERE target = ?1 AND action = 'server.deploy'
+               AND json_extract(payload, '$.ssh_skip_reason') IS NULL
+               AND (json_extract(payload, '$.ssh_errors') IS NULL
+                    OR json_array_length(payload, '$.ssh_errors') = 0)",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)

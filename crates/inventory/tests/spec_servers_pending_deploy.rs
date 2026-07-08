@@ -277,3 +277,194 @@ async fn server_side_detector_tracks_membership_vs_deploy() {
             .unwrap()
     );
 }
+
+// ── Only SUCCESSFUL deploys count as a baseline (review 2026-07-08) ────
+//
+// Every deploy path writes a `server.deploy` row even when it failed or
+// was skipped (`ssh_errors` non-empty / `ssh_skip_reason` set). Such a
+// row must NOT clear the pending banner: the node's users[] is still
+// stale — hiding that is exactly the «connects but no internet» class
+// the banner exists to expose.
+
+#[tokio::test]
+async fn failed_deploy_row_does_not_clear_user_side_pending() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("frank", 7)).await.unwrap();
+    inv.audit("admin", "user.grant", Some("frank"), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Deploy attempt AFTER the grant, but it failed (ssh_errors set).
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("srv"),
+        Some(&serde_json::json!({
+            "ssh_errors": ["sing-box: apply_config failed: node unreachable"],
+            "ssh_skip_reason": null,
+        })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("frank".into()), &[ServerId("srv".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "a FAILED deploy must not count as a baseline — server stays pending"
+    );
+
+    // A later SUCCESSFUL deploy (empty ssh_errors, no skip) clears it.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("srv"),
+        Some(&serde_json::json!({
+            "ssh_errors": [],
+            "ssh_skip_reason": null,
+        })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("frank".into()), &[ServerId("srv".into())])
+        .await
+        .unwrap();
+    assert!(got.is_empty(), "successful deploy clears pending");
+}
+
+#[tokio::test]
+async fn skipped_deploy_row_does_not_clear_user_side_pending() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("grace", 8)).await.unwrap();
+    inv.audit("admin", "user.grant", Some("grace"), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Skip-reason deploy (e.g. deploy key absent) — nothing reached
+    // the node.
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("srv"),
+        Some(&serde_json::json!({
+            "ssh_errors": [],
+            "ssh_skip_reason": "deploy key absent; see /admin/settings",
+        })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("grace".into()), &[ServerId("srv".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "a SKIPPED deploy must not count as a baseline — server stays pending"
+    );
+}
+
+#[tokio::test]
+async fn failed_deploy_row_does_not_clear_server_side_pending() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.audit(
+        "admin",
+        "user.revoke",
+        Some("alice"),
+        Some(&serde_json::json!({ "server": "srv", "source": "test" })),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Auto-deploy after the revoke got refused (e.g. DG-1 guard) —
+    // the revoked UUID is still live on the node.
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("srv"),
+        Some(&serde_json::json!({
+            "ssh_errors": ["sing-box: apply_config failed: refusing to REMOVE 1 user UUID(s)"],
+            "ssh_skip_reason": null,
+        })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap(),
+        "failed deploy must leave the server-side pending flag up"
+    );
+
+    // Successful deploy clears it.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("srv"),
+        Some(&serde_json::json!({ "ssh_errors": [], "ssh_skip_reason": null })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !inv.server_pending_deploy(&ServerId("srv".into()))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
+    // wizard-bootstrap success rows + pre-2026-07 baselines carry no
+    // ssh_errors/ssh_skip_reason fields (or no payload at all) — they
+    // were only ever written on success and must keep clearing pending.
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("henry", 9)).await.unwrap();
+    inv.audit("admin", "user.grant", Some("henry"), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Payload-less row (test/CLI baseline).
+    inv.audit("admin", "server.deploy", Some("srv"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("henry".into()), &[ServerId("srv".into())])
+        .await
+        .unwrap();
+    assert!(
+        got.is_empty(),
+        "payload-less baseline must count as success"
+    );
+
+    // Wizard-bootstrap-shaped row (payload without the ssh_* fields).
+    inv.add_user(&user("iris", 10)).await.unwrap();
+    inv.audit("admin", "user.grant", Some("iris"), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("wiz"),
+        Some(&serde_json::json!({ "kernels": ["sing-box"], "via": "wizard-bootstrap" })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("iris".into()), &[ServerId("wiz".into())])
+        .await
+        .unwrap();
+    assert!(
+        got.is_empty(),
+        "wizard-bootstrap success row must count as a baseline"
+    );
+}

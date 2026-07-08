@@ -17427,3 +17427,393 @@ async fn pr_user_info_cards_headlines_ru() {
         );
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+//  Auto-deploy on grant / revoke (HANDOFF 2026-07-08 §4.1 / §6.2)
+//
+//  A grant only used to write inv.db: the sub URI appeared instantly but
+//  the UUID never reached the node's vless users[] — REALITY handshake
+//  succeeds, VLESS-auth rejects, the client is forwarded to the cover
+//  dest → «connects but no internet». Every grant/revoke handler must now
+//  dispatch the same background redeploy delete/disable already use.
+//
+//  In the test environment the deploy key is absent, so the spawn skips
+//  the SSH pipeline and records a FAILED `user.autodeploy` audit row
+//  (ok=false) instead of stamping a fake `server.deploy` baseline. That
+//  row — its trigger + servers payload — is the observable contract that
+//  the redeploy was dispatched for exactly the affected server set.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Poll the audit log until at least `n` autodeploy rows exist
+/// (`user.autodeploy` for user-scoped triggers, `server.autodeploy`
+/// for server-side bulk — the spawn is a background task racing the
+/// test). Returns newest-first per `recent_audit` ordering.
+async fn wait_for_autodeploy_rows(
+    inv: &SqliteInventory,
+    n: usize,
+) -> Vec<vpnctl_inventory::AuditEntry> {
+    for _ in 0..200 {
+        let rows: Vec<_> = inv
+            .recent_audit(200)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "user.autodeploy" || e.action == "server.autodeploy")
+            .collect();
+        if rows.len() >= n {
+            return rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for {n} autodeploy audit row(s)");
+}
+
+/// Count autodeploy rows right now (for no-op negative checks).
+async fn count_autodeploy_rows(inv: &SqliteInventory) -> usize {
+    inv.recent_audit(200)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.action == "user.autodeploy" || e.action == "server.autodeploy")
+        .count()
+}
+
+#[tokio::test]
+async fn grant_from_user_detail_dispatches_auto_deploy_of_that_server_only() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 2, 1, &[]).await; // s0 + s1 + u0, no grants
+    let app = router(s);
+
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s0"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    let row = &rows[0];
+    assert_eq!(row.action, "user.autodeploy");
+    assert_eq!(row.target.as_deref(), Some("u0"));
+    let payload = row.payload.as_ref().unwrap();
+    assert_eq!(payload["trigger"], "user.grant");
+    assert_eq!(
+        payload["servers"],
+        serde_json::json!(["s0"]),
+        "auto-deploy must target ONLY the granted server, not the whole fleet"
+    );
+    assert_eq!(
+        payload["ok"], false,
+        "with no deploy key the autodeploy row must record the failure, \
+         not pretend the node was updated"
+    );
+
+    // Idempotent re-grant is a no-op mutation → must NOT restart the node.
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/grants/s0"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        count_autodeploy_rows(&inv).await,
+        1,
+        "no-op re-grant must not dispatch a second auto-deploy"
+    );
+}
+
+#[tokio::test]
+async fn revoke_from_user_detail_dispatches_auto_deploy_only_on_actual_revoke() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 2, 1, &[(0, 0)]).await; // u0 granted s0; s1 ungranted
+    let app = router(s);
+
+    // Revoking a NOT-granted pair is a no-op → no deploy.
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/grants/s1/revoke"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        count_autodeploy_rows(&inv).await,
+        0,
+        "no-op revoke must not dispatch an auto-deploy"
+    );
+
+    // A real revoke dispatches a deploy of the revoked server so the
+    // UUID actually leaves the node's users[].
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/grants/s0/revoke"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    let payload = rows[0].payload.as_ref().unwrap();
+    assert_eq!(rows[0].target.as_deref(), Some("u0"));
+    assert_eq!(payload["trigger"], "user.revoke");
+    assert_eq!(payload["servers"], serde_json::json!(["s0"]));
+}
+
+#[tokio::test]
+async fn grant_and_revoke_from_server_detail_dispatch_auto_deploy() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 1, &[]).await;
+    let app = router(s);
+
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/grants/u0"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    assert_eq!(rows[0].payload.as_ref().unwrap()["trigger"], "user.grant");
+    assert_eq!(rows[0].target.as_deref(), Some("u0"));
+
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/grants/u0/revoke"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 2).await;
+    assert!(
+        rows.iter()
+            .any(|r| r.payload.as_ref().unwrap()["trigger"] == "user.revoke"),
+        "server-detail revoke must dispatch an auto-deploy"
+    );
+}
+
+#[tokio::test]
+async fn bulk_grant_all_dispatches_one_auto_deploy_for_the_whole_batch() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 3, &[]).await; // 3 users → still ONE deploy of s0
+    let app = router(s);
+
+    app.clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/grants/_grant-all"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    let payload = rows[0].payload.as_ref().unwrap();
+    assert_eq!(
+        rows[0].action, "server.autodeploy",
+        "server-targeted bulk autodeploy must stay out of the user.* namespace"
+    );
+    assert_eq!(rows[0].target.as_deref(), Some("s0"));
+    assert_eq!(payload["trigger"], "server.grants.bulk_grant");
+    assert_eq!(payload["servers"], serde_json::json!(["s0"]));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        count_autodeploy_rows(&inv).await,
+        1,
+        "bulk grant of 3 users must dispatch exactly ONE deploy of the server"
+    );
+
+    // Fully-granted re-run grants 0 → no deploy.
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/grants/_grant-all"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        count_autodeploy_rows(&inv).await,
+        1,
+        "no-op bulk re-grant must not dispatch another deploy"
+    );
+}
+
+#[tokio::test]
+async fn bulk_revoke_all_dispatches_one_auto_deploy() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    let app = router(s);
+
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/grants/_revoke-all")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from("confirm=s0"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    let payload = rows[0].payload.as_ref().unwrap();
+    assert_eq!(rows[0].action, "server.autodeploy");
+    assert_eq!(rows[0].target.as_deref(), Some("s0"));
+    assert_eq!(payload["trigger"], "server.grants.bulk_revoke");
+    assert_eq!(payload["servers"], serde_json::json!(["s0"]));
+}
+
+#[tokio::test]
+async fn user_create_grant_all_dispatches_auto_deploy_across_granted_servers() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    seed(&inv, 2, 0, &[]).await;
+    let app = router(s);
+
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from("id=newbie&grant_all=1"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    let payload = rows[0].payload.as_ref().unwrap();
+    assert_eq!(rows[0].target.as_deref(), Some("newbie"));
+    assert_eq!(payload["trigger"], "user.create.grant_all");
+    let mut servers: Vec<String> = payload["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    servers.sort();
+    assert_eq!(
+        servers,
+        vec!["s0".to_string(), "s1".to_string()],
+        "grant-all must dispatch ONE deploy pass covering every granted server"
+    );
+}
+
+/// The payload the auto-deploy pushes: after a grant lands through the
+/// real handler, the node config the redeploy pipeline renders (same
+/// `users_for_server` → `render_config` chain as
+/// `wizard_bootstrap::redeploy_pipeline`) must carry the user's UUID in
+/// `inbounds[*].users[]` — the exact bytes whose absence caused the
+/// «connects but no internet» failure.
+#[tokio::test]
+async fn granted_user_uuid_lands_in_rendered_node_config() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let registry = Arc::clone(&s.registry);
+    seed(&inv, 1, 1, &[]).await;
+    let app = router(s);
+
+    let sid = ServerId("s0".into());
+    let server = inv.get_server(&sid).await.unwrap().unwrap();
+    let (secrets, _minted) = vpnctl_inventory::bootstrap_server_secrets(&inv, &server, &registry)
+        .await
+        .unwrap();
+    let render = |users: &[User]| -> serde_json::Value {
+        let kernel = registry.kernel(&KernelId("sing-box".into())).unwrap();
+        let protocols: Vec<&dyn vpnctl_core::Protocol> = server
+            .enabled_protocols
+            .iter()
+            .filter_map(|p| registry.protocol(p))
+            .collect();
+        let ctx = vpnctl_core::RenderCtx::new(&server, &secrets);
+        let bytes = kernel.render_config(&ctx, users, &protocols).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let uuids_in = |cfg: &serde_json::Value| -> Vec<String> {
+        cfg["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|ib| ib["users"].as_array().cloned().unwrap_or_default())
+            .filter_map(|u| u["uuid"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // Before the grant: users_for_server is empty → no UUID in users[].
+    let users = inv.users_for_server(&sid).await.unwrap();
+    assert!(users.is_empty());
+    assert!(uuids_in(&render(&users)).is_empty());
+
+    // Grant through the real handler…
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/grants/s0"),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // …and the config the auto-deploy would push now carries the UUID.
+    let users = inv.users_for_server(&sid).await.unwrap();
+    let uuids = uuids_in(&render(&users));
+    assert_eq!(
+        uuids,
+        vec!["00000000-0000-0000-0000-000000000000".to_string()],
+        "granted user's UUID must be present in the rendered inbounds[*].users[]"
+    );
+}

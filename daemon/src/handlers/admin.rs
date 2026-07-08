@@ -8401,13 +8401,13 @@ pub(crate) async fn server_grant_user(
     let uid = vpnctl_core::UserId(user_id_str.clone());
     // Existence checks — explicit 404 for both, otherwise the FK
     // violation surfaces as a generic 500.
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     match state.inv.get_user(&uid).await {
         Ok(Some(_)) => {}
         Ok(None) => return user_not_found(&user_id_str),
@@ -8432,8 +8432,8 @@ pub(crate) async fn server_grant_user(
     // target=<server>` row was invisible to it, so a grant made from
     // the server-detail page never raised the «config not yet
     // deployed» banner once the server had its first deploy baseline.
-    if !was_granted
-        && let Err(e) = state
+    if !was_granted {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -8445,8 +8445,12 @@ pub(crate) async fn server_grant_user(
                 })),
             )
             .await
-    {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.grant");
+        {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.grant");
+        }
+        // Auto-deploy — same contract as `user_grant_server` (HANDOFF
+        // §4.1); the mutation is identical, only the redirect differs.
+        spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.grant");
     }
     Redirect::to(&format!(
         "/admin/servers/{}/grants",
@@ -8463,13 +8467,13 @@ pub(crate) async fn server_revoke_user(
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let uid = vpnctl_core::UserId(user_id_str.clone());
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     // User-existence check — the grant twin always had it; without it
     // an unknown user 200-redirected as if revoked (audit 2026-06-10).
     match state.inv.get_user(&uid).await {
@@ -8490,8 +8494,8 @@ pub(crate) async fn server_revoke_user(
     // pending-deploy detector keys on per-user mutation rows; the old
     // `action="revoke", target=<server>` row was invisible to it, so a
     // revoked UUID stayed live on the node with no warning anywhere.
-    if was_granted
-        && let Err(e) = state
+    if was_granted {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -8503,8 +8507,11 @@ pub(crate) async fn server_revoke_user(
                 })),
             )
             .await
-    {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.revoke");
+        {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.revoke");
+        }
+        // Auto-deploy — mirror of `user_revoke_server`.
+        spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.revoke");
     }
     Redirect::to(&format!(
         "/admin/servers/{}/grants",
@@ -8614,7 +8621,7 @@ pub(crate) async fn server_deploy(
     let mut ssh_errors: Vec<String> = Vec::new();
     let mut total_config_bytes: usize = 0;
     let ssh_skip_reason: Option<&'static str> = if !key_path.exists() {
-        Some("deploy key absent; see /admin/settings/system")
+        Some(crate::wizard_bootstrap::DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
         Some("server has no kernels declared")
     } else {
@@ -9147,6 +9154,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         match state.inv.list_servers().await {
             Ok(servers) => {
                 let mut granted: u32 = 0;
+                let mut granted_servers: Vec<vpnctl_core::Server> = Vec::new();
                 for s in &servers {
                     if let Err(e) = state.inv.grant(&user.id, &s.id).await {
                         tracing::warn!(
@@ -9159,6 +9167,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
                         continue;
                     }
                     granted += 1;
+                    granted_servers.push(s.clone());
                     // Audit each grant individually so the per-
                     // server timeline filter still surfaces the
                     // event. (Filtering by `action=user.grant` will
@@ -9192,6 +9201,15 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
                         granted = granted,
                         total = servers.len(),
                         "user-create grant-all complete"
+                    );
+                    // ONE auto-deploy pass over every granted server
+                    // (run_deploy_all deploys each server once) so the
+                    // new user's UUID reaches all nodes' users[].
+                    spawn_user_servers_redeploy(
+                        &state,
+                        granted_servers,
+                        id_decoded.clone(),
+                        "user.create.grant_all",
                     );
                 }
             }
@@ -9237,13 +9255,13 @@ pub(crate) async fn user_grant_server(
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     // Membership BEFORE the grant — audit only a NEW grant (an
     // idempotent re-grant must not falsely re-mark the server
@@ -9259,8 +9277,8 @@ pub(crate) async fn user_grant_server(
     // `user.grant` with target = USER id — what the pending-deploy
     // detector keys on. Previously this wrote `action="grant",
     // target=<server>`, which the detector never saw.
-    if !was_granted
-        && let Err(e) = state
+    if !was_granted {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9272,14 +9290,20 @@ pub(crate) async fn user_grant_server(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            user = %user_id_str,
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for user.grant — mutation already committed"
-        );
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id_str,
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for user.grant — mutation already committed"
+            );
+        }
+        // Auto-deploy so the new UUID lands in the node's users[]
+        // (HANDOFF §4.1: grant without deploy = «connects but no
+        // internet»). Only on an ACTUAL new grant — a no-op re-grant
+        // must not restart the node.
+        spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.grant");
     }
     Redirect::to(&format!(
         "/admin/users/{}/access",
@@ -9304,13 +9328,13 @@ pub(crate) async fn user_revoke_server(
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     // Membership BEFORE the revoke — audit only an ACTUAL revoke
     // (mirror of the grant paths; see `server_revoke_user`).
@@ -9323,8 +9347,8 @@ pub(crate) async fn user_revoke_server(
     }
     // Canonical per-user `user.revoke` (target = USER id) — visible to
     // the pending-deploy detector, unlike the old server-targeted row.
-    if was_granted
-        && let Err(e) = state
+    if was_granted {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9336,14 +9360,19 @@ pub(crate) async fn user_revoke_server(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            user = %user_id_str,
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for user.revoke — mutation already committed"
-        );
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id_str,
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for user.revoke — mutation already committed"
+            );
+        }
+        // Auto-deploy so the revoked UUID actually leaves the node's
+        // users[] (mirror of the grant path; same best-effort shape as
+        // disable/delete).
+        spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.revoke");
     }
     Redirect::to(&format!(
         "/admin/users/{}/access",
@@ -9384,11 +9413,11 @@ pub(crate) async fn server_grant_all_users(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     // 3-arm match (audit 2026-06-10): the old `if let Ok(None)` SWALLOWED
     // the DB-error arm and fell through as if the server existed.
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     let users = match state.inv.list_users().await {
         Ok(u) => u,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -9494,6 +9523,17 @@ pub(crate) async fn server_grant_all_users(
         total = users.len(),
         "bulk-grant complete"
     );
+    // Auto-deploy the affected server ONCE for the whole batch (not
+    // once per user) so every new UUID lands in the node's users[].
+    // Skipped on a fully-granted re-run (granted == 0 → no-op batch).
+    if granted > 0 {
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.grants.bulk_grant",
+        );
+    }
     Redirect::to(&format!(
         "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
@@ -9525,11 +9565,11 @@ pub(crate) async fn server_revoke_all_users(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     // 3-arm match (audit 2026-06-10): the old `if let Ok(None)` SWALLOWED
     // the DB-error arm and fell through as if the server existed.
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     let granted = match state.inv.users_for_server(&sid).await {
         Ok(v) => v,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -9609,6 +9649,15 @@ pub(crate) async fn server_revoke_all_users(
         total_was = total_was,
         "bulk-revoke complete"
     );
+    // Auto-deploy ONCE for the batch — mirror of the bulk-grant path.
+    if revoked > 0 {
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.grants.bulk_revoke",
+        );
+    }
     Redirect::to(&format!(
         "/admin/servers/{}/grants",
         path_segment_encode(&server_id_str)
@@ -9937,17 +9986,24 @@ pub(crate) async fn user_set_disabled_false(
     user_set_disabled_inner(state, user_id_str, false).await
 }
 
-/// Background, best-effort redeploy of `servers` after a user-inventory
-/// mutation (disable / enable / delete) so the change lands on the nodes
-/// WITHOUT a manual «Deploy all». Mirrors that button, scoped to one
-/// user's servers. `servers` must be captured by the caller at the right
-/// moment — for a DELETE, BEFORE the cascade drops the grants. Empty →
-/// no-op. NOTE: apply_config restarts sing-box, so other users on a node
-/// see a brief blip — inherent to any config change.
+/// Background, best-effort redeploy of `servers` after an inventory
+/// mutation that changes node membership (grant / revoke / disable /
+/// enable / delete) so the change lands on the nodes WITHOUT a manual
+/// «Deploy all». Mirrors that button, scoped to the affected servers.
+/// Without this, a grant only writes inv.db: the sub URI appears
+/// instantly but the UUID never reaches the node's `users[]`, so the
+/// REALITY handshake succeeds, VLESS-auth rejects, and the client is
+/// silently forwarded to the cover dest — «connects but no internet»
+/// (HANDOFF 2026-07-08 §4.1). `servers` must be captured by the caller
+/// at the right moment — for a DELETE, BEFORE the cascade drops the
+/// grants. Empty → no-op. `subject` labels the audit row: user id for
+/// user-scoped triggers, server id for server-side bulk grant/revoke.
+/// NOTE: apply_config restarts sing-box, so other users on a node see
+/// a brief blip — inherent to any config change.
 fn spawn_user_servers_redeploy(
     state: &AppState,
     servers: Vec<vpnctl_core::Server>,
-    user_id: String,
+    subject: String,
     trigger: &'static str,
 ) {
     if servers.is_empty() {
@@ -9956,31 +10012,86 @@ fn spawn_user_servers_redeploy(
     let inv = state.inv.clone();
     let registry = std::sync::Arc::clone(&state.registry);
     let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let server_ids: Vec<String> = servers.iter().map(|s| s.id.0.clone()).collect();
+    // Server-side bulk triggers target a SERVER; keep them out of the
+    // `user.*` audit namespace so user-timeline filters don't surface
+    // server-targeted rows (review 2026-07-08).
+    let action: &'static str = if trigger.starts_with("server.") {
+        "server.autodeploy"
+    } else {
+        "user.autodeploy"
+    };
     tokio::spawn(async move {
         use tokio_stream::StreamExt;
-        let mut stream = Box::pin(crate::wizard_bootstrap::run_deploy_all(
-            servers,
-            inv.clone(),
-            registry,
-            key_path,
-        ));
         let mut errors: Vec<String> = Vec::new();
-        while let Some(ev) = stream.next().await {
-            if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } = ev {
-                errors.push(format!("{phase}: {message}"));
+        if key_path.exists() {
+            // Per-server run_redeploy (NOT run_deploy_all): the deploy-all
+            // stream wraps per-server failures as Step lines and always
+            // ends Ok, so this dispatcher would record ok=true even when
+            // every server failed. Driving each server's stream directly
+            // keeps the terminal Ok/Error per server observable.
+            for server in servers {
+                let sid = server.id.0.clone();
+                // Bounded retry on the per-server deploy lock: a deploy
+                // already in flight rendered its config BEFORE this
+                // mutation committed, so being refused here would leave
+                // the mutation off the node until a manual deploy.
+                // ponytail: 3 retries × 5s covers back-to-back operator
+                // clicks; a node mid-`ensure_installed` for minutes still
+                // ends in errors + the pending banner staying up.
+                let mut failure: Option<String> = None;
+                for attempt in 0u32..4 {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                    failure = None;
+                    let mut stream = Box::pin(crate::wizard_bootstrap::run_redeploy(
+                        server.clone(),
+                        inv.clone(),
+                        std::sync::Arc::clone(&registry),
+                        key_path.clone(),
+                    ));
+                    while let Some(ev) = stream.next().await {
+                        if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } =
+                            ev
+                        {
+                            failure = Some(format!("{phase}: {message}"));
+                        }
+                    }
+                    match &failure {
+                        Some(msg)
+                            if msg.contains(
+                                crate::wizard_bootstrap::DEPLOY_ALREADY_RUNNING_PREFIX,
+                            ) =>
+                        {
+                            continue;
+                        }
+                        _ => break,
+                    }
+                }
+                if let Some(msg) = failure {
+                    errors.push(format!("{sid}: {msg}"));
+                }
             }
+        } else {
+            // No deploy key → running the pipeline would only stamp a
+            // `server.deploy` row with ssh_skip_reason per server, which
+            // clears the pending-deploy banner while the nodes stay
+            // stale. Record the failure on the autodeploy row instead
+            // and leave the banner up.
+            errors.push(crate::wizard_bootstrap::DEPLOY_KEY_ABSENT_MSG.into());
         }
         if errors.is_empty() {
             tracing::info!(
                 target = "vpnctld::admin",
-                user = %user_id,
+                subject = %subject,
                 trigger,
-                "auto-deploy applied to user's servers (config re-rendered + sing-box reloaded)"
+                "auto-deploy applied (config re-rendered + sing-box reloaded)"
             );
         } else {
             tracing::warn!(
                 target = "vpnctld::admin",
-                user = %user_id,
+                subject = %subject,
                 trigger,
                 errors = ?errors,
                 "auto-deploy: some servers failed to apply — retry via Deploy all"
@@ -9989,10 +10100,11 @@ fn spawn_user_servers_redeploy(
         let _ = inv
             .audit(
                 "admin",
-                "user.autodeploy",
-                Some(&user_id),
+                action,
+                Some(&subject),
                 Some(&serde_json::json!({
                     "trigger": trigger,
+                    "servers": server_ids,
                     "ok": errors.is_empty(),
                     "errors": errors,
                 })),
