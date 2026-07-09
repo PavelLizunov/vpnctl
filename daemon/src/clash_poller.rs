@@ -307,10 +307,12 @@ async fn poll_one_server(
     snapshot_cache: &crate::snapshot_cache::SnapshotCache,
     server: &vpnctl_core::Server,
 ) {
-    // Only sing-box nodes expose clash-api at 9090 today. AmneziaWG
-    // nodes are skipped silently — operator's amnezia-only servers
-    // don't generate stats yet (queued for a future "amneziawg
-    // metrics from wg show" path).
+    // Only sing-box nodes expose clash-api at 9090. AmneziaWG nodes are
+    // skipped here — their per-user source IPs are collected separately by
+    // `crate::wg_stats_poller` (`awg show awg0 dump` → user via
+    // `wireguard_pubkey`), which feeds the sharing verdict's daily-networks
+    // term. That poller is the "amneziawg metrics from wg show" path this
+    // comment used to defer.
     if !server.kernels.iter().any(|k| k.0 == "sing-box") {
         tracing::debug!(
             target = "vpnctld::poller",
