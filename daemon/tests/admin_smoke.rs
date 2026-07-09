@@ -712,11 +712,15 @@ async fn admin_servers_renders_one_card_per_server_with_user_counts() {
     let app = router(s);
     let html = fetch_html(app, "/admin/servers").await;
 
-    // One card per server.
+    // One row per server in the dense inventory table (densify 2a).
+    assert!(
+        html.contains(r#"<table class="ed-grid">"#),
+        "servers list must render the dense inventory table"
+    );
     assert_eq!(
-        html.matches(r#"<article class="ed-server">"#).count(),
+        html.matches(r#"class="ed-grid__id""#).count(),
         3,
-        "expected three ed-server cards"
+        "expected three server rows (one ed-grid__id link each)"
     );
     // Header shows total.
     assert!(
@@ -917,9 +921,9 @@ async fn admin_users_populated_renders_rows_and_masks_secrets() {
 
     let html = fetch_html(router(s), "/admin/users").await;
 
-    // 3 row articles.
+    // 3 dense table rows.
     assert_eq!(
-        html.matches(r#"<article class="ed-server">"#).count(),
+        html.matches(r#"class="ed-grid__id""#).count(),
         3,
         "expected 3 user rows"
     );
@@ -944,12 +948,11 @@ async fn admin_users_populated_renders_rows_and_masks_secrets() {
         !html.contains(&token),
         "FULL sub_token leaked into the list page"
     );
-    // Singular vs plural for grants on per-row line.
-    // u0 is granted to s0; u1, u2 also granted to s0 → all three say "1 server".
+    // u0/u1/u2 are all granted to s0 → the grants column reads 1.
     assert_eq!(
-        html.matches("<b>1</b> server").count(),
+        html.matches(r#"<td class="num"><b>1</b></td>"#).count(),
         3,
-        "each user row should show '1 server' granted (singular)"
+        "each user row should show one granted server"
     );
 }
 
@@ -3647,7 +3650,7 @@ async fn user_detail_tab_labels_copy_contract() {
     for label in [
         ">Overview</a>",
         ">Delivery</a>",
-        ">Access</a>",
+        ">Access · 0</a>",
         ">Activity</a>",
         ">Traffic</a>",
     ] {
@@ -3657,7 +3660,7 @@ async fn user_detail_tab_labels_copy_contract() {
     for label in [
         ">Обзор</a>",
         ">Выдача</a>",
-        ">Доступ</a>",
+        ">Доступ · 0</a>",
         ">Активность</a>",
         ">Трафик</a>",
     ] {
@@ -5745,12 +5748,11 @@ async fn admin_users_renders_search_form_before_add_user_form() {
         "search form (at {search_idx}) must appear BEFORE add-user form (at {add_idx}) — \
          else accidental Enter from search-flow creates a user (Pavel-2026-05-19 bug)"
     );
-    // The add-user container must carry visual «destructive» styling
-    // — dashed border + accent eyebrow — so it's unmistakable for a
-    // search input.
+    // The dense inbar keeps a dashed accent divider before the create
+    // POST so it remains unmistakable from the safe GET search.
     assert!(
-        html.contains("border: 1px dashed var(--accent)"),
-        "add-user container must use dashed-accent styling to distinguish from search"
+        html.contains("border-left: 1px dashed var(--accent)"),
+        "add-user form must use a dashed accent divider"
     );
 }
 
@@ -7354,7 +7356,7 @@ async fn admin_server_detail_with_probe_renders_kpis() {
             Some(true),
             Some(9876),
             Some(20480),
-            Some(483),
+            Some(231),
             Some(960),
             Some(4),
             Some(r#"["tcp/443","tcp/8388","udp/8388","udp/8443"]"#),
@@ -7368,11 +7370,15 @@ async fn admin_server_detail_with_probe_renders_kpis() {
         .unwrap();
 
     let html = fetch_html(router(s), "/admin/servers/s0").await;
-    // Hero block visible
-    assert!(html.contains("Live status"));
+    // Dense six-tile hero strip visible.
+    assert!(html.contains("ed-status-strip"));
     assert!(html.contains("active"), "sing-box active visible");
     assert!(html.contains("48%"), "disk pct visible (9876/20480)");
-    assert!(html.contains("50%"), "mem pct visible (1 - 483/960 = 50)");
+    assert!(html.contains("76%"), "mem pct visible (1 - 231/960 = 76)");
+    assert!(
+        html.contains(r#"class="ed-status-tile warn""#),
+        "memory above 70% must render the warm heat tile"
+    );
     // No empty-state once we have data
     assert!(!html.contains("No probes yet"));
 }
@@ -8955,7 +8961,7 @@ async fn admin_server_detail_shows_update_kernels_button() {
         "update-kernels button must point admin.js at its own log pane"
     );
     assert!(
-        html.contains("update kernels →") || html.contains("обновить ядра →"),
+        html.contains("update kernels") || html.contains("обновить ядра"),
         "update-kernels button label drifted"
     );
 }
@@ -9014,7 +9020,7 @@ async fn admin_servers_renders_update_all_kernels_button() {
         "update-all-kernels needs its own live log pane"
     );
     assert!(
-        html.contains("update all kernels →") || html.contains("обновить все ядра →"),
+        html.contains("update all kernels") || html.contains("обновить все ядра"),
         "update-all-kernels button label drifted"
     );
 }
@@ -11747,36 +11753,32 @@ async fn nm12_followup_servers_list_reflects_hidden_state() {
 
     let html = fetch_html(router(s), "/admin/servers").await;
 
-    // The "protocols" row must list ONLY visible (vless+reality),
-    // not the 2 hidden ones.
-    let proto_block = html
-        .split("<dt>protocols</dt>")
-        .nth(1)
-        .expect("protocols dt must appear");
-    let visible_dd = proto_block.split("</dd>").next().expect("dd must close");
+    // Densify 2a: visible protocols render in the dense-table cell; the
+    // hidden ones live ONLY inside the "+N hidden" flag's title (still
+    // listening on the node, just not emitted to subscriptions — NM-10/12).
+    let visible_seg = html
+        .split(r#"<span class="ed-grid__flag""#)
+        .next()
+        .expect("page renders");
     assert!(
-        visible_dd.contains("vless+reality"),
-        "protocols dd should list vless+reality, got: {visible_dd}"
+        visible_seg.contains("vless+reality"),
+        "visible protocol list must show vless+reality"
     );
     assert!(
-        !visible_dd.contains("tuic-v5"),
-        "protocols dd MUST NOT list hidden tuic-v5, got: {visible_dd}"
+        !visible_seg.contains("tuic-v5") && !visible_seg.contains("anytls"),
+        "hidden protocols must NOT appear in the visible list (only in the flag title)"
+    );
+    // The +N hidden flag renders, names the hidden protocols in its title,
+    // and shows the count.
+    assert!(
+        html.contains(r#"class="ed-grid__flag""#),
+        "a +N hidden flag must render for the server with hidden protocols"
     );
     assert!(
-        !visible_dd.contains("anytls"),
-        "protocols dd MUST NOT list hidden anytls, got: {visible_dd}"
+        html.contains("tuic-v5") && html.contains("anytls"),
+        "hidden protocols must be surfaced (in the flag title)"
     );
-
-    // A separate "hidden" row must surface tuic-v5 + anytls plus
-    // the count hint (1 visible, 2 hidden).
-    assert!(
-        html.contains("hidden") && html.contains("tuic-v5") && html.contains("anytls"),
-        "list page must surface hidden protocols somewhere on the card"
-    );
-    assert!(
-        html.contains("2 hidden, 1 visible"),
-        "list page must show the (N hidden, M visible) count hint"
-    );
+    assert!(html.contains("+2"), "flag must show the hidden count (+2)");
 }
 
 #[tokio::test]
@@ -17097,7 +17099,7 @@ async fn server_detail_tab_labels_copy_contract() {
         ">Status</a>",
         ">Activity</a>",
         ">Protocols</a>",
-        ">Grants</a>",
+        ">Grants · 0</a>",
         ">Setup</a>",
     ] {
         assert!(en.contains(label), "EN tab label drifted: {label:?}");
@@ -17107,7 +17109,7 @@ async fn server_detail_tab_labels_copy_contract() {
         ">Статус</a>",
         ">Активность</a>",
         ">Протоколы</a>",
-        ">Гранты</a>",
+        ">Гранты · 0</a>",
         ">Настройка</a>",
     ] {
         assert!(ru.contains(label), "RU tab label drifted: {label:?}");
@@ -17163,8 +17165,8 @@ async fn pr_user_online_badge_green_when_snapshot_attributes_connection() {
     let html = fetch_html(router(s), "/admin/users/u0").await;
     assert!(html.contains("Presence"), "presence eyebrow missing");
     assert!(
-        html.contains("🟢 "),
-        "online badge must show the green dot when a connection is attributed"
+        html.contains(r#"class="ed-stat ed-stat--active""#),
+        "online badge must use the active status marker"
     );
     assert!(html.contains("online"), "online badge must read 'online'");
     // The server the connection landed on is named.

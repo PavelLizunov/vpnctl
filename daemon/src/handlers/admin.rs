@@ -2492,7 +2492,26 @@ fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
 /// Editorial server card — one per row, matches `.ed-server` from the
 /// design source. Renders the inventory's `Server` plus the per-server
 /// user count looked up from `users_count_per_server` (defaulting to 0).
-fn server_card(
+/// Truncate an `SHA256:<base64>` host-fingerprint to `SHA256:head4…tail4`
+/// for a dense table cell; the full value rides in the cell's `title=`.
+/// Non-SHA256 strings (e.g. `(unverified)`) pass through unchanged.
+fn fp_short(fp: &str) -> String {
+    if let Some(hash) = fp.strip_prefix("SHA256:") {
+        let chars: Vec<char> = hash.chars().collect();
+        if chars.len() > 10 {
+            let head: String = chars.iter().take(4).collect();
+            let tail: String = chars[chars.len() - 4..].iter().collect();
+            return format!("SHA256:{head}…{tail}");
+        }
+    }
+    fp.to_string()
+}
+
+/// One inventory row in the dense `.ed-grid` servers table (densify 2a).
+/// Same visible/hidden protocol split as the old card via the pre-loaded
+/// hidden matrix (NM-10: defaults to visible when the matrix doesn't know
+/// a pid — in-memory cache vs on-disk table diverge only via raw SQL).
+fn server_row(
     idx: usize,
     s: &vpnctl_core::Server,
     user_count: i64,
@@ -2500,23 +2519,18 @@ fn server_card(
         (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
         bool,
     >,
+    health: Option<&vpnctl_inventory::NodeHealthRow>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // Split `enabled_protocols` into visible + hidden by consulting
-    // the `server_protocols` table (via the pre-loaded bulk matrix).
-    // Defaults to `not hidden` when the matrix doesn't know about a
-    // pid — same defensive fallback the server-detail page uses
-    // (NM-10 review-agent note: in-memory cache vs on-disk table
-    // can diverge only via raw SQL; the safe default is "show it").
     let mut visible_protos: Vec<&str> = Vec::with_capacity(s.enabled_protocols.len());
     let mut hidden_protos: Vec<&str> = Vec::new();
     for p in &s.enabled_protocols {
-        let is_hidden = hidden_matrix
+        if hidden_matrix
             .get(&(s.id.clone(), p.clone()))
             .copied()
-            .unwrap_or(false);
-        if is_hidden {
+            .unwrap_or(false)
+        {
             hidden_protos.push(p.0.as_str());
         } else {
             visible_protos.push(p.0.as_str());
@@ -2525,71 +2539,80 @@ fn server_card(
     let visible_str = if visible_protos.is_empty() {
         "—".to_string()
     } else {
-        visible_protos.join(", ")
+        visible_protos.join(" · ")
     };
-    let jump = match &s.jump_via {
-        Some(j) => j.0.clone(),
-        None => tr(lang, "direct", "напрямую").to_string(),
-    };
-    let fp = s
+    let fp_full = s
         .trusted_host_fingerprint
         .as_deref()
         .unwrap_or_else(|| tr(lang, "(unverified)", "(не подтверждён)"));
+    let mut health_warnings = Vec::new();
+    if let Some(h) = health {
+        if h.sing_box_active == Some(false) {
+            health_warnings.push(tr(lang, "sing-box down", "sing-box не работает").to_string());
+        }
+        if h.fail2ban_active == Some(false) {
+            health_warnings.push(tr(lang, "fail2ban down", "fail2ban не работает").to_string());
+        }
+        if let Some(pct) = h
+            .mem_available_mib
+            .zip(h.mem_total_mib)
+            .filter(|(_, total)| *total > 0)
+            .map(|(available, total)| 100u64.saturating_sub(available * 100 / total))
+            .filter(|pct| *pct > 70)
+        {
+            health_warnings.push(format!("{} {pct}%", tr(lang, "memory", "память")));
+        }
+        if let Some(pct) = h
+            .disk_used_mib
+            .zip(h.disk_total_mib)
+            .filter(|(_, total)| *total > 0)
+            .map(|(used, total)| (used * 100 / total).min(100))
+            .filter(|pct| *pct > 70)
+        {
+            health_warnings.push(format!("{} {pct}%", tr(lang, "disk", "диск")));
+        }
+    }
+    let has_health_warning = !health_warnings.is_empty();
     let detail_href = format!("/admin/servers/{}", path_segment_encode(&s.id.0));
     html! {
-        article.ed-server {
-            div.ed-server__no { (format!("№ {:02}", idx + 1)) }
-            div {
-                // Phase H chunk 3: server id is now a link to the
-                // detail page (which carries live telemetry + drift
-                // info). Clickable headline matches the user-list
-                // pattern from C-1.
-                h2.ed-server__h {
-                    a href=(detail_href) style="color: var(--ink); text-decoration: none;" {
-                        (s.id.0)
-                    }
-                }
-                div.ed-server__addr {
-                    (s.address) ":" (s.ssh_port)
-                    " · " (s.ssh_user) "@"
-                    " · " span.ed-mono {
-                        (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
-                    }
-                }
-                p.ed-server__lede {
-                    (tr(lang, "Hoster ", "Хостер ")) b { (s.hoster) }
-                    " · " b { (user_count) } " "
-                    @if user_count == 1 { (tr(lang, "user", "пользователь")) }
-                    @else { (tr(lang, "users", "пользователей")) }
-                    (tr(lang, " granted access · jump ", " имеют доступ · jump через "))
-                    em { (jump) }
+        tr class=(if has_health_warning { "on-warn" } else { "" }) {
+            td.ed-grid__mut { (format!("{:02}", idx + 1)) }
+            td {
+                a.ed-grid__id href=(detail_href) { (s.id.0) }
+                @if has_health_warning {
+                    " " span.ed-grid__flag title=(health_warnings.join(" · ")) { "⚠" }
                 }
             }
-            dl.ed-server__meta {
-                dt { (tr(lang, "protocols", "протоколы")) }
-                dd { (visible_str) }
+            td {
+                (s.address) ":" (s.ssh_port)
+                " " span.ed-grid__mut { "· " (s.ssh_user) "@" }
+            }
+            td.ed-grid__mut { (s.hoster) }
+            td.num { b { (user_count) } " " (tr(lang, "users", "польз.")) }
+            td.ed-grid__sm {
+                (visible_str)
                 @if !hidden_protos.is_empty() {
-                    dt style="color: var(--acc);" { (tr(lang, "hidden", "скрыты")) }
-                    dd style="color: var(--acc); font-style: italic;"
-                       title=(tr(
-                           lang,
-                           "These protocols are still enabled on the node (sing-box inbound keeps listening, cached client URIs continue to work) but the subscription render path stops emitting them. Adjust on the server detail page.",
-                           "Эти протоколы по-прежнему включены на ноде (sing-box inbound продолжает слушать, кешированные клиентские URI работают), но в рендер подписок они не попадают. Управление — на странице сервера.",
-                       )) {
-                        (hidden_protos.join(", "))
-                        " · " span.ed-mono style="font-size: 10px;" {
-                            "(" (hidden_protos.len())
-                            (tr(lang, " hidden, ", " скрытых, "))
-                            (visible_protos.len())
-                            (tr(lang, " visible)", " видимых)"))
-                        }
+                    " "
+                    span.ed-grid__flag
+                        title=(match lang {
+                            crate::i18n::Locale::En => format!(
+                                "{} hidden from subscription (still listening on the node): {}",
+                                hidden_protos.len(),
+                                hidden_protos.join(", "),
+                            ),
+                            crate::i18n::Locale::Ru => format!(
+                                "{} скрыто из подписки (нода продолжает слушать): {}",
+                                hidden_protos.len(),
+                                hidden_protos.join(", "),
+                            ),
+                        }) {
+                        "+" (hidden_protos.len()) " " (tr(lang, "hidden", "скрыт"))
                     }
                 }
-                dt { (tr(lang, "fingerprint", "отпечаток")) }
-                dd style="font-family: var(--mono); font-size: 11px;" { (fp) }
-                dt { (tr(lang, "usage ×", "коэф. использования")) }
-                dd { (format!("{:.2}", s.usage_coefficient)) }
             }
+            td.ed-grid__mut.ed-grid__sm title=(fp_full) { (fp_short(fp_full)) }
+            td.num { (format!("{:.2}", s.usage_coefficient)) }
+            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "open →", "открыть →")) } }
         }
     }
 }
@@ -2614,90 +2637,108 @@ pub(crate) async fn servers(
         state.inv.list_all_server_protocols_with_hidden(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let mut latest_health = std::collections::HashMap::new();
+    for server in &server_list {
+        if let Ok(Some(row)) = state.inv.latest_node_health(&server.id).await {
+            latest_health.insert(server.id.clone(), row);
+        }
+    }
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
-        h1.ed-art-h1 {
-            (server_list.len()) " "
-            @if server_list.len() == 1 { em { (crate::i18n::tr(lang, "server", "сервер")) } }
-            @else { em { (crate::i18n::tr(lang, "servers", "серверов")) } }
-            (crate::i18n::tr(lang, " in inventory", " в инвентаре"))
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
-                lang,
-                "Read straight from the SQLite inventory. Add a server through the ",
-                "Читаются напрямую из SQLite-инвентаря. Добавь сервер через ",
-            ))
-            a href="/admin/servers/new" style="color: var(--ink); text-decoration: underline;" {
-                (crate::i18n::tr(lang, "wizard", "мастер"))
+        div.ed-headrow {
+            h1.ed-sumbar__h {
+                (server_list.len()) " "
+                @if server_list.len() == 1 { em { (crate::i18n::tr(lang, "server", "сервер")) } }
+                @else { em { (crate::i18n::tr(lang, "servers", "серверов")) } }
+                (crate::i18n::tr(lang, " in inventory", " в инвентаре"))
             }
-            (crate::i18n::tr(
-                lang,
-                " (paste IP + root password, the daemon does the rest), or use ",
-                " (вставь IP + root пароль, остальное сделает демон), либо через ",
-            ))
-            span.ed-mono { "vpnctl bootstrap" }
-            (crate::i18n::tr(lang, " then ", " затем "))
-            span.ed-mono { "vpnctl deploy" }
-            (crate::i18n::tr(lang, " from the CLI.", " в CLI."))
-        }
-
-        div style="margin: 16px 0 16px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper);" {
-            form method="post" action="/admin/servers/quick-add"
-                 style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" {
-                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    (crate::i18n::tr(lang, "add server", "добавить сервер"))
-                }
-                input type="text" name="id" required="required"
-                      placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
-                      pattern="[A-Za-z0-9._-]+"
-                      title=(crate::i18n::tr(
-                          lang,
-                          "Letters, digits, dot, underscore, hyphen — no spaces or slashes",
-                          "Буквы, цифры, точка, подчёркивание, дефис — без пробелов и слешей",
-                      ))
-                      style="max-width: 160px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                input type="text" name="address" required="required"
-                      placeholder=(crate::i18n::tr(lang, "ip or hostname", "ip или хост"))
-                      title=(crate::i18n::tr(
-                          lang,
-                          "IPv4 / IPv6 / hostname of an already-bootstrapped node",
-                          "IPv4 / IPv6 / хост уже развёрнутой ноды",
-                      ))
-                      style="max-width: 220px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                input type="number" name="ssh_port" value="22" min="1" max="65535"
-                      title=(crate::i18n::tr(
-                          lang,
-                          "SSH port — 22 (DO) or 2222 (Cloudzy)",
-                          "SSH порт — 22 (DO) или 2222 (Cloudzy)",
-                      ))
-                      style="max-width: 72px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                button type="submit"
-                       title=(crate::i18n::tr(
-                           lang,
-                           "Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after.",
-                           "Регистрирует сервер с ядром sing-box и всеми поддерживаемыми им протоколами. Настройки правь на странице сервера сразу после.",
-                       ))
-                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (crate::i18n::tr(lang, "register", "зарегистрировать"))
-                }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); flex-basis: 100%;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page.",
-                        "→ ядро sing-box по умолчанию, включены все поддерживаемые им протоколы. Тонкая настройка — на странице сервера.",
-                    ))
+            span.ed-tip
+                title=(crate::i18n::tr(
+                    lang,
+                    "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest), or use `vpnctl bootstrap` then `vpnctl deploy` from the CLI.",
+                    "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон), либо `vpnctl bootstrap` затем `vpnctl deploy` в CLI.",
+                )) { "ⓘ" }
+            // Fleet actions live top-right of the header (densify 2a).
+            // Both stream via admin.js [data-sse-url]; their log panes
+            // sit just below the add-bar (getElementById finds them
+            // anywhere on the page). Best-effort — a down node is
+            // reported, the rest still go.
+            @if !server_list.is_empty() {
+                div.ed-headrow__actions {
+                    button type="button"
+                           data-sse-url="/admin/servers/update-kernels-all/sse"
+                           data-log="update-kernels-log"
+                           data-busy-label=(crate::i18n::tr(lang, "updating all kernels… (watch the log)", "обновляю все ядра… (смотри лог)"))
+                           data-retry-label=(crate::i18n::tr(lang, "retry update all", "повторить обновление всех"))
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Upgrade the kernel binaries on EVERY server (apt upgrade + service restart) without re-rendering any config. Run after a kernel release to roll the new binary across the fleet. The running config is left untouched, so this is safe even on a node whose inventory has drifted. Best-effort — a down node is reported, the rest still update.",
+                               "Обновить бинарники ядер на ВСЕХ серверах (apt upgrade + рестарт сервиса) без перерендера конфига. Запусти после релиза ядра, чтобы раскатать новый бинарь по флоту. Рабочий конфиг не трогается, поэтому безопасно даже на ноде с дрейфом инвентаря. Best-effort — упавшая нода отмечается, остальные обновляются.",
+                           ))
+                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                        (crate::i18n::tr(lang, "update all kernels", "обновить все ядра"))
+                        " (" (server_list.len()) ")"
+                    }
+                    button id="deploy-button" type="button"
+                           data-sse-url="/admin/servers/deploy-all/sse"
+                           data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
+                           data-retry-label=(crate::i18n::tr(lang, "retry deploy all", "повторить деплой всех"))
+                           title=(crate::i18n::tr(
+                               lang,
+                               "Re-deploy EVERY server: pushes each node's sing-box config so newly-added users' UUIDs land on all of them. Run once after adding a user or granting servers. Best-effort — a down node is reported, the rest still deploy.",
+                               "Передеплоить ВСЕ серверы: пушит конфиг sing-box на каждую ноду, чтобы UUID новых юзеров попали на все. Нажми один раз после добавления юзера или выдачи грантов. Best-effort — упавшая нода отмечается, остальные деплоятся.",
+                           ))
+                           class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
+                        (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
+                        " (" (server_list.len()) ")"
+                    }
                 }
             }
         }
 
-        // Phase E sub-iter 4a — wizard CTA. For fresh nodes that need
-        // bootstrap (push our SSH key, install kernel, etc). Use the
-        // quick-add above if you already have a working node.
-        div style="margin: 0 0 24px;" {
-            a href="/admin/servers/new"
-              style="display: inline-block; padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+        form.ed-inbar method="post" action="/admin/servers/quick-add" {
+            span.ed-inbar__label { (crate::i18n::tr(lang, "add server", "добавить сервер")) }
+            input type="text" name="id" required="required"
+                  placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
+                  pattern="[A-Za-z0-9._-]+"
+                  title=(crate::i18n::tr(
+                      lang,
+                      "Letters, digits, dot, underscore, hyphen — no spaces or slashes",
+                      "Буквы, цифры, точка, подчёркивание, дефис — без пробелов и слешей",
+                  ))
+                  style="max-width: 130px;";
+            input type="text" name="address" required="required"
+                  placeholder=(crate::i18n::tr(lang, "ip or hostname", "ip или хост"))
+                  title=(crate::i18n::tr(
+                      lang,
+                      "IPv4 / IPv6 / hostname of an already-bootstrapped node",
+                      "IPv4 / IPv6 / хост уже развёрнутой ноды",
+                  ))
+                  style="max-width: 180px;";
+            input type="number" name="ssh_port" value="22" min="1" max="65535"
+                  title=(crate::i18n::tr(
+                      lang,
+                      "SSH port — 22 (DO) or 2222 (Cloudzy)",
+                      "SSH порт — 22 (DO) или 2222 (Cloudzy)",
+                  ))
+                  style="max-width: 58px;";
+            button type="submit"
+                   class="ed-abtn ed-abtn--primary ed-abtn--sm"
+                   title=(crate::i18n::tr(
+                       lang,
+                       "Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after.",
+                       "Регистрирует сервер с ядром sing-box и всеми поддерживаемыми им протоколами. Настройки правь на странице сервера сразу после.",
+                   )) {
+                (crate::i18n::tr(lang, "register", "зарегистрировать"))
+            }
+            span.ed-tip
+                title=(crate::i18n::tr(
+                    lang,
+                    "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page.",
+                    "→ ядро sing-box по умолчанию, включены все поддерживаемые им протоколы. Тонкая настройка — на странице сервера.",
+                )) { "ⓘ" }
+            a.ed-grid__open href="/admin/servers/new" style="margin-left: auto;" {
                 (crate::i18n::tr(
                     lang,
                     "wizard → bootstrap a fresh node from scratch",
@@ -2706,56 +2747,16 @@ pub(crate) async fn servers(
             }
         }
 
-        // Deploy-all — push EVERY server's sing-box config in one click.
-        // Run this after adding a user / granting servers so the new
-        // UUID lands on every node (grants alone only update inv.db; the
-        // node's sing-box isn't touched until a deploy). SSE-streamed via
-        // admin.js [data-sse-url]; per-server progress + a summary land in
-        // the log. Best-effort — a down node is reported, rest still go.
+        // SSE log panes for the two fleet actions in the header above.
+        // Hidden until a stream starts; admin.js reveals the pane whose
+        // id matches the clicked button's data-log (deploy-log /
+        // update-kernels-log), located via getElementById anywhere on
+        // the page.
         @if !server_list.is_empty() {
-            div id="deploy-button" style="margin: 0 0 24px;" {
-                button type="button"
-                       data-sse-url="/admin/servers/deploy-all/sse"
-                       data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
-                       data-retry-label=(crate::i18n::tr(lang, "retry deploy all", "повторить деплой всех"))
-                       title=(crate::i18n::tr(
-                           lang,
-                           "Re-deploy EVERY server: pushes each node's sing-box config so newly-added users' UUIDs land on all of them. Run once after adding a user or granting servers. Best-effort — a down node is reported, the rest still deploy.",
-                           "Передеплоить ВСЕ серверы: пушит конфиг sing-box на каждую ноду, чтобы UUID новых юзеров попали на все. Нажми один раз после добавления юзера или выдачи грантов. Best-effort — упавшая нода отмечается, остальные деплоятся.",
-                       ))
-                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                    (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
-                    " (" (server_list.len()) ")"
-                }
-                pre id="deploy-log" hidden
-                    style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
-            }
-            // "Update all kernels" (update-kernels PR2) — upgrade ONLY the
-            // kernel binaries across the fleet (apt upgrade + service
-            // restart) without re-rendering any config. SSE-streamed via
-            // the same generic admin.js [data-sse-url]+[data-log] wiring;
-            // its OWN log pane (`update-kernels-log`) avoids colliding with
-            // `deploy-log`. Safe on inventory-drift nodes — never shrinks
-            // the live user set. Best-effort — a down node is reported,
-            // the rest still update.
-            div id="update-kernels-button" style="margin: 0 0 24px;" {
-                button type="button"
-                       data-sse-url="/admin/servers/update-kernels-all/sse"
-                       data-log="update-kernels-log"
-                       data-busy-label=(crate::i18n::tr(lang, "updating all kernels… (watch the log)", "обновляю все ядра… (смотри лог)"))
-                       data-retry-label=(crate::i18n::tr(lang, "retry update all", "повторить обновление всех"))
-                       title=(crate::i18n::tr(
-                           lang,
-                           "Upgrade the kernel binaries on EVERY server (apt upgrade + service restart) without re-rendering any config. Run after a kernel release to roll the new binary across the fleet. The running config is left untouched, so this is safe even on a node whose inventory has drifted. Best-effort — a down node is reported, the rest still update.",
-                           "Обновить бинарники ядер на ВСЕХ серверах (apt upgrade + рестарт сервиса) без перерендера конфига. Запусти после релиза ядра, чтобы раскатать новый бинарь по флоту. Рабочий конфиг не трогается, поэтому безопасно даже на ноде с дрейфом инвентаря. Best-effort — упавшая нода отмечается, остальные обновляются.",
-                       ))
-                       class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
-                    (crate::i18n::tr(lang, "update all kernels →", "обновить все ядра →"))
-                    " (" (server_list.len()) ")"
-                }
-                pre id="update-kernels-log" hidden
-                    style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
-            }
+            pre id="deploy-log" hidden
+                style="margin: 0 0 16px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
+            pre id="update-kernels-log" hidden
+                style="margin: 0 0 16px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 360px; overflow-y: auto; white-space: pre-wrap;" {}
         }
 
         @if server_list.is_empty() {
@@ -2771,15 +2772,31 @@ pub(crate) async fn servers(
                 ))
             }
         } @else {
-            div {
-                @for (idx, s) in server_list.iter().enumerate() {
-                    (server_card(
-                        idx,
-                        s,
-                        user_counts.get(&s.id).copied().unwrap_or(0),
-                        &hidden_matrix,
-                        lang,
-                    ))
+            table.ed-grid {
+                thead {
+                    tr {
+                        th style="width: 34px;" { "№" }
+                        th { (crate::i18n::tr(lang, "server", "сервер")) }
+                        th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
+                        th { (crate::i18n::tr(lang, "hoster", "хостер")) }
+                        th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
+                        th { (crate::i18n::tr(lang, "protocols", "протоколы")) }
+                        th { (crate::i18n::tr(lang, "fingerprint", "отпечаток")) }
+                        th.num { (crate::i18n::tr(lang, "usage ×", "коэф. ×")) }
+                        th {}
+                    }
+                }
+                tbody {
+                    @for (idx, s) in server_list.iter().enumerate() {
+                        (server_row(
+                            idx,
+                            s,
+                            user_counts.get(&s.id).copied().unwrap_or(0),
+                            &hidden_matrix,
+                            latest_health.get(&s.id),
+                            lang,
+                        ))
+                    }
                 }
             }
         }
@@ -2820,9 +2837,7 @@ fn mask_secret(s: &str) -> String {
 // (the wizard's doc-comment explicitly admitted the duplication).
 // Both surfaces now route through the shared helper.
 
-/// Per-user row in the users list. Keeps the editorial cadence — one
-/// `<article>` per row with id / uuid prefix / sub-token preview / grant
-/// count, and a CTA arrow to the detail page.
+/// Per-user row in the dense users table (densify 2c).
 ///
 /// `grants_count` is `usize` (the natural count from `Vec::len()`); maud
 /// renders any `Display` integer so we don't need to pre-narrow into
@@ -2832,6 +2847,7 @@ fn user_row(
     idx: usize,
     u: &vpnctl_core::User,
     grants_count: usize,
+    live_conns: u32,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -2839,43 +2855,37 @@ fn user_row(
     let uuid_preview: String = u.uuid.chars().take(8).collect();
     let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
     html! {
-        article.ed-server {
-            div.ed-server__no { (format!("№ {:02}", idx + 1)) }
-            div {
-                h2.ed-server__h { (u.id.0) }
-                div.ed-server__addr {
-                    "uuid " span.ed-mono { (uuid_preview) "…" }
-                    (tr(lang, " · sub-token ", " · sub-токен "))
-                    @match &sub_token_preview {
-                        Some(s) => span.ed-mono { (s) },
-                        None => em { (tr(
-                            lang,
-                            "(unset — open the user to regenerate)",
-                            "(не задан — открой пользователя чтобы сгенерировать)",
-                        )) },
+        tr class=(if live_conns > 0 { "on-green" } else { "" }) {
+            td.ed-grid__mut { (format!("{:02}", idx + 1)) }
+            td { a.ed-grid__id href=(detail_href) { (u.id.0) } }
+            td {
+                @if live_conns > 0 {
+                    span.ed-stat.ed-stat--active {
+                        span.ed-stat__dot {}
+                        (tr(lang, "online", "онлайн")) " · " (live_conns) " "
+                        @if live_conns == 1 { (tr(lang, "conn", "соединение")) }
+                        @else { (tr(lang, "conns", "соединений")) }
                     }
-                }
-                p.ed-server__lede {
-                    b { (grants_count) } " "
-                    @if grants_count == 1 { (tr(lang, "server", "сервер")) }
-                    @else { (tr(lang, "servers", "серверов")) }
-                    (tr(lang, " granted", " доступно"))
-                    @if u.tuic_password.is_some() {
-                        (tr(lang, " · tuic password set", " · tuic-пароль задан"))
-                    }
-                    @if u.wireguard_pubkey.is_some() {
-                        (tr(lang, " · wireguard pubkey set", " · wireguard-pubkey задан"))
-                    }
+                } @else {
+                    span.ed-grid__mut { "— " (tr(lang, "offline", "офлайн")) }
                 }
             }
-            dl.ed-server__meta {
-                dt { (tr(lang, "open", "открыть")) }
-                dd {
-                    a href=(detail_href) class="ed-server__cta" {
-                        (tr(lang, "detail · QR", "детали · QR"))
-                    }
+            td.ed-grid__sm title=(u.uuid) { (uuid_preview) "…" }
+            td.ed-grid__sm {
+                @match &sub_token_preview {
+                    Some(s) => span title=(s) { (s) },
+                    None => em.ed-grid__mut { (tr(lang, "unset", "не задан")) },
                 }
             }
+            td.num { b { (grants_count) } }
+            td.ed-grid__sm {
+                @if u.tuic_password.is_some() { span style="color: var(--green);" { "tuic ✓" } }
+                @else { span.ed-grid__mut { "tuic —" } }
+                " · "
+                @if u.wireguard_pubkey.is_some() { span style="color: var(--green);" { "wg ✓" } }
+                @else { span.ed-grid__mut { "wg —" } }
+            }
+            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "detail · QR →", "детали · QR →")) } }
         }
     }
 }
@@ -2903,11 +2913,25 @@ pub(crate) async fn users(
 
     // list_users + servers_for_user-per-user would be N+1; instead use
     // the inventory's grants-count map (one query) and look up by user.
-    let users_list = state
-        .inv
-        .list_users()
-        .await
-        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let (users_list, servers_list) =
+        tokio::try_join!(state.inv.list_users(), state.inv.list_servers())
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Presence is an in-memory fold over the already-polled clash-api
+    // snapshots. Patched nodes put the authenticated user directly on
+    // each connection; unresolved legacy connections stay uncounted on
+    // this fleet overview (the user detail keeps the heavier IP fallback).
+    let mut live_conns_per_user: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    for server in &servers_list {
+        if let Some(snap) = state.snapshot_cache.get(&server.id) {
+            for connection in &snap.snapshot.connections {
+                if let Some(user_id) = connection.metadata.user.as_deref() {
+                    *live_conns_per_user.entry(user_id.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
 
     // Per-user grants count: the existing aggregations only group by
     // server_id, not user_id. Since N is small (homelab) we issue one
@@ -2961,135 +2985,71 @@ pub(crate) async fn users(
     };
     let total_users = users_list.len();
     let visible_users = pairs.len();
+    let sort_link = |kind: &str, label: &str| -> Markup {
+        let active = sort_kind == kind;
+        html! {
+            a href=(make_sort_href(kind))
+              style=(if active { "color: var(--ink); text-decoration: underline; margin-left: 8px;" } else { "color: var(--mute); margin-left: 8px;" }) {
+                (label)
+            }
+        }
+    };
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageUsers)) }
-        h1.ed-art-h1 {
-            (users_list.len()) " "
-            @if users_list.len() == 1 { em { (crate::i18n::tr(lang, "user", "пользователь")) } }
-            @else { em { (crate::i18n::tr(lang, "users", "пользователей")) } }
-            (crate::i18n::tr(lang, " on file", " в базе"))
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
+        div.ed-headrow {
+            h1.ed-sumbar__h {
+                (users_list.len()) " "
+                @if users_list.len() == 1 { em { (crate::i18n::tr(lang, "user", "пользователь")) } }
+                @else { em { (crate::i18n::tr(lang, "users", "пользователей")) } }
+                (crate::i18n::tr(lang, " on file", " в базе"))
+            }
+            span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "Each user has a public subscription URL — ",
-                "У каждого пользователя есть публичный URL подписки — ",
-            ))
-            span.ed-mono { "https://ninitux.com/api/v1/app/config/<device_id>" } " — "
-            (crate::i18n::tr(
-                lang,
-                "served by vpnctld since the Phase 5 cutover (2026-05-19). The QR on every user-detail page encodes that URL; the legacy ",
-                "обслуживается vpnctld с момента Phase 5 cutover (2026-05-19). QR на странице каждого пользователя кодирует этот URL; легаси ",
-            ))
-            span.ed-mono { "/sub/<token>" }
-            (crate::i18n::tr(
-                lang,
-                " endpoint stays as a LAN-only fallback. Open a row for the QR you'll point a phone at.",
-                " остаётся как LAN-only fallback. Открой строку — там QR, который наводишь камерой телефона.",
-            ))
+                "Each user has a public subscription URL at https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
+                "У каждого пользователя есть публичный URL подписки https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
+            )) { "ⓘ" }
+            @if !users_list.is_empty() {
+                div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
+                    (crate::i18n::tr(lang, "sort:", "сортировка:"))
+                    (sort_link("id", "id ↑"))
+                    (sort_link("id-desc", "id ↓"))
+                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
+                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
+                }
+            }
         }
 
-        // Search FIRST, add-user SECOND. Pre-2026-05-19 the order
-        // was reversed — Pavel hit the case where typing a query
-        // into «add user» (placement default = first input on the
-        // page → mouse-less keyboard flow lands there) accidentally
-        // POSTed and tried to create a user. Putting search first
-        // means: (a) the autofocus cursor lands on a SAFE field,
-        // (b) misplaced Enter routes to a GET search not a POST
-        // create, (c) the destructive «create» action gets a
-        // visually distinct (dashed) container so it's harder to
-        // confuse for the input box you wanted.
-        //
-        // Pavel iter C2: search + sort. Search is a GET form so the
-        // resulting URL is shareable / bookmarkable. Sort links live
-        // next to the search and pin the current direction.
-        @if !users_list.is_empty() {
-            div style="display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; margin: 0 0 14px;" {
+        // Search stays first in DOM: autofocus + Enter must remain a
+        // safe GET, never the create POST (Pavel's 2026-05-19 bug).
+        div.ed-inbar {
+            @if !users_list.is_empty() {
                 form method="get" action="/admin/users"
-                     style="display: flex; gap: 6px; align-items: baseline;" {
-                    label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                        (crate::i18n::tr(lang, "search", "поиск"))
-                    }
+                     style="display: flex; gap: 6px; align-items: center;" {
+                    span.ed-inbar__label { (crate::i18n::tr(lang, "search", "поиск")) }
                     input type="text" name="q" value=(q_lower)
                           placeholder=(crate::i18n::tr(lang, "user id substring", "подстрока user id"))
-                          autofocus
-                          style="max-width: 200px; padding: 3px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                    @if !sort_kind.is_empty() && sort_kind != "id" {
-                        input type="hidden" name="sort" value=(sort_kind);
-                    }
-                    button type="submit"
-                           title=(crate::i18n::tr(
-                               lang,
-                               "Search user ids by substring (case-insensitive)",
-                               "Поиск user id по подстроке (регистр игнорируется)",
-                           ))
-                           style="padding: 3px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                          autofocus;
+                    @if sort_kind != "id" { input type="hidden" name="sort" value=(sort_kind); }
+                    button.ed-abtn.ed-abtn--secondary.ed-abtn--sm type="submit" {
                         (crate::i18n::tr(lang, "go", "ок"))
                     }
                     @if !q_lower.is_empty() {
-                        a href=(make_sort_href(sort_kind))
-                          style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-left: 4px;" {
+                        a href=(make_sort_href(sort_kind)) style="color: var(--mute);" {
                             (crate::i18n::tr(lang, "× clear", "× очистить"))
                         }
                     }
                 }
-                div style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (crate::i18n::tr(lang, "sort: ", "сортировка: "))
-                    @let sort_link = |kind: &str, label: &str| -> Markup {
-                        let active = sort_kind == kind;
-                        html! {
-                            a href=(make_sort_href(kind))
-                              style=(if active { "color: var(--ink); text-decoration: underline; margin-right: 8px;" } else { "color: var(--mute); margin-right: 8px;" }) {
-                                (label)
-                            }
-                        }
-                    };
-                    (sort_link("id", crate::i18n::tr(lang, "id ↑", "id ↑")))
-                    (sort_link("id-desc", crate::i18n::tr(lang, "id ↓", "id ↓")))
-                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
-                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
-                }
                 @if visible_users != total_users {
-                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                        (crate::i18n::tr(lang, "showing ", "показано "))
-                        (visible_users)
-                        (crate::i18n::tr(lang, " of ", " из "))
-                        (total_users)
+                    span.ed-grid__mut {
+                        (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
+                        (crate::i18n::tr(lang, " of ", " из ")) (total_users)
                     }
                 }
             }
-        }
-
-        // Phase C-3.2 — add-user form, now SECOND in the page (after
-        // search) per the «accidentally typed brat in add-user» bug
-        // 2026-05-19. UUID + tuic_password + sub_token are all
-        // mint-on-server; the operator only types the human-readable
-        // id. **All secrets — UUID, tuic_password, sub_token, AND
-        // the WireGuard keypair — are generated unconditionally**
-        // (per CLAUDE.md "users are maximally low-tech" one-action
-        // ceiling: creation = type id + Enter, no checkboxes for the
-        // operator either). Per-key management (rotate WG, replace
-        // with operator-provided pubkey, etc.) lives on the
-        // user-detail page.
-        //
-        // Visual distinction (dashed border + accent eyebrow tag)
-        // signals «destructive: creates a new row». The search
-        // container above uses no surround at all, so they're hard
-        // to confuse at a glance.
-        div style="margin: 16px 0 28px; padding: 14px 16px; border: 1px dashed var(--accent); background: var(--paper);" {
-            div style="font-family: var(--mono); font-size: 10px; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                (crate::i18n::tr(
-                    lang,
-                    "↓ create a NEW user (mints UUID + keys) ↓",
-                    "↓ создать НОВОГО пользователя (сгенерирует UUID + ключи) ↓",
-                ))
-            }
             form method="post" action="/admin/users"
-                 style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" {
-                label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    (crate::i18n::tr(lang, "new id", "новый id"))
-                }
+                 style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--accent);" {
+                span.ed-inbar__label { (crate::i18n::tr(lang, "new user", "новый пользователь")) }
                 input type="text" name="id" required="required"
                       placeholder="alice"
                       pattern="[a-z0-9._-]{2,32}"
@@ -3100,40 +3060,29 @@ pub(crate) async fn users(
                           "2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type.",
                           "2-32 символа: a-z 0-9 . _ - только. Пробелы превращаются в дефисы; верхний регистр в нижний; остальные символы отбрасываются по мере набора.",
                       ))
-                      style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-                // D1 audit catch — pre-2026-05-22 user-create
-                // produced a user with ZERO grants, then operator
-                // clicked through every server to grant access
-                // (3 servers × every user × manual). Default ON
-                // means «one click = ready to use»; uncheck to
-                // create a deliberately-ungranted user (e.g. test
-                // account, future-server placeholder, paused user).
-                label style="font-family: var(--mono); font-size: 11px; color: var(--ink); display: flex; align-items: center; gap: 4px;"
+                      style="width: 150px;";
+                label style="display: flex; align-items: center; gap: 4px;"
                       title=(crate::i18n::tr(
                           lang,
                           "Grant access to EVERY currently-registered server (default ON). Uncheck to create a user with zero grants — useful for test accounts or paused users.",
                           "Дать доступ КО ВСЕМ зарегистрированным сейчас серверам (по-умолчанию вкл). Сними галку, чтобы создать пользователя без грантов — полезно для тестового или приостановленного аккаунта.",
                       )) {
-                    input type="checkbox" name="grant_all" value="1" checked="checked"
-                          style="margin: 0;";
+                    input type="checkbox" name="grant_all" value="1" checked="checked" style="margin: 0;";
                     (crate::i18n::tr(lang, "grant all servers", "выдать все серверы"))
                 }
-                button type="submit"
+                button.ed-abtn.ed-abtn--recovery.ed-abtn--sm type="submit"
                        title=(crate::i18n::tr(
                            lang,
                            "Mint UUID + tuic_password + sub_token + WG keypair, optionally grant all servers; redirect to /admin/users/<id> where keys are visible",
                            "Сгенерирует UUID + tuic_password + sub_token + WG-пару, по-желанию выдаст все серверы; редирект на /admin/users/<id> где ключи видны",
-                       ))
-                       style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (crate::i18n::tr(lang, "create user", "создать пользователя"))
+                       )) {
+                    (crate::i18n::tr(lang, "create → mints uuid + keys", "создать → uuid + ключи"))
                 }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    (crate::i18n::tr(
-                        lang,
-                        "→ all keys are auto-generated and shown on the user page",
-                        "→ все ключи генерируются автоматически и видны на странице пользователя",
-                    ))
-                }
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "all keys are auto-generated and shown on the user page.",
+                    "Все ключи генерируются автоматически и видны на странице пользователя.",
+                )) { "ⓘ" }
             }
         }
 
@@ -3158,10 +3107,34 @@ pub(crate) async fn users(
                 "."
             }
         } @else {
-            div {
-                @for (display_idx, (_orig_idx, u, g)) in pairs.iter().enumerate() {
-                    (user_row(display_idx, u, *g, lang))
+            table.ed-grid id="users-grid" {
+                thead {
+                    tr {
+                        th { "№" }
+                        th { (crate::i18n::tr(lang, "user", "пользователь")) }
+                        th { (crate::i18n::tr(lang, "presence", "присутствие")) }
+                        th { "uuid" }
+                        th { "sub-token" }
+                        th.num { (crate::i18n::tr(lang, "servers", "серверы")) }
+                        th { (crate::i18n::tr(lang, "keys", "ключи")) }
+                        th {}
+                    }
                 }
+                tbody {
+                    @for (display_idx, (_orig_idx, u, g)) in pairs.iter().enumerate() {
+                        (user_row(
+                            display_idx,
+                            u,
+                            *g,
+                            live_conns_per_user.get(&u.id.0).copied().unwrap_or(0),
+                            lang,
+                        ))
+                    }
+                }
+            }
+            p.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px; margin-top: 8px;" {
+                (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
+                (crate::i18n::tr(lang, " of ", " из ")) (total_users)
             }
         }
     };
@@ -4023,21 +3996,22 @@ async fn user_detail_render(
     .await;
 
     let body = html! {
-            div.ed-art-eyebrow {
+            nav.ed-crumb {
                 a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
                     (crate::i18n::tr(lang, "← all users", "← все пользователи"))
                 }
-                (crate::i18n::tr(lang, "  ·  user", "  ·  пользователь"))
             }
-            h1.ed-art-h1 { (user.id.0) }
-            p.ed-art-deck {
-                "uuid " span.ed-mono { (user.uuid) }
+            div.ed-headrow {
+                h1.ed-sumbar__h { (user.id.0) }
+                (online_badge)
+                div.ed-headrow__actions {
+                    a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
+                      class="ed-abtn ed-abtn--danger ed-abtn--sm" {
+                        (crate::i18n::tr(lang, "delete…", "удалить…"))
+                    }
+                }
             }
-
-            // PR-User user#1 — online-now presence badge, directly under
-            // the user header so «is this person connected right now» is
-            // the first thing the operator sees.
-            (online_badge)
+            div.ed-detail-meta { "uuid " (user.uuid) }
 
             // 2026-05-23 quickfix follow-up — pending-deploy banner.
             // Surfaces servers whose running config doesn't yet include
@@ -4050,8 +4024,8 @@ async fn user_detail_render(
             // Visual: amber border, prominent at the top so it's
             // noticed before the operator starts copying the QR.
             @if !pending_deploy_servers.is_empty() {
-                div style="border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
-                    div style="font-family: var(--serif); font-weight: 500; color: var(--warm); font-size: 14px; margin-bottom: 4px;" {
+                div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 12px 0 16px;" {
+                    div style="font-family: var(--serif); font-weight: 500; color: var(--warm); font-size: 13px;" {
                         (crate::i18n::tr(
                             lang,
                             "⚠ Config not yet deployed to:",
@@ -4066,20 +4040,18 @@ async fn user_detail_render(
                             }
                         }
                     }
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0; font-size: 12px;" {
-                        (crate::i18n::tr(
-                            lang,
-                            "Until you deploy each server above, the user's sing-box entry isn't on the node — REALITY handshake succeeds but VLESS auth silently drops, the client shows «connected» with no traffic. Same incident pattern as 2026-05-23 multiviruss. Or just hit the one-click button below.",
-                            "Пока не задеплоишь каждый сервер выше, запись пользователя в sing-box не попадает на ноду — REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, клиент показывает «подключено» без трафика. Тот же паттерн что инцидент с multiviruss 2026-05-23. Либо просто нажми кнопку ниже.",
-                        ))
-                    }
+                    span.ed-tip title=(crate::i18n::tr(
+                        lang,
+                        "Until deploy, the user's sing-box entry is absent: REALITY handshake succeeds but VLESS auth silently drops, so the client can show connected with no traffic.",
+                        "До деплоя записи пользователя нет в sing-box: REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, поэтому клиент может показывать подключение без трафика.",
+                    )) { "ⓘ" }
                     // One-click fix right here in the user view: deploy every
                     // server (pushes THIS user's UUID onto each granted node).
                     // Reuses the fleet-wide SSE deploy; `data-reload-self`
                     // reloads this user page on done so the banner re-computes
                     // and clears. A down node (fi etc.) is reported ✗ in the
                     // log; the rest still deploy.
-                    div style="margin-top: 10px;" {
+                    div style="margin-left: auto;" {
                         button type="button"
                                data-sse-url="/admin/servers/deploy-all/sse"
                                data-log="user-deploy-log"
@@ -4091,18 +4063,21 @@ async fn user_detail_render(
                                    "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
                                    "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
                                ))
-                               class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
+                               class="ed-abtn ed-abtn--warning ed-abtn--sm" {
                             (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
                         }
-                        pre id="user-deploy-log" hidden
-                            style="margin-top: 10px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
                     }
                 }
+                pre id="user-deploy-log" hidden
+                    style="margin: -8px 0 16px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
             }
 
     @let tab_base = format!("/admin/users/{}", path_segment_encode(&user.id.0));
-    (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", crate::i18n::tr(lang, "Access", "Доступ")), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))]))
+    @let access_tab_label = format!("{} · {}", crate::i18n::tr(lang, "Access", "Доступ"), servers.len());
+    (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", access_tab_label.as_str()), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))]))
     @if tab == UserTab::Overview {
+        div.ed-user-overview {
+            aside.ed-user-overview__sub {
             // Subscription URL + QR — the headline for this page.
             //
             // Two URLs may exist per user post-Phase-5 (ninitux cutover,
@@ -4126,16 +4101,22 @@ async fn user_detail_render(
             // visual review 2026-05-19; this block is the fix.
             div.ed-art-eyebrow style="margin-top: 28px;" {
                 (crate::i18n::tr(lang, "Subscription", "Подписка"))
+                " "
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "The QR and URL are the same ready-to-import artefact. ninitux.com is the production endpoint; the legacy token endpoint is the LAN fallback.",
+                    "QR и URL — один готовый к импорту артефакт. ninitux.com — production endpoint; старый token endpoint — LAN fallback.",
+                )) { "ⓘ" }
             }
             @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
                 (Some(device_id), Some(ninitux), _, _) => {
                     // Primary: ninitux production URL — QR scans this.
-                    div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                    div style="padding: 8px 0;" {
                         (qr_svg(ninitux))
-                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                            div { span style="color: var(--mute);" { "url        " } (ninitux) }
-                            div { span style="color: var(--mute);" { "device_id  " } (device_id) }
-                            div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
+                        div style="font-family: var(--mono); font-size: 11px; line-height: 1.7; min-width: 0;" {
+                            div.ed-user-overview__url { (ninitux) }
+                            div.ed-user-overview__url title=(device_id) { "device " (device_id) }
+                            div style="margin-top: 8px; color: var(--soft); font-family: var(--serif); font-style: italic; font-size: 11px;" {
                                 (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
                                 span.ed-mono { "ninitux.com" }
                                 (crate::i18n::tr(lang, " → vpnctld. ", " → vpnctld. "))
@@ -4182,10 +4163,10 @@ async fn user_detail_render(
                     // as the primary. Operator should pin a device_id to
                     // unlock the ninitux URL (import script or future web
                     // action).
-                    div style="display: flex; gap: 28px; align-items: flex-start; padding: 16px 0;" {
+                    div style="padding: 8px 0;" {
                         (qr_svg(url))
-                        div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                            div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "url   ", "url   ")) } (url) }
+                        div style="font-family: var(--mono); font-size: 11px; line-height: 1.7; min-width: 0;" {
+                            div.ed-user-overview__url { (url) }
                             div { span style="color: var(--mute);" { (crate::i18n::tr(lang, "token ", "token ")) } (mask_secret(token)) }
                             div style="margin-top: 12px; color: var(--soft); font-family: var(--serif); font-style: italic;" {
                                 (crate::i18n::tr(lang, "Legacy ", "Легаси ")) span.ed-mono { "/sub/<token>" }
@@ -4269,6 +4250,17 @@ async fn user_detail_render(
                     }
                 }
             }
+            }
+            section {
+                (user_overview_summary(
+                    &user,
+                    (&lifecycle, access_aggregates.last_seen, &access_aggregates, &ua_clusters),
+                    &traffic_by_server,
+                    (&all_servers, &granted_ids),
+                    lang,
+                ))
+            }
+        }
 
             // WireGuard / AmneziaWG key material + distribution. Always
             // shows the pubkey verbatim (it's public). Private key marker
@@ -5268,7 +5260,7 @@ async fn user_detail_render(
                 }
             }
     }
-    @if tab == UserTab::Overview || tab == UserTab::Activity {
+    @if tab == UserTab::Activity {
 
             // ── PR-User user#4 — sharing-evidence verdict ────────────
             // ONE consolidated verdict line above the per-UA evidence
@@ -5321,9 +5313,6 @@ async fn user_detail_render(
 
     }
     @if tab == UserTab::Overview {
-            // ── PR-User user#5 — lifecycle facts ─────────────────────
-            (user_lifecycle_section(&lifecycle, access_aggregates.last_seen, lang))
-
             // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
             // Show current month-to-date usage + the configured cap
             // (if any) + an inline form to change both, plus the user#3
@@ -5387,27 +5376,6 @@ async fn user_detail_render(
                 }
             }
 
-            div.ed-rule {}
-            div.ed-art-eyebrow style="color: var(--red); margin-top: 24px;" {
-                (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
-            }
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-                (crate::i18n::tr(
-                    lang,
-                    "Deleting drops the user, cascades to grants, and clears the FK on ",
-                    "Удаление сносит пользователя, каскадно убирает grants и очищает FK в ",
-                ))
-                span.ed-mono { "sub_access_log" }
-                (crate::i18n::tr(
-                    lang,
-                    " rows (forensics survive with NULL user_id).",
-                    " (forensics остаётся с NULL user_id).",
-                ))
-            }
-            a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
-              class="ed-abtn ed-abtn--danger" {
-                (crate::i18n::tr(lang, "delete user…", "удалить пользователя…"))
-            }
     }
         };
     Ok(shell("users", &theme, &accent, lang, body))
@@ -5448,7 +5416,7 @@ async fn user_online_badge(
     last_seen: Option<chrono::DateTime<chrono::Utc>>,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::i18n::{K, t, tr};
+    use crate::i18n::tr;
     // Per-server live connection count attributed to this user, plus
     // the set of (server, source_ip) pairs the in-memory attribution
     // map could NOT resolve — candidates for the sourceIP fallback.
@@ -5519,7 +5487,6 @@ async fn user_online_badge(
     let online = total_conns > 0;
 
     html! {
-        div.ed-art-eyebrow style="margin-top: 18px;" { (t(lang, K::EyebrowPresence)) }
         @if online {
             @let server_count = conns_per_server.len();
             @let server_list = conns_per_server
@@ -5527,8 +5494,13 @@ async fn user_online_badge(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
-            p style="font-family: var(--mono); font-size: 13px; margin: 4px 0 0; color: var(--ink);" {
-                "🟢 "
+            span.ed-stat.ed-stat--active
+                title=(tr(
+                    lang,
+                    "Presence — live from each node's clash-api snapshot (≤5 min old). NM-11 fallback attributes unresolved connections by source IP; unseen IPs remain uncounted.",
+                    "Присутствие — live-снимок clash-api каждой ноды (не старше 5 мин). NM-11 fallback атрибутирует соединения по source IP; незнакомые IP не учитываются.",
+                )) {
+                span.ed-stat__dot {}
                 b { (tr(lang, "online", "онлайн")) }
                 " · " (total_conns) " "
                 @if total_conns == 1 { (tr(lang, "conn", "соединение")) }
@@ -5538,15 +5510,10 @@ async fn user_online_badge(
                 @else { (tr(lang, "across ", "на ")) }
                 span.ed-mono { (server_list) }
             }
-            p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 4px 0 0;" {
-                (tr(
-                    lang,
-                    "Live from each node's clash-api snapshot (≤5 min old), attributed by source IP — sing-box doesn't carry the username (NM-11), so a connection whose IP we've never seen on a /sub fetch stays uncounted.",
-                    "Из снэпшота clash-api каждой ноды (не старше 5 мин), атрибуция по source IP — sing-box не передаёт имя юзера (NM-11), поэтому соединение с IP, который мы не видели при запросе /sub, не учитывается.",
-                ))
-            }
         } @else {
-            p style="font-family: var(--mono); font-size: 13px; margin: 4px 0 0; color: var(--mute);" {
+            span.ed-stat.ed-stat--unknown
+                title=(tr(lang, "Presence — no live connection in the latest clash-api snapshots.", "Присутствие — в последних снимках clash-api нет активных соединений.")) {
+                span.ed-stat__dot {}
                 (tr(lang, "offline", "офлайн"))
                 " · "
                 @match last_seen {
@@ -5641,6 +5608,128 @@ fn user_detail_traffic_by_server_section(
     }
 }
 
+/// Densified overview for the user-detail right column: four facts,
+/// 24h traffic split, and the grant summary. It only rearranges data
+/// already loaded by `user_detail_render`; no extra query or client state.
+fn user_overview_summary(
+    user: &vpnctl_core::User,
+    facts: (
+        &vpnctl_inventory::UserLifecycle,
+        Option<chrono::DateTime<chrono::Utc>>,
+        &vpnctl_inventory::SubAccessAggregates,
+        &[vpnctl_inventory::UaCluster],
+    ),
+    traffic: &[(vpnctl_core::ServerId, u64, u64)],
+    inventory: (
+        &[vpnctl_core::Server],
+        &std::collections::HashSet<vpnctl_core::ServerId>,
+    ),
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let (lifecycle, last_seen, aggregates, ua_clusters) = facts;
+    let (all_servers, granted_ids) = inventory;
+    let likely_shared = user_is_likely_shared(aggregates, ua_clusters);
+    let traffic_total: u64 = traffic
+        .iter()
+        .map(|(_, up, down)| up.saturating_add(*down))
+        .sum();
+
+    html! {
+        div.ed-fact-grid aria-label=(tr(lang, "Lifecycle and sharing summary", "Жизненный цикл и sharing summary")) {
+            div.ed-fact title=(tr(lang, "Heuristic over the 30-day subscription-access window; cross-check Activity before acting.", "Эвристика по 30-дневному окну обращений к подписке; перед действием сверься с Activity.")) {
+                div.ed-fact__k { (tr(lang, "Sharing verdict", "Вердикт по расшариванию")) " ⓘ" }
+                div.ed-fact__v style=(if likely_shared { "color: var(--warm); font-weight: 600;" } else { "color: var(--green);" }) {
+                    @if likely_shared { (tr(lang, "likely shared", "вероятно расшарен")) }
+                    @else { (tr(lang, "single-user", "один пользователь")) }
+                    " · " (aggregates.distinct_ips) " IP · " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN")) " · " (aggregates.distinct_countries) " " (tr(lang, "countries", "стран"))
+                }
+            }
+            div.ed-fact title=(tr(lang, "When this inventory row was created.", "Когда создана запись в инвентаре.")) {
+                div.ed-fact__k { (tr(lang, "created", "создан")) }
+                div.ed-fact__v { (format_msk_iso(lifecycle.created_at)) " · " (lifecycle.age_days) (tr(lang, "d", "д")) }
+            }
+            div.ed-fact title=(tr(lang, "Most recent subscription fetch or attributed VPN tick.", "Последнее обращение к подписке или атрибутированный VPN-тик.")) {
+                div.ed-fact__k { (tr(lang, "last seen", "последний раз")) }
+                div.ed-fact__v {
+                    @match last_seen {
+                        Some(ts) => (format_msk_iso(ts)),
+                        None => (tr(lang, "never", "никогда")),
+                    }
+                }
+            }
+            div.ed-fact title=(tr(lang, "Most recent real, non-egress subscription fetch; clients normally poll every 3600s.", "Последнее реальное не-egress обращение к подписке; клиенты обычно опрашивают раз в 3600с.")) {
+                div.ed-fact__k { (tr(lang, "last fetch", "последний fetch")) }
+                div.ed-fact__v {
+                    @match lifecycle.last_sub_fetch {
+                        Some(ts) => (format_msk_iso(ts)),
+                        None => (tr(lang, "never · polls 3600s", "никогда · опрос 3600с")),
+                    }
+                }
+            }
+        }
+
+        section style="margin-top: 18px;" {
+            div.ed-art-eyebrow {
+                (tr(lang, "Traffic by server · 24h", "Трафик по серверам · 24ч")) " "
+                span.ed-tip title=(tr(lang, "Per-server upload and download attributed to this user from clash-api ticks.", "Upload и download по серверам, атрибутированные этому пользователю из clash-api тиков.")) { "ⓘ" }
+            }
+            @if traffic.is_empty() {
+                p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
+                    (tr(lang, "No per-server traffic recorded yet (NM-11).", "Трафик по серверам пока не записан (NM-11)."))
+                }
+            } @else {
+                table.ed-grid style="margin-top: 8px;" {
+                    thead { tr { th { (tr(lang, "server", "сервер")) } th.num { (tr(lang, "uploaded", "отправлено")) } th.num { (tr(lang, "downloaded", "принято")) } th.num { (tr(lang, "total", "всего")) } th { (tr(lang, "share", "доля")) } } }
+                    tbody {
+                        @for (sid, up, down) in traffic {
+                            @let total = up.saturating_add(*down);
+                            @let share = total.saturating_mul(100).checked_div(traffic_total).unwrap_or(0);
+                            tr {
+                                td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (sid.0) } }
+                                td.num { (humanize_bytes(*up)) }
+                                td.num { (humanize_bytes(*down)) }
+                                td.num { b { (humanize_bytes(total)) } }
+                                td { div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        section style="margin-top: 18px;" {
+            div.ed-art-eyebrow { (tr(lang, "Access", "Доступ")) " · " (granted_ids.len()) " " (tr(lang, "servers granted", "серверов выдано")) }
+            div.ed-grants-summary {
+                @for server in all_servers {
+                    @if granted_ids.contains(&server.id) {
+                        a.ed-grant-chip.on href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) { "✓ " (server.id.0) }
+                    } @else {
+                        form method="post" action=(format!("/admin/users/{}/grants/{}", path_segment_encode(&user.id.0), path_segment_encode(&server.id.0))) {
+                            button.ed-grant-chip.off type="submit" title=(tr(lang, "Grant this server", "Выдать этот сервер")) {
+                                (server.id.0) " — " (tr(lang, "not granted · grant →", "не выдан · выдать →"))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn user_is_likely_shared(
+    aggregates: &vpnctl_inventory::SubAccessAggregates,
+    ua_clusters: &[vpnctl_inventory::UaCluster],
+) -> bool {
+    aggregates.distinct_asns >= 3
+        || ua_clusters.iter().any(|c| {
+            matches!(
+                ua_verdict(c.distinct_ips, c.distinct_slash16),
+                UaVerdict::LikelyShared
+            )
+        })
+}
+
 /// user#4 — one consolidated sharing-evidence verdict line. Folds the
 /// 30-day `sub_access_aggregates_for_user` spread (distinct IPs / ASNs
 /// / countries) with the UA-cluster `/16` spread (reusing the exact
@@ -5654,20 +5743,15 @@ fn user_sharing_verdict_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // ASN spread is the strongest single-query signal (a sub URL
-    // fetched from ≥3 distinct ASNs left one human's device fleet).
-    // Mirror the dashboard's likely-shared threshold.
-    const SHARED_ASN_THRESHOLD: u64 = 3;
-    // Reuse the Track-4 UA heuristic verbatim: any UA cluster whose
-    // /16 spread trips `ua_verdict` → LikelyShared counts as evidence.
+    // Reuse the exact overview heuristic so the summary and Activity
+    // evidence can never disagree.
     let ua_shared = ua_clusters.iter().any(|c| {
         matches!(
             ua_verdict(c.distinct_ips, c.distinct_slash16),
             UaVerdict::LikelyShared
         )
     });
-    let asn_shared = aggregates.distinct_asns >= SHARED_ASN_THRESHOLD;
-    let likely_shared = ua_shared || asn_shared;
+    let likely_shared = user_is_likely_shared(aggregates, ua_clusters);
 
     html! {
         div.ed-rule {}
@@ -6051,75 +6135,6 @@ fn user_source_ips_section(
 }
 
 /// user#5 — lifecycle facts: created · last seen · last fetch · age.
-/// `lifecycle` is Q-4d (`user_lifecycle`), carrying created_at,
-/// last_sub_fetch and age_days. `last_seen` is the most recent activity
-/// of any kind, sourced from `sub_access_aggregates_for_user.last_seen`
-/// (passed in to avoid a re-query). Renders timestamps via the shared
-/// `format_msk_iso`.
-fn user_lifecycle_section(
-    lifecycle: &vpnctl_inventory::UserLifecycle,
-    last_seen: Option<chrono::DateTime<chrono::Utc>>,
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "Lifecycle", "Жизненный цикл")) }
-        div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 10px 0 0; font-family: var(--serif);" {
-            div title=(tr(lang, "When this user row was created (users.created_at).", "Когда создана запись пользователя (users.created_at).")) {
-                div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                    (format_msk_iso(lifecycle.created_at))
-                }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (tr(lang, "created", "создан"))
-                }
-            }
-            div title=(tr(lang, "Most recent activity of any kind seen for this user (last /sub fetch or VPN tick).", "Последняя любая активность юзера (последнее обращение /sub или VPN-тик).")) {
-                @match last_seen {
-                    Some(ts) => {
-                        div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                            (format_msk_iso(ts))
-                        }
-                    }
-                    None => {
-                        div style="font-size: 16px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
-                            (tr(lang, "never", "никогда"))
-                        }
-                    }
-                }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (tr(lang, "last seen", "последний раз"))
-                }
-            }
-            div title=(tr(lang, "Most recent real (non-egress) /sub subscription fetch.", "Последнее реальное (не-egress) обращение к подписке /sub.")) {
-                @match lifecycle.last_sub_fetch {
-                    Some(ts) => {
-                        div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                            (format_msk_iso(ts))
-                        }
-                    }
-                    None => {
-                        div style="font-size: 16px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
-                            (tr(lang, "never", "никогда"))
-                        }
-                    }
-                }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (tr(lang, "last fetch", "последнее обращение"))
-                }
-            }
-            div title=(tr(lang, "Whole days since the user row was created.", "Целых дней с момента создания записи юзера.")) {
-                div style="font-size: 16px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                    (lifecycle.age_days) " " (tr(lang, "days", "дн"))
-                }
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                    (tr(lang, "age", "возраст"))
-                }
-            }
-        }
-    }
-}
-
 /// Phase Track-4 — UA fingerprint heuristic. Renders one row per
 /// distinct User-Agent that has hit this user's `/sub` URL in the
 /// last 24h, with a "likely roaming" / "likely shared URL" label.
@@ -14578,21 +14593,80 @@ async fn server_detail_render(
         .collect();
 
     let body = html! {
-        nav style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 12px;" {
+        nav.ed-crumb {
             a href="/admin/servers" style="color: var(--mute); text-decoration: none;" {
-                "← all servers"
+                "← " (crate::i18n::tr(lang, "all servers", "все серверы"))
             }
         }
-        div.ed-art-eyebrow { "Server detail" }
-        h1.ed-art-h1 { (server.id.0) }
-        p.ed-art-deck {
-            span.ed-mono { (server.address) ":" (server.ssh_port) }
-            " · ssh as " span.ed-mono { (server.ssh_user) }
-            " · "
-            @if server.kernels.len() == 1 { "kernel " } @else { "kernels " }
-            span.ed-mono {
-                (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+        div.ed-headrow {
+            h1.ed-sumbar__h { (server.id.0) }
+            @if let Some(h) = latest.as_ref() {
+                @if h.sing_box_active == Some(true) {
+                    span.ed-stat.ed-stat--active {
+                        span.ed-stat__dot {}
+                        (crate::i18n::tr(lang, "up", "работает"))
+                        " · " (crate::i18n::tr(lang, "probe ", "проба "))
+                        (humanize_age(chrono::Utc::now() - h.ts, lang))
+                    }
+                } @else if h.sing_box_active == Some(false) {
+                    span.ed-stat.ed-stat--failed {
+                        span.ed-stat__dot {}
+                        (crate::i18n::tr(lang, "down", "не работает"))
+                        " · " (crate::i18n::tr(lang, "probe ", "проба "))
+                        (humanize_age(chrono::Utc::now() - h.ts, lang))
+                    }
+                } @else {
+                    span.ed-stat.ed-stat--unknown {
+                        span.ed-stat__dot {}
+                        (crate::i18n::tr(lang, "unknown", "неизвестно"))
+                    }
+                }
             }
+            div.ed-headrow__actions {
+                button type="button"
+                       data-sse-url=(format!("/admin/servers/{}/update-kernels/sse", path_segment_encode(&server.id.0)))
+                       data-log="update-kernels-log"
+                       data-busy-label=(crate::i18n::tr(lang, "updating kernels… (watch the log)", "обновляю ядра… (смотри лог)"))
+                       data-retry-label=(crate::i18n::tr(lang, "retry update", "повторить обновление"))
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Upgrade the kernel binaries only: streamed live, this probes each declared kernel's version, upgrades the package (apt upgrade), restarts the service, then probes the version again. The running config is left untouched, so this is safe on an inventory-drift node.",
+                           "Обновить только бинарники ядер: с живым логом — снять версию каждого ядра, обновить пакет (apt upgrade), перезапустить сервис и снять версию снова. Рабочий конфиг не меняется, поэтому действие безопасно при дрейфе инвентаря.",
+                       ))
+                       class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                    (crate::i18n::tr(lang, "update kernels", "обновить ядра"))
+                }
+                button id="deploy-button" type="button"
+                       data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
+                       data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
+                       data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Full deploy: streamed live — mint missing per-protocol secrets, SSH into the node, run ensure_installed + apply_config for every enabled kernel, and restart services. Each step and the final status appear in the log below. Re-clicking is safe.",
+                           "Полный деплой с живым логом: дораздать недостающие секреты, подключиться к ноде по SSH, выполнить ensure_installed + apply_config для каждого включённого ядра и перезапустить сервисы. Каждый шаг и итог появятся в логе ниже. Повторный клик безопасен.",
+                       ))
+                       class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
+                    (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                }
+                noscript {
+                    form method="post"
+                         action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
+                         style="display: inline;" {
+                        button type="submit" class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
+                            (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                        }
+                    }
+                }
+            }
+        }
+        div.ed-detail-meta {
+            (server.address) ":" (server.ssh_port)
+            " · " (crate::i18n::tr(lang, "ssh as ", "ssh как ")) (server.ssh_user)
+            " · "
+            @if server.kernels.len() == 1 { (crate::i18n::tr(lang, "kernel ", "ядро ")) }
+            @else { (crate::i18n::tr(lang, "kernels ", "ядра ")) }
+            (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            " · " (crate::i18n::tr(lang, "hoster ", "хостер ")) (server.hoster)
         }
 
         // Operator-facing Deploy button. Per CLAUDE.md "Web is the
@@ -14627,100 +14701,10 @@ async fn server_detail_render(
                 ))
             }
         }
-        div id="deploy-button" style="margin: 12px 0 18px;" {
-            // JS-driven: streams per-step progress + terminal status
-            // into the log pane below via SSE (admin.js wires the
-            // `data-sse-url`). The terminal event is `error` when any
-            // kernel step failed — so the operator sees failure, not a
-            // silent "success" redirect.
-            button type="button"
-                   data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
-                   data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
-                   data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
-                   title=(crate::i18n::tr(
-                       lang,
-                       "Full deploy: streamed live — mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Each step + the final status appears in the log below. Re-clicking is safe — already-present secrets and kernels are skipped.",
-                       "Полный деплой с живым логом: дораздать недостающие per-protocol секреты, затем SSH в ноду и запустить apt-get install + render-config + systemctl restart для каждого включённого ядра. Каждый шаг + финальный статус появятся в логе ниже. Повторный клик безопасен — уже существующие секреты и ядра пропускаются.",
-                   ))
-                   class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
-            }
-            // No-JS fallback: the original synchronous POST still works
-            // (it just lacks the live log — the browser blocks until the
-            // deploy returns, then redirects).
-            noscript {
-                form method="post"
-                     action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
-                     style="display: inline;" {
-                    button type="submit"
-                           class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                        (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
-                    }
-                }
-            }
-            // Live log pane — hidden until the operator clicks deploy.
-            pre id="deploy-log" hidden
-                style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
-            span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                (crate::i18n::tr(lang, "Mints missing secrets, SSH-pushes ", "Создаёт недостающие секреты, SSH-пушит "))
-                span.ed-mono
-                    title=(crate::i18n::tr(
-                        lang,
-                        "ensure_installed: run the kernel's package install on the node (e.g. apt-get install sing-box). Skipped if the binary is already present at the expected version.",
-                        "ensure_installed: запустить установку пакета ядра на ноде (напр. apt-get install sing-box). Пропускается если бинарь уже стоит нужной версии.",
-                    )) {
-                    "ensure_installed"
-                }
-                " + "
-                span.ed-mono
-                    title=(crate::i18n::tr(
-                        lang,
-                        "apply_config: re-render the kernel's config file (e.g. /etc/sing-box/config.json) from the current inventory state + push it to the node + systemctl restart. Brief connection drop (~1-2 sec) for live clients; they reconnect transparently.",
-                        "apply_config: перерендерить конфиг ядра (напр. /etc/sing-box/config.json) из текущего инвентаря + запушить на ноду + systemctl restart. Кратковременный разрыв (~1-2 сек) для живых клиентов; переподключение прозрачное.",
-                    )) {
-                    "apply_config"
-                }
-                (crate::i18n::tr(
-                    lang,
-                    " for every kernel, restarts the service. Subscription URLs reflect the new config immediately.",
-                    " для каждого ядра, рестартует сервис. URL подписок отражают новый конфиг сразу.",
-                ))
-            }
-            (crate::i18n::tr(lang, " · hoster ", " · хостер ")) b { (server.hoster) }
-        }
-
-        // "Update kernels" (update-kernels PR2) — upgrade ONLY the kernel
-        // binaries (apt upgrade + service restart) without touching the
-        // running config. Streamed via the same generic admin.js
-        // [data-sse-url]+[data-log] wiring as Deploy, but its OWN log pane
-        // (`update-kernels-log`) so it doesn't collide with `deploy-log`.
-        // Safe on inventory-drift nodes — it never re-renders the config,
-        // so it can't shrink the live user set.
-        div id="update-kernels-button" style="margin: 12px 0 18px;" {
-            button type="button"
-                   data-sse-url=(format!("/admin/servers/{}/update-kernels/sse", path_segment_encode(&server.id.0)))
-                   data-log="update-kernels-log"
-                   data-busy-label=(crate::i18n::tr(lang, "updating kernels… (watch the log)", "обновляю ядра… (смотри лог)"))
-                   data-retry-label=(crate::i18n::tr(lang, "retry update", "повторить обновление"))
-                   title=(crate::i18n::tr(
-                       lang,
-                       "Upgrade the kernel binaries only: streamed live, this probes each declared kernel's version, upgrades the package (apt upgrade), restarts the service, then probes the version again — before → after lands in the log below. The running config is left untouched, so this is safe to run on a node whose inventory has drifted. Re-clicking is safe — an already-current binary is a no-op.",
-                       "Обновить только бинарники ядер: с живым логом — снимает версию каждого объявленного ядра, обновляет пакет (apt upgrade), рестартует сервис и снимает версию снова — до → после появится в логе ниже. Рабочий конфиг не трогается, поэтому безопасно на ноде с дрейфом инвентаря. Повторный клик безопасен — уже актуальный бинарь = no-op.",
-                   ))
-                   class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
-                (crate::i18n::tr(lang, "update kernels →", "обновить ядра →"))
-            }
-            // Live log pane — hidden until the operator clicks update.
-            pre id="update-kernels-log" hidden
-                style="margin-top: 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
-            span style="margin-left: 12px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                (crate::i18n::tr(
-                    lang,
-                    "Upgrades the kernel binaries and restarts the service; the running config is untouched. Safe on a node whose inventory has drifted.",
-                    "Обновляет бинарники ядер и рестартует сервис; рабочий конфиг не трогается. Безопасно на ноде с дрейфом инвентаря.",
-                ))
-            }
-        }
+        pre id="deploy-log" hidden
+            style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
+        pre id="update-kernels-log" hidden
+            style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
 
         // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
@@ -14731,29 +14715,40 @@ async fn server_detail_render(
         // each group below renders only on its own tab. Bare
         // /admin/servers/{id} == the `status` tab.
         @let tab_base = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
+        @let protocols_tab_label = if latest.is_none() || (missing.is_empty() && extra.is_empty()) {
+            crate::i18n::tr(lang, "Protocols", "Протоколы").to_string()
+        } else {
+            format!("{} ⚠", crate::i18n::tr(lang, "Protocols", "Протоколы"))
+        };
+        @let grants_tab_label = format!("{} · {}", crate::i18n::tr(lang, "Grants", "Гранты"), user_count);
         (detail_tabs(&tab_base, tab.slug(), &[
             ("status", crate::i18n::tr(lang, "Status", "Статус")),
             ("activity", crate::i18n::tr(lang, "Activity", "Активность")),
-            ("protocols", crate::i18n::tr(lang, "Protocols", "Протоколы")),
-            ("grants", crate::i18n::tr(lang, "Grants", "Гранты")),
+            ("protocols", protocols_tab_label.as_str()),
+            ("grants", grants_tab_label.as_str()),
             ("setup", crate::i18n::tr(lang, "Setup", "Настройка")),
         ]))
 
         // ── STATUS (default) — "is the node healthy, what changed".
         @if tab == ServerTab::Status {
-            // Rolling uptime SLO (24h/7d/30d); nothing when no probes.
-            (server_detail_uptime_section(
-                uptime_24h.as_ref(),
-                uptime_7d.as_ref(),
-                uptime_30d.as_ref(),
-                lang,
-            ))
-            // A3 — 24h resource trend sparklines (disk, mem, log size).
-            (server_detail_resource_trend_section(&trend_rows, lang))
-            // Drift SUMMARY only — the verdict + counts. The full
-            // declared-vs-observed grid + observed-socket list (100+
-            // rows on wgturn/xray nodes) live on the protocols tab.
-            (server_detail_drift_summary(&missing, &extra, latest.is_some(), &tab_base, lang))
+            div.ed-detail-grid {
+                div {
+                    // Rolling uptime SLO (24h/7d/30d) + compact drift
+                    // verdict form the left scan column.
+                    (server_detail_uptime_section(
+                        uptime_24h.as_ref(),
+                        uptime_7d.as_ref(),
+                        uptime_30d.as_ref(),
+                        lang,
+                    ))
+                    (server_detail_drift_summary(&missing, &extra, latest.is_some(), &tab_base, lang))
+                }
+                div {
+                    // The three 24h resource sparklines own the wider
+                    // right column so trend shape stays legible.
+                    (server_detail_resource_trend_section(&trend_rows, lang))
+                }
+            }
             // server#7 — server-scoped audit timeline (last 20).
             (server_detail_audit_section(&server_audit, lang))
         }
@@ -15057,7 +15052,7 @@ fn server_detail_uptime_section(
         return html! {};
     }
 
-    let chip = |label: &str, stat: Option<&vpnctl_inventory::UptimeStat>| -> Markup {
+    let row = |label: &str, stat: Option<&vpnctl_inventory::UptimeStat>| -> Markup {
         let pct = stat.and_then(|s| s.uptime_pct);
         let color = pct_color(pct);
         let pct_text = pct_label(pct, lang);
@@ -15072,19 +15067,14 @@ fn server_detail_uptime_section(
         // disk-pressure tile at 100%).
         let pct_attr = pct.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
         html! {
-            div data-uptime-pct=(pct_attr)
-                style="display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid var(--rule); background: var(--paper); min-width: 110px;" {
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase;" {
-                    (label)
-                }
-                div style=(format!("font-family: var(--serif); font-weight: 500; color: {color}; font-size: 22px; line-height: 1;")) {
+            tr data-uptime-pct=(pct_attr) {
+                th { (label) }
+                td.num style=(format!("font-family: var(--serif); font-weight: 600; color: {color};")) {
                     (pct_text)
                 }
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                td.num.ed-grid__mut.ed-grid__sm {
                     (row_count) " " (tr(lang, "probes", "проб"))
-                    @if down_count > 0 {
-                        " · " (down_count) " " (tr(lang, "down", "падений"))
-                    }
+                    @if down_count > 0 { " · " (down_count) " " (tr(lang, "down", "падений")) }
                 }
             }
         }
@@ -15109,21 +15099,22 @@ fn server_detail_uptime_section(
         .unwrap_or(false);
 
     html! {
-        div #uptime-section style="margin-top: 18px;" {
+        section #uptime-section style="margin-top: 18px;" {
             div.ed-art-eyebrow {
                 (tr(lang, "Uptime · sing-box service", "Uptime · сервис sing-box"))
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 4px 0 12px;" {
-                (tr(
+                " "
+                span.ed-tip title=(tr(
                     lang,
-                    "Rolling-window aggregate over `sing_box_active` from the node_probe poller (10-min default tick). \u{00ab}up\u{00bb} = systemctl reports active at probe time. Unknown probes (e.g. probe ran but sing-box wasn't installed yet) are excluded from the denominator.",
-                    "Скользящие окна агрегата `sing_box_active` от node_probe-поллера (по умолчанию тик 10 минут). \u{00ab}up\u{00bb} = systemctl показал active в момент пробы. Неопределённые пробы (например проба прошла а sing-box ещё не установлен) не учитываются в знаменателе.",
-                ))
+                    "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means systemctl reported active at probe time; unknown probes are excluded from the denominator.",
+                    "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что systemctl показал active; неопределённые пробы не входят в знаменатель.",
+                )) { "ⓘ" }
             }
-            div style="display: flex; gap: 12px; flex-wrap: wrap;" {
-                (chip(tr(lang, "last 24h", "24 часа"), u24h))
-                (chip(tr(lang, "last 7d",  "7 дней"),  u7d))
-                (chip(tr(lang, "last 30d", "30 дней"), u30d))
+            table.ed-grid style="margin-top: 8px;" {
+                tbody {
+                    (row(tr(lang, "last 24h", "24 часа"), u24h))
+                    (row(tr(lang, "last 7d",  "7 дней"),  u7d))
+                    (row(tr(lang, "last 30d", "30 дней"), u30d))
+                }
             }
             @if last_outage.is_some() || stale {
                 div style="margin-top: 12px; font-family: var(--mono); font-size: 11px; color: var(--mute); display: flex; flex-direction: column; gap: 4px;" {
@@ -15210,17 +15201,21 @@ fn server_detail_hero(
             }
         })
         .unwrap_or("?");
-    let disk_pct = h
+    let disk_used_pct = h
         .disk_used_mib
         .zip(h.disk_total_mib)
         .filter(|(_, t)| *t > 0)
-        .map(|(u, t)| format!("{}%", (u * 100 / t).min(100)))
+        .map(|(u, t)| (u * 100 / t).min(100));
+    let disk_pct = disk_used_pct
+        .map(|pct| format!("{pct}%"))
         .unwrap_or("?".into());
-    let mem_pct = h
+    let mem_used_pct = h
         .mem_available_mib
         .zip(h.mem_total_mib)
         .filter(|(_, t)| *t > 0)
-        .map(|(a, t)| format!("{}%", 100u64.saturating_sub(a * 100 / t)))
+        .map(|(a, t)| 100u64.saturating_sub(a * 100 / t));
+    let mem_pct = mem_used_pct
+        .map(|pct| format!("{pct}%"))
         .unwrap_or("?".into());
     let load = h
         .load_1min_x100
@@ -15247,29 +15242,29 @@ fn server_detail_hero(
     };
 
     html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow {
-            (tr(lang, "Live status · last probe ", "Живой статус · последний probe "))
-            span style="color: var(--mute);" {
-                (format_msk_iso(h.ts))
-            }
-        }
-        div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
-            (status_tile("sing-box", sb, sb_color))
-            (status_tile("fail2ban", f2b, f2b_color))
-            (status_tile(tr(lang, "disk used", "диск занят"), &disk_pct, "var(--ink)"))
-            (status_tile(tr(lang, "memory used", "память занята"), &mem_pct, "var(--ink)"))
-            (status_tile(tr(lang, "1-min load", "load 1мин"), &load, "var(--ink)"))
-            (status_tile(tr(lang, "sing-box log", "лог sing-box"), &log_size, log_alert_color))
+        div.ed-status-strip title=(format!("{} · {}", tr(lang, "last probe", "последняя проба"), format_msk_iso(h.ts))) {
+            (status_tile_with_warn("sing-box", sb, sb_color, h.sing_box_active == Some(false)))
+            (status_tile_with_warn("fail2ban", f2b, f2b_color, h.fail2ban_active == Some(false)))
+            (status_tile_with_warn(tr(lang, "disk used", "диск занят"), &disk_pct, "var(--ink)", disk_used_pct.is_some_and(|v| v > 70)))
+            (status_tile_with_warn(tr(lang, "memory used", "память занята"), &mem_pct, "var(--ink)", mem_used_pct.is_some_and(|v| v > 70)))
+            (status_tile_with_warn(tr(lang, "1-min load", "load 1мин"), &load, "var(--ink)", false))
+            (status_tile_with_warn(tr(lang, "sing-box log", "лог sing-box"), &log_size, log_alert_color, h.sing_box_log_bytes.is_some_and(|b| b > 500 * 1024 * 1024)))
         }
     }
 }
 
 fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
+    status_tile_with_warn(label, value, value_color, false)
+}
+
+fn status_tile_with_warn(label: &str, value: &str, value_color: &str, warn: bool) -> Markup {
     html! {
-        div style="border: 1px solid var(--rule); padding: 10px 12px; background: var(--paper);" {
-            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" { (label) }
-            div style=(format!("font-family: var(--serif); font-size: 22px; color: {value_color}; margin-top: 2px;")) { (value) }
+        div class=(if warn { "ed-status-tile warn" } else { "ed-status-tile" }) {
+            div.ed-status-tile__k { (label) }
+            div.ed-status-tile__v style=(format!("color: {value_color};")) {
+                (value)
+                @if warn { " ⚠" }
+            }
         }
     }
 }
@@ -15348,26 +15343,30 @@ fn server_detail_resource_trend_section(
         .collect();
 
     let n_samples = chronological.len();
+    let max_value = |series: &[f64]| series.iter().copied().reduce(f64::max).unwrap_or_default();
+    let disk_max = max_value(&disk_pct_series);
+    let mem_max = max_value(&mem_used_pct_series);
+    let log_max = max_value(&log_mib_series);
     html! {
-        section id="resource-trend" style="margin-top: 28px;" {
+        section id="resource-trend" style="margin-top: 18px;" {
             div.ed-art-eyebrow {
                 (tr(lang, "Resource trend · last 24h", "Тренд ресурсов · последние 24ч"))
-            }
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
-                (tr(
+                " "
+                span.ed-tip title=(tr(
                     lang,
                     "10-min probe snapshots over the last 24h. Sparkline reads left-to-right (oldest → newest); the «max» label on each chart is the peak in the window. Use these to tell a slow leak (climbing line) from a transient burst (flat line, one spike).",
                     "10-минутные снимки probe за последние 24 часа. Sparkline читается слева-направо (старое → новое); метка «max» в каждом графике — пик за окно. Помогает отличить медленную утечку (растущая линия) от кратковременного всплеска (плоская линия с одним пиком).",
-                ))
+                )) { "ⓘ" }
             }
-            div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;" {
+            div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 8px;" {
                 div {
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "Disk %", "Диск %"))
                     }
                     (sparkline_svg(&disk_pct_series, 280, 60))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                        (disk_pct_series.len()) " " (tr(lang, "samples", "точек"))
+                        (tr(lang, "max ", "макс ")) (format!("{disk_max:.0}%"))
+                        " · " (disk_pct_series.len()) " " (tr(lang, "samples", "точек"))
                     }
                 }
                 div {
@@ -15375,8 +15374,10 @@ fn server_detail_resource_trend_section(
                         (tr(lang, "Mem used %", "Память исп. %"))
                     }
                     (sparkline_svg(&mem_used_pct_series, 280, 60))
-                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                        (mem_used_pct_series.len()) " " (tr(lang, "samples", "точек"))
+                    div style=(if mem_max > 70.0 { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
+                        (tr(lang, "max ", "макс ")) (format!("{mem_max:.0}%"))
+                        @if mem_max > 70.0 { " ⚠" }
+                        " · " (mem_used_pct_series.len()) " " (tr(lang, "samples", "точек"))
                     }
                 }
                 div {
@@ -15385,7 +15386,8 @@ fn server_detail_resource_trend_section(
                     }
                     (sparkline_svg(&log_mib_series, 280, 60))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                        (log_mib_series.len()) " " (tr(lang, "samples · alert at 500 MiB", "точек · алерт на 500 MiB"))
+                        (tr(lang, "max ", "макс ")) (format!("{log_max:.0} MiB"))
+                        " · " (log_mib_series.len()) " " (tr(lang, "samples", "точек"))
                     }
                 }
             }
