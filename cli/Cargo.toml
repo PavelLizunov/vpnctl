@@ -32,6 +32,10 @@ qrcode = { version = "0.14", default-features = false }
 # Downloads DB-IP Lite (CC-BY 4.0, no signup) MMDB files, validates
 # them, atomic-renames into VPNCTLD_GEOIP_DIR. rustls features
 # (no openssl-sys / native-tls per workspace invariants).
+# Keep `default-features = false` and DO NOT add `http3` — that gates
+# reqwest's optional quinn/quinn-proto dep (RUSTSEC-2026-0185). We only
+# do plain HTTPS GETs, so quinn stays out of the compiled graph; the
+# lock still version-pins it (deactivated optional dep) at a patched rev.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 flate2 = "1"
