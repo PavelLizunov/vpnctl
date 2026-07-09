@@ -12,6 +12,10 @@
   --paper:   oklch(0.965 0.012 80);
   --paper-2: oklch(0.945 0.014 80);
   --paper-3: oklch(0.925 0.018 80);
+  /* alias — admin.rs log panes have referenced var(--paper-tint) since the
+     first SSE pane; the token was never defined (silent transparent).
+     Per-theme --paper-2 tracks automatically via the cascade. */
+  --paper-tint: var(--paper-2);
   --ink:     oklch(0.20 0.020 80);
   --soft:    oklch(0.42 0.018 80);
   --mute:    oklch(0.58 0.014 80);
@@ -500,6 +504,79 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 .ed-sumbar__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; flex: 0 0 auto; }
 .ed-tip { cursor: help; color: var(--dim); font-size: 11px; user-select: none; }
 .ed-tip:hover { color: var(--acc); }
+
+/* ── dense data table (densification workhorse) ──
+   Replaces card grids + prose decks with scannable mono rows. All colours
+   from theme tokens so it reads in cream / newsprint / foxed / ink themes.
+   Heat cells (`td.warn`) + row tints (`tr.on-warn`/`tr.on-green`) surface a
+   threshold crossing without a new colour — a paper-toned mix of the status
+   token. Design handoff `design_handoff_vpnctl_densify` (variant 1b). */
+.ed-grid { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+.ed-grid caption { text-align: left; }
+.ed-grid th {
+  font-weight: 500; font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  text-align: left; color: var(--mute); background: var(--paper-2);
+  border: 1px solid var(--rule); padding: 6px 10px; white-space: nowrap;
+}
+.ed-grid td {
+  border: 1px solid var(--paper-3); padding: 7px 10px;
+  color: var(--ink); vertical-align: baseline;
+}
+.ed-grid th.num, .ed-grid td.num { text-align: right; }
+.ed-grid a { color: var(--ink); text-decoration: none; }
+.ed-grid a:hover { text-decoration: underline; }
+.ed-grid__id { font-family: var(--serif); font-weight: 600; font-size: 14px; color: var(--ink); }
+.ed-grid__mut { color: var(--mute); }
+.ed-grid__sm { font-size: 10.5px; }
+.ed-grid__open { font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--acc); }
+.ed-grid__flag { color: var(--warm); cursor: help; }               /* the ⚠ / ≠ / +N-hidden marker */
+/* heat: a cell that crossed a watermark (MEM/DISK > threshold) */
+.ed-grid td.warn {
+  background: color-mix(in oklab, var(--warm) 15%, var(--paper));
+  color: var(--warm); font-weight: 700;
+}
+/* row tints — problem node / online user; a faint status wash, not a new hue */
+.ed-grid tr.on-warn > td { background: color-mix(in oklab, var(--warm) 9%, var(--paper)); }
+.ed-grid tr.on-green > td { background: color-mix(in oklab, var(--green) 8%, var(--paper)); }
+/* inline add/action bar — the densified replacement for a boxed form */
+.ed-inbar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px 14px; margin: 14px 0; border: 1px solid var(--rule);
+  background: var(--paper-2); font-family: var(--mono); font-size: 11px;
+}
+.ed-inbar__label { font-weight: 600; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--mute); }
+.ed-inbar input { padding: 5px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink); }
+/* header row: h1 + ⓘ on the left, action buttons pushed right */
+.ed-headrow { display: flex; align-items: center; gap: 12px; margin: 0 0 4px; flex-wrap: wrap; }
+.ed-headrow__actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.ed-detail-meta { margin: 2px 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute); }
+.ed-status-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 12px 0 18px; }
+.ed-status-tile { min-width: 0; border: 1px solid var(--rule); margin-left: -1px; padding: 9px 10px; background: var(--paper); }
+.ed-status-tile:first-child { margin-left: 0; }
+.ed-status-tile__k { font-family: var(--mono); font-size: 9px; color: var(--mute); letter-spacing: 0.1em; text-transform: uppercase; white-space: nowrap; }
+.ed-status-tile__v { margin-top: 2px; font-family: var(--serif); font-size: 18px; line-height: 1.1; }
+.ed-status-tile.warn { background: color-mix(in oklab, var(--warm) 15%, var(--paper)); }
+.ed-status-tile.warn .ed-status-tile__v { color: var(--warm) !important; font-weight: 700; }
+.ed-detail-grid { display: grid; grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.ed-user-overview { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 28px; align-items: start; }
+.ed-user-overview__sub { min-width: 0; }
+.ed-user-overview__sub .ed-qr { margin: 8px 0 10px; }
+.ed-user-overview__url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10.5px; color: var(--mute); }
+.ed-fact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 18px 0; }
+.ed-fact { min-width: 0; border: 1px solid var(--rule); margin-left: -1px; padding: 9px 10px; background: var(--paper); }
+.ed-fact:first-child { margin-left: 0; }
+.ed-fact__k { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
+.ed-fact__v { margin-top: 3px; font-family: var(--mono); font-size: 11px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.ed-grants-summary { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.ed-grant-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--rule); padding: 4px 7px; font-family: var(--mono); font-size: 10.5px; }
+.ed-grant-chip.on { color: var(--green); }
+.ed-grant-chip.off { color: var(--mute); border-style: dashed; }
+@media (max-width: 900px) {
+  .ed-status-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ed-detail-grid { grid-template-columns: 1fr; }
+  .ed-user-overview { grid-template-columns: 1fr; }
+  .ed-fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* ── status inline ── */
 .ed-stat {
