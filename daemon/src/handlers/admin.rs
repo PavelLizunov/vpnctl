@@ -2743,7 +2743,7 @@ pub(crate) async fn servers(
                            "Re-deploy EVERY server: pushes each node's sing-box config so newly-added users' UUIDs land on all of them. Run once after adding a user or granting servers. Best-effort — a down node is reported, the rest still deploy.",
                            "Передеплоить ВСЕ серверы: пушит конфиг sing-box на каждую ноду, чтобы UUID новых юзеров попали на все. Нажми один раз после добавления юзера или выдачи грантов. Best-effort — упавшая нода отмечается, остальные деплоятся.",
                        ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                     (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
                     " (" (server_list.len()) ")"
                 }
@@ -2769,7 +2769,7 @@ pub(crate) async fn servers(
                            "Upgrade the kernel binaries on EVERY server (apt upgrade + service restart) without re-rendering any config. Run after a kernel release to roll the new binary across the fleet. The running config is left untouched, so this is safe even on a node whose inventory has drifted. Best-effort — a down node is reported, the rest still update.",
                            "Обновить бинарники ядер на ВСЕХ серверах (apt upgrade + рестарт сервиса) без перерендера конфига. Запусти после релиза ядра, чтобы раскатать новый бинарь по флоту. Рабочий конфиг не трогается, поэтому безопасно даже на ноде с дрейфом инвентаря. Best-effort — упавшая нода отмечается, остальные обновляются.",
                        ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
                     (crate::i18n::tr(lang, "update all kernels →", "обновить все ядра →"))
                     " (" (server_list.len()) ")"
                 }
@@ -4070,8 +4070,8 @@ async fn user_detail_render(
             // Visual: amber border, prominent at the top so it's
             // noticed before the operator starts copying the QR.
             @if !pending_deploy_servers.is_empty() {
-                div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
-                    div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px; margin-bottom: 4px;" {
+                div style="border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper); padding: 12px 14px; margin: 12px 0 16px;" {
+                    div style="font-family: var(--serif); font-weight: 500; color: var(--warm); font-size: 14px; margin-bottom: 4px;" {
                         (crate::i18n::tr(
                             lang,
                             "⚠ Config not yet deployed to:",
@@ -4111,7 +4111,7 @@ async fn user_detail_render(
                                    "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
                                    "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
                                ))
-                               style="padding: 6px 14px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                               class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                             (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
                         }
                         pre id="user-deploy-log" hidden
@@ -4189,7 +4189,7 @@ async fn user_detail_render(
                                                "Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable.",
                                                "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
                                            ))
-                                           style="padding: 4px 10px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                           class="ed-abtn ed-abtn--secondary" {
                                         (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                     }
                                 }
@@ -4229,7 +4229,7 @@ async fn user_detail_render(
                                            "Mint a new sub_token; the previous URL stops working immediately",
                                            "Сгенерировать новый sub_token; предыдущий URL перестанет работать немедленно",
                                        ))
-                                       style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                       class="ed-abtn ed-abtn--warning" {
                                     (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                 }
                             }
@@ -4244,7 +4244,7 @@ async fn user_detail_render(
                              style="display: inline; margin-left: 8px;" {
                             button type="submit"
                                    title="Generate this user's FIRST sub-token + the public /sub/<token> URL. Safe — no existing config to invalidate; the user's QR + clients will start working after this."
-                                   style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--recovery" {
                                     "mint sub-token"
                                 }
                         }
@@ -4276,7 +4276,7 @@ async fn user_detail_render(
                                    "Mint this user's per-user password used by TUIC / naive / Hysteria2. Safe — no existing secret to invalidate. Redeploy the user's servers afterwards so the node accepts it.",
                                    "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
                                ))
-                               style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                               class="ed-abtn ed-abtn--recovery" {
                             (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
                         }
                     }
@@ -4319,7 +4319,7 @@ async fn user_detail_render(
                              style="margin-top: 12px;" {
                             button type="submit"
                                    title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
-                                   style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--warning" {
                                 "rotate WG keypair"
                             }
                         }
@@ -5379,7 +5379,7 @@ async fn user_detail_render(
                          action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0)))
                          style="display: inline; margin-top: 8px;" {
                         button type="submit"
-                               style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                               class="ed-abtn ed-abtn--primary" {
                             (crate::i18n::tr(lang, "enable user", "включить пользователя"))
                         }
                     }
@@ -5401,14 +5401,14 @@ async fn user_detail_render(
                                "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
                                "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
                            ))
-                           style="padding: 4px 12px; border: 1px solid var(--mute); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           class="ed-abtn ed-abtn--warning" {
                         (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
                     }
                 }
             }
 
             div.ed-rule {}
-            div.ed-art-eyebrow style="color: var(--acc); margin-top: 24px;" {
+            div.ed-art-eyebrow style="color: var(--red); margin-top: 24px;" {
                 (crate::i18n::tr(lang, "Danger zone", "Опасная зона"))
             }
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
@@ -5425,7 +5425,7 @@ async fn user_detail_render(
                 ))
             }
             a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
-              style="display: inline-block; padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+              class="ed-abtn ed-abtn--danger" {
                 (crate::i18n::tr(lang, "delete user…", "удалить пользователя…"))
             }
     }
@@ -9733,11 +9733,11 @@ pub(crate) async fn user_delete_confirm(
                   style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             button type="submit"
                    title=(format!("Delete user {} permanently", user_id_str))
-                   style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                   class="ed-abtn ed-abtn--danger-solid" {
                 "delete forever"
             }
             a href=(format!("/admin/users/{}", path_segment_encode(&user_id_str)))
-              style="padding: 4px 10px; border: 1px solid var(--rule-s); color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+              class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                 "cancel"
             }
         }
@@ -9896,11 +9896,11 @@ pub(crate) async fn server_delete_confirm(
                   style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             button type="submit"
                    title=(format!("Delete server {server_id_str} from the inventory permanently"))
-                   style="padding: 4px 12px; border: 1px solid var(--acc-bad, #97233f); background: var(--acc-bad, #97233f); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                   class="ed-abtn ed-abtn--danger-solid" {
                 "delete forever"
             }
             a href=(back)
-              style="padding: 4px 10px; border: 1px solid var(--rule-s); color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+              class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                 "cancel"
             }
         }
@@ -10858,7 +10858,7 @@ pub(crate) async fn alerts(
                                "Mark every unacked alert as seen in one click. Doesn't clear or fix the underlying conditions — just clears the dashboard tile. The alert rows stay in the feed under «show all».",
                                "Отметить все непринятые алерты как просмотренные одним кликом. Не очищает и не чинит условия — лишь обнуляет тайл дашборда. Строки остаются в ленте под «показать всё».",
                            ))
-                           style="background: transparent; border: 1px solid var(--rule); color: var(--accent-text, var(--ink)); font-family: var(--mono); font-size: 11px; padding: 2px 10px; cursor: pointer;" {
+                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                         (crate::i18n::tr(lang, "ack all", "принять все"))
                         " (" (unacked_total) ")"
                     }
@@ -11286,7 +11286,7 @@ fn alert_row(
                                                "Mark this alert acknowledged. Doesn't clear or fix the underlying condition — just records 'I've seen it'. The alert row stays in the feed (with an acked-timestamp) until the condition resolves.",
                                                "Отметить алерт принятым. Не очищает и не чинит условие — просто фиксирует «я это видел». Строка остаётся в ленте (с меткой времени принятия) пока условие не уйдёт.",
                                            ))
-                                           style="background: transparent; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 2px 8px; cursor: pointer;" {
+                                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                                         (t(lang, K::BtnAck))
                                     }
                                 }
@@ -11531,7 +11531,7 @@ fn settings_disaster_recovery_section(
         div style="display: flex; gap: 12px; margin-bottom: 18px;" {
             form method="post" action="/admin/backup/self-test" style="display: inline;" {
                 button type="submit"
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                     (tr(lang, "run self-test now", "запустить self-test сейчас"))
                 }
             }
@@ -12012,7 +12012,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                "Take a snapshot now (in addition to the hourly schedule). Safe to click any time.",
                                "Сделать снэпшот сейчас (вдобавок к часовому расписанию). Безопасно нажимать в любой момент.",
                            ))
-                           style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
                         (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас"))
                     }
                 }
@@ -12027,7 +12027,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                "Run restore fire-drill against the latest snapshot — does it actually restore into a usable DB? Safe to click any time; does NOT touch live inv.db.",
                                "Запустить проверку восстановления на последнем снэпшоте — реально ли он восстанавливается в рабочую БД? Безопасно нажимать в любой момент; живую inv.db не трогает.",
                            ))
-                           style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                         (crate::i18n::tr(lang, "run restore self-test", "проверить восстановление"))
                     }
                 }
@@ -14637,8 +14637,8 @@ async fn server_detail_render(
         // is STILL ACCEPTED by the node until the deploy below runs.
         @if pending_deploy {
             div id="pending-deploy-banner"
-                style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--acc); background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
-                b { (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
+                style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
+                b style="color: var(--warm);" { "⚠ " (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
                 " — "
                 (crate::i18n::tr(
                     lang,
@@ -14662,7 +14662,7 @@ async fn server_detail_render(
                        "Full deploy: streamed live — mint missing per-protocol server secrets, then SSH into the node and run apt-get install + render-config + systemctl restart for each enabled kernel. Each step + the final status appears in the log below. Re-clicking is safe — already-present secrets and kernels are skipped.",
                        "Полный деплой с живым логом: дораздать недостающие per-protocol секреты, затем SSH в ноду и запустить apt-get install + render-config + systemctl restart для каждого включённого ядра. Каждый шаг + финальный статус появятся в логе ниже. Повторный клик безопасен — уже существующие секреты и ядра пропускаются.",
                    ))
-                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                   class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                 (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
             }
             // No-JS fallback: the original synchronous POST still works
@@ -14673,7 +14673,7 @@ async fn server_detail_render(
                      action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                      style="display: inline;" {
                     button type="submit"
-                           style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                         (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
                     }
                 }
@@ -14727,7 +14727,7 @@ async fn server_detail_render(
                        "Upgrade the kernel binaries only: streamed live, this probes each declared kernel's version, upgrades the package (apt upgrade), restarts the service, then probes the version again — before → after lands in the log below. The running config is left untouched, so this is safe to run on a node whose inventory has drifted. Re-clicking is safe — an already-current binary is a no-op.",
                        "Обновить только бинарники ядер: с живым логом — снимает версию каждого объявленного ядра, обновляет пакет (apt upgrade), рестартует сервис и снимает версию снова — до → после появится в логе ниже. Рабочий конфиг не трогается, поэтому безопасно на ноде с дрейфом инвентаря. Повторный клик безопасен — уже актуальный бинарь = no-op.",
                    ))
-                   style="padding: 6px 14px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                   class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
                 (crate::i18n::tr(lang, "update kernels →", "обновить ядра →"))
             }
             // Live log pane — hidden until the operator clicks update.
@@ -14870,7 +14870,7 @@ async fn server_detail_render(
                                        "Grant access to every user currently in the inventory who doesn't have it yet. Idempotent — re-running this on a fully-granted server is a no-op.",
                                        "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно — повторный запуск на сервере с уже выданными грантами ничего не сломает.",
                                    ))
-                                   style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--secondary" {
                                 (crate::i18n::tr(lang, "grant all ", "выдать всем "))
                                 "(" (ungranted_count) ")"
                             }
@@ -14908,7 +14908,7 @@ async fn server_detail_render(
                                        "Revoke access for every currently-granted user on this server. Destructive — requires confirm. Re-granting per-user remains available.",
                                        "Отозвать доступ у всех юзеров с текущим грантом на сервере. Деструктивно — нужно подтверждение. Перевыдать поштучно потом можно.",
                                    ))
-                                   style="padding: 4px 12px; border: 1px solid var(--acc); background: transparent; color: var(--acc); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--danger" {
                                 (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
                                 "(" (granted_count) ")…"
                             }
@@ -14948,7 +14948,7 @@ async fn server_detail_render(
                                 };
                                 button type="submit"
                                        title=(title_str)
-                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                       class="ed-abtn ed-abtn--warning ed-abtn--sm" {
                                     (crate::i18n::tr(lang, "revoke", "отозвать"))
                                 }
                             }
@@ -14963,7 +14963,7 @@ async fn server_detail_render(
                                 };
                                 button type="submit"
                                        title=(title_str)
-                                       style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                       class="ed-abtn ed-abtn--sm" {
                                     (crate::i18n::tr(lang, "grant", "выдать"))
                                 }
                             }
@@ -15002,7 +15002,7 @@ async fn server_detail_render(
                       "Remove this server from the inventory (grants + secrets + protocols cascade). Opens a retype-to-confirm page.",
                       "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
                   ))
-                  style="display: inline-block; font-family: var(--mono); font-size: 11px; color: var(--acc-bad, #97233f); text-decoration: none; border: 1px solid var(--acc-bad, #97233f); padding: 5px 12px;" {
+                  class="ed-abtn ed-abtn--danger" {
                     (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
                 }
             }
@@ -15875,7 +15875,7 @@ fn server_detail_kernels_section(
                             };
                             button type="submit"
                                    title=(dis_title)
-                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--warning ed-abtn--sm" {
                                 (crate::i18n::t(lang, crate::i18n::K::BtnDisable))
                             }
                         }
@@ -15892,7 +15892,7 @@ fn server_detail_kernels_section(
                             };
                             button type="submit"
                                    title=(en_title)
-                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--sm" {
                                 (crate::i18n::t(lang, crate::i18n::K::BtnEnable))
                             }
                         }
@@ -16021,7 +16021,7 @@ fn server_detail_push_deploy_key_section(
                            "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. With the password filled it connects via sshpass; leave the password empty to use the configured reference key instead.",
                            "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. С заполненным паролем подключается через sshpass; оставь пароль пустым, чтобы использовать настроенный reference-key.",
                        ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                     (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
@@ -16102,7 +16102,7 @@ fn server_detail_fingerprint_section(
                            "Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint.",
                            "Запустить ssh-keyscan + ssh-keygen -lf - на хосте демона и закрепить полученный отпечаток.",
                        ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
                     (tr(lang, "auto-detect via ssh-keyscan →", "автоопределить через ssh-keyscan →"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
@@ -17204,7 +17204,7 @@ fn server_detail_protocols_section(
                             };
                             button type="submit"
                                    title=(dis_proto_title)
-                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--warning ed-abtn--sm" {
                                 (t(lang, K::BtnDisable))
                             }
                         }
@@ -17222,7 +17222,7 @@ fn server_detail_protocols_section(
                                 };
                                 button type="submit"
                                        title=(unhide_title)
-                                       style="padding: 2px 8px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                       class="ed-abtn ed-abtn--sm" {
                                     (t(lang, K::BtnUnhide))
                                 }
                             }
@@ -17236,7 +17236,7 @@ fn server_detail_protocols_section(
                                 };
                                 button type="submit"
                                        title=(hide_title)
-                                       style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
+                                       class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                                     (t(lang, K::BtnHide))
                                 }
                             }
@@ -17254,7 +17254,7 @@ fn server_detail_protocols_section(
                             };
                             button type="submit"
                                    title=(en_proto_title)
-                                   style="padding: 2px 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                                   class="ed-abtn ed-abtn--sm" {
                                 (t(lang, K::BtnEnable))
                             }
                         }
