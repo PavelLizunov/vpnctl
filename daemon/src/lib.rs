@@ -34,6 +34,9 @@ pub mod config;
 pub mod handlers;
 pub mod health_monitor;
 pub mod real_ip;
+// AmneziaWG per-user source-IP poller — the "amneziawg metrics from wg show"
+// path clash_poller's skip comment names; feeds the sharing verdict for WG.
+pub mod wg_stats_poller;
 // Composite account-sharing risk scorer (weighted, explainable) — replaces
 // the single `distinct_asns >= 3` heuristic. Pavel 2026-06-17.
 pub mod sharing_score;

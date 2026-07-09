@@ -131,6 +131,13 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         snapshot_cache.clone(),
     ));
 
+    // AmneziaWG per-user source-IP poller — clash-api covers only sing-box,
+    // so `wireguard`-protocol users (served by the amneziawg kernel, iface
+    // awg0) were invisible to the sharing verdict. This SSHes each amneziawg
+    // node's `awg show awg0 dump`, maps peer pubkeys → users, and records
+    // their endpoint IPs into the same `vpn_user_source_ips` the verdict reads.
+    drop(crate::wg_stats_poller::spawn_wg_stats_poller(inv.clone()));
+
     // Phase 5a-2 — periodic reverse-DNS resolver. Walks
     // `snapshot_cache` for unique destination IPs lacking a host
     // field, calls `getent hosts <ip>`, caches result in
