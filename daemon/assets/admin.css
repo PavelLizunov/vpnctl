@@ -243,48 +243,8 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
   font-weight: 300;
 }
 
-/* ── metric row ── */
-.ed-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-}
-.ed-metric {
-  padding: 20px 22px 18px;
-  border-right: 1px solid var(--rule);
-  display:flex; flex-direction: column; gap: 6px;
-}
-.ed-metric:last-child { border-right: 0; padding-right: 0; }
-.ed-metric:first-child { padding-left: 0; }
-.ed-metric__lbl {
-  font-family: var(--sans);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--mute);
-  font-weight: 500;
-}
-.ed-metric__v {
-  font-family: var(--serif);
-  font-size: 68px;
-  font-weight: 400;
-  line-height: 0.95;
-  letter-spacing: -0.04em;
-  color: var(--ink);
-  font-variant-numeric: lining-nums tabular-nums;
-}
-.ed-metric__v em { font-style: italic; color: var(--dim); font-weight: 300; }
-.ed-metric__v small { font-size: 24px; letter-spacing: -0.02em; color: var(--soft); }
-.ed-metric__sub {
-  font-family: var(--serif);
-  font-style: italic;
-  font-size: 13px;
-  color: var(--soft);
-  font-weight: 300;
-}
-.ed-metric__sub b { font-style: normal; color: var(--ink); font-weight: 500; }
+/* (the .ed-metric KPI-card family was removed in the densification pass —
+   replaced by the mono .ed-sumbar summary bar defined lower down.) */
 
 /* ── health list ── */
 .ed-health { display:flex; flex-direction: column; }
@@ -517,6 +477,29 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 .ed-abtn--danger-solid:hover { background: var(--red); color: var(--paper); opacity: 0.86; }
 .ed-abtn--sm { padding: 2px 8px; }
 .ed-abtn--lg { padding: 6px 14px; }
+
+/* ── densification pass (2026-07-09) ──
+   One-line "at a glance" summary bar replacing the 68px KPI cards, and a
+   ⓘ info-tip that folds an explanatory paragraph into a hover title. Both
+   use existing theme tokens so they read in every theme. This is the start
+   of the reusable densify vocabulary (see design_handoff_vpnctl_densify). */
+.ed-sumbar {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 22px;
+  padding: 12px 0 14px; margin: 8px 0 6px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 11px; color: var(--mute);
+}
+.ed-sumbar__h { margin: 0; font-family: var(--serif); font-size: 20px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.ed-sumbar__h em { font-weight: 400; font-style: italic; }
+.ed-sumbar__stat b { font-weight: 600; font-size: 13px; color: var(--ink); }
+.ed-sumbar__warn { color: var(--warm); text-decoration: none; }
+.ed-sumbar__warn b { color: var(--warm); }
+.ed-sumbar__live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--green); }
+.ed-sumbar__live b { color: var(--ink); font-weight: 600; }
+.ed-sumbar__live em { font-family: var(--serif); font-style: italic; color: var(--green); }
+.ed-sumbar__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; flex: 0 0 auto; }
+.ed-tip { cursor: help; color: var(--dim); font-size: 11px; user-select: none; }
+.ed-tip:hover { color: var(--acc); }
 
 /* ── status inline ── */
 .ed-stat {
