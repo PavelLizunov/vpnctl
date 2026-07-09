@@ -31,6 +31,18 @@
 #    on restart per CLAUDE.md "Грабли"; we don't want the gate to brick
 #    every commit just because rustup wasn't restored that session)
 #
+# WHICH TREE IT GATES (multi-session worktrees)
+# ---------------------------------------------
+# Sessions work in sibling git worktrees (CLAUDE.md «Multi-session
+# conventions»), so the commit/push command usually arrives as
+# `cd <worktree> && git push …`. Gating the hook's OWN tree ($0 →
+# main checkout) would run the suite against whatever branch ANOTHER
+# session has checked out there. Caught 2026-07-10: a green push from
+# vpnctl-track was blocked because the main dir sat on a codex/*
+# branch with a Windows-red test that main had already #[cfg(unix)]'d.
+# Fix: honor a leading `cd <dir>` from the command when <dir> carries
+# a Cargo.toml; otherwise fall back to the $0-anchored root.
+#
 # WHY NOT JUST `just ci`
 # ----------------------
 # `just ci` runs fmt+clippy+test+deny — ~30s. On EVERY commit that's
@@ -71,14 +83,29 @@ BYPASS
     exit 0
 fi
 
-# Find the vpnctl repo root. The hook may be invoked from any cwd
-# (Claude session might be elsewhere). We anchor by the path the hook
-# itself lives in: $0 is .../vpnctl/.claude/hooks/git-gate.sh, so
-# repo_root = .../vpnctl.
+# Find the tree to gate. Default anchor: the path the hook itself
+# lives in ($0 is .../vpnctl/.claude/hooks/git-gate.sh, so repo_root
+# = .../vpnctl). A leading `cd <dir>` in the command overrides it —
+# that's the worktree the git command actually runs in (see «WHICH
+# TREE IT GATES» above). Quoted paths are unwrapped; the target only
+# wins when it carries a Cargo.toml (a `cd docs && git push` or a
+# cd into a non-Rust repo keeps the old behavior).
 script_dir=$(dirname -- "$(readlink -f -- "$0")")
 repo_root=$(dirname -- "$(dirname -- "$script_dir")")
 
-if [[ ! -f "$repo_root/Cargo.toml" ]]; then
+gate_root="$repo_root"
+cd_line=$(printf '%s\n' "$cmd" | grep -m1 -E '^[[:space:]]*cd[[:space:]]+' || true)
+if [[ -n "$cd_line" ]]; then
+    cd_dir=$(printf '%s\n' "$cd_line" \
+        | sed -E 's/^[[:space:]]*cd[[:space:]]+//; s/[[:space:]]*(&&|;|\|).*$//; s/[[:space:]]+$//')
+    cd_dir=${cd_dir#\"}; cd_dir=${cd_dir%\"}
+    cd_dir=${cd_dir#\'}; cd_dir=${cd_dir%\'}
+    if [[ -n "$cd_dir" && -f "$cd_dir/Cargo.toml" ]]; then
+        gate_root="$cd_dir"
+    fi
+fi
+
+if [[ ! -f "$gate_root/Cargo.toml" ]]; then
     # Hook lives in a non-Rust repo somehow — silently allow.
     exit 0
 fi
@@ -96,7 +123,7 @@ NOCARGO
     exit 0
 fi
 
-cd "$repo_root" || exit 0
+cd "$gate_root" || exit 0
 
 # Common helper: run a step, capture combined output, on failure print
 # the last 30 lines to stderr and exit 2 (block).
@@ -105,7 +132,7 @@ run_or_block() {
     local out
     if ! out=$("$@" 2>&1); then
         echo "" >&2
-        echo "🛑 vpnctl git-gate: $label FAILED" >&2
+        echo "🛑 vpnctl git-gate: $label FAILED (tree: $gate_root)" >&2
         echo "$out" | tail -n 30 >&2
         cat >&2 <<EOF
 
@@ -134,9 +161,10 @@ esac
 # Reminder (was the old PostToolUse content — keep it as a nudge after
 # the gate passes, when the operator can still see the message before
 # the actual commit/push runs).
-cat >&2 <<'GREEN'
+cat >&2 <<GREEN
 
-🤖 vpnctl git-gate green. Reminders (CLAUDE.md → Workflow rules):
+🤖 vpnctl git-gate green (tree: $gate_root).
+   Reminders (CLAUDE.md → Workflow rules):
   1. review-agent on the diff?              (Agent / general-purpose)
   2. test-writer-agent for new public APIs? (spec only, no impl)
   3. After push: gh run watch <id> --exit-status to verify CI.
