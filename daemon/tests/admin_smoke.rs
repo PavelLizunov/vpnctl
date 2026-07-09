@@ -639,9 +639,16 @@ async fn admin_dashboard_renders_zero_state_on_empty_db() {
         html.contains(r#"class="ed-sumbar__live""#) && html.contains("<em>live</em>"),
         "summary bar must show the daemon 'live' status"
     );
+    // Dashboard 1b quiet contract: no servers → no fleet table, no
+    // alerts → no health feed, no flagged users → no likely-shared
+    // panel. The overview two-column wrapper still renders (empty).
     assert!(
-        html.contains("No actions logged yet"),
-        "audit empty-state copy missing"
+        !html.contains("fleet-at-a-glance"),
+        "empty inventory must not render the fleet table"
+    );
+    assert!(
+        html.contains(r#"class="ed-dash-cols""#),
+        "overview panel row missing"
     );
 }
 
@@ -9459,15 +9466,33 @@ async fn admin_dashboard_shows_limit_alerts_when_user_over_threshold() {
     // Suppress unused-import warning (Utc was for record_vpn_stats_at
     // signature; record_vpn_stats stamps internally).
     let _ = Utc::now();
+    // Dashboard 1b: limit crossings no longer get a dedicated card —
+    // the health-monitor fires a `user.traffic_limit:<uid>` alert
+    // (Bundle 4) and the dashboard surfaces it through the health
+    // feed. Seed the alert row the monitor would have written.
+    s.inv
+        .insert_alert_if_no_unacked(
+            "user.traffic_limit:heavy",
+            None,
+            "warning",
+            "heavy at 87% of monthly limit",
+            None,
+        )
+        .await
+        .unwrap();
     let app = router(s);
     let html = fetch_html(app, "/admin/").await;
     assert!(
-        html.contains("near monthly limit"),
-        "limit-alerts heading missing on dashboard"
+        html.contains("Health feed"),
+        "health feed missing on dashboard"
     );
     assert!(
-        html.contains(">heavy<"),
-        "heavy user must appear in alert list"
+        html.contains("user.traffic_limit"),
+        "feed row must name the limit-alert kind"
+    );
+    assert!(
+        html.contains(r#"href="/admin/users/heavy""#),
+        "user-scoped alert must link the user from the kind suffix"
     );
 }
 
@@ -14666,59 +14691,6 @@ async fn dashboard_idle_users_panel_omitted_when_no_users() {
 }
 
 #[tokio::test]
-async fn dashboard_idle_users_panel_renders_never_seen_user() {
-    let dir = TempDir::new().unwrap();
-    let st = state(&dir).await;
-    // Create a user but never write a sub_access_log row → must
-    // appear in the idle panel with «never» marker.
-    st.inv
-        .add_user(&User {
-            id: UserId("ghost".into()),
-            uuid: "00000000-0000-0000-0000-000000000099".into(),
-            tuic_password: None,
-            wireguard_pubkey: None,
-            wireguard_private: None,
-            sub_token: None,
-            vpn_router_device_id: None,
-            disabled: false,
-        })
-        .await
-        .unwrap();
-    let app = router(st);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let html = std::str::from_utf8(&body).unwrap();
-    assert!(
-        html.contains("id=\"idle-users\""),
-        "idle-users panel must render when at least one user is idle"
-    );
-    assert!(
-        html.contains("Idle users") || html.contains("Простаивающие"),
-        "idle-users eyebrow must render"
-    );
-    // The «never» marker must appear for a user without any
-    // sub_access_log rows.
-    assert!(
-        html.contains(">never<") || html.contains(">никогда<"),
-        "never-seen marker must render for a user with no access-log rows"
-    );
-    // Link to user-detail must be there.
-    assert!(
-        html.contains("/admin/users/ghost"),
-        "row must link to /admin/users/<id> for drill-in"
-    );
-}
-
-#[tokio::test]
 async fn user_create_with_grant_all_renders_checked_checkbox_in_form() {
     // The form on /admin/users must render the checkbox CHECKED by
     // default so the operator's «one click» path produces a granted
@@ -15980,12 +15952,13 @@ async fn dashboard_fleet_table_renders_row_per_server() {
     let html = fetch_html(router(s), "/admin/").await;
 
     assert!(
-        html.contains("Fleet at a glance"),
-        "fleet-at-a-glance eyebrow missing"
-    );
-    assert!(
         html.contains(r#"id="fleet-at-a-glance""#),
-        "fleet-at-a-glance section anchor missing"
+        "fleet section anchor missing"
+    );
+    // Dashboard 1b: the fleet renders as a dense .ed-grid table.
+    assert!(
+        html.contains(r#"<table class="ed-grid""#),
+        "fleet must render as a dense ed-grid table"
     );
     // Both seeded servers appear as drill-in links.
     assert!(
@@ -15994,9 +15967,53 @@ async fn dashboard_fleet_table_renders_row_per_server() {
     );
     // The seeded sing-box version shows in s0's version cell.
     assert!(html.contains("1.13.12"), "s0 sing-box version cell missing");
-    // Disk% (20) and mem% (75) cells from the seeded health row.
+    // Disk% (20) stays a plain cell; mem% (75) crosses the 70% watermark
+    // and must render as a warm heat cell with the ⚠ marker.
     assert!(html.contains("20%"), "s0 disk% cell missing");
-    assert!(html.contains("75%"), "s0 mem% cell missing");
+    assert!(
+        html.contains(r#"class="num warn""#) && html.contains("75% ⚠"),
+        "s0 mem% above 70 must render the heat cell + ⚠"
+    );
+}
+
+/// Dashboard 1b — a node whose sing-box version differs from the fleet
+/// majority gets the warm «≠» drift marker in its version cell.
+#[tokio::test]
+async fn dashboard_fleet_table_marks_version_drift() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 3, 0, &[]).await;
+    // s0 + s1 on the majority version, s2 drifted ahead.
+    for (sid, ver) in [("s0", "1.13.12"), ("s1", "1.13.12"), ("s2", "1.13.14")] {
+        s.inv
+            .record_node_health(
+                &ServerId(sid.into()),
+                Some(true),
+                Some(true),
+                Some(1024),
+                Some(20480),
+                Some(6144),
+                Some(8192),
+                Some(50),
+                None,
+                None,
+                Some(&format!(r#"{{"sing-box":"{ver}"}}"#)),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("1.13.14 ≠"),
+        "minority version must carry the ≠ drift marker"
+    );
+    assert!(
+        !html.contains("1.13.12 ≠"),
+        "majority version must NOT be flagged"
+    );
 }
 
 /// dash#1 — empty fleet renders no at-a-glance table at all (the metrics
@@ -16007,8 +16024,8 @@ async fn dashboard_fleet_table_hidden_when_no_servers() {
     let app = router(state(&dir).await);
     let html = fetch_html(app, "/admin/").await;
     assert!(
-        !html.contains("Fleet at a glance"),
-        "fleet-at-a-glance must stay hidden on an empty fleet"
+        !html.contains(r#"id="fleet-at-a-glance""#),
+        "fleet table must stay hidden on an empty fleet"
     );
 }
 
@@ -16077,38 +16094,41 @@ async fn dashboard_kernel_rollup_empty_state_when_no_versions() {
 /// dash#4 — alerts breakdown renders severity counts + the section
 /// when there's at least one unacked alert.
 #[tokio::test]
-async fn dashboard_alerts_breakdown_renders_severity() {
+async fn dashboard_health_feed_renders_alert_row() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     seed_dashboard_signals(&s.inv).await;
     let html = fetch_html(router(s), "/admin/").await;
+    assert!(html.contains("Health feed"), "health-feed eyebrow missing");
+    // Eyebrow carries the unacked total (1 seeded).
     assert!(
-        html.contains("Homelab health · open alerts"),
-        "alerts-breakdown eyebrow missing"
+        html.contains("open 1"),
+        "health-feed eyebrow must show the unacked total"
     );
-    // One critical alert seeded → "critical 1".
-    assert!(
-        html.contains("critical 1"),
-        "alerts-breakdown critical count missing"
-    );
-    // Top-kind line names the seeded kind.
+    // The seeded critical alert renders as a feed row: ✖ mark + kind +
+    // the server target linked.
+    assert!(html.contains("✖"), "critical alert must show the ✖ mark");
     assert!(
         html.contains("disk_pressure"),
-        "alerts-breakdown top-kind line missing the seeded kind"
+        "feed row must name the alert kind"
+    );
+    assert!(
+        html.contains("full feed →") || html.contains("весь поток →"),
+        "feed must link to /admin/alerts"
     );
 }
 
-/// dash#4 — quiet-dashboard contract: no card when zero unacked alerts.
+/// Dashboard 1b — quiet contract: no health feed when zero unacked alerts.
 #[tokio::test]
-async fn dashboard_alerts_breakdown_empty_when_none() {
+async fn dashboard_health_feed_empty_when_none() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await; // no alerts seeded
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        !html.contains("Homelab health · open alerts"),
-        "alerts-breakdown must stay hidden with zero unacked alerts"
+        !html.contains("Health feed"),
+        "health feed must stay hidden with zero unacked alerts"
     );
 }
 
@@ -16379,34 +16399,6 @@ async fn admin_user_detail_origins_empty_state_when_only_egress() {
     );
 }
 
-/// dash#6 — today digest renders the banner with the seeded counts.
-#[tokio::test]
-async fn dashboard_today_digest_renders_counts() {
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    seed_dashboard_signals(&s.inv).await; // 1 user.create audit row today
-    let html = fetch_html(router(s), "/admin/").await;
-    assert!(html.contains("Today:"), "today-digest banner missing");
-    assert!(
-        html.contains("user added"),
-        "today-digest must report the seeded user.create as 'user added'"
-    );
-}
-
-/// dash#6 — hidden on a quiet day (no audit activity today).
-#[tokio::test]
-async fn dashboard_today_digest_hidden_when_quiet() {
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[(0, 0)]).await; // seed writes ZERO audit rows
-    let html = fetch_html(router(s), "/admin/").await;
-    assert!(
-        !html.contains("Today:"),
-        "today-digest must stay hidden with no activity today"
-    );
-}
-
 // ════════════════════════════════════════════════════════════════════
 //  ui-audit follow-up — dashboard split into 2 sub-route tabs
 //  (overview / activity). The KPI metrics + today-digest + fleet table
@@ -16428,14 +16420,14 @@ async fn dashboard_tabs_render_gate_and_mark_active() {
         (
             "/admin/overview",
             "overview",
-            "Homelab health · open alerts",
+            "Health feed",
             "Fleet traffic",
         ),
         (
             "/admin/activity",
             "activity",
             "Fleet traffic",
-            "Homelab health · open alerts",
+            "Health feed",
         ),
     ];
     for (path, slug, present, absent) in cases {
@@ -16446,7 +16438,7 @@ async fn dashboard_tabs_render_gate_and_mark_active() {
         );
         // KPI glance stays chrome — the fleet table renders on BOTH tabs.
         assert!(
-            html.contains("Fleet at a glance"),
+            html.contains(r#"id="fleet-at-a-glance""#),
             "{path}: KPI glance (fleet table) must stay as chrome on every tab"
         );
         let active = format!(r#"ed-tab--on" href="/admin/{slug}""#);
@@ -16478,7 +16470,7 @@ async fn dashboard_bare_url_renders_overview_tab() {
         "bare URL must mark the overview tab active"
     );
     assert!(
-        html.contains("Homelab health · open alerts"),
+        html.contains("Health feed"),
         "bare URL must render the overview tab's sections"
     );
     assert!(
@@ -16519,16 +16511,15 @@ async fn dashboard_info_cards_headlines_match_voice() {
     let overview = fetch_html(app.clone(), "/admin/").await;
     let activity = fetch_html(app, "/admin/activity").await;
     for (html, needle) in [
-        (&overview, "Fleet at a glance"),            // dash#1 (chrome)
-        (&activity, "vs prior"),                     // dash#2 (activity)
-        (&activity, "Kernel rollup · sing-box"),     // dash#3 (activity)
-        (&overview, "Homelab health · open alerts"), // dash#4 (overview)
-        (&overview, "Likely-shared subscriptions"),  // dash#5 (overview)
-        (&overview, "Today:"),                       // dash#6 (chrome)
+        (&overview, ">Fleet <span"),                // 1b fleet (chrome)
+        (&activity, "vs prior"),                    // dash#2 (activity)
+        (&activity, "Kernel rollup · sing-box"),    // dash#3 (activity)
+        (&overview, "Health feed"),                 // 1b feed (overview)
+        (&overview, "Likely-shared subscriptions"), // 1b panel (overview)
     ] {
         assert!(
             html.contains(needle),
-            "PR-Dash headline drifted — missing: {needle:?}"
+            "dashboard headline drifted — missing: {needle:?}"
         );
     }
 }
@@ -16545,16 +16536,15 @@ async fn dashboard_info_cards_headlines_ru() {
     let overview = fetch_html_with_cookie(app.clone(), "/admin/", "vpnctl_lang=ru").await;
     let activity = fetch_html_with_cookie(app, "/admin/activity", "vpnctl_lang=ru").await;
     for (html, needle) in [
-        (&overview, "Флот одним взглядом"),    // dash#1 (chrome)
-        (&activity, "против пред."),           // dash#2 (activity)
-        (&activity, "Версии ядер · sing-box"), // dash#3 (activity)
-        (&overview, "Здоровье homelab · открытые алерты"), // dash#4 (overview)
-        (&overview, "Похоже на расшаренные подписки"), // dash#5 (overview)
-        (&overview, "Сегодня:"),               // dash#6 (chrome)
+        (&overview, ">Флот <span"),                    // 1b fleet (chrome)
+        (&activity, "против пред."),                   // dash#2 (activity)
+        (&activity, "Версии ядер · sing-box"),         // dash#3 (activity)
+        (&overview, "Поток здоровья"),                 // 1b feed (overview)
+        (&overview, "Похоже на расшаренные подписки"), // 1b panel (overview)
     ] {
         assert!(
             html.contains(needle),
-            "PR-Dash RU headline drifted — missing: {needle:?}"
+            "dashboard RU headline drifted — missing: {needle:?}"
         );
     }
 }

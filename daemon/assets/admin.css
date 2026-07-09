@@ -546,6 +546,18 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 }
 .ed-inbar__label { font-weight: 600; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--mute); }
 .ed-inbar input { padding: 5px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink); }
+/* dashboard 1b — minimal feed table (bottom rules only, no cell borders)
+   for the likely-shared / health-feed panels; and the two-panel grid */
+.ed-feed { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
+.ed-feed td { padding: 5px 8px; border-bottom: 1px solid var(--paper-3); vertical-align: baseline; }
+.ed-feed tr:last-child td { border-bottom: none; }
+.ed-feed td.num { text-align: right; }
+.ed-feed a { color: var(--ink); text-decoration: none; font-weight: 500; }
+.ed-feed a:hover { text-decoration: underline; }
+.ed-scorebar { height: 7px; width: 80px; background: color-mix(in oklab, var(--rule) 45%, var(--paper)); }
+.ed-scorebar > div { height: 7px; }
+.ed-dash-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 16px; }
+@media (max-width: 900px) { .ed-dash-cols { grid-template-columns: 1fr; } }
 /* header row: h1 + ⓘ on the left, action buttons pushed right */
 .ed-headrow { display: flex; align-items: center; gap: 12px; margin: 0 0 4px; flex-wrap: wrap; }
 .ed-headrow__actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }

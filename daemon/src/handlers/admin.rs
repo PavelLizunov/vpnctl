@@ -464,29 +464,25 @@ struct DashboardStats {
 /// queries (4 counters + recent audit) are independent so we kick them off
 /// in parallel via `try_join` — the round-trips are cheap, but rendering
 /// should still feel instant even after the inventory grows.
-async fn collect_dashboard_data(
-    state: &AppState,
-) -> anyhow::Result<(DashboardStats, Vec<vpnctl_inventory::AuditEntry>)> {
-    let (servers_count, users_count, disabled_users_count, grants_count, server_list, audit) = tokio::try_join!(
+async fn collect_dashboard_data(state: &AppState) -> anyhow::Result<DashboardStats> {
+    let (servers_count, users_count, disabled_users_count, grants_count, server_list) = tokio::try_join!(
         state.inv.count_servers(),
         state.inv.count_users(),
         state.inv.count_disabled_users(),
         state.inv.count_grants(),
         state.inv.list_servers(),
-        state.inv.recent_audit(10),
     )?;
     let distinct_protocols: HashSet<_> = server_list
         .iter()
         .flat_map(|s| s.enabled_protocols.iter().map(|p| p.0.as_str()))
         .collect();
-    let stats = DashboardStats {
+    Ok(DashboardStats {
         servers: servers_count,
         users: users_count,
         disabled_users: disabled_users_count,
         grants: grants_count,
         distinct_protocols: distinct_protocols.len(),
-    };
-    Ok((stats, audit))
+    })
 }
 
 /// Render an editorial 4-cell metric row from the dashboard stats.
@@ -705,37 +701,42 @@ fn dashboard_fleet_table(
     }
     let now = chrono::Utc::now();
     let dash = "—";
-    let th = |label: &str, right: bool| -> Markup {
-        let align = if right { "right" } else { "left" };
-        html! {
-            th style=(format!("text-align: {align}; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;")) {
-                (label)
+    // Busiest node — its conns + traffic cells render bold (mock 1b) and
+    // every share bar scales against its traffic.
+    let max_traffic = traffic_24h.values().copied().max().unwrap_or(0);
+    // Fleet-majority sing-box version: the most frequent reported one.
+    // A node on any OTHER version gets a warm «≠» drift marker.
+    let majority_version: Option<String> = {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (_, j) in kernel_versions {
+            if let Some(v) = sing_box_version_of(j.as_deref()) {
+                *counts.entry(v).or_insert(0) += 1;
             }
         }
+        counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v)
     };
     html! {
-        section id="fleet-at-a-glance" style="margin-top: 28px;" {
+        section id="fleet-at-a-glance" style="margin-top: 18px;" {
             div.ed-art-eyebrow {
-                (tr(lang, "Fleet at a glance", "Флот одним взглядом"))
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
-                (tr(
+                (tr(lang, "Fleet", "Флот")) " "
+                span.ed-tip title=(tr(
                     lang,
-                    "One row per server — sing-box state, disk and memory pressure, live connections, traffic over the last 24h, the on-node sing-box version and how fresh the last health probe is. Open a server for the full drill-in.",
-                    "Одна строка на сервер — состояние sing-box, нагрузка диска и памяти, живые подключения, трафик за 24ч, версия sing-box на ноде и свежесть последней проверки здоровья. Открой сервер для детального разбора.",
-                ))
+                    "One row per server — sing-box state, disk/memory pressure (warm cell above 70%), live connections, 24h traffic with each node's share of the busiest, the on-node sing-box version (≠ marks drift from the fleet majority) and probe freshness. Open a server for the full drill-in.",
+                    "Одна строка на сервер — состояние sing-box, нагрузка диска/памяти (тёплая ячейка выше 70%), живые подключения, трафик за 24ч с долей от самой нагруженной ноды, версия sing-box на ноде (≠ помечает дрейф от большинства флота) и свежесть пробы. Открой сервер для деталей.",
+                )) { "ⓘ" }
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table.ed-grid style="margin-top: 8px;" {
                 thead {
-                    tr style="border-bottom: 1px solid var(--ink);" {
-                        (th(tr(lang, "server", "сервер"), false))
-                        (th(tr(lang, "sing-box", "sing-box"), false))
-                        (th(tr(lang, "disk", "диск"), true))
-                        (th(tr(lang, "mem", "память"), true))
-                        (th(tr(lang, "conns now", "подкл."), true))
-                        (th(tr(lang, "traffic 24h", "трафик 24ч"), true))
-                        (th(tr(lang, "version", "версия"), true))
-                        (th(tr(lang, "last probe", "проверка"), true))
+                    tr {
+                        th { (tr(lang, "server", "сервер")) }
+                        th { (tr(lang, "state", "состояние")) }
+                        th.num { (tr(lang, "disk", "диск")) }
+                        th.num { (tr(lang, "mem", "память")) }
+                        th.num { (tr(lang, "conns", "подкл.")) }
+                        th.num { (tr(lang, "traffic 24h", "трафик 24ч")) }
+                        th { (tr(lang, "share of traffic", "доля трафика")) }
+                        th { (tr(lang, "version", "версия")) }
+                        th.num { (tr(lang, "probe", "проба")) }
                     }
                 }
                 tbody {
@@ -753,58 +754,69 @@ fn dashboard_fleet_table(
                             .find(|(id, _)| *id == s.id)
                             .and_then(|(_, j)| sing_box_version_of(j.as_deref()));
                         @let traffic = traffic_24h.get(&s.id).copied();
-                        tr style="border-bottom: 1px dotted var(--rule);" {
-                            td style="padding: 4px 8px;" {
-                                a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) style="color: var(--ink); text-decoration: none;" { (s.id.0) }
-                            }
-                            // sing-box up/down/unknown.
-                            td style="padding: 4px 8px;" {
+                        @let busiest = max_traffic > 0 && traffic == Some(max_traffic);
+                        @let disk_pct = health.and_then(pct_disk);
+                        @let mem_pct = health.and_then(pct_mem);
+                        tr {
+                            td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) { (s.id.0) } }
+                            td.ed-grid__sm {
                                 @match health.and_then(|h| h.sing_box_active) {
-                                    Some(true) => span style="color: #2e7d32;" { (tr(lang, "up", "работает")) },
-                                    Some(false) => span style="color: #c62828;" { (tr(lang, "down", "не работает")) },
-                                    None => span style="color: var(--mute);" { (dash) },
+                                    Some(true) => span.ed-stat.ed-stat--active { span.ed-stat__dot {} (tr(lang, "up", "работает")) },
+                                    Some(false) => span.ed-stat.ed-stat--failed { span.ed-stat__dot {} (tr(lang, "down", "не работает")) },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // disk %.
-                            td style="padding: 4px 8px; text-align: right;" {
-                                @match health.and_then(pct_disk) {
-                                    Some(p) => span style=(format!("color: {};", utilization_color(p))) { (p) "%" },
-                                    None => span style="color: var(--mute);" { (dash) },
+                            td class=(if disk_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
+                                @match disk_pct {
+                                    Some(p) => { (p) "%" @if p > 70 { " ⚠" } },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // mem %.
-                            td style="padding: 4px 8px; text-align: right;" {
-                                @match health.and_then(pct_mem) {
-                                    Some(p) => span style=(format!("color: {};", utilization_color(p))) { (p) "%" },
-                                    None => span style="color: var(--mute);" { (dash) },
+                            td class=(if mem_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
+                                @match mem_pct {
+                                    Some(p) => { (p) "%" @if p > 70 { " ⚠" } },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // active conns now.
-                            td style="padding: 4px 8px; text-align: right;" {
+                            td.num {
                                 @match conns {
-                                    Some(c) => (c),
-                                    None => span style="color: var(--mute);" { (dash) },
+                                    Some(c) => @if busiest { b { (c) } } @else { (c) },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // 24h traffic.
-                            td style="padding: 4px 8px; text-align: right;" {
+                            td.num {
                                 @match traffic {
-                                    Some(b) => (humanize_bytes(b)),
-                                    None => span style="color: var(--mute);" { (dash) },
+                                    Some(b) => @if busiest { b { (humanize_bytes(b)) } } @else { (humanize_bytes(b)) },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // sing-box version.
-                            td style="padding: 4px 8px; text-align: right;" {
+                            td {
+                                @if let Some(b) = traffic {
+                                    @let share = b.saturating_mul(100).checked_div(max_traffic).unwrap_or(0);
+                                    div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} }
+                                } @else {
+                                    span.ed-grid__mut { (dash) }
+                                }
+                            }
+                            td.ed-grid__sm {
                                 @match kv {
-                                    Some(v) => (v),
-                                    None => span style="color: var(--mute);" { (dash) },
+                                    Some(ref v) => {
+                                        @if majority_version.as_ref() != Some(v) {
+                                            span.ed-grid__flag
+                                                title=(tr(lang, "Version differs from the fleet majority — run update kernels", "Версия отличается от большинства флота — запусти обновление ядер")) {
+                                                (v) " ≠"
+                                            }
+                                        } @else {
+                                            span.ed-grid__mut { (v) }
+                                        }
+                                    },
+                                    None => span.ed-grid__mut { (dash) },
                                 }
                             }
-                            // last-probe age.
-                            td style="padding: 4px 8px; text-align: right; color: var(--mute);" {
+                            td.num.ed-grid__mut.ed-grid__sm {
                                 @match health.map(|h| h.ts) {
                                     Some(ts) => (humanize_age(now - ts, lang)),
-                                    None => span style="color: var(--mute);" { (dash) },
+                                    None => (dash),
                                 }
                             }
                         }
@@ -835,19 +847,6 @@ fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     }
     let free_pct = ((avail.saturating_mul(100)) / total).min(100) as u8;
     Some(100u8.saturating_sub(free_pct))
-}
-
-/// Colour bucket for a *utilization* percentage (disk-used / mem-used),
-/// where HIGH is bad — distinct from `pct_color`, whose thresholds are
-/// tuned for uptime where HIGH is good. Green below 70% used, amber
-/// 70–89%, red at 90%+. Standard ops headroom convention so the
-/// at-a-glance table reads "is this node tight on resources?" correctly.
-fn utilization_color(used_pct: u8) -> &'static str {
-    match used_pct {
-        0..=69 => "#2e7d32",  // green — comfortable headroom
-        70..=89 => "#e6a23c", // amber — getting tight
-        _ => "#c62828",       // red — 90%+ used
-    }
 }
 
 /// Compact "how long ago" string for the last-probe column. Buckets to
@@ -951,83 +950,69 @@ fn dashboard_fleet_traffic_totals(
     }
 }
 
-/// PR-Dash dash#4 — open-alerts breakdown by severity + kind. Replaces
-/// the count-only `dashboard_alerts_tile`: shows «critical N · warn M»
-/// plus the top alert kinds. Keeps the quiet-dashboard contract —
-/// renders nothing when there are zero unacked alerts. Links to
-/// /admin/alerts for the full feed.
-fn dashboard_alerts_breakdown(
-    by_kind_sev: &[(String, String, u64)],
+/// Dashboard 1b — health feed: the newest unacked alerts as a minimal
+/// table (severity mark / kind / target / age), with the unacked total
+/// in the eyebrow and a «full feed →» link to /admin/alerts. Replaces
+/// the PR-Dash dash#4 (kind, severity)-counts card. Quiet-dashboard
+/// contract kept — renders nothing when there are zero unacked alerts.
+fn dashboard_health_feed(
+    alerts: &[vpnctl_inventory::AdminAlert],
+    unacked_total: u64,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    if by_kind_sev.is_empty() {
+    if alerts.is_empty() {
         // Quiet dashboard — no unacked alerts, no card.
         return html! {};
     }
-    // Severity totals across all kinds.
-    let sev_total = |sev: &str| -> u64 {
-        by_kind_sev
-            .iter()
-            .filter(|(_, s, _)| s.eq_ignore_ascii_case(sev))
-            .map(|(_, _, n)| *n)
-            .fold(0u64, u64::saturating_add)
-    };
-    let critical = sev_total("critical");
-    let warn = sev_total("warning") + sev_total("warn");
-    let total: u64 = by_kind_sev
-        .iter()
-        .map(|(_, _, n)| *n)
-        .fold(0u64, u64::saturating_add);
-
-    // Top kinds by count — `alerts_by_kind_severity` already sorts
-    // DESC by count, but a kind can span severities, so re-aggregate
-    // per kind and take the top 3.
-    let mut per_kind: Vec<(String, u64)> = Vec::new();
-    for (kind, _, n) in by_kind_sev {
-        if let Some(entry) = per_kind.iter_mut().find(|(k, _)| k == kind) {
-            entry.1 = entry.1.saturating_add(*n);
-        } else {
-            per_kind.push((kind.clone(), *n));
-        }
-    }
-    per_kind.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    per_kind.truncate(3);
-
+    let now = chrono::Utc::now();
     html! {
-        div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
-            div.ed-art-eyebrow { (tr(lang, "Homelab health · open alerts", "Здоровье homelab · открытые алерты")) }
-            p style="font-family: var(--serif); margin: 6px 0 0;" {
-                @if critical > 0 {
-                    span style="color: #c62828; font-weight: 600;" {
-                        (tr(lang, "critical ", "критич. ")) (critical)
+        div {
+            div.ed-art-eyebrow {
+                (tr(lang, "Health feed", "Поток здоровья"))
+                " · " (tr(lang, "open", "открыто")) " " (unacked_total)
+            }
+            table.ed-feed style="margin-top: 8px;" {
+                tbody {
+                    @for a in alerts {
+                        // Kinds carry the subject after a colon
+                        // (`user.traffic_limit:<uid>`); split so the kind
+                        // column stays scannable and the subject joins
+                        // the target cell.
+                        @let (kind_base, kind_subject) = match a.kind.split_once(':') {
+                            Some((k, s)) => (k, Some(s)),
+                            None => (a.kind.as_str(), None),
+                        };
+                        tr {
+                            td style="width: 20px;" {
+                                @if a.severity.eq_ignore_ascii_case("critical") {
+                                    span style="color: var(--red);" title=(a.severity) { "✖" }
+                                } @else {
+                                    span style="color: var(--warm);" title=(a.severity) { "⚠" }
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm title=(a.summary) { (kind_base) }
+                            td {
+                                @match (&a.server_id, kind_subject) {
+                                    (Some(sid), _) => {
+                                        a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (sid.0) }
+                                    },
+                                    (None, Some(subject)) => {
+                                        // User-scoped kinds put the user id
+                                        // after the colon — link it.
+                                        a href=(format!("/admin/users/{}", path_segment_encode(subject))) { (subject) }
+                                    },
+                                    (None, None) => span.ed-grid__mut { "—" },
+                                }
+                            }
+                            td.num.ed-grid__mut.ed-grid__sm { (humanize_age(now - a.created_at, lang)) }
+                        }
                     }
-                    " · "
-                }
-                @if warn > 0 {
-                    span style="color: var(--acc); font-weight: 600;" {
-                        (tr(lang, "warn ", "предупр. ")) (warn)
-                    }
-                    " · "
-                }
-                // If neither critical nor warn matched (e.g. only "info"
-                // severity), still surface the raw total so the operator
-                // isn't left with an empty headline.
-                @if critical == 0 && warn == 0 {
-                    b { (total) }
-                    (tr(lang, " open", " открытых"))
-                    " · "
-                }
-                a href="/admin/alerts" style="color: var(--ink);" {
-                    em { (tr(lang, "see the full feed →", "смотреть весь поток →")) }
                 }
             }
-            // Top kinds line.
-            p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 8px 0 0;" {
-                (tr(lang, "top: ", "топ: "))
-                @for (i, (kind, n)) in per_kind.iter().enumerate() {
-                    @if i > 0 { " · " }
-                    (kind) " (" (n) ")"
+            div style="margin-top: 6px;" {
+                a href="/admin/alerts" style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--acc); text-decoration: none;" {
+                    (tr(lang, "full feed →", "весь поток →"))
                 }
             }
         }
@@ -1081,144 +1066,50 @@ fn dashboard_abuse_summary(
     }
     let n = rows.len();
     html! {
-        div style="margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper-tint);" {
-            div.ed-art-eyebrow style="color: var(--acc);" {
+        div {
+            div.ed-art-eyebrow {
                 (tr(lang, "Likely-shared subscriptions", "Похоже на расшаренные подписки"))
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
-                b { (n) }
-                @if n == 1 {
-                    (tr(lang, " subscription looks shared", " подписка похожа на расшаренную"))
-                } @else {
-                    (tr(lang, " subscriptions look shared", " подписок похожи на расшаренные"))
-                }
-                (tr(
+                " · " (n) " "
+                span.ed-tip title=(tr(
                     lang,
-                    " — risk score weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity (a traveller's home + mobile + work no longer trips it). Open a row to rotate the token.",
-                    " — риск-скор взвешивает ОДНОВРЕМЕННЫЕ клиентские IP + невозможные перемещения намного выше простого разнообразия сетей (дом + мобильный + работа путешественника больше не срабатывают). Открой строку, чтобы сменить токен.",
-                ))
+                    "Risk score weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity (a traveller's home + mobile + work no longer trips it). Open a row to rotate the token.",
+                    "Риск-скор взвешивает ОДНОВРЕМЕННЫЕ клиентские IP + невозможные перемещения намного выше простого разнообразия сетей (дом + мобильный + работа путешественника больше не срабатывают). Открой строку, чтобы сменить токен.",
+                )) { "ⓘ" }
             }
-            ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-                @for (uid, sc) in &rows {
-                    li style="display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        span style=(format!(
-                            "font-weight: 700; min-width: 26px; text-align: right; color: {};",
-                            if sc.level == SharingLevel::High { "#b00020" } else { "#9a6700" }
-                        )) {
-                            (sc.score)
-                        }
-                        // Link to the user's "Subscription origins" section.
-                        a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0)))
-                          style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
-                            (uid.0)
-                        }
-                        span style="color: var(--mute);" {
-                            @for (i, reason) in sc.reasons.iter().take(3).enumerate() {
-                                @if i > 0 { " · " }
-                                (sharing_reason_label(*reason, lang))
+            table.ed-feed style="margin-top: 8px;" {
+                tbody {
+                    @for (uid, sc) in rows.iter().take(6) {
+                        @let tone = if sc.level == SharingLevel::High { "var(--red)" } else { "var(--warm)" };
+                        tr {
+                            td.num style="width: 34px;" {
+                                b style=(format!("color: {tone};")) { (sc.score) }
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// PR-Dash dash#6 — "today so far" digest. «Today: N added · M grants
-/// changed · K deploys» from the audit log (Q-4g). Renders nothing
-/// when every count is zero (quiet dashboard). Sits near the metrics
-/// deck so it reads as a one-line "what changed today" banner.
-fn dashboard_today_digest(
-    digest: &vpnctl_inventory::TodayDigest,
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    if digest.users_added == 0 && digest.grants_changed == 0 && digest.deploys == 0 {
-        return html! {};
-    }
-    // Build the parts so the separators don't dangle when a count is 0.
-    html! {
-        div style="margin: 14px 0 0; padding: 10px 14px; border: 1px solid var(--rule); border-left: 3px solid var(--accent); background: var(--paper);" {
-            p style="font-family: var(--serif); font-size: 13px; margin: 0;" {
-                b { (tr(lang, "Today: ", "Сегодня: ")) }
-                @if digest.users_added > 0 {
-                    b { (digest.users_added) }
-                    @if digest.users_added == 1 {
-                        (tr(lang, " user added", " пользователь добавлен"))
-                    } @else {
-                        (tr(lang, " users added", " пользователей добавлено"))
-                    }
-                }
-                @if digest.grants_changed > 0 {
-                    @if digest.users_added > 0 { " · " }
-                    b { (digest.grants_changed) }
-                    (tr(lang, " grants changed", " доступов изменено"))
-                }
-                @if digest.deploys > 0 {
-                    @if digest.users_added > 0 || digest.grants_changed > 0 { " · " }
-                    b { (digest.deploys) }
-                    @if digest.deploys == 1 {
-                        (tr(lang, " deploy", " деплой"))
-                    } @else {
-                        (tr(lang, " deploys", " деплоев"))
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Editorial timeline of the most recent audit entries. Empty inventory
-/// gets a deliberate "no activity yet" stub so the section never renders
-/// as a bare rule.
-fn dashboard_audit(audit: &[vpnctl_inventory::AuditEntry], lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::tr;
-    html! {
-        div.ed-art-eyebrow style="margin-top: 28px;" {
-            (tr(lang, "Recent activity", "Недавняя активность"))
-        }
-        @if audit.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                (tr(
-                    lang,
-                    "No actions logged yet — vpnctl bootstrap / deploy / add-user will start filling this stream.",
-                    "Действий пока не записано — vpnctl bootstrap / deploy / add-user начнут наполнять этот поток.",
-                ))
-            }
-        } @else {
-            div.ed-time {
-                @for e in audit {
-                    div.ed-time-row {
-                        // 16-char ISO clip — drops fractional seconds and Z.
-                        span.ed-time-row__t { (format_msk_iso(e.ts)) }
-                        span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
-                            (e.action)
-                        }
-                        span.ed-time-row__tgt {
-                            @match &e.target {
-                                Some(t) => (t),
-                                None => "—",
+                            td style="width: 96px;" {
+                                div.ed-scorebar {
+                                    div style=(format!("width: {}%; background: {tone};", sc.score)) {}
+                                }
                             }
-                        }
-                        span.ed-time-row__pl {
-                            (tr(lang, "by ", "автор: ")) (e.actor)
-                            // Show key payload fields so the row tells
-                            // the operator WHAT was enabled, granted,
-                            // etc. Without this they had to crack
-                            // `audit_log.payload` open by hand to
-                            // disambiguate "server.protocol.enable
-                            // stg" from "server.kernel.enable stg".
-                            // (Caught 2026-05-16 by Pavel: «в дашборде
-                            // логах не очень понятно что конкретно я
-                            // включил».)
-                            @if let Some(p) = &e.payload {
-                                @let summary = summarize_audit_payload(p);
-                                @if !summary.is_empty() {
-                                    " · " span.ed-mono { (summary) }
+                            td {
+                                // Deep-link to the user's "Subscription
+                                // origins" evidence section.
+                                a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
+                                    (uid.0)
+                                }
+                            }
+                            td.num.ed-grid__mut {
+                                @for (i, reason) in sc.reasons.iter().take(2).enumerate() {
+                                    @if i > 0 { " · " }
+                                    (sharing_reason_label(*reason, lang))
                                 }
                             }
                         }
+                    }
+                }
+            }
+            @if n > 6 {
+                div style="margin-top: 6px;" {
+                    span.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px;" {
+                        "+" (n - 6) " " (tr(lang, "more flagged", "ещё под флагом"))
                     }
                 }
             }
@@ -1445,7 +1336,7 @@ async fn dashboard_render(
             Vec::new()
         });
 
-    let (stats, audit) = collect_dashboard_data(&state)
+    let stats = collect_dashboard_data(&state)
         .await
         .map_err(internal_error)?;
 
@@ -1460,27 +1351,6 @@ async fn dashboard_render(
             tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
             Vec::new()
         });
-    // Pavel iter D.6c — limit alerts. Pre-filtered to users who
-    // have crossed their configured threshold; sorted DESC by
-    // percent-of-limit so the most-at-risk shows first.
-    let limit_state = state
-        .inv
-        .users_traffic_vs_limit()
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "users_traffic_vs_limit failed");
-            Vec::new()
-        });
-    let alerting: Vec<(vpnctl_core::UserId, u64, u64, u8)> = limit_state
-        .into_iter()
-        .filter(|(_, used, lim, threshold)| {
-            *lim > 0 && ((*used as u128 * 100) / *lim as u128) >= u128::from(*threshold)
-        })
-        .collect();
-
-    // PR-Dash dash#4 replaced the count-only «unacked alerts» tile with
-    // the (kind, severity) breakdown loaded below — `unacked_alert_count`
-    // is no longer queried on the dashboard path.
 
     // Phase 4b — per-server live activity rollup for the dashboard
     // «VPN activity» tile. ONE call returns one entry per known
@@ -1488,18 +1358,6 @@ async fn dashboard_render(
     // pass the per-server breakdown to the renderer.
     let live_activity = state.inv.all_servers_live_activity(since_hours).await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", error = %e, "all_servers_live_activity failed");
-        Vec::new()
-    });
-
-    // A2 — idle users (audit 2026-05-22): users who haven't hit
-    // /sub or /api/v1/app/config in the last 30 days, plus users
-    // who have NEVER appeared in the access log (created and
-    // forgotten). Revoke candidates. Cap at 10 to keep the panel
-    // compact — operator can drill into /admin/users for the full
-    // list. Threshold of 30 days catches «forgotten phone in
-    // drawer» without surfacing normal-vacation users.
-    let idle_users = state.inv.idle_users(30, 10).await.unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "idle_users failed");
         Vec::new()
     });
 
@@ -1572,17 +1430,16 @@ async fn dashboard_render(
         })
         .collect();
 
-    // PR-Dash dash#4 — open-alerts breakdown by (kind, severity) (Q-4f).
-    // Replaces the count-only tile. Keeps the quiet-dashboard contract:
-    // empty Vec ⇒ the card renders nothing.
-    let alerts_breakdown = state
-        .inv
-        .alerts_by_kind_severity()
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "alerts_by_kind_severity failed");
-            Vec::new()
-        });
+    // Dashboard 1b — health feed: newest 5 unacked alerts + the unacked
+    // total for the eyebrow. Quiet-dashboard contract: empty ⇒ no card.
+    let recent_alerts = state.inv.recent_alerts(5, false).await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "recent_alerts failed");
+        Vec::new()
+    });
+    let unacked_total = state.inv.unacked_alert_count().await.unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "unacked_alert_count failed");
+        recent_alerts.len() as u64
+    });
 
     // PR-Dash dash#5 (redesigned 2026-06-17) — composite account-sharing
     // risk. Gather raw signals fleet-wide over the retention window, score
@@ -1606,13 +1463,6 @@ async fn dashboard_render(
         .filter(|(_, sc)| sc.is_flagged())
         .collect();
     likely_shared.sort_by_key(|b| std::cmp::Reverse(b.1.score));
-
-    // PR-Dash dash#6 — "today so far" digest from the audit log (Q-4g).
-    // All-zero ⇒ card hidden (quiet dashboard).
-    let today_digest = state.inv.today_digest().await.unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "today_digest failed");
-        vpnctl_inventory::TodayDigest::default()
-    });
 
     // PR-Dash — per-server usage coefficients (for the weighted traffic
     // sums in dash#1 + dash#2). Built from the already-loaded server
@@ -1652,10 +1502,7 @@ async fn dashboard_render(
         // Densification pass — the h1 + explanatory deck + four KPI cards
         // collapse into one dense summary bar (prose → ⓘ hover).
         (dashboard_summary_bar(&stats, conns_now, lang))
-        // PR-Dash dash#6 — "today so far" digest, near the metrics deck.
-        (dashboard_today_digest(&today_digest, lang))
-        // PR-Dash dash#1 — fleet-at-a-glance table, after the metrics
-        // deck and before the window picker.
+        // Dashboard 1b — dense fleet table, right under the summary bar.
         (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
         // ── in-page tabs (ui-audit follow-up). The KPI metrics +
         // today-digest + fleet table ABOVE are chrome (every tab — the
@@ -1670,15 +1517,16 @@ async fn dashboard_render(
             ],
         ))
 
-        // ── OVERVIEW (default) — what needs attention + what happened.
+        // ── OVERVIEW (default) — dashboard 1b two-panel row: what looks
+        // shared (left) and what's unhealthy (right). Both panels keep the
+        // quiet contract — an empty side simply renders nothing. Traffic-
+        // limit crossings arrive as `user.traffic_limit` alerts, so they
+        // surface in the health feed rather than a dedicated card.
         @if tab == DashboardTab::Overview {
-            // PR-Dash dash#4 — alerts breakdown. Quiet when no unacked.
-            (dashboard_alerts_breakdown(&alerts_breakdown, lang))
-            // PR-Dash dash#5 — abuse summary (likely-shared subs).
-            (dashboard_abuse_summary(&likely_shared, lang))
-            (dashboard_idle_users(&idle_users, lang))
-            (dashboard_limit_alerts(&alerting, lang))
-            (dashboard_audit(&audit, lang))
+            div.ed-dash-cols {
+                (dashboard_abuse_summary(&likely_shared, lang))
+                (dashboard_health_feed(&recent_alerts, unacked_total, lang))
+            }
         }
 
         // ── ACTIVITY — the window-driven charts (traffic / uptime / usage).
@@ -1973,154 +1821,6 @@ fn dashboard_vpn_activity(
 // by `dashboard_alerts_breakdown` (defined above, near the other PR-Dash
 // cards), which renders the (kind, severity) breakdown from
 // `alerts_by_kind_severity` instead of a bare count.
-
-/// A2 (audit 2026-05-22) — «idle users» panel. Lists users whose
-/// most recent `/sub` or `/api/v1/app/config` hit is older than 30
-/// days, OR who have never appeared in `sub_access_log` at all
-/// (created and forgotten). Helps the operator find revoke
-/// candidates without manually grep-ing the user list.
-///
-/// **Rendered only when there's at least one idle user** — quiet
-/// dashboard for a fleet with zero idle accounts. Each row links to
-/// `/admin/users/<id>` where the operator can revoke / disable / dig
-/// in. «Never seen» is displayed as «never» in italics so it visually
-/// distinguishes from «seen X days ago».
-fn dashboard_idle_users(
-    rows: &[(vpnctl_core::UserId, Option<chrono::DateTime<chrono::Utc>>)],
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    if rows.is_empty() {
-        return html! {};
-    }
-    let now = chrono::Utc::now();
-    html! {
-        section id="idle-users" style="margin-top: 28px;" {
-            div.ed-art-eyebrow {
-                (tr(lang, "Idle users · revoke candidates", "Простаивающие пользователи · кандидаты на отзыв"))
-            }
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 12px 0;" {
-                (tr(
-                    lang,
-                    // Honest copy (audit 2026-06-10): the metric is
-                    // SUBSCRIPTION pulls, not tunnel traffic — a client
-                    // with a cached config can use the VPN daily and
-                    // still look «idle» here. Check the user's traffic
-                    // page before revoking.
-                    "Users whose subscription URL hasn't been pulled in 30+ days (or never). Apps with a cached config can still be USING the VPN — check the user's traffic page before revoking. ",
-                    "Пользователи, чей URL подписки не запрашивался 30+ дней (или никогда). Приложение с закэшированным конфигом может продолжать ПОЛЬЗОВАТЬСЯ VPN — проверь страницу трафика юзера перед отзывом. ",
-                ))
-                em { (tr(lang, "Click to drill in", "Кликни, чтобы зайти")) }
-                (tr(
-                    lang,
-                    " — common pattern: forgotten phone in a drawer; revoke + reclaim the sub-token slot.",
-                    " — типичный паттерн: забытый телефон в ящике; отзови и освободи слот sub-токена.",
-                ))
-            }
-            div.ed-time {
-                @for (uid, last_seen) in rows {
-                    div.ed-time-row {
-                        // Age column on the left so the operator can
-                        // scan «who's been gone longest» in one pass.
-                        span.ed-time-row__t {
-                            @match last_seen {
-                                Some(ts) => {
-                                    @let age_days = (now - *ts).num_days().max(0);
-                                    (age_days) " " (tr(lang, "d ago", "д назад"))
-                                }
-                                None => {
-                                    em style="color: var(--mute);" {
-                                        (tr(lang, "never", "никогда"))
-                                    }
-                                }
-                            }
-                        }
-                        span.ed-time-row__a {
-                            (tr(lang, "idle", "простой"))
-                        }
-                        span.ed-time-row__tgt {
-                            a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
-                              style="color: var(--ink); text-decoration: none;" {
-                                (uid.0)
-                            }
-                        }
-                        span.ed-time-row__pl style="color: var(--mute);" {
-                            @match last_seen {
-                                Some(ts) => (format_msk_iso(*ts)),
-                                None => "—",
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Render the "limit alerts" section on the dashboard. Shows only
-/// users who have crossed their configured threshold (skipping the
-/// section entirely when nobody is at risk — empty dashboard is
-/// clean dashboard). Each row click-throughs to user-detail where
-/// the operator can rotate keys / raise limit / dig in.
-fn dashboard_limit_alerts(
-    rows: &[(vpnctl_core::UserId, u64, u64, u8)],
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    if rows.is_empty() {
-        // Clean — no one near limit, no UI clutter. Operator sees
-        // this section only when something demands attention.
-        return html! {};
-    }
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow style="color: var(--acc);" {
-            (rows.len())
-            @if rows.len() == 1 {
-                (tr(lang, " user near monthly limit", " пользователь у лимита месяца"))
-            } @else {
-                (tr(lang, " users near monthly limit", " пользователей у лимита месяца"))
-            }
-        }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (tr(
-                lang,
-                "These users have crossed their configured alert threshold (default ",
-                "Эти пользователи перешли порог срабатывания уведомления (по умолчанию ",
-            ))
-            span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%" }
-            (tr(
-                lang,
-                "). Click through to raise the cap or shape behaviour.",
-                "). Кликни чтобы поднять лимит или повлиять на поведение.",
-            ))
-        }
-        ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-            @for (uid, used, lim, threshold) in rows {
-                @let pct = ((*used as u128 * 100) / (*lim).max(1) as u128).min(999) as u32;
-                @let over_limit = pct >= 100;
-                li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                    a href=(format!("/admin/users/{}", path_segment_encode(&uid.0)))
-                      style="color: var(--ink); text-decoration: none; font-weight: 600; flex: 1;" {
-                        (uid.0)
-                    }
-                    span style="color: var(--mute);" {
-                        (fmt_traffic_progress(*used, *lim))
-                    }
-                    @if over_limit {
-                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); font-weight: 600; margin-left: 8px;" {
-                            (tr(lang, "OVER", "СВЕРХ"))
-                        }
-                    } @else {
-                        span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-left: 8px;" {
-                            "≥ " (threshold) "%"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Render the "heavy users · <window>" section on the dashboard.
 /// Sorted DESC by total bytes (upload + download). Empty list →
