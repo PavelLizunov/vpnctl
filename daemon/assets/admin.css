@@ -477,6 +477,47 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
   letter-spacing: -0.005em;
 }
 
+/* ── action buttons (mono family) ──
+   Page/table action buttons are a mono-11px family, distinct from the
+   sans .ed-btn hero family above. This gives them a semantic vocabulary so
+   danger/recovery/warning read at a glance instead of every action being
+   hand-styled inline (audit 2026-07-08: ~600 inline styles, --red never
+   used on a destructive action). Colours are outline-only (border+text
+   from existing theme tokens) so every variant keeps contrast in all three
+   themes; the only solid fill is --primary (--ink/--paper, always max
+   contrast) and the transient hover fills. Drop-in for the existing inline
+   styles: base == the old neutral outline, sizes match 2/4/6-px paddings. */
+.ed-abtn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.25;
+  padding: 4px 12px;
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 90ms ease, color 90ms ease, border-color 90ms ease;
+}
+.ed-abtn:hover { background: var(--paper-3); }
+.ed-abtn--primary   { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.ed-abtn--primary:hover { background: var(--ink); color: var(--paper); opacity: 0.86; }
+.ed-abtn--secondary { border-color: var(--rule-s); color: var(--soft); }
+.ed-abtn--secondary:hover { border-color: var(--ink); color: var(--ink); }
+.ed-abtn--recovery  { background: var(--acc); color: var(--paper); border-color: var(--acc); }
+.ed-abtn--recovery:hover { background: var(--acc); color: var(--paper); opacity: 0.86; }
+.ed-abtn--warning   { border-color: var(--warm); color: var(--warm); }
+.ed-abtn--warning:hover { background: var(--warm); color: var(--paper); }
+.ed-abtn--danger    { border-color: var(--red); color: var(--red); }
+.ed-abtn--danger:hover { background: var(--red); color: var(--paper); }
+/* solid danger — the point-of-no-return confirm button on delete-confirm
+   pages (outline --danger is the trigger that OPENS the confirm). */
+.ed-abtn--danger-solid { background: var(--red); color: var(--paper); border-color: var(--red); }
+.ed-abtn--danger-solid:hover { background: var(--red); color: var(--paper); opacity: 0.86; }
+.ed-abtn--sm { padding: 2px 8px; }
+.ed-abtn--lg { padding: 6px 14px; }
+
 /* ── status inline ── */
 .ed-stat {
   display:inline-flex; align-items: baseline; gap: 6px;
