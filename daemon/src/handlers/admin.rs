@@ -490,55 +490,54 @@ async fn collect_dashboard_data(
 }
 
 /// Render an editorial 4-cell metric row from the dashboard stats.
-fn dashboard_metrics(stats: &DashboardStats, lang: crate::i18n::Locale) -> Markup {
+fn dashboard_summary_bar(
+    stats: &DashboardStats,
+    conns_now: usize,
+    lang: crate::i18n::Locale,
+) -> Markup {
     use crate::i18n::tr;
+    // Densification pass (2026-07-09): the four 68px KPI cards + the
+    // explanatory deck above collapse into one dense mono line. The prose
+    // folds into the ⓘ hover; the counts stay. Same data, a quarter of the
+    // vertical space (see design_handoff_vpnctl_densify).
+    let tip = tr(
+        lang,
+        "Counts straight from the SQLite inventory backing this daemon (/var/lib/vpnctl/inv.db). Servers, users, grants and the daemon version update on every reload.",
+        "Счётчики читаются напрямую из SQLite-инвентаря этого демона (/var/lib/vpnctl/inv.db). Серверы, пользователи, выданные доступы и версия демона обновляются при каждой перезагрузке.",
+    );
     html! {
-        div.ed-metrics {
-            div.ed-metric {
-                span.ed-metric__lbl { (tr(lang, "Servers", "Серверы")) }
-                span.ed-metric__v { (stats.servers) }
-                span.ed-metric__sub { (tr(lang, "in inventory", "в инвентаре")) }
+        div.ed-sumbar {
+            h1.ed-sumbar__h {
+                (tr(lang, "homelab ", "homelab "))
+                em { (tr(lang, "at a glance", "одним взглядом")) }
             }
-            div.ed-metric {
-                span.ed-metric__lbl { (tr(lang, "Users", "Пользователи")) }
-                span.ed-metric__v { (stats.users) }
-                span.ed-metric__sub {
-                    (tr(lang, "across ", "всего ")) b { (stats.grants) }
-                    @if stats.grants == 1 { (tr(lang, " grant", " доступ")) }
-                    @else { (tr(lang, " grants", " доступов")) }
-                    // B1.user surface — disabled-count appears ONLY when
-                    // non-zero (quiet dashboard contract). Direct link
-                    // to /admin/users so operator can drill in to
-                    // re-enable / triage. Amber styling pulls the eye
-                    // without screaming.
-                    @if stats.disabled_users > 0 {
-                        " · "
-                        a href="/admin/users"
-                          style="color: var(--acc); text-decoration: none;"
-                          title=(tr(
-                              lang,
-                              "Users with disabled=true (B1.user soft-suspend). Click to drill into the user list.",
-                              "Пользователи с disabled=true (B1.user мягкая пауза). Кликни, чтобы открыть список.",
-                          )) {
-                            b { (stats.disabled_users) }
-                            // «paused» / «на паузе» are invariant
-                            // across plural counts in both languages
-                            // (adjective stays the same). No-op
-                            // @if/@else removed per 2026-05-23 audit.
-                            (tr(lang, " paused", " на паузе"))
-                        }
+            span.ed-tip title=(tip) { "ⓘ" }
+            span.ed-sumbar__stat { b { (stats.servers) } " " (tr(lang, "servers", "серверов")) }
+            span.ed-sumbar__stat {
+                b { (stats.users) } " " (tr(lang, "users", "юзеров"))
+                @if stats.disabled_users > 0 {
+                    " · "
+                    a.ed-sumbar__warn href="/admin/users"
+                      title=(tr(
+                          lang,
+                          "Users with disabled=true (soft-suspended). Click to drill into the user list.",
+                          "Пользователи с disabled=true (на паузе). Кликни, чтобы открыть список.",
+                      )) {
+                        b { (stats.disabled_users) } (tr(lang, " paused", " на паузе"))
                     }
                 }
             }
-            div.ed-metric {
-                span.ed-metric__lbl { (tr(lang, "Protocols", "Протоколы")) }
-                span.ed-metric__v { (stats.distinct_protocols) }
-                span.ed-metric__sub { (tr(lang, "distinct, enabled", "уникальных, включено")) }
+            span.ed-sumbar__stat {
+                b { (stats.grants) } " "
+                @if stats.grants == 1 { (tr(lang, "grant", "доступ")) }
+                @else { (tr(lang, "grants", "доступов")) }
             }
-            div.ed-metric {
-                span.ed-metric__lbl { (tr(lang, "Daemon", "Демон")) }
-                span.ed-metric__v { em { (tr(lang, "live", "активен")) } }
-                span.ed-metric__sub { "vpnctld " b { (env!("CARGO_PKG_VERSION")) } }
+            span.ed-sumbar__stat { b { (stats.distinct_protocols) } " " (tr(lang, "protocols", "протоколов")) }
+            span.ed-sumbar__stat { b { (conns_now) } " " (tr(lang, "conns now", "подкл. сейчас")) }
+            span.ed-sumbar__live {
+                span.ed-sumbar__dot {}
+                "vpnctld " b { (env!("CARGO_PKG_VERSION")) } " "
+                em { (tr(lang, "live", "активен")) }
             }
         }
     }
@@ -1646,32 +1645,13 @@ async fn dashboard_render(
         map
     };
 
+    let conns_now: usize = active_conns_now.iter().filter_map(|(_, c)| *c).sum();
+
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
-        h1.ed-art-h1 {
-            (crate::i18n::tr(lang, "homelab ", "homelab "))
-            em { (crate::i18n::tr(lang, "at a glance", "одним взглядом")) }
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
-                lang,
-                "Counts straight from the SQLite inventory backing this daemon (",
-                "Счётчики читаются напрямую из SQLite-инвентаря этого демона (",
-            ))
-            span.ed-mono { "/var/lib/vpnctl/inv.db" }
-            (crate::i18n::tr(lang, "). ", "). "))
-            b { (crate::i18n::tr(
-                lang,
-                "Servers, users, grants and the daemon version",
-                "Серверы, пользователи, выданные доступы и версия демона",
-            )) }
-            (crate::i18n::tr(
-                lang,
-                " update on every reload.",
-                " обновляются при каждой перезагрузке страницы.",
-            ))
-        }
-        (dashboard_metrics(&stats, lang))
+        // Densification pass — the h1 + explanatory deck + four KPI cards
+        // collapse into one dense summary bar (prose → ⓘ hover).
+        (dashboard_summary_bar(&stats, conns_now, lang))
         // PR-Dash dash#6 — "today so far" digest, near the metrics deck.
         (dashboard_today_digest(&today_digest, lang))
         // PR-Dash dash#1 — fleet-at-a-glance table, after the metrics

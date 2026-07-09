@@ -630,16 +630,14 @@ async fn admin_dashboard_renders_zero_state_on_empty_db() {
     let app = router(state(&dir).await);
     let html = fetch_html(app, "/admin/").await;
 
-    assert!(html.contains(r#"class="ed-metrics""#), "metric row missing");
-    assert_metric_tile(&html, "Servers", "0");
-    assert_metric_tile(&html, "Users", "0");
-    assert_metric_tile(&html, "Protocols", "0");
-    // Daemon tile uses <em>live</em> instead of an integer; assert that.
+    assert!(html.contains(r#"class="ed-sumbar""#), "summary bar missing");
+    assert_summary_stat(&html, "0", "servers");
+    assert_summary_stat(&html, "0", "users");
+    assert_summary_stat(&html, "0", "protocols");
+    // Daemon 'live' status lives in the summary bar's right slot.
     assert!(
-        html.contains(
-            r#"<span class="ed-metric__lbl">Daemon</span><span class="ed-metric__v"><em>live</em></span>"#
-        ),
-        "Daemon tile must read 'live'"
+        html.contains(r#"class="ed-sumbar__live""#) && html.contains("<em>live</em>"),
+        "summary bar must show the daemon 'live' status"
     );
     assert!(
         html.contains("No actions logged yet"),
@@ -647,16 +645,14 @@ async fn admin_dashboard_renders_zero_state_on_empty_db() {
     );
 }
 
-/// Assert that a metric tile labelled `label` shows value `value` on the
-/// dashboard. Anchors the integer to its tile (`<span class="ed-metric__lbl">Servers</span><span class="ed-metric__v">3</span>`)
-/// so a refactor that swaps two tiles can't pass the test by accident.
-fn assert_metric_tile(html: &str, label: &str, value: &str) {
-    let needle = format!(
-        r#"<span class="ed-metric__lbl">{label}</span><span class="ed-metric__v">{value}</span>"#
-    );
+/// Assert the dashboard summary bar (densification pass) shows
+/// `<b>value</b> label` (e.g. `<b>3</b> servers`), anchoring each count to
+/// its own unit label so a reorder of the bar can't pass by coincidence.
+fn assert_summary_stat(html: &str, value: &str, label: &str) {
+    let needle = format!("<b>{value}</b> {label}");
     assert!(
         html.contains(&needle),
-        "metric tile {label}={value} not found (looked for {needle:?})"
+        "summary stat '{value} {label}' not found (looked for {needle:?})"
     );
 }
 
@@ -673,12 +669,12 @@ async fn admin_dashboard_counts_match_seeded_inventory() {
     let app = router(s);
     let html = fetch_html(app, "/admin/").await;
 
-    assert_metric_tile(&html, "Servers", "3");
-    assert_metric_tile(&html, "Users", "2");
+    assert_summary_stat(&html, "3", "servers");
+    assert_summary_stat(&html, "2", "users");
     // distinct enabled_protocols is 1 (every seeded server gets vless+reality)
-    assert_metric_tile(&html, "Protocols", "1");
+    assert_summary_stat(&html, "1", "protocols");
     assert!(
-        html.contains("across <b>4</b> grants"),
+        html.contains("<b>4</b> grants"),
         "grants subtitle missing or wrong (expected 4 grants, plural)"
     );
 }
@@ -837,11 +833,11 @@ async fn admin_dashboard_pluralises_grants_subtitle() {
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("across <b>1</b> grant"),
+        html.contains("<b>1</b> grant"),
         "singular form 'grant' expected for 1 grant"
     );
     assert!(
-        !html.contains("across <b>1</b> grants"),
+        !html.contains("<b>1</b> grants"),
         "must not pluralise when grant count is 1"
     );
 
@@ -851,7 +847,7 @@ async fn admin_dashboard_pluralises_grants_subtitle() {
     seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("across <b>2</b> grants"),
+        html.contains("<b>2</b> grants"),
         "plural form 'grants' expected for 2 grants"
     );
 }
