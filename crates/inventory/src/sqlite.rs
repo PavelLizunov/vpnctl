@@ -80,7 +80,7 @@ type BoostySettingsRow = (
     i64,
 );
 
-/// Bridge configuration (migration `0036_boosty_bridge.sql`, singleton row).
+/// Bridge configuration (migration `0040_boosty_bridge.sql`, singleton row).
 ///
 /// The three credential fields are SECRETS — never audit-log them, never
 /// render them verbatim in admin HTML (mask to `••••<last4>`).
@@ -2057,7 +2057,7 @@ impl SqliteInventory {
         Ok(())
     }
 
-    // ── Boosty bridge (migration 0036) ──────────────────────────────────
+    // ── Boosty bridge (migration 0040) ──────────────────────────────────
 
     /// All user → Boosty-subscriber links (users with a non-NULL
     /// `boosty_subscriber_id`). The reconciler joins these with each

@@ -6,9 +6,9 @@
 
 use boosty_api::api_client::ApiClient;
 use serde_json::json;
-use vpnctl_boosty_bridge::{ApplyMode, sync_once};
+use vpnctl_boosty_bridge::{ApplyMode, build_client, sync_from_settings_at, sync_once};
 use vpnctl_core::{User, UserId};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
 fn subscriber(id: i64, name: &str, status: &str) -> serde_json::Value {
     json!({
@@ -164,4 +164,116 @@ async fn enable_only_mode_leaves_lapsed_pending() {
     assert!(report.disabled.is_empty());
     let users = inv.list_users().await.unwrap();
     assert!(!users[0].disabled, "EnableOnly must not disable bob");
+}
+
+/// AC-A1: Boosty invalidates the old refresh token at refresh time, so the
+/// rotated value must be persisted even when the sync itself fails AFTER a
+/// successful refresh — otherwise the next pass authenticates with a
+/// consumed token and the bridge bricks itself.
+#[tokio::test]
+async fn rotated_refresh_token_persisted_even_when_roster_fetch_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let _refresh = server
+        .mock("POST", "/oauth/token/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"access_token":"acc2","refresh_token":"ref2","expires_in":3600}"#)
+        .create_async()
+        .await;
+    let _subs = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(500)
+        .create_async()
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let settings = BoostySettings {
+        enabled: true,
+        blog_url: Some("ninitux".into()),
+        access_token: None,
+        refresh_token: Some("ref1".into()),
+        device_id: Some("dev".into()),
+        poll_interval_secs: 3600,
+        auto_disable_lapsed: false,
+    };
+    inv.set_boosty_settings(&settings).await.unwrap();
+
+    let result = sync_from_settings_at(&inv, &settings, ApplyMode::DryRun, &server.url()).await;
+    assert!(result.is_err(), "roster 500 must fail the pass");
+
+    let after = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(
+        after.refresh_token.as_deref(),
+        Some("ref2"),
+        "rotated token must be persisted despite the failed sync"
+    );
+}
+
+/// AC-A4: with BOTH credential kinds configured the refresh flow must win —
+/// a static access token expires within ~an hour and would kill the bridge
+/// on its first expiry.
+#[tokio::test]
+async fn build_client_prefers_refresh_flow_when_both_creds_set() {
+    let settings = BoostySettings {
+        access_token: Some("static-acc".into()),
+        refresh_token: Some("ref1".into()),
+        device_id: Some("dev".into()),
+        ..Default::default()
+    };
+    // No network happens: configuring the refresh flow is lazy.
+    let client = build_client(&settings, "http://127.0.0.1:1").await.unwrap();
+    assert_eq!(
+        client.refresh_token().await.as_deref(),
+        Some("ref1"),
+        "client must be in refresh mode, not static-bearer mode"
+    );
+}
+
+/// AC-A2: a server that accepts the TCP connection and then never responds
+/// must not hang the sync forever — the client carries a total request
+/// timeout (reqwest's default is NO timeout; this pins the regression).
+/// Runtime ~30s (the configured request timeout) — deliberate.
+#[tokio::test]
+async fn hung_server_times_out_instead_of_hanging_forever() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Accept connections and hold them open, never writing a byte.
+    let _hold = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            if let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let settings = BoostySettings {
+        blog_url: Some("b".into()),
+        refresh_token: Some("r".into()),
+        device_id: Some("d".into()),
+        ..Default::default()
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sync_from_settings_at(
+            &inv,
+            &settings,
+            ApplyMode::DryRun,
+            &format!("http://{addr}"),
+        ),
+    )
+    .await;
+    match result {
+        Ok(inner) => assert!(inner.is_err(), "sync against a silent server must error"),
+        Err(_) => panic!("sync must time out well before 60s — request timeout not wired?"),
+    }
 }

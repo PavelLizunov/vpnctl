@@ -11,8 +11,10 @@ publish.workspace = true
 vpnctl-core = { path = "../core" }
 vpnctl-inventory = { path = "../inventory" }
 # The Boosty API client (rustls; no native-tls, matches deny.toml). Pinned to
-# a commit on the operator's fork so CI is reproducible.
-boosty_api = { git = "https://github.com/PavelLizunov/boosty_api_rs", rev = "581827e" }
+# a commit on the operator's fork so CI is reproducible. ee204ec = security
+# hardening: refresh-error body truncation (no token echo into our logs/HTML)
+# + URL segment encoding for the operator-typed blog slug.
+boosty_api = { git = "https://github.com/PavelLizunov/boosty_api_rs", rev = "ee204ec" }
 # Only to construct the reqwest::Client that ApiClient::new wants; rustls
 # (features unify with boosty_api's json/multipart/form across the graph).
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
@@ -22,7 +24,7 @@ thiserror = { workspace = true }
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 tempfile = "3"
 mockito = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "boosty_api"
 version = "0.28.0"
-source = "git+https://github.com/PavelLizunov/boosty_api_rs?rev=581827e#581827ee32824e6561604150d3485119e25c078e"
+source = "git+https://github.com/PavelLizunov/boosty_api_rs?rev=ee204ec#ee204ecef9cc7a774471fb3ca5bda160a941ee5a"
 dependencies = [
  "reqwest 0.13.4",
  "rust_decimal",

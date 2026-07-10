@@ -14,6 +14,7 @@ mod reconcile;
 pub use reconcile::{Action, LinkedUser, SubscriberState, reconcile};
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use boosty_api::api_client::ApiClient;
 use vpnctl_core::UserId;
@@ -81,19 +82,32 @@ pub enum BridgeError {
     Config(String),
 }
 
+/// Connection / total-request timeouts for the HTTP client. Token refresh
+/// holds the client's internal auth mutex across the network call (see
+/// boosty_api docs), so a client WITHOUT timeouts turns one hung connection
+/// into a permanently stuck poller and a hanging /admin/boosty page.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Build an authenticated Boosty [`ApiClient`] from bridge settings.
 ///
-/// Prefers the static bearer token; falls back to the refresh flow
-/// (refresh token + device id). Errors if neither is configured.
-pub async fn build_client(settings: &BoostySettings) -> Result<ApiClient, BridgeError> {
-    let client = ApiClient::new(reqwest::Client::new(), BOOSTY_BASE_URL);
-
-    if let Some(token) = settings.access_token.as_deref()
-        && !token.is_empty()
-    {
-        client.set_bearer_token(token).await?;
-        return Ok(client);
-    }
+/// Prefers the refresh flow (refresh token + device id): access tokens
+/// expire within ~an hour, so with both credentials configured a static
+/// token would kill the bridge on its first expiry. Falls back to the
+/// static bearer token; errors if neither is configured.
+///
+/// `base_url` is the API root (production callers pass [`BOOSTY_BASE_URL`]
+/// via [`sync_from_settings`]; tests point it at a mock server).
+pub async fn build_client(
+    settings: &BoostySettings,
+    base_url: &str,
+) -> Result<ApiClient, BridgeError> {
+    let http = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| BridgeError::Config(format!("building HTTP client failed: {e}")))?;
+    let client = ApiClient::new(http, base_url);
 
     if let (Some(refresh), Some(device)) = (
         settings.refresh_token.as_deref(),
@@ -107,8 +121,15 @@ pub async fn build_client(settings: &BoostySettings) -> Result<ApiClient, Bridge
         return Ok(client);
     }
 
+    if let Some(token) = settings.access_token.as_deref()
+        && !token.is_empty()
+    {
+        client.set_bearer_token(token).await?;
+        return Ok(client);
+    }
+
     Err(BridgeError::Config(
-        "no Boosty credentials set (need an access token, or a refresh token + device id)".into(),
+        "no Boosty credentials set (need a refresh token + device id, or an access token)".into(),
     ))
 }
 
@@ -119,25 +140,50 @@ pub async fn sync_from_settings(
     settings: &BoostySettings,
     mode: ApplyMode,
 ) -> Result<SyncReport, BridgeError> {
+    sync_from_settings_at(inv, settings, mode, BOOSTY_BASE_URL).await
+}
+
+/// [`sync_from_settings`] against an explicit API base URL (tests point
+/// this at a mock server; production uses [`BOOSTY_BASE_URL`]).
+pub async fn sync_from_settings_at(
+    inv: &SqliteInventory,
+    settings: &BoostySettings,
+    mode: ApplyMode,
+    base_url: &str,
+) -> Result<SyncReport, BridgeError> {
     let blog = settings
         .blog_url
         .as_deref()
         .filter(|b| !b.is_empty())
         .ok_or_else(|| BridgeError::Config("blog_url not set".into()))?;
 
-    let client = build_client(settings).await?;
-    let report = sync_once(&client, inv, blog, mode).await?;
+    let client = build_client(settings, base_url).await?;
+    let result = sync_once(&client, inv, blog, mode).await;
 
-    // Boosty rotates the refresh token on every refresh; persist the new
-    // value so the next daemon start / sync still authenticates.
+    // Boosty rotates the refresh token on every refresh and invalidates the
+    // old one, and every pass starts with a refresh (fresh client). Persist
+    // the rotated value BEFORE propagating a sync error: a pass that
+    // authenticated but failed mid-fetch has already consumed the stored
+    // token — losing the rotated one would brick auth on the next pass.
     if settings.refresh_token.is_some()
         && let Some(rotated) = client.refresh_token().await
         && settings.refresh_token.as_deref() != Some(rotated.as_str())
     {
-        inv.set_boosty_refresh_token(&rotated).await?;
+        if let Err(e) = inv.set_boosty_refresh_token(&rotated).await {
+            if result.is_ok() {
+                // Sync worked; the failed persist is now the real error —
+                // the next pass would refresh with a consumed token.
+                return Err(e.into());
+            }
+            tracing::warn!(
+                target = "boosty_bridge",
+                error = %e,
+                "persisting rotated refresh token failed after a failed sync"
+            );
+        }
     }
 
-    Ok(report)
+    result
 }
 
 /// Run one reconciliation pass against the live Boosty roster.
