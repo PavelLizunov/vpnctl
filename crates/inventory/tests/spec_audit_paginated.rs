@@ -50,7 +50,7 @@ async fn no_filters_returns_all_rows_newest_first() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(10, 0, None, None, None)
+        .recent_audit_paginated(10, 0, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(rows.len(), 5, "rule 1: limit=10 > 5 → all 5 rows");
@@ -84,7 +84,7 @@ async fn limit_and_offset_slice_window() {
     inv.audit("admin", "c", None, None).await.unwrap();
 
     let p1 = inv
-        .recent_audit_paginated(2, 0, None, None, None)
+        .recent_audit_paginated(2, 0, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(p1.len(), 2, "rule 2: limit=2 caps to 2");
@@ -92,14 +92,14 @@ async fn limit_and_offset_slice_window() {
     assert_eq!(p1[1].action, "b", "rule 2: page1[1]=2nd-newest");
 
     let p2 = inv
-        .recent_audit_paginated(2, 2, None, None, None)
+        .recent_audit_paginated(2, 2, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(p2.len(), 1, "rule 2: only 1 row left after offset=2");
     assert_eq!(p2[0].action, "a", "rule 2: page2 = oldest 'a'");
 
     let past = inv
-        .recent_audit_paginated(100, 10, None, None, None)
+        .recent_audit_paginated(100, 10, None, None, None, None)
         .await
         .unwrap();
     assert!(past.is_empty(), "rule 2: offset past end → empty Vec");
@@ -113,7 +113,7 @@ async fn actor_filter_is_exact_match_not_like() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, Some("admin"), None, None)
+        .recent_audit_paginated(50, 0, Some("admin"), None, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -138,7 +138,7 @@ async fn action_prefix_matches_only_starting_with_prefix() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, None, Some("user."), None)
+        .recent_audit_paginated(50, 0, None, Some("user."), None, None)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "rule 4: 3 user.* rows expected");
@@ -163,7 +163,7 @@ async fn combined_filters_intersect() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, Some("admin"), Some("user."), None)
+        .recent_audit_paginated(50, 0, Some("admin"), Some("user."), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -195,7 +195,7 @@ async fn empty_action_prefix_matches_all_rows() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, None, Some(""), None)
+        .recent_audit_paginated(50, 0, None, Some(""), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -220,7 +220,7 @@ async fn empty_table_with_filters_returns_empty_ok() {
     ];
     for (actor, prefix) in combos {
         let rows = inv
-            .recent_audit_paginated(10, 0, *actor, *prefix, None)
+            .recent_audit_paginated(10, 0, *actor, *prefix, None, None)
             .await
             .unwrap();
         assert!(
@@ -241,7 +241,7 @@ async fn limit_zero_returns_empty_vec() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(0, 0, None, None, None)
+        .recent_audit_paginated(0, 0, None, None, None, None)
         .await
         .unwrap();
     assert!(
@@ -249,4 +249,45 @@ async fn limit_zero_returns_empty_vec() {
         "rule 8: limit=0 MUST return empty Vec, got {}",
         rows.len()
     );
+}
+
+// Rule 9 (2026-07-10): `action_exclude` drops EXACT-match rows from
+// both the page and the matched count — backs the audit page's «hide
+// snapshots» chip. Other filters still apply on top.
+#[tokio::test]
+async fn action_exclude_drops_exact_action_from_rows_and_counts() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    for _ in 0..3 {
+        inv.audit("admin", "backup.snapshot", None, None)
+            .await
+            .unwrap();
+    }
+    inv.audit("admin", "user.grant", Some("alice"), None)
+        .await
+        .unwrap();
+
+    let rows = inv
+        .recent_audit_paginated(50, 0, None, None, None, Some("backup.snapshot"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "only the non-snapshot row may survive");
+    assert_eq!(rows[0].action, "user.grant");
+
+    let (total, matched) = inv
+        .audit_counts(None, None, None, Some("backup.snapshot"))
+        .await
+        .unwrap();
+    assert_eq!(total, 4, "total stays unfiltered");
+    assert_eq!(matched, 1, "matched honours the exclusion");
+
+    // Exclusion is EXACT — a prefix-sibling action must survive.
+    inv.audit("admin", "backup.snapshot.prune", None, None)
+        .await
+        .unwrap();
+    let rows = inv
+        .recent_audit_paginated(50, 0, None, None, None, Some("backup.snapshot"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "exact match only — prefix sibling stays");
 }

@@ -103,10 +103,21 @@ async def shoot(
             if basic_auth:
                 token = base64.b64encode(basic_auth.encode()).decode()
                 headers["Authorization"] = f"Basic {token}"
-            if extra_cookie:
-                headers["Cookie"] = extra_cookie
             if headers:
                 await cdp_call(ws, 5, "Network.setExtraHTTPHeaders", {"headers": headers})
+            if extra_cookie:
+                # Chrome ≥ ~130 silently strips `Cookie` out of
+                # setExtraHTTPHeaders (caught 2026-07-10: theme/lang
+                # cookie shots rendered the defaults on Chrome 150).
+                # Set a real cookie via CDP instead — same wire bytes
+                # for the server, honest cookie jar for the browser.
+                name, _, value = extra_cookie.partition("=")
+                await cdp_call(
+                    ws,
+                    55,
+                    "Network.setCookie",
+                    {"name": name, "value": value, "url": url, "path": "/"},
+                )
 
             await cdp_call(
                 ws,
@@ -136,8 +147,14 @@ async def shoot(
             print(f"ok {out_path} {len(data)} bytes")
     finally:
         # Reset the persistent tab so the next caller starts clean.
+        # The real cookie set above persists in the profile — delete it
+        # too, or the NEXT cookie-less shot silently inherits this
+        # theme/lang (caught 2026-07-10: RU leaked into an ink-theme shot).
         try:
             async with websockets.connect(ws_url) as ws:
+                if extra_cookie:
+                    name, _, _ = extra_cookie.partition("=")
+                    await cdp_call(ws, 98, "Network.deleteCookies", {"name": name, "url": url})
                 await cdp_call(ws, 99, "Page.navigate", {"url": "about:blank"})
         except Exception:
             pass
