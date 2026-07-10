@@ -1197,6 +1197,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/access.csv",
             get(admin::user_access_csv),
         )
+        // R2 polish — the pending-deploy banner's button deploys ONLY
+        // the pending set (was the fleet-wide deploy-all). GET because
+        // EventSource can't POST; guarded in-handler by the same
+        // Sec-Fetch-Site predicate as the other SSE deploy triggers.
+        .route(
+            "/admin/users/{id}/deploy-pending/sse",
+            get(admin::user_deploy_pending_sse),
+        )
         .route("/admin/users/{id}/activity", get(admin::user_detail_activity))
         .route("/admin/users/{id}/traffic", get(admin::user_detail_traffic))
         // Phase C-3 writes (Users). Each write goes via POST so a casual

@@ -1193,6 +1193,11 @@ fn summarize_audit_payload(payload: &serde_json::Value) -> String {
         "was_present",
         "address",
         "ssh_port",
+        // R2 2026-07-10 — alert.fire rows read as blanks without their
+        // kind; bulk grant/ack rows without their count.
+        "kind",
+        "count",
+        "server",
     ];
     for k in SAFE_KEYS {
         if let Some(v) = map.get(*k) {
@@ -1239,60 +1244,11 @@ fn action_kind(action: &str) -> &'static str {
 // directly — ISO format is the correct interchange for external
 // tools.
 
-/// Classify an IP address from `sub_access_log.ip` into one of four
-/// buckets so the admin UI can flag rows that aren't real external
-/// clients. Pavel 2026-05-21: «вот такой ip это норм?» about a
-/// `127.0.0.1` row — answer is «it's localhost, you (or a script
-/// on the daemon host) ran a curl on the box itself». This makes
-/// that visible at a glance instead of looking like a mystery
-/// external client.
-///
-// `IpKind` + `classify_ip` moved to `crate::ip_kind` (single source
-// of truth for both the admin render here AND the access-log writer
-// that fires `sub_access.suspicious_local_ip` alerts). Render-side
-// chip tag / tooltip / colour are admin-render-specific and stay
-// here as a free-standing fn rather than methods on the shared
-// enum (the enum doesn't need a `crate::i18n::Locale` dep).
-use crate::ip_kind::{IpKind, classify_ip};
-
-fn ip_kind_tag(k: IpKind, lang: crate::i18n::Locale) -> Option<&'static str> {
-    match k {
-        IpKind::Loopback => Some(crate::i18n::tr(lang, "localhost", "localhost")),
-        IpKind::LanRfc1918 => Some(crate::i18n::tr(lang, "LAN", "LAN")),
-        IpKind::LinkLocal => Some(crate::i18n::tr(lang, "link-local", "link-local")),
-        IpKind::Public => None,
-    }
-}
-
-fn ip_kind_tooltip(k: IpKind, lang: crate::i18n::Locale) -> &'static str {
-    match k {
-        IpKind::Loopback => crate::i18n::tr(
-            lang,
-            "Loopback (127.0.0.0/8). Hit came from a script running ON the daemon host itself (curl localhost, SSH tunnel, internal poller). Not an external client.",
-            "Loopback (127.0.0.0/8). Запрос пришёл от скрипта, запущенного НА самом хосте демона (curl localhost, SSH-туннель, внутренний поллер). НЕ внешний клиент.",
-        ),
-        IpKind::LanRfc1918 => crate::i18n::tr(
-            lang,
-            "RFC 1918 private address (10/8, 172.16/12, 192.168/16). Same LAN as the daemon — likely your nginx proxy or another homelab host. Real client IP should arrive via X-Forwarded-For if the peer is in VPNCTLD_TRUSTED_PROXIES.",
-            "Приватный адрес по RFC 1918 (10/8, 172.16/12, 192.168/16). Та же LAN что и демон — скорее всего твой nginx-прокси или другой homelab-хост. Реальный IP клиента должен приходить через X-Forwarded-For если пир в VPNCTLD_TRUSTED_PROXIES.",
-        ),
-        IpKind::LinkLocal => crate::i18n::tr(
-            lang,
-            "Link-local (169.254.0.0/16). DHCP-failure fallback address; should never appear in a sub-access log on a healthy network.",
-            "Link-local (169.254.0.0/16). Fallback-адрес при сбое DHCP; в access-log здоровой сети появляться не должен.",
-        ),
-        IpKind::Public => "",
-    }
-}
-
-fn ip_kind_color(k: IpKind) -> &'static str {
-    match k {
-        IpKind::Loopback => "var(--mute)",
-        IpKind::LanRfc1918 => "var(--mute)",
-        IpKind::LinkLocal => "var(--acc)",
-        IpKind::Public => "var(--rule)",
-    }
-}
+// IP classification lives in `crate::ip_kind` (single source of
+// truth for both the admin render AND the access-log writer that
+// fires `sub_access.suspicious_local_ip` alerts). The render-side
+// chip wrappers left with the legacy Subscription-access table
+// (R2 2026-07-10); the source-IPs section labels ranges itself.
 
 // `parse_ua_short` moved to `crate::ua` (Track-1.2 / migration 0019)
 // so the access-log writer can persist its result in
@@ -1303,9 +1259,9 @@ fn ip_kind_color(k: IpKind) -> &'static str {
 // could document anymore.
 
 // `classify_ip` unit tests moved with the implementation to
-// `crate::ip_kind::tests`. The render-side wrappers
-// (`ip_kind_tag` / `_tooltip` / `_color`) are exercised end-to-end
-// via the admin_smoke `track_1_2_*` tests.
+// `crate::ip_kind::tests`. The render-side chip wrappers left with the
+// legacy Subscription-access table (R2 2026-07-10); the source-IPs
+// section carries its own labelling.
 
 /// Dashboard URL query — currently just the VPN traffic chart's
 /// window selector (`?vpn_window=24h|7d|30d|all`). Defaults to 24h.
@@ -2549,11 +2505,9 @@ pub(crate) async fn monitoring_probe_all(
 /// Inline-SVG sparkline. Pure SSR — width/height pinned, no JS,
 /// stroke uses `var(--acc)` so the accent toggle in the Tweaks panel
 /// recolours every chart on the page consistently.
-fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
-    sparkline_svg_scaled(values, width, height, None, true)
-}
-
-/// The general form behind [`sparkline_svg`].
+/// The sparkline renderer. (The unlabelled legacy wrapper
+/// `sparkline_svg` was deleted in R2 once its last caller learned to
+/// pass an explicit axis + caption.)
 ///
 /// * `y_max = Some(cap)` pins the y-axis — **percent series pass 100**
 ///   so a flat 28 % disk line sits at 28 % of the box height instead of
@@ -3402,15 +3356,6 @@ fn share_link_card(link: &str, footnote: &Markup) -> Markup {
 /// doesn't wrap awkwardly.
 const QR_DISPLAY_PX: u32 = 220;
 
-/// Number of leading chars rendered inside JA3 / JA4 chips on the
-/// subscription-access table. Full value is in the chip's `title=`
-/// tooltip. Eight is a sweet spot — long enough that two distinct
-/// fingerprints diverge in the rendered prefix (JA3 starts with the
-/// numeric TLS-version-and-cipher-list, JA4 with the protocol-class
-/// `t13d1516h2_…` segment), short enough to keep the chip from
-/// dominating the row. Pinned by track_1_4 admin_smoke tests.
-const JA_CHIP_PREFIX_CHARS: usize = 8;
-
 fn qr_svg(url: &str) -> Markup {
     use qrcode::QrCode;
     use qrcode::render::svg;
@@ -3685,17 +3630,12 @@ fn collect_share_links(
     out
 }
 
-/// Phase 4a — query parameters for the user-detail page. Today only
-/// the VPN-egress toggle; more flags can land here as they show up.
+/// Phase 4a — query parameters for the user-detail page.
+/// (`?show_egress` left with the legacy Subscription-access table it
+/// toggled, R2 2026-07-10 — the v2 geo-log always shows egress rows
+/// inline with their ⚠ marker instead of hiding them.)
 #[derive(Debug, Default, serde::Deserialize)]
 pub(crate) struct UserDetailQuery {
-    /// When `?show_egress=1`, the sub-access table includes rows
-    /// where src IP is one of our own VPN-server addresses (the
-    /// «in full-tunnel mode the user's egress is the VPN exit»
-    /// case). Default = off, so the operator sees only real client
-    /// IPs (the genuine abuse-signal).
-    #[serde(default)]
-    show_egress: Option<String>,
     /// 2026-05-23 — VPN-traffic sparkline window. One of «24h»,
     /// «7d», «30d», «all». Defaults to 24h. Backed by
     /// `pick_vpn_sparkline_window`.
@@ -3707,9 +3647,6 @@ pub(crate) struct UserDetailQuery {
 }
 
 impl UserDetailQuery {
-    fn show_egress(&self) -> bool {
-        matches!(self.show_egress.as_deref(), Some("1") | Some("true"))
-    }
     /// Clamped 0-based log page.
     fn log_page(&self) -> i64 {
         self.log_page.unwrap_or(0).clamp(0, 10_000)
@@ -3797,7 +3734,6 @@ async fn user_detail_render(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
-    let show_egress = query.show_egress();
 
     let user = state
         .inv
@@ -3971,44 +3907,15 @@ async fn user_detail_render(
         .map(|s| &s.id)
         .collect();
 
-    // Phase Track-1 abuse-detection signal: how many distinct IPs hit
-    // this user's /sub URL in the last 24h / 7d, plus the recent
-    // access rows themselves. Failures here log a warn but DON'T block
-    // the page render — the operator can still see the rest of the
-    // user detail without telemetry.
-    let ips_24h = state
-        .inv
-        .distinct_ips_for_user(&uid, 24)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "distinct_ips_for_user(24) failed");
-            0
-        });
-    let ips_7d = state
-        .inv
-        .distinct_ips_for_user(&uid, 24 * 7)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "distinct_ips_for_user(168) failed");
-            0
-        });
-    // Phase 4a — default hides VPN-egress rows (where src IP =
-    // one of our own VPN-server addresses, i.e. user is in
-    // full-tunnel + we're seeing OUR exit IP, not theirs). The
-    // `?show_egress=1` query flag flips it on for the case Pavel
-    // explicitly wants to inspect the full-tunnel traffic.
-    let recent_access = state
-        .inv
-        .recent_sub_access_filtered(&uid, 25, show_egress)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sub_access_filtered failed");
-            Vec::new()
-        });
     // Phase 4a — aggregates over the 30-day window for the summary
     // cards above the timeline table. Failure → zeros; cards still
     // render so the page doesn't break (operator sees the
     // diagnostic in journalctl).
+    //
+    // R2 2026-07-10: the Track-1 24h/7d distinct-IP counters + the
+    // 25-row `recent_sub_access_filtered` load left with the legacy
+    // «Subscription access» block they fed — the v2 4c tiles + paged
+    // geo-log (+ the composite sharing score) carry that signal now.
     let access_aggregates = state
         .inv
         .sub_access_aggregates_for_user(&uid, 30)
@@ -4017,11 +3924,6 @@ async fn user_detail_render(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_aggregates_for_user failed");
             vpnctl_inventory::SubAccessAggregates::default()
         });
-    // Heat threshold — first cut. 5 distinct IPs in 24h is a soft
-    // signal that the URL has been shared. Configurable later via the
-    // Settings section once that exists.
-    const ABUSE_HEAT_THRESHOLD: u64 = 5;
-    let heat_24h = ips_24h >= ABUSE_HEAT_THRESHOLD;
 
     // PR-User user#2 — per-server traffic split over the last 24h
     // (Q-4b). One query. Failure → empty Vec, which renders the NM-11
@@ -4249,26 +4151,28 @@ async fn user_detail_render(
                         "Until deploy, the user's sing-box entry is absent: REALITY handshake succeeds but VLESS auth silently drops, so the client can show connected with no traffic.",
                         "До деплоя записи пользователя нет в sing-box: REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, поэтому клиент может показывать подключение без трафика.",
                     )) { "ⓘ" }
-                    // One-click fix right here in the user view: deploy every
-                    // server (pushes THIS user's UUID onto each granted node).
-                    // Reuses the fleet-wide SSE deploy; `data-reload-self`
-                    // reloads this user page on done so the banner re-computes
-                    // and clears. A down node (fi etc.) is reported ✗ in the
-                    // log; the rest still deploy.
+                    // One-click fix right here in the user view: deploy
+                    // ONLY the pending servers the banner names (was the
+                    // fleet-wide deploy-all until 2026-07-10 — one
+                    // pending node redeployed the whole fleet).
+                    // `data-reload-self` reloads this user page on done
+                    // so the banner re-computes and clears. A down node
+                    // is reported ✗ in the log; the rest still deploy.
                     div style="margin-left: auto;" {
                         button type="button"
-                               data-sse-url="/admin/servers/deploy-all/sse"
+                               data-sse-url=(format!("/admin/users/{}/deploy-pending/sse", path_segment_encode(&user.id.0)))
                                data-log="user-deploy-log"
                                data-reload-self="true"
-                               data-busy-label=(crate::i18n::tr(lang, "deploying all… (watch the log)", "деплою все… (смотри лог)"))
+                               data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
                                data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
                                title=(crate::i18n::tr(
                                    lang,
-                                   "Deploy every server now — pushes this user's UUID onto each granted node so the config goes live. Best-effort; a down node is reported, the rest still deploy. Reloads this page when done.",
-                                   "Задеплоить все серверы сейчас — пушит UUID этого юзера на каждую ноду, чтобы конфиг заработал. Best-effort; упавшая нода отмечается, остальные деплоятся. По завершении страница перезагрузится.",
+                                   "Deploy the listed servers now — pushes this user's config onto each pending node. Servers that are already up to date are left untouched. Reloads this page when done.",
+                                   "Задеплоить перечисленные серверы — пушит конфиг юзера на каждую отставшую ноду. Уже актуальные серверы не трогаются. По завершении страница перезагрузится.",
                                ))
                                class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "deploy all servers now →", "развернуть все серверы сейчас →"))
+                            (crate::i18n::tr(lang, "deploy pending ", "задеплоить недостающие "))
+                            "(" (pending_deploy_servers.len()) ") →"
                         }
                     }
                 }
@@ -4728,32 +4632,44 @@ async fn user_detail_render(
                                         }
                                     }
                                 } @else {
+                                    // R2 2026-07-10: one explainer per flow
+                                    // + per-server QRs behind <details> —
+                                    // 4 servers × 3 flows used to unroll
+                                    // into a 12-QR wall with the same
+                                    // paragraph repeated under each.
+                                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 8px;" {
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "Opens in the official WireGuard app (mobile + desktop) and Hiddify; the private key is base64-embedded inside. Expand a server for its QR.",
+                                            "Открывается в официальном WireGuard (mobile + desktop) и Hiddify; приватный ключ закодирован внутри. Разверни сервер, чтобы показать QR.",
+                                        ))
+                                    }
                                     @for (sid, _pid, link) in &wg_links {
-                                        div style="margin-bottom: 18px;" {
-                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
-                                                " · "
-                                                a href=(format!("/admin/users/{}/wireguard/conf/{}",
-                                                                path_segment_encode(&user.id.0),
-                                                                path_segment_encode(&sid.0)))
-                                                  download=(format!("{}-{}.conf", user.id.0, sid.0))
-                                                  style="color: var(--mute); text-decoration: underline;" {
-                                                    ".conf"
+                                        details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
+                                            summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                span style="color: var(--mute);" {
+                                                    " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
                                             }
-                                            (share_link_card(link, &html! {
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    "Opens in the official WireGuard app (mobile + desktop) and Hiddify. Link is ",
-                                                    "Открывается в официальном WireGuard (mobile + desktop) и Hiddify. Длина ссылки ",
-                                                ))
-                                                (link.len())
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    " chars (the private key is base64-embedded inside). Click the box above to select-all + copy.",
-                                                    " символов (приватный ключ закодирован base64 внутри). Кликни на блок выше, чтобы выделить и скопировать.",
-                                                ))
-                                            }))
+                                            div style="margin: 8px 0 12px;" {
+                                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                    a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                                    path_segment_encode(&user.id.0),
+                                                                    path_segment_encode(&sid.0)))
+                                                      download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                                      style="color: var(--mute); text-decoration: underline;" {
+                                                        (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                                                    }
+                                                }
+                                                (share_link_card(link, &html! {
+                                                    (crate::i18n::tr(
+                                                        lang,
+                                                        "Click the box above to select-all + copy.",
+                                                        "Кликни на блок выше, чтобы выделить и скопировать.",
+                                                    ))
+                                                }))
+                                            }
                                         }
                                     }
                                 }
@@ -4811,40 +4727,47 @@ async fn user_detail_render(
                                         }
                                     }
                                 } @else {
+                                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 8px;" {
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "QR / paste opens in AmneziaVPN (zlib-compressed JSON-container inside); the ",
+                                            "QR или вставка открывается в AmneziaVPN (внутри zlib-сжатый JSON-контейнер); ",
+                                        ))
+                                        span.ed-mono { ".conf" }
+                                        (crate::i18n::tr(
+                                            lang,
+                                            " download is the fallback for AmneziaVPN's ",
+                                            " — резерв через ",
+                                        ))
+                                        em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
+                                        (crate::i18n::tr(lang, " import path. Expand a server for its QR.", ". Разверни сервер, чтобы показать QR."))
+                                    }
                                     @for (sid, link) in &amnezia_links {
-                                        div style="margin-bottom: 18px;" {
-                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
-                                                " · "
-                                                a href=(format!("/admin/users/{}/wireguard/conf/{}",
-                                                                path_segment_encode(&user.id.0),
-                                                                path_segment_encode(&sid.0)))
-                                                  download=(format!("{}-{}.conf", user.id.0, sid.0))
-                                                  style="color: var(--mute); text-decoration: underline;" {
-                                                    ".conf"
+                                        details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
+                                            summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                span style="color: var(--mute);" {
+                                                    " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
                                             }
-                                            (share_link_card(link, &html! {
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    "QR / paste opens in AmneziaVPN; the deep link is ",
-                                                    "QR или вставка открывается в AmneziaVPN; deep-link ",
-                                                ))
-                                                (link.len())
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    " chars (zlib-compressed JSON-container inside). The ",
-                                                    " символов (внутри zlib-сжатый JSON-контейнер). Ссылка ",
-                                                ))
-                                                span.ed-mono { ".conf" }
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    " link above is a fallback for AmneziaVPN's ",
-                                                    " выше — резерв через ",
-                                                ))
-                                                em { (crate::i18n::tr(lang, "File with settings", "Файл с настройками")) }
-                                                (crate::i18n::tr(lang, " import path.", " import-путь AmneziaVPN."))
-                                            }))
+                                            div style="margin: 8px 0 12px;" {
+                                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+                                                    a href=(format!("/admin/users/{}/wireguard/conf/{}",
+                                                                    path_segment_encode(&user.id.0),
+                                                                    path_segment_encode(&sid.0)))
+                                                      download=(format!("{}-{}.conf", user.id.0, sid.0))
+                                                      style="color: var(--mute); text-decoration: underline;" {
+                                                        (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                                                    }
+                                                }
+                                                (share_link_card(link, &html! {
+                                                    (crate::i18n::tr(
+                                                        lang,
+                                                        "Click the box above to select-all + copy.",
+                                                        "Кликни на блок выше, чтобы выделить и скопировать.",
+                                                    ))
+                                                }))
+                                            }
                                         }
                                     }
                                 }
@@ -4863,18 +4786,30 @@ async fn user_detail_render(
                                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
                                         (crate::i18n::tr(lang, "Flow F — AmneziaWG (awg://)", "Поток F — AmneziaWG (awg://)"))
                                     }
+                                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 8px;" {
+                                        (crate::i18n::tr(
+                                            lang,
+                                            "Opens in the sing-box-lx-based app — per-server AmneziaWG obfuscation (s1/s2/h1-h4) baked in; one-tap, no on-device key-gen. Expand a server for its QR.",
+                                            "Открывается в приложении на sing-box-lx — per-server AmneziaWG-обфускация (s1/s2/h1-h4) уже внутри; один тап, без генерации ключей. Разверни сервер, чтобы показать QR.",
+                                        ))
+                                    }
                                     @for (sid, link) in &awg_links {
-                                        div style="margin-bottom: 18px;" {
-                                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) (sid.0)
+                                        details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
+                                            summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
+                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                span style="color: var(--mute);" {
+                                                    " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
+                                                }
                                             }
-                                            (share_link_card(link, &html! {
-                                                (crate::i18n::tr(
-                                                    lang,
-                                                    "Opens in the sing-box-lx-based app — per-server AmneziaWG obfuscation (s1/s2/h1-h4) baked in; one-tap, no on-device key-gen.",
-                                                    "Открывается в приложении на sing-box-lx — per-server AmneziaWG-обфускация (s1/s2/h1-h4) уже внутри; один тап, без генерации ключей на устройстве.",
-                                                ))
-                                            }))
+                                            div style="margin: 8px 0 12px;" {
+                                                (share_link_card(link, &html! {
+                                                    (crate::i18n::tr(
+                                                        lang,
+                                                        "Click the box above to select-all + copy.",
+                                                        "Кликни на блок выше, чтобы выделить и скопировать.",
+                                                    ))
+                                                }))
+                                            }
                                         }
                                     }
                                 }
@@ -5512,279 +5447,10 @@ async fn user_detail_render(
                 }
             }
         }
-            div.ed-rule {}
-            div.ed-art-eyebrow {
-                (crate::i18n::tr(lang, "Subscription access", "Обращения к подписке"))
-                @if heat_24h {
-                    span style="color: var(--acc); margin-left: 12px; letter-spacing: 0;" {
-                        (crate::i18n::tr(lang, "· abuse signal: ", "· abuse-сигнал: "))
-                        (ips_24h)
-                        (crate::i18n::tr(
-                            lang,
-                            " distinct IPs in 24h (≥",
-                            " уникальных IP за 24ч (≥",
-                        ))
-                        (ABUSE_HEAT_THRESHOLD)
-                        (crate::i18n::tr(lang, " threshold)", " порог)"))
-                    }
-                }
-            }
-            // Phase 4a hero row 1 — 30-day aggregates from
-            // sub_access_aggregates_for_user. Cards excluded VPN-egress
-            // rows; the `last_seen` chip uses the 30d max ts.
-            div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 12px 0 6px; font-family: var(--serif);" {
-                div title=(crate::i18n::tr(lang, "Distinct real-client IPs over the last 30 days. VPN-egress rows (where src IP = one of our VPN servers, full-tunnel mode) excluded.", "Уникальные клиентские IP за 30 дней. Строки VPN-egress (когда src IP — один из наших VPN-серверов в full-tunnel) исключены.")) {
-                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_ips) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "distinct IPs · 30 days", "уникальных IP · 30 дней"))
-                    }
-                }
-                div title=(crate::i18n::tr(lang, "Distinct ISO country codes from GeoIP enrichment (DB-IP Lite City). Rows where GeoIP didn't resolve a country stay uncounted.", "Уникальные ISO-коды стран из GeoIP-обогащения (DB-IP Lite City). Строки где GeoIP не определил страну — не учтены.")) {
-                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_countries) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "countries · 30 days", "стран · 30 дней"))
-                    }
-                }
-                div title=(crate::i18n::tr(lang, "Distinct ASN labels (full AS-number + operator name) from GeoIP-ASN. High distinct_ASNs with low distinct_countries = single user roaming ISPs. High both = shared subscription URL.", "Уникальные ASN (номер AS + название оператора) из GeoIP-ASN. Много ASN при малом числе стран = один юзер мигрирует между провайдерами. Много и того и другого = расшаренная подписка.")) {
-                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_asns) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "ASNs · 30 days", "ASN · 30 дней"))
-                    }
-                }
-                div title=(crate::i18n::tr(lang, "Sum of subscription payload bytes served over the last 30 days. Subscription JSON itself, NOT actual VPN traffic.", "Сумма байт payload подписки за 30 дней. Это сам JSON-конфиг подписки, НЕ реальный VPN-трафик.")) {
-                    div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (humanize_bytes(access_aggregates.total_bytes)) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "served · 30 days", "отдано · 30 дней"))
-                    }
-                }
-                div title=(crate::i18n::tr(lang, "Most recent subscription fetch (any IP, including VPN-egress). If older than a few days, the user's client probably isn't auto-updating — they may have imported the URL once and forgotten about it.", "Последнее обращение к подписке (любой IP, включая VPN-egress). Если старше нескольких дней — клиент не auto-update'ит подписку; возможно, юзер импортировал URL один раз и забыл.")) {
-                    @match access_aggregates.last_seen {
-                        Some(ts) => {
-                            div style="font-size: 18px; font-weight: 400; color: var(--ink); line-height: 1; font-family: var(--mono);" {
-                                (format_msk_iso(ts))
-                            }
-                        }
-                        None => {
-                            div style="font-size: 18px; font-weight: 400; color: var(--mute); line-height: 1; font-family: var(--serif); font-style: italic;" {
-                                (crate::i18n::tr(lang, "never", "никогда"))
-                            }
-                        }
-                    }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "last fetch", "последнее обращение"))
-                    }
-                }
-            }
-            // Phase 4a — VPN-egress filter toggle. Default state hides
-            // rows where src IP is one of our own VPN-server addresses
-            // (full-tunnel egress noise). Clicking the link adds /
-            // removes `?show_egress=1`. Counter shows how many rows are
-            // currently hidden so the operator knows what the filter is
-            // catching.
-            div style="display: flex; gap: 36px; padding: 4px 0 14px; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                @if show_egress {
-                    span {
-                        (crate::i18n::tr(lang, "Showing VPN-egress rows. ", "Показаны строки VPN-egress. "))
-                        a href=(format!("/admin/users/{}/activity", user.id.0))
-                          style="color: var(--ink); text-decoration: underline;" {
-                            (crate::i18n::tr(lang, "Hide them", "Скрыть"))
-                        }
-                    }
-                } @else {
-                    @if access_aggregates.egress_rows > 0 {
-                        // English needs singular/plural agreement
-                        // («1 row hidden» vs «12 rows hidden»); Russian
-                        // sidesteps with the genitive-plural «строк» that
-                        // works for 1, 2, 5, … (technically «строка» for 1
-                        // is more natural but the gen-plural reads fine in
-                        // context and keeps the i18n surface flat).
-                        @let en_suffix = if access_aggregates.egress_rows == 1 {
-                            " VPN-egress row hidden (src IP = our own VPN server, full-tunnel mode). "
-                        } else {
-                            " VPN-egress rows hidden (src IP = our own VPN server, full-tunnel mode). "
-                        };
-                        span {
-                            (access_aggregates.egress_rows)
-                            (crate::i18n::tr(lang, en_suffix, " строк VPN-egress скрыто (src IP — наш VPN-сервер, full-tunnel). "))
-                            a href=(format!("/admin/users/{}/activity?show_egress=1", user.id.0))
-                              style="color: var(--ink); text-decoration: underline;" {
-                                (crate::i18n::tr(lang, "Show them", "Показать"))
-                            }
-                        }
-                    } @else {
-                        span {
-                            (crate::i18n::tr(lang, "No VPN-egress rows for this user (no full-tunnel traffic observed).", "Строк VPN-egress нет (full-tunnel-трафик не наблюдался)."))
-                        }
-                    }
-                }
-            }
-            // Hero row 2 — the legacy 24h/7d/recent counters live here
-            // because they're shorter-window vs the 30-day aggregates
-            // above. Kept for continuity with the old abuse-detection
-            // workflow.
-            div style="display: flex; gap: 36px; padding: 4px 0 18px; font-family: var(--serif);" {
-                div {
-                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
-                    }
-                }
-                div {
-                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
-                    }
-                }
-                div {
-                    div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
-                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
-                        (crate::i18n::tr(lang, "rows in table", "строк в таблице"))
-                    }
-                }
-            }
-            @if recent_access.is_empty() {
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    (crate::i18n::tr(
-                        lang,
-                        "No subscription fetches recorded yet. Hits will appear here as soon as a client pulls the URL above.",
-                        "Обращений к подписке пока не записано. Строки появятся сразу как только клиент дёрнет URL выше.",
-                    ))
-                }
-            } @else {
-                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
-                    thead {
-                        tr style="border-bottom: 1px solid var(--ink);" {
-                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (crate::i18n::tr(lang, "when", "когда"))
-                            }
-                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (crate::i18n::tr(lang, "ip", "ip"))
-                            }
-                            th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (crate::i18n::tr(lang, "user-agent", "user-agent"))
-                            }
-                            th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (crate::i18n::tr(lang, "status", "статус"))
-                            }
-                            th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (crate::i18n::tr(lang, "bytes", "байт"))
-                            }
-                        }
-                    }
-                    tbody {
-                        @for row in &recent_access {
-                            @let ip_kind = classify_ip(&row.ip);
-                            // Prefer persisted device_class from
-                            // sub_access_log (migration 0019) — that
-                            // way future parser changes don't rewrite
-                            // history. Fallback to live parse for
-                            // pre-migration NULL rows.
-                            @let ua_summary = row
-                                .device_class
-                                .as_deref()
-                                .or_else(|| crate::ua::parse_ua_short(row.ua.as_deref()));
-                            tr style="border-bottom: 1px dotted var(--rule);" {
-                                td style="padding: 5px 8px; color: var(--soft); white-space: nowrap;" {
-                                    (format_msk_iso(row.ts))
-                                }
-                                td style="padding: 5px 8px; color: var(--ink);" title=(ip_kind_tooltip(ip_kind, lang)) {
-                                    (row.ip)
-                                    @if let Some(tag) = ip_kind_tag(ip_kind, lang) {
-                                        " "
-                                        span style=(format!("font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid {color}; color: {color}; margin-left: 2px;", color = ip_kind_color(ip_kind))) {
-                                            (tag)
-                                        }
-                                    }
-                                    // Track-1.2 (migration 0019) — country
-                                    // ISO + ASN chips from GeoIP enrichment.
-                                    // Both columns are NULL for old rows or
-                                    // when VPNCTLD_GEOIP_DIR isn't set;
-                                    // render only what we have.
-                                    @if let Some(cc) = row.geo_country.as_deref() {
-                                        " "
-                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px solid var(--acc-good, #2c5f2d); color: var(--acc-good, #2c5f2d); margin-left: 2px;"
-                                             title=(crate::i18n::tr(lang, "Country (ISO 3166-1 alpha-2) from MaxMind GeoLite2 City", "Страна (ISO 3166-1 alpha-2) из MaxMind GeoLite2 City")) {
-                                            (cc)
-                                        }
-                                    }
-                                    @if let Some(asn) = row.geo_asn.as_deref() {
-                                        " "
-                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; color: var(--mute); margin-left: 2px;"
-                                             title=(crate::i18n::tr(lang, "Autonomous System / ISP from MaxMind GeoLite2 ASN", "Автономная система / ISP из MaxMind GeoLite2 ASN")) {
-                                            (asn)
-                                        }
-                                    }
-                                    @if let Some(http_v) = row.http_version.as_deref() {
-                                        " "
-                                        span style="font-family: var(--mono); font-size: 9px; color: var(--mute); margin-left: 2px;"
-                                             title=(crate::i18n::tr(lang, "HTTP version negotiated", "Согласованная версия HTTP")) {
-                                            (http_v)
-                                        }
-                                    }
-                                    // Track-1.4 — TLS JA3 / JA4 fingerprint chip
-                                    // (migration 0020). NULL until an nginx-side
-                                    // JA3 module forwards `X-SSL-JA3` /
-                                    // `X-SSL-JA4` headers. Hash itself is long;
-                                    // render the first JA_CHIP_PREFIX_CHARS only,
-                                    // full value lives in the title= tooltip.
-                                    @if let Some(ja3) = row.tls_ja3.as_deref() {
-                                        " "
-                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
-                                             title=(format!("{}\n{}",
-                                                crate::i18n::tr(lang, "JA3 TLS ClientHello fingerprint (Salesforce). Same device through IP changes = same JA3.", "JA3 — отпечаток TLS ClientHello (Salesforce). Одно и то же устройство через смену IP = тот же JA3."),
-                                                ja3)) {
-                                            "JA3 " ((ja3.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
-                                        }
-                                    }
-                                    @if let Some(ja4) = row.tls_ja4.as_deref() {
-                                        " "
-                                        span style="font-family: var(--mono); font-size: 9px; padding: 0 4px; border: 1px dotted var(--rule); color: var(--mute); margin-left: 2px;"
-                                             title=(format!("{}\n{}",
-                                                crate::i18n::tr(lang, "JA4 TLS fingerprint (FoxIO 2023). Protocol-aware, harder to randomise than JA3.", "JA4 — отпечаток TLS (FoxIO 2023). Знает протокол, сложнее рандомизируется чем JA3."),
-                                                ja4)) {
-                                            "JA4 " ((ja4.chars().take(JA_CHIP_PREFIX_CHARS).collect::<String>()))
-                                        }
-                                    }
-                                }
-                                td style="padding: 5px 8px; color: var(--soft); overflow-wrap: anywhere; word-break: break-all;" {
-                                    @match &row.ua {
-                                        Some(s) => {
-                                            // Parsed summary if recognised, else raw string.
-                                            @if let Some(label) = ua_summary {
-                                                span title=(s) style="border-bottom: 1px dotted var(--rule-s); cursor: help;" {
-                                                    (label)
-                                                }
-                                            } @else {
-                                                (s)
-                                            }
-                                        }
-                                        None => em style="color: var(--mute);" { (crate::i18n::tr(lang, "(none)", "(нет)")) },
-                                    }
-                                }
-                                td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (row.status) }
-                                td style="padding: 5px 8px; text-align: right; color: var(--soft);" { (row.bytes) }
-                            }
-                        }
-                    }
-                }
-                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 10px;" {
-                    (crate::i18n::tr(lang, "Showing the ", "Показано "))
-                    (recent_access.len())
-                    (crate::i18n::tr(
-                        lang,
-                        " most recent fetches. Rows are auto-purged after 30 days (default retention).",
-                        " последних обращений. Строки автоудаляются через 30 дней (retention по умолчанию).",
-                    ))
-                }
-            }
-    }
-    @if tab == UserTab::Activity {
-
-            // ── PR-User user#4 — sharing-evidence verdict ────────────
-            // ONE consolidated verdict line above the per-UA evidence
-            // table, folding the 30-day access spread with the UA-cluster
-            // /16 spread (reusing the Track-4 ua_verdict thresholds).
-            (user_sharing_verdict_section(&access_aggregates, &ua_clusters, lang))
+            // R2 2026-07-10: the legacy «Subscription access» stats+table
+            // and the standalone sharing-verdict paragraph duplicated the v2
+            // 4c tiles + geo-log above (same aggregates, second 25-row table).
+            // Origins / UA / source-IPs / sessions below carry the unique data.
 
     }
     @if tab == UserTab::Activity {
@@ -5806,8 +5472,11 @@ async fn user_detail_render(
 
     }
     @if tab == UserTab::Traffic {
-            // ── PR-User user#2 — traffic split by server (24h) ───────
-            (user_detail_traffic_by_server_section(&traffic_by_server, lang))
+            // R2 2026-07-10: the fixed-24h «Traffic by server» table
+            // that used to open this tab duplicated the window-driven
+            // per-server table inside Live-VPN-stats below (same
+            // numbers at the default 24h window). The live table
+            // gained its «total» column; one table remains.
 
             // ── Live VPN stats (Track-3 chunk 3) + user#6 trend ──────
             // The window picker (24h/7d/30d/all) is now folded INTO this
@@ -6063,69 +5732,6 @@ fn humanize_since(ts: chrono::DateTime<chrono::Utc>, lang: crate::i18n::Locale) 
     }
 }
 
-/// user#2 — traffic split by server. Per-server up/down over the last
-/// 24h from `user_traffic_by_server(uid, 24)`. NM-11 empty-state: per-
-/// connection clash attribution is NULL upstream, so this table only
-/// has data once the poller's `record_vpn_stats` has written per-user
-/// rows — until then we render an explainer, not a blank card.
-fn user_detail_traffic_by_server_section(
-    rows: &[(vpnctl_core::ServerId, u64, u64)],
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "Traffic by server · last 24h", "Трафик по серверам · за 24ч")) }
-        @if rows.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
-                (tr(
-                    lang,
-                    "No per-server traffic recorded for this user in the last 24h. The split fills in once the clash-api poller has written at least one per-user tick — sing-box's clash-api carries the source IP but not the username (NM-11), so attribution lands a snapshot behind the connection. A blank table here means the user hasn't been seen connected yet, not an error.",
-                    "Трафика по серверам у этого юзера за 24ч нет. Разбивка заполнится, как только поллер clash-api запишет хотя бы один per-user тик — clash-api sing-box передаёт source IP, но не имя юзера (NM-11), поэтому атрибуция отстаёт на снэпшот. Пустая таблица здесь значит, что юзера ещё не видели подключённым, а не ошибку.",
-                ))
-            }
-        } @else {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                (tr(
-                    lang,
-                    "Per-server upload / download over the last 24h, weighted by each node's usage coefficient. Sums the clash-api per-tick deltas attributed to this user.",
-                    "Upload / download по каждому серверу за 24ч, взвешенные коэффициентом нагрузки ноды. Сумма per-тик дельт clash-api, отнесённых к этому юзеру.",
-                ))
-            }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
-                thead {
-                    tr style="border-bottom: 1px solid var(--ink);" {
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (tr(lang, "server", "сервер"))
-                        }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (tr(lang, "uploaded", "отправлено"))
-                        }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (tr(lang, "downloaded", "принято"))
-                        }
-                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                            (tr(lang, "total", "всего"))
-                        }
-                    }
-                }
-                tbody {
-                    @for (sid, up, dn) in rows {
-                        tr style="border-bottom: 1px dotted var(--rule);" {
-                            td style="padding: 5px 8px; color: var(--ink);" {
-                                a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) style="color: var(--ink); text-decoration: none;" { (sid.0) }
-                            }
-                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*up)) }
-                            td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*dn)) }
-                            td style="padding: 5px 8px; text-align: right; color: var(--ink); font-weight: 500;" { (humanize_bytes(up.saturating_add(*dn))) }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Densified overview for the user-detail right column: four facts,
 /// 24h traffic split, and the grant summary. It only rearranges data
 /// already loaded by `user_detail_render`; no extra query or client state.
@@ -6251,73 +5857,6 @@ fn user_is_likely_shared(
         })
 }
 
-/// user#4 — one consolidated sharing-evidence verdict line. Folds the
-/// 30-day `sub_access_aggregates_for_user` spread (distinct IPs / ASNs
-/// / countries) with the UA-cluster `/16` spread (reusing the exact
-/// `ua_verdict` thresholds from card #7 / Track-4 so the two surfaces
-/// can't disagree). Renders ONE sentence — "likely shared" when either
-/// signal trips, "looks single-user" otherwise — above the detailed
-/// per-UA table so the operator gets the headline before the evidence.
-fn user_sharing_verdict_section(
-    aggregates: &vpnctl_inventory::SubAccessAggregates,
-    ua_clusters: &[vpnctl_inventory::UaCluster],
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    // Reuse the exact overview heuristic so the summary and Activity
-    // evidence can never disagree.
-    let ua_shared = ua_clusters.iter().any(|c| {
-        matches!(
-            ua_verdict(c.distinct_ips, c.distinct_slash16),
-            UaVerdict::LikelyShared
-        )
-    });
-    let likely_shared = user_is_likely_shared(aggregates, ua_clusters);
-
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "Sharing verdict", "Вердикт по расшариванию")) }
-        @if likely_shared {
-            p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--acc);" {
-                b { (tr(lang, "Verdict: likely shared", "Вердикт: вероятно расшарен")) }
-                " — "
-                (crate::i18n::n_of(lang, aggregates.distinct_ips, "IP", "IPs", "IP", "IP", "IP"))
-                " / " (crate::i18n::n_of(lang, aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
-                " / " (crate::i18n::n_of(lang, aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
-                @if ua_shared {
-                    (tr(lang, " / UA spread across ISPs", " / UA-разброс по ISP"))
-                }
-            }
-        } @else {
-            p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--soft);" {
-                (tr(lang, "Verdict: looks single-user", "Вердикт: похоже на одного юзера"))
-                " — "
-                (crate::i18n::n_of(lang, aggregates.distinct_ips, "IP", "IPs", "IP", "IP", "IP"))
-                " / " (crate::i18n::n_of(lang, aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
-                " / " (crate::i18n::n_of(lang, aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
-            }
-        }
-        p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 4px 0 0;" {
-            (tr(
-                lang,
-                "Heuristic over the 30-day /sub access window — a subscription fetched from many ASNs / countries, or a single User-Agent spread across many ISP /16 networks, has probably escaped past one human. Not authoritative; cross-check the per-IP timeline below before acting.",
-                "Эвристика по 30-дневному окну обращений к /sub — подписка, которую тянут из многих ASN / стран, или один User-Agent, расползшийся по разным ISP /16, скорее всего ушла за пределы одного человека. Не приговор; сверься с таймлайном по IP ниже прежде чем что-то делать.",
-            ))
-        }
-    }
-}
-
-/// Shared table-header `<th>` style for the origins breakdown tables —
-/// matches the per-fetch sub-access table + UA-cluster table so the
-/// three "Subscription origins" tables read as one block.
-const ORIGINS_TH: &str = "padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;";
-/// Shared body-cell `<td>` style.
-const ORIGINS_TD: &str = "padding: 5px 8px;";
-
-/// Reformat an ISO-8601 (UTC) timestamp string from the inventory
-/// origins methods (`first_seen` / `last_seen`) into the operator's MSK
-/// display string via `format_msk_iso`. Returns the raw string verbatim
-/// if it doesn't parse (defensive — never panics, never hides a row).
 fn format_origin_ts(raw: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(raw) {
         Ok(dt) => format_msk_iso(dt.with_timezone(&chrono::Utc)),
@@ -6389,6 +5928,11 @@ fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
         None => html! { em style="color: var(--mute);" { (unknown) } },
     }
 }
+
+/// Shared th/td inline styles for the origins tables (survived the R2
+/// removal of the legacy verdict section that used to sit above them).
+const ORIGINS_TH: &str = "padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;";
+const ORIGINS_TD: &str = "padding: 5px 8px;";
 
 /// abuse-origins — "Subscription origins" section (anchor `#origins`).
 /// The actionable WHO-is-sharing view: three compact tables (by
@@ -7778,24 +7322,41 @@ async fn live_vpn_stats_section(
         ))
         @let trend = vpn_traffic_trend_series(&rows, window);
         @if trend.iter().any(|&v| v > 0.0) {
+            @let trend_max = trend.iter().copied().fold(0.0_f64, f64::max);
             div style="margin: 6px 0 18px;" {
                 div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-bottom: 2px;" {
                     (tr(lang, "traffic trend · ", "тренд трафика · ")) (window_label)
                 }
-                (sparkline_svg(&trend, 720, 60))
+                // R2 2026-07-10: label_max off — the in-SVG label printed
+                // RAW BYTES («max 84028835»); the humanized caption below
+                // replaces it. Width matches the tables (was 720 ≈ half).
+                (sparkline_svg_scaled(&trend, 1160, 60, None, false))
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                    (tr(lang, "max ", "макс ")) (humanize_bytes(trend_max as u64))
+                    (tr(lang, " per bucket", " на интервал"))
+                }
             }
         }
         @if !per_server.is_empty() {
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
-                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "server" }
-                        th title="Sum of upload-bytes deltas from clash-api 5-min ticks over the last 24h. Counts everything sing-box saw on this user's auth — VLESS, TUIC, Trojan; wgturn / WireGuard NOT included (kernel-level, no clash-api visibility)."
-                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "uploaded" }
-                        th title="Same window + same caveats as uploaded — download direction."
-                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "downloaded" }
-                        th title="Maximum simultaneous active connections seen for this user during any 5-min poll window in the last 24h. >50 from a phone client = unusual (chat apps + browser keep ~5-15 sustained); >200 typically means torrent / web-crawler."
-                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "peak conns" }
+                        th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "server", "сервер")) }
+                        th title=(tr(
+                            lang,
+                            "Sum of upload-bytes deltas from clash-api 5-min ticks over the picked window, weighted by each node's usage coefficient. Counts everything sing-box saw on this user's auth — VLESS, TUIC, Trojan; wgturn / WireGuard NOT included (kernel-level, no clash-api visibility).",
+                            "Сумма upload-дельт clash-api (тик 5 минут) за выбранное окно, взвешенная коэффициентом нагрузки ноды. Считает всё, что sing-box видел на auth этого юзера — VLESS, TUIC, Trojan; wgturn / WireGuard НЕ входят (kernel-уровень, clash-api их не видит).",
+                        ))
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "uploaded", "отправлено")) }
+                        th title=(tr(lang, "Same window + same caveats as uploaded — download direction.", "То же окно и те же оговорки, что и у «отправлено» — направление download."))
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "downloaded", "принято")) }
+                        th style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "total", "всего")) }
+                        th title=(tr(
+                            lang,
+                            "Maximum simultaneous active connections seen for this user during any 5-min poll window. >50 from a phone client = unusual (chat apps + browser keep ~5-15 sustained); >200 typically means torrent / web-crawler.",
+                            "Максимум одновременных соединений юзера в любом 5-минутном окне поллера. >50 с телефона — необычно (мессенджеры + браузер держат ~5-15); >200 — обычно торрент / краулер.",
+                        ))
+                           style="text-align: right; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "peak conns", "пик соед.")) }
                     }
                 }
                 tbody {
@@ -7804,6 +7365,7 @@ async fn live_vpn_stats_section(
                             td style="padding: 5px 8px; color: var(--ink);" { (server_id) }
                             td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*up)) }
                             td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (humanize_bytes(*dn)) }
+                            td style="padding: 5px 8px; text-align: right; color: var(--ink); font-weight: 600;" { (humanize_bytes(up.saturating_add(*dn))) }
                             td style="padding: 5px 8px; text-align: right; color: var(--ink);" { (conns) }
                         }
                     }
@@ -11277,9 +10839,11 @@ pub(crate) struct AuditQuery {
     pub action: Option<String>,
     /// v2 5b — substring filter on the target column.
     pub target: Option<String>,
-    /// `?hide=snapshots` — drop the hourly `backup.snapshot`
-    /// housekeeping rows that otherwise fill the first screen of the
-    /// timeline. Any other value is ignored.
+    /// Housekeeping visibility. The hourly `backup.snapshot` rows are
+    /// hidden BY DEFAULT (they filled the whole first screen — R2
+    /// 2026-07-10); `?hide=none` shows everything. The R1 value
+    /// `?hide=snapshots` still parses as the (now default) hidden
+    /// state so bookmarks keep working.
     pub hide: Option<String>,
     pub page: Option<i64>,
 }
@@ -11289,8 +10853,8 @@ impl AuditQuery {
     /// single source for the handler, the CSV export and the chip URL.
     pub(crate) fn action_exclude(&self) -> Option<&'static str> {
         match self.hide.as_deref() {
-            Some("snapshots") => Some("backup.snapshot"),
-            _ => None,
+            Some("none") => None,
+            _ => Some("backup.snapshot"),
         }
     }
 }
@@ -11324,9 +10888,11 @@ fn audit_url(
         q.push_str(&format!("target={}", path_segment_encode(t)));
         sep = '&';
     }
-    if hide_snapshots {
+    if !hide_snapshots {
+        // Hidden is the default — only the SHOW-everything state needs
+        // a query param.
         q.push(sep);
-        q.push_str("hide=snapshots");
+        q.push_str("hide=none");
         sep = '&';
     }
     if let Some(p) = page {
@@ -12650,8 +12216,8 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
 
     }
     @if tab == SettingsTab::Backups {
-            div.ed-rule {}
-            div #backups-section.ed-art-eyebrow {
+            // No ed-rule — the tab row draws its own bottom border (R2).
+            div #backups-section.ed-art-eyebrow style="margin-top: 14px;" {
                 (crate::i18n::tr(lang, "Backups — inventory snapshots", "Бэкапы — снэпшоты инвентаря"))
             }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
@@ -12733,7 +12299,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                             thead style="position: sticky; top: 0; background: var(--paper); z-index: 1;" {
                                 tr {
                                     th style="text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                        (crate::i18n::tr(lang, "created (UTC)", "создан (UTC)"))
+                                        (crate::i18n::tr(lang, "created", "создан"))
                                     }
                                     th style="text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--rule); color: var(--mute); font-weight: normal; letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
                                         (crate::i18n::tr(lang, "size", "размер"))
@@ -12747,7 +12313,25 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                 @for snap in list.iter().take(60) {
                                     tr {
                                         td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule);" {
-                                            (snap.created.as_deref().unwrap_or_else(|| crate::i18n::tr(lang, "(unparseable timestamp)", "(не разобран timestamp)")))
+                                            // R2 2026-07-10: the display timezone applies here
+                                            // like everywhere else; a filename that doesn't
+                                            // carry a parseable stamp shows the NAME instead of
+                                            // a «(unparseable timestamp)» parser complaint.
+                                            @match snap
+                                                .created
+                                                .as_deref()
+                                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                            {
+                                                Some(ts) => (format_msk_iso(ts.with_timezone(&chrono::Utc))),
+                                                None => span.ed-grid__mut
+                                                    title=(crate::i18n::tr(
+                                                        lang,
+                                                        "No timestamp in the filename (manual or legacy snapshot) — shown by name.",
+                                                        "В имени файла нет метки времени (ручной или легаси-снэпшот) — показан по имени.",
+                                                    )) {
+                                                    (snap.file_name)
+                                                },
+                                            }
                                         }
                                         td style="padding: 4px 8px; border-bottom: 1px dotted var(--rule); text-align: right; color: var(--soft);" {
                                             (format_size_bytes(snap.size_bytes))
@@ -12805,12 +12389,12 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
 
     }
     @if tab == SettingsTab::Notifications {
-            div.ed-rule {}
+            // No ed-rule — the tab row draws its own bottom border (R2).
             // `id` so the POST-redirect-GET after Save can use a
             // fragment anchor (`#telegram-notifications`) and the
             // browser scrolls back to this section instead of jumping
             // to the top of /admin/settings.
-            div #telegram-notifications.ed-art-eyebrow {
+            div #telegram-notifications.ed-art-eyebrow style="margin-top: 14px;" {
                 (crate::i18n::tr(
                     lang,
                     "Notifications — Telegram bot",
@@ -12903,16 +12487,19 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     input type="password"
                           id="telegram_bot_token"
                           name="telegram_bot_token"
+                          // R2: the old placeholder was a three-clause
+                          // manual that truncated at narrower widths —
+                          // the full rules live in the tooltip.
                           placeholder=(crate::i18n::tr(
                               lang,
-                              "leave blank to keep existing; paste new value to replace; clear BOTH fields to disable",
-                              "пусто = оставить как есть; новое значение = заменить; ОЧИСТИТЬ ОБА поля = выключить",
+                              "blank = keep existing",
+                              "пусто = оставить как есть",
                           ))
                           autocomplete="off"
                           title=(crate::i18n::tr(
                               lang,
-                              "Token from @BotFather, shape `123456:ABC-XYZ...`. Stored in inv.db, masked after save. Empty + empty chat-id disables the Telegram sink entirely.",
-                              "Токен от @BotFather, форма `123456:ABC-XYZ...`. Хранится в inv.db, маскируется после сохранения. Пустой токен + пустой chat-id = полное отключение Telegram.",
+                              "Token from @BotFather, shape `123456:ABC-XYZ...`. Stored in inv.db, masked after save. Leave blank to keep the existing token; paste a new value to replace it; clear BOTH fields and save to disable the Telegram sink entirely.",
+                              "Токен от @BotFather, форма `123456:ABC-XYZ...`. Хранится в inv.db, маскируется после сохранения. Пусто = оставить текущий; новое значение = заменить; очистить ОБА поля и сохранить = полностью выключить Telegram.",
                           ))
                           style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
                     label for="telegram_chat_id" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
@@ -13077,8 +12664,8 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
                 _ => crate::i18n::Locale::En,
             };
-            div style="margin-top: 16px;" {
-                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
+            div style="margin-top: 18px;" {
+                div.ed-art-eyebrow style="margin-bottom: 8px;" {
                     (crate::i18n::tr(lang, "Alert language", "Язык уведомлений"))
                 }
                 @for (code, label, is_active) in [
@@ -14476,28 +14063,92 @@ pub(crate) async fn servers_deploy_all_sse(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
-    use axum::response::sse::{Event, KeepAlive, Sse};
-    use futures_core::Stream;
-    use std::pin::Pin;
-    use tokio_stream::StreamExt;
-
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        // Unified predicate (audit 2026-06-10, same as the geoip SSE):
-        // allow only "same-origin" (EventSource from an admin page) and
-        // "none" (direct navigation). The old check let "same-site"
-        // through while refusing "none" — opposite of the geoip guard.
-        if sfs != "same-origin" && sfs != "none" {
-            return error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin deploy trigger refused (same-origin only)",
-            );
-        }
+    if let Some(resp) = refuse_cross_origin_sse(&headers) {
+        return resp;
     }
 
     let servers = match state.inv.list_servers().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    deploy_servers_sse_response(&state, servers)
+}
+
+/// `GET /admin/users/{id}/deploy-pending/sse` — deploys ONLY the servers
+/// the pending-deploy banner names for this user. Before 2026-07-10 the
+/// banner button reused the fleet-wide deploy-all: one pending `us`
+/// redeployed cdn/de/is/nl too — harmless (idempotent, reload-not-
+/// restart) but noisy and inconsistent with the scoped banner
+/// (operator report, design review R2).
+pub(crate) async fn user_deploy_pending_sse(
+    headers: HeaderMap,
+    Path(user_id_str): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Some(resp) = refuse_cross_origin_sse(&headers) {
+        return resp;
+    }
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    let granted = match state.inv.servers_for_user(&uid).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let granted_ids: Vec<vpnctl_core::ServerId> = granted.iter().map(|s| s.id.clone()).collect();
+    let pending = match state
+        .inv
+        .servers_pending_deploy_for_user(&uid, &granted_ids)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let servers: Vec<vpnctl_core::Server> = granted
+        .into_iter()
+        .filter(|s| pending.contains(&s.id))
+        .collect();
+    // Racing a just-finished deploy leaves nothing to do — say so
+    // instead of streaming an empty run.
+    if servers.is_empty() {
+        use axum::response::sse::{Event, KeepAlive, Sse};
+        let ev = Event::default()
+            .event("ok")
+            .data(r#"{"kind":"ok","message":"nothing pending — every granted server already carries this user's config"}"#);
+        let stream = tokio_stream::once(Ok::<_, std::convert::Infallible>(ev));
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .into_response();
+    }
+    deploy_servers_sse_response(&state, servers)
+}
+
+/// Shared Sec-Fetch-Site guard for the SSE deploy triggers. Allows
+/// only "same-origin" (EventSource from an admin page) and "none"
+/// (direct navigation) — unified predicate from the 2026-06-10 audit.
+fn refuse_cross_origin_sse(headers: &HeaderMap) -> Option<Response> {
+    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if sfs != "same-origin" && sfs != "none" {
+            return Some(error_resp(
+                StatusCode::FORBIDDEN,
+                "cross-origin deploy trigger refused (same-origin only)",
+            ));
+        }
+    }
+    None
+}
+
+/// Stream a `run_deploy_all` pass over `servers` as an SSE response —
+/// the shared tail of the fleet-wide and per-user-pending deploy
+/// triggers.
+fn deploy_servers_sse_response(state: &AppState, servers: Vec<vpnctl_core::Server>) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use tokio_stream::StreamExt;
 
     let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
     let raw = crate::wizard_bootstrap::run_deploy_all(
@@ -15512,6 +15163,11 @@ async fn server_detail_render(
             // below → deploy. The `update kernels →` button lives in the
             // chrome above (adjacent to Deploy).
             (kernel_floor_rollup(&server_kernel_versions, lang))
+            // Declared vs observed drift FIRST (R2 2026-07-10) — the ⚠
+            // on this tab's label is about drift, but the grid used to
+            // sit at the very bottom below four config forms: the tab
+            // opened without answering its own warning.
+            (server_detail_drift_section(&server, &state.registry, &observed, &missing, &extra, latest.is_some(), lang))
             (server_detail_kernels_section(&server, &state.registry, lang))
             // Enabled protocols — enable/disable/hide (NM-10 hidden_map:
             // hidden=1 keeps the inbound running but stops emitting the
@@ -15528,11 +15184,10 @@ async fn server_detail_render(
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
             // wgturn VK-link — only when the wgturn kernel is enabled.
             (server_detail_wgturn_section(&server, &server_secrets, lang))
-            // Declared vs observed drift — full grid incl. the observed
-            // listening-socket list (port-level, probe-derived).
-            (server_detail_drift_section(&server, &state.registry, &observed, &missing, &extra, latest.is_some(), lang))
             // Drift DETAIL — on-node orphan UUIDs; `?drift=live` arms a
             // best-effort 6s SSH read of the node's sing-box config.
+            // Stays at the bottom: it's the on-demand deep dive, not
+            // the at-a-glance verdict.
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
         }
 
@@ -16920,13 +16575,28 @@ fn server_detail_push_deploy_key_section(
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (tr(lang, "root password", "root-пароль"))
                 }
+                // R2: short placeholder (the old sentence truncated
+                // mid-word in the 400px field); full rules in `title`.
                 input type="password"
                       name="root_password"
                       autocomplete="off"
                       placeholder=(if reference_ok {
-                          tr(lang, "leave blank to use reference key; fill to force sshpass fallback", "пусто = reference-key; заполни = форсировать sshpass fallback")
+                          tr(lang, "blank = reference key", "пусто = reference-key")
                       } else {
-                          tr(lang, "never stored — used once for the SSH connect, then discarded", "не сохраняется — используется один раз для SSH-коннекта, затем отбрасывается")
+                          tr(lang, "never stored", "не сохраняется")
+                      })
+                      title=(if reference_ok {
+                          tr(
+                              lang,
+                              "Leave blank to authenticate with the reference key; fill in to force the sshpass fallback. Used once for the SSH connect, then discarded — never stored, never logged.",
+                              "Пусто — аутентификация reference-ключом; заполни, чтобы форсировать sshpass-fallback. Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
+                          )
+                      } else {
+                          tr(
+                              lang,
+                              "Used once for the SSH connect, then discarded — never stored, never logged.",
+                              "Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
+                          )
                       })
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
             }
@@ -18013,32 +17683,20 @@ fn server_detail_protocols_section(
                 "Что крутится на этой ноде. Протоколы — это wire-форматы; их ядра (одно или больше) выбираются выше в секции Ядра.",
             ))
         }
-        // Same deploy-required notice as the Kernels section above —
-        // duplicated deliberately so an operator who scrolls straight
-        // to «Enabled protocols» (the more frequently-touched section)
-        // doesn't miss it.
-        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+        // Same deploy-required rule as the Kernels note above. Kept as
+        // a marker for operators who scroll straight here, but R2
+        // compressed it to one line — two identical banner paragraphs
+        // on one screen read as a copy-paste bug.
+        div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (tr(lang, "⚠ toggle here = inventory only", "⚠ тогл здесь = только инвентарь"))
             }
-            (tr(lang, " — clicking ", " — клик по "))
-            span.ed-mono { (t(lang, K::BtnEnable)) }
-            " / "
-            span.ed-mono { (t(lang, K::BtnDisable)) }
-            (tr(
-                lang,
-                " only writes to vpnctl's database. The actual sing-box config on the node is rewritten when you click ",
-                " только пишет в БД vpnctl. Реальный конфиг sing-box на ноде переписывается когда ты кликаешь ",
-            ))
+            (tr(lang, " — goes live on ", " — вступает в силу по "))
             a href="#deploy-button"
               style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
                 span.ed-mono { (t(lang, K::BtnDeploy)) }
             }
-            (tr(
-                lang,
-                " at the top. So: toggle → click deploy → wait for SSE log to finish → live.",
-                " вверху. То есть: тогл → клик деплой → дождаться окончания SSE-лога → live.",
-            ))
+            (tr(lang, " (details in the note under Kernels).", " (подробности — в заметке под Ядрами)."))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for pid in &all_protocols {
@@ -18728,7 +18386,14 @@ fn server_detail_traffic_section(
                 (status_tile(tr(lang, "↓ download", "↓ принято"), &humanize_bytes(total_dn), "var(--ink)"))
             }
             @if has_data {
-                (sparkline_svg(&series, 720, 90))
+                // R2: in-SVG label off — it printed raw bytes; the
+                // humanized caption below carries the peak.
+                @let series_max = series.iter().copied().fold(0.0_f64, f64::max);
+                (sparkline_svg_scaled(&series, 1160, 90, None, false))
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
+                    (tr(lang, "max ", "макс ")) (humanize_bytes(series_max as u64))
+                    (tr(lang, " per bucket", " на интервал"))
+                }
             } @else {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0;" {
                     (tr(
@@ -18819,18 +18484,15 @@ fn server_detail_audit_section(
                     ))
                 }
             } @else {
-                div.ed-time {
+                // `--compact` drops the target column — on a
+                // server-scoped stream it repeated this server's id on
+                // every row (zero information, stolen width; R2).
+                div.ed-time.ed-time--compact {
                     @for e in rows {
                         div.ed-time-row {
                             span.ed-time-row__t { (format_msk_iso(e.ts)) }
                             span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) {
                                 (e.action)
-                            }
-                            span.ed-time-row__tgt {
-                                @match &e.target {
-                                    Some(t) => (t),
-                                    None => "—",
-                                }
                             }
                             span.ed-time-row__pl {
                                 (tr(lang, "by ", "автор: ")) (e.actor)

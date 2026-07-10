@@ -1373,10 +1373,12 @@ async fn admin_users_href_url_encodes_special_chars() {
 /// after `seed()` every user has `Some(token)`.
 ///
 /// The user-detail "pending deploy" banner (multiviruss incident) now
-/// carries an in-view one-click "deploy all servers now" button so the
-/// operator doesn't have to bounce to /admin/servers. It reuses the
-/// fleet deploy-all SSE + `data-reload-self` (reload THIS page on done so
-/// the banner re-computes/clears).
+/// carries an in-view one-click deploy button so the operator doesn't
+/// have to bounce to /admin/servers. R2 2026-07-10: the button targets
+/// the PER-USER pending SSE endpoint — the old fleet deploy-all
+/// redeployed every server in the inventory when a single node was
+/// pending (operator report). `data-reload-self` reloads THIS page on
+/// done so the banner re-computes/clears.
 #[tokio::test]
 async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
     let dir = TempDir::new().unwrap();
@@ -1399,14 +1401,24 @@ async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
         html.contains("Config not yet deployed to") || html.contains("ещё не задеплоен"),
         "pending-deploy banner must render when grants aren't deployed"
     );
-    // In-view deploy-all button wired to the fleet SSE endpoint.
+    // In-view deploy button wired to the per-user pending SSE endpoint
+    // — NOT the fleet-wide deploy-all.
     assert!(
-        html.contains(r#"data-sse-url="/admin/servers/deploy-all/sse""#),
-        "in-view deploy-all button must target the fleet SSE endpoint"
+        html.contains(r#"data-sse-url="/admin/users/u0/deploy-pending/sse""#),
+        "in-view deploy button must target the per-user pending SSE endpoint"
+    );
+    assert!(
+        !html.contains(r#"data-sse-url="/admin/servers/deploy-all/sse""#),
+        "user page must NOT wire the fleet-wide deploy-all any more"
+    );
+    // Label carries the pending count (both seeded servers pending).
+    assert!(
+        html.contains("deploy pending "),
+        "button label must say 'deploy pending (N)'"
     );
     assert!(
         html.contains(r#"data-reload-self="true""#),
-        "user-page deploy-all must reload this page (not bounce to /admin/servers)"
+        "user-page deploy must reload this page (not bounce to /admin/servers)"
     );
     assert!(
         html.contains(r#"id="user-deploy-log""#),
@@ -2596,23 +2608,20 @@ async fn admin_user_detail_track1_empty_state_renders_nudge() {
     let app = router(s);
 
     let html = fetch_html(app, "/admin/users/u0/activity").await;
+    // R2: the v2 4c surface — tiles + geo-log — replaced the legacy
+    // Track-1 block; a fresh user shows the no-data verdict tile, not
+    // a broken-looking empty table.
     assert!(
-        html.contains("Subscription access"),
-        "section eyebrow 'Subscription access' missing"
+        html.contains("Sub-access log"),
+        "v2 geo-log eyebrow missing"
     );
     assert!(
-        html.contains("No subscription fetches recorded yet"),
-        "empty-state nudge copy drifted"
-    );
-    // Counters should still render — both 0 — so the operator gets
-    // the full layout shape from day 1.
-    assert!(
-        html.contains("distinct IPs · 24h"),
-        "24h counter label missing"
+        html.contains("no fetches in 30d"),
+        "no-data verdict note missing on a fresh user"
     );
     assert!(
-        html.contains("distinct IPs · 7 days"),
-        "7-day counter label missing"
+        html.contains("sharing verdict"),
+        "verdict tile must render from day 1"
     );
 }
 
@@ -2691,39 +2700,6 @@ async fn admin_user_detail_track1_renders_counters_and_recent_table() {
     );
 }
 
-/// At or above the threshold (5 distinct IPs / 24h) the heat flag
-/// renders next to the eyebrow with the abuse-signal copy. This is
-/// the "URL got shared" tell.
-#[tokio::test]
-async fn admin_user_detail_track1_heat_flag_fires_at_threshold() {
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    seed(&s.inv, 0, 1, &[]).await;
-
-    for i in 1..=5 {
-        s.inv
-            .log_sub_access(
-                &UserId("u0".into()),
-                &format!("192.0.2.{i}"),
-                None,
-                200,
-                100,
-            )
-            .await
-            .unwrap();
-    }
-
-    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
-    assert!(
-        html.contains("abuse signal"),
-        "heat flag must fire at exactly the threshold (5 IPs/24h)"
-    );
-    assert!(
-        html.contains("5 distinct IPs in 24h"),
-        "heat flag copy must include the actual count and the window"
-    );
-}
-
 /// Per-user isolation: alice's fetches must NOT show on bob's detail.
 #[tokio::test]
 async fn admin_user_detail_track1_does_not_leak_other_users_access() {
@@ -2743,10 +2719,10 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
         .unwrap();
 
     let html = fetch_html(router(s), "/admin/users/u1/activity").await;
-    // u1 has no fetches.
+    // u1 has no fetches — the v2 verdict tile says so.
     assert!(
-        html.contains("No subscription fetches recorded yet"),
-        "u1 should show empty state"
+        html.contains("no fetches in 30d"),
+        "u1 should show the no-data verdict note"
     );
     // u0's row must NOT appear on u1's page.
     assert!(
@@ -3616,7 +3592,7 @@ async fn user_detail_tabs_render_gate_and_mark_active() {
         (
             "/admin/users/u0/activity",
             "activity",
-            "Subscription access",
+            "Sub-access log",
             "WireGuard keypair",
         ),
         (
@@ -6027,12 +6003,12 @@ async fn admin_audit_filter_by_actor_narrows() {
     );
 }
 
-/// v2 polish — the «hide snapshots» chip: `?hide=snapshots` drops the
-/// hourly `backup.snapshot` housekeeping rows (and only them), the
-/// counts line says «M match the filter», and the chip flips to a
-/// «show snapshots» link that preserves other filters.
+/// v2 polish (R2 default flip) — the hourly `backup.snapshot`
+/// housekeeping rows are hidden BY DEFAULT (they drowned the first
+/// screen); `?hide=none` shows everything and the chip toggles
+/// between the two states.
 #[tokio::test]
-async fn admin_audit_hide_snapshots_chip_filters_housekeeping() {
+async fn admin_audit_hides_snapshots_by_default_with_show_chip() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     for _ in 0..2 {
@@ -6047,28 +6023,32 @@ async fn admin_audit_hide_snapshots_chip_filters_housekeeping() {
         .unwrap();
     let app = router(s);
 
-    // Default view: housekeeping visible + the hide chip offered.
+    // Default view: housekeeping HIDDEN, real mutation visible, the
+    // way back offered, and the counts line marks the active filter.
     let html = fetch_html(app.clone(), "/admin/audit").await;
-    assert!(html.contains("backup.snapshot"));
-    assert!(
-        html.contains("hide=snapshots"),
-        "default view must offer the hide-snapshots chip"
-    );
-
-    // Hidden view: snapshots gone, real mutation stays, chip flips.
-    let html = fetch_html(app, "/admin/audit?hide=snapshots").await;
     assert!(
         !html.contains("backup.snapshot"),
-        "hidden view must not render snapshot rows"
+        "default view must hide snapshot rows"
     );
     assert!(html.contains("user.grant"), "real mutations must survive");
     assert!(
-        html.contains("show snapshots"),
-        "hidden view must offer the way back"
+        html.contains("hide=none"),
+        "default view must offer the show-snapshots chip"
     );
     assert!(
         html.contains("match the filter"),
-        "hiding counts as an active filter in the counts line"
+        "default hiding counts as an active filter in the counts line"
+    );
+
+    // ?hide=none: snapshots visible, chip flips back to hiding.
+    let html = fetch_html(app, "/admin/audit?hide=none").await;
+    assert!(
+        html.contains("backup.snapshot"),
+        "?hide=none must render snapshot rows"
+    );
+    assert!(
+        html.contains("hide snapshots"),
+        "show-all view must offer the hide chip"
     );
 }
 
@@ -12393,7 +12373,7 @@ async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
 }
 
 #[tokio::test]
-async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
+async fn track_1_2_geo_log_renders_country_and_asn() {
     // Pin that the migration-0019 chips render on the
     // /admin/users/{id} Subscription-access table when columns
     // are present. Without this assertion, a maud template
@@ -12446,15 +12426,12 @@ async fn track_1_2_subscription_access_renders_country_asn_http_chips() {
         html.contains("AS15169 GOOGLE"),
         "geo_asn chip 'AS15169 GOOGLE' must render"
     );
+    // R2: the v2 geo-log has no http-version / device-class columns —
+    // that metadata lives in the origins fingerprint line + the CSV
+    // export. The UA column carries the raw string.
     assert!(
-        html.contains(">HTTP/2.0<"),
-        "http_version chip 'HTTP/2.0' must render"
-    );
-    // Persisted device_class wins over live parse — Hiddify text
-    // shows up as the parsed label.
-    assert!(
-        html.contains(">Hiddify<"),
-        "persisted device_class 'Hiddify' must render as the UA label"
+        html.contains("Hiddify/Android/2.5.0"),
+        "raw UA must render in the UA column"
     );
 }
 
@@ -12657,76 +12634,6 @@ async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
     assert!(
         html.contains("(missing — run") || html.contains("(отсутствует — запусти"),
         "expected the 'missing' empty-state for both City + ASN"
-    );
-}
-
-#[tokio::test]
-async fn track_1_4_subscription_access_renders_ja3_ja4_chips_when_set() {
-    // Pin Track-1.4 (migration 0020) render: when sub_access_log
-    // carries tls_ja3 + tls_ja4 (because operator wired an
-    // nginx-side JA3 module), the row renders both chips with
-    // the first 8 chars of each + a tooltip explaining the
-    // fingerprint family.
-    use vpnctl_core::{User, UserId};
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    let inv = s.inv.clone();
-    inv.add_user(&User {
-        id: UserId("fry".into()),
-        uuid: "fr0".into(),
-        sub_token: Some("frtok".into()),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    })
-    .await
-    .unwrap();
-
-    inv.log_sub_access_rich(
-        &UserId("fry".into()),
-        "8.8.8.8",
-        Some("Hiddify/iOS/2.5.0"),
-        200,
-        4096,
-        None,
-        Some("HTTP/2.0"),
-        Some("Hiddify"),
-        Some("US"),
-        Some("AS15169 GOOGLE"),
-        Some("769,49195-49199,0-23-65281,29-23-24,0"),
-        Some("t13d1516h2_8daaf6152771_b186095e22b6"),
-    )
-    .await
-    .unwrap();
-
-    let html = fetch_html(router(s), "/admin/users/fry/activity").await;
-    // JA3 chip — first 8 chars of the fingerprint, prefixed «JA3 ».
-    assert!(
-        html.contains("JA3 769,4919"),
-        "expected JA3 chip with first 8 chars of fingerprint, got HTML around chips: …{}…",
-        html.split("JA3")
-            .nth(1)
-            .unwrap_or("")
-            .chars()
-            .take(40)
-            .collect::<String>()
-    );
-    // JA3 full value lives in the title= tooltip.
-    assert!(
-        html.contains("769,49195-49199,0-23-65281,29-23-24,0"),
-        "JA3 full value must be in tooltip"
-    );
-    // JA4 chip — `t13d1516` prefix.
-    assert!(
-        html.contains("JA4 t13d1516"),
-        "expected JA4 chip with first 8 chars of fingerprint"
-    );
-    // JA4 full value in tooltip.
-    assert!(
-        html.contains("t13d1516h2_8daaf6152771_b186095e22b6"),
-        "JA4 full value must be in tooltip"
     );
 }
 
@@ -12969,235 +12876,6 @@ async fn phase3c_settings_page_carries_no_inline_script_blocks() {
 // ────────────────────────────────────────────────────────────────────────
 //  Phase 4a — user-detail 30d aggregates + VPN-egress hide toggle.
 // ────────────────────────────────────────────────────────────────────────
-
-async fn phase4a_register_test_server(s: &AppState, id: &str, address: &str) {
-    use vpnctl_core::{KernelId, Server, ServerId};
-    s.inv
-        .add_server(&Server {
-            id: ServerId(id.into()),
-            address: address.into(),
-            ssh_port: 22,
-            ssh_user: "root".into(),
-            kernels: vec![KernelId("sing-box".into())],
-            enabled_protocols: Vec::new(),
-            trusted_host_fingerprint: None,
-            hoster: "generic".into(),
-            jump_via: None,
-            usage_coefficient: 1.0,
-        })
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn phase4a_user_detail_renders_30d_aggregates_above_table() {
-    // Pin Phase 4a hero row 1 — distinct IPs / countries / ASNs /
-    // bytes-served / last-fetch cards land above the existing
-    // 24h/7d/recent counters. Each card has a `title=` tooltip
-    // explaining its meaning.
-    use vpnctl_core::{User, UserId};
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    let inv = s.inv.clone();
-    inv.add_user(&User {
-        id: UserId("agg-user".into()),
-        uuid: "agg0".into(),
-        sub_token: Some("aggtok".into()),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    })
-    .await
-    .unwrap();
-    // Three real-client rows across US + DE; the aggregate query
-    // should count distinct_ips=3, distinct_countries=2, etc.
-    for (ip, cc, asn, bytes) in [
-        ("8.8.8.8", "US", "AS15169 Google", 100u64),
-        ("8.8.4.4", "US", "AS15169 Google", 100),
-        ("5.5.5.5", "DE", "AS3320 DTAG", 50),
-    ] {
-        inv.log_sub_access_rich(
-            &UserId("agg-user".into()),
-            ip,
-            None,
-            200,
-            bytes,
-            None,
-            None,
-            None,
-            Some(cc),
-            Some(asn),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
-
-    let html = fetch_html(router(s), "/admin/users/agg-user/activity").await;
-    // Card labels (en defaults — i18n test covers ru elsewhere).
-    assert!(
-        html.contains("distinct IPs · 30 days"),
-        "missing 30d-IPs card"
-    );
-    assert!(
-        html.contains("countries · 30 days"),
-        "missing 30d-countries card"
-    );
-    assert!(html.contains("ASNs · 30 days"), "missing 30d-ASNs card");
-    assert!(html.contains("served · 30 days"), "missing 30d-bytes card");
-    assert!(html.contains("last fetch"), "missing last-fetch card");
-}
-
-#[tokio::test]
-async fn phase4a_user_detail_default_hides_vpn_egress_rows_and_shows_counter_toggle() {
-    // The CSRF gate: src IP = our own VPN server (`10.20.30.40`).
-    // The migration-0021 trigger should flag it. Default render
-    // (no `?show_egress=1`) excludes the row from the table AND
-    // shows the «N VPN-egress rows hidden» pointer.
-    use vpnctl_core::{User, UserId};
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    let inv = s.inv.clone();
-    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
-    inv.add_user(&User {
-        id: UserId("egress-user".into()),
-        uuid: "eg0".into(),
-        sub_token: Some("egtok".into()),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    })
-    .await
-    .unwrap();
-    inv.log_sub_access(&UserId("egress-user".into()), "10.20.30.40", None, 200, 0)
-        .await
-        .unwrap();
-    inv.log_sub_access(&UserId("egress-user".into()), "8.8.8.8", None, 200, 0)
-        .await
-        .unwrap();
-
-    let html = fetch_html(router(s.clone()), "/admin/users/egress-user/activity").await;
-    // The «N VPN-egress rows hidden» counter proves the trigger
-    // flagged the row AND that the user-detail handler is calling
-    // recent_sub_access_filtered with include_egress=false. NOTE:
-    // we can't just `!html.contains("10.20.30.40")` because the
-    // same address renders in the «Server access» section (every
-    // server is listed there as ungranted with a [grant] button).
-    assert!(html.contains("8.8.8.8"), "real client IP must render");
-    // English uses singular «row» when N=1; the counter
-    // therefore reads «1 VPN-egress row hidden ...».
-    // (Review-agent Phase 4a #5 — pluralization bug fix.)
-    assert!(
-        html.contains("1 VPN-egress row hidden"),
-        "counter must use singular «row» when exactly 1 row is hidden, got HTML around «VPN-egress»: …{}…",
-        html.split("VPN-egress")
-            .nth(1)
-            .unwrap_or("")
-            .chars()
-            .take(40)
-            .collect::<String>()
-    );
-    // The «Show them» link with the show_egress=1 query (handler
-    // builds it relative to /admin/users/<id>).
-    assert!(
-        html.contains("/admin/users/egress-user/activity?show_egress=1"),
-        "missing «Show them» link with ?show_egress=1"
-    );
-}
-
-#[tokio::test]
-async fn phase4a_user_detail_show_egress_param_includes_vpn_egress_rows_and_flips_toggle() {
-    // ?show_egress=1 must (1) include the egress row in the table,
-    // (2) show the «Hide them» link pointing back at the
-    // egress-free URL.
-    use vpnctl_core::{User, UserId};
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    let inv = s.inv.clone();
-    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
-    inv.add_user(&User {
-        id: UserId("egress-on".into()),
-        uuid: "eo0".into(),
-        sub_token: Some("eotok".into()),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    })
-    .await
-    .unwrap();
-    inv.log_sub_access(&UserId("egress-on".into()), "10.20.30.40", None, 200, 0)
-        .await
-        .unwrap();
-    inv.log_sub_access(&UserId("egress-on".into()), "8.8.8.8", None, 200, 0)
-        .await
-        .unwrap();
-
-    let html = fetch_html(router(s), "/admin/users/egress-on/activity?show_egress=1").await;
-    assert!(
-        html.contains("10.20.30.40"),
-        "show_egress=1 must include the VPN-egress IP in the table"
-    );
-    assert!(html.contains("8.8.8.8"), "real client IP still renders");
-    assert!(
-        html.contains("Showing VPN-egress rows"),
-        "expected «Showing VPN-egress rows» banner"
-    );
-    // «Hide them» link points back at the bare URL (no query).
-    assert!(
-        html.contains("href=\"/admin/users/egress-on/activity\""),
-        "missing «Hide them» link back to egress-free URL"
-    );
-}
-
-#[tokio::test]
-async fn phase4a_user_detail_counter_uses_plural_rows_when_more_than_one_hidden() {
-    // Pin the plural branch — review-agent flagged the original
-    // `1 rows hidden` as ungrammatical; the fix uses singular when
-    // N=1. This test pins that the >1 branch correctly uses «rows».
-    use vpnctl_core::{User, UserId};
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    let inv = s.inv.clone();
-    phase4a_register_test_server(&s, "de", "10.20.30.40").await;
-    phase4a_register_test_server(&s, "fi", "5.5.5.5").await;
-    inv.add_user(&User {
-        id: UserId("plur".into()),
-        uuid: "p0".into(),
-        sub_token: Some("ptok".into()),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    })
-    .await
-    .unwrap();
-    // 3 egress hits (2 from de IP, 1 from fi IP) + 1 real-client.
-    for ip in ["10.20.30.40", "10.20.30.40", "5.5.5.5", "1.1.1.1"] {
-        inv.log_sub_access(&UserId("plur".into()), ip, None, 200, 0)
-            .await
-            .unwrap();
-    }
-
-    let html = fetch_html(router(s), "/admin/users/plur/activity").await;
-    assert!(
-        html.contains("3 VPN-egress rows hidden"),
-        "counter must use plural «rows» when N=3, got HTML around «VPN-egress»: …{}…",
-        html.split("VPN-egress")
-            .nth(1)
-            .unwrap_or("")
-            .chars()
-            .take(40)
-            .collect::<String>()
-    );
-}
 
 // ────────────────────────────────────────────────────────────────────────
 //  Phase 4b — server-detail Live activity tile + dashboard VPN-activity.
@@ -17297,24 +16975,6 @@ async fn pr_user_online_badge_offline_when_no_snapshot() {
     );
 }
 
-/// user#2 — empty-state (NM-11): no per-user VPN ticks → the explainer
-/// renders, not a blank card.
-#[tokio::test]
-async fn pr_user_traffic_by_server_empty_state_explains_nm11() {
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
-    assert!(
-        html.contains("Traffic by server · last 24h"),
-        "traffic-by-server eyebrow missing"
-    );
-    assert!(
-        html.contains("No per-server traffic recorded"),
-        "NM-11 empty-state explainer missing"
-    );
-}
-
 /// user#2 — populated: a per-user VPN tick lands a per-server row.
 #[tokio::test]
 async fn pr_user_traffic_by_server_renders_per_server_rows() {
@@ -17335,16 +16995,21 @@ async fn pr_user_traffic_by_server_renders_per_server_rows() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
+    // R2: the fixed-24h duplicate table was removed — the window-driven
+    // live-stats table (now carrying a «total» column) is the one
+    // per-server surface on this tab.
     assert!(
-        html.contains("Traffic by server · last 24h"),
-        "traffic-by-server eyebrow missing"
+        html.contains("Live VPN stats"),
+        "live-stats eyebrow missing"
     );
-    assert!(
-        !html.contains("No per-server traffic recorded"),
-        "empty-state must not render when there's data"
-    );
-    // s0 row present.
+    assert!(html.contains("peak conns"), "peak-conns column missing");
+    assert!(html.contains("total"), "total column missing (R2)");
+    // s0 row present with humanized totals.
     assert!(html.contains("s0"), "per-server row for s0 missing");
+    assert!(
+        html.contains("11.4 MiB"),
+        "total column must humanize up+down (3 MB + 9 MB)"
+    );
 }
 
 /// user#3 — with a monthly cap set + month-to-date usage, the section
@@ -17579,11 +17244,11 @@ async fn pr_user_info_cards_headlines_en() {
     let overview = fetch_html(app.clone(), "/admin/users/u0").await;
     let traffic = fetch_html(app, "/admin/users/u0/traffic").await;
     for (html, needle) in [
-        (&overview, "Presence"),                    // user#1 (chrome)
-        (&traffic, "Traffic by server · last 24h"), // user#2
-        (&overview, "Sharing verdict"),             // user#4
-        (&overview, "Lifecycle"),                   // user#5
-        (&overview, "Traffic limit"),               // user#3
+        (&overview, "Presence"),        // user#1 (chrome)
+        (&traffic, "Live VPN stats"),   // user#2 (R2: merged table)
+        (&overview, "Sharing verdict"), // user#4
+        (&overview, "Lifecycle"),       // user#5
+        (&overview, "Traffic limit"),   // user#3
     ] {
         assert!(
             html.contains(needle),
@@ -17613,11 +17278,11 @@ async fn pr_user_info_cards_headlines_ru() {
     let overview = fetch_html_with_cookie(app.clone(), "/admin/users/u0", "vpnctl_lang=ru").await;
     let traffic = fetch_html_with_cookie(app, "/admin/users/u0/traffic", "vpnctl_lang=ru").await;
     for (html, needle) in [
-        (&overview, "Присутствие"),                // user#1 (chrome)
-        (&traffic, "Трафик по серверам · за 24ч"), // user#2
-        (&overview, "Вердикт по расшариванию"),    // user#4
-        (&overview, "Жизненный цикл"),             // user#5
-        (&overview, "Лимит трафика"),              // user#3
+        (&overview, "Присутствие"),             // user#1 (chrome)
+        (&traffic, "Живая статистика VPN"),     // user#2 (R2: merged table)
+        (&overview, "Вердикт по расшариванию"), // user#4
+        (&overview, "Жизненный цикл"),          // user#5
+        (&overview, "Лимит трафика"),           // user#3
     ] {
         assert!(
             html.contains(needle),
