@@ -2760,7 +2760,8 @@ impl SqliteInventory {
     /// subset of servers whose **latest `server.deploy` audit row
     /// is older than the user's latest mutation** (`user.add`,
     /// `user.grant`, `user.revoke`, `user.set_vpn_router_device_id`,
-    /// `user.disable`, `user.enable`). Those servers' running sing-box
+    /// `user.disable`, `user.enable`, and the Boosty-bridge flips
+    /// `boosty.disable` / `boosty.enable`). Those servers' running sing-box
     /// config does NOT yet include the user's current state — clicking
     /// their detail page's «deploy» button pushes the fresh render and
     /// closes the gap.
@@ -2822,7 +2823,8 @@ impl SqliteInventory {
                              OR json_extract(payload, '$.server') IS NULL))
                      OR action IN ('user.add',
                                    'user.set_vpn_router_device_id',
-                                   'user.disable', 'user.enable')
+                                   'user.disable', 'user.enable',
+                                   'boosty.disable', 'boosty.enable')
                    )",
             )
             .bind(&user_id.0)

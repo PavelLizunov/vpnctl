@@ -89,7 +89,6 @@ const NAV: &[NavItem] = &[
     NavItem {
         key: "boosty",
         label_key: crate::i18n::K::NavBoosty,
-        count: None,
     },
 ];
 
@@ -8612,7 +8611,7 @@ pub(crate) async fn boosty_page(
         }
     };
 
-    Ok(shell("boosty", &theme, &accent, lang, body))
+    Ok(render_page(&state, "boosty", &theme, &accent, lang, body).await)
 }
 
 /// `POST /admin/boosty/settings` — save bridge config. Blank secret inputs
@@ -8696,12 +8695,37 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
         ApplyMode::EnableOnly
     };
     match vpnctl_boosty_bridge::sync_from_settings(&state.inv, &settings, mode).await {
-        Ok(report) => tracing::info!(
-            target = "vpnctld::boosty",
-            enabled = report.enabled.len(),
-            disabled = report.disabled.len(),
-            "manual boosty sync"
-        ),
+        Ok(report) => {
+            tracing::info!(
+                target = "vpnctld::boosty",
+                enabled = report.enabled.len(),
+                disabled = report.disabled.len(),
+                "manual boosty sync"
+            );
+            // Push the applied flips to the nodes (same pipeline as the
+            // poller tick); backgrounded so the redirect stays instant.
+            let flipped: Vec<String> = report
+                .enabled
+                .iter()
+                .chain(report.disabled.iter())
+                .cloned()
+                .collect();
+            if !flipped.is_empty() {
+                let inv = state.inv.clone();
+                let registry = std::sync::Arc::clone(&state.registry);
+                let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+                tokio::spawn(async move {
+                    crate::boosty_sync_poller::deploy_flipped_users(
+                        &inv,
+                        &registry,
+                        &key,
+                        &flipped,
+                        "boosty.sync_now",
+                    )
+                    .await;
+                });
+            }
+        }
         Err(e) => return bad_request(&format!("boosty sync failed: {e}")),
     }
     Redirect::to("/admin/boosty").into_response()
@@ -8766,27 +8790,46 @@ pub(crate) async fn boosty_unlink(
 }
 
 /// `POST /admin/boosty/disable/{user}` — disable a lapsed subscriber's
-/// user (soft-mute; the "confirm disable" button).
+/// user (soft-mute; the "confirm disable" button), then re-deploy the
+/// user's servers so the node-side access is actually cut.
 pub(crate) async fn boosty_disable(
     State(state): State<AppState>,
     Path(user): Path<String>,
 ) -> Response {
     let uid = vpnctl_core::UserId(user.clone());
-    match state.inv.set_user_disabled(&uid, true).await {
-        Ok(_) => {}
+    let changed = match state.inv.set_user_disabled(&uid, true).await {
+        Ok(b) => b,
         Err(e) => return bad_request(&e.to_string()),
-    }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "boosty.disable",
-            Some(&user),
-            Some(&serde_json::json!({ "reason": "operator-confirmed lapse" })),
-        )
-        .await
-    {
-        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.disable failed");
+    };
+    // Audit-on-actual-mutation (NM-10): a double-submit of the confirm
+    // button writes nothing and deploys nothing.
+    if changed {
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "boosty.disable",
+                Some(&user),
+                Some(&serde_json::json!({ "reason": "operator-confirmed lapse" })),
+            )
+            .await
+        {
+            tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.disable failed");
+        }
+        let inv = state.inv.clone();
+        let registry = std::sync::Arc::clone(&state.registry);
+        let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+        let users = vec![user.clone()];
+        tokio::spawn(async move {
+            crate::boosty_sync_poller::deploy_flipped_users(
+                &inv,
+                &registry,
+                &key,
+                &users,
+                "boosty.disable",
+            )
+            .await;
+        });
     }
     Redirect::to("/admin/boosty").into_response()
 }

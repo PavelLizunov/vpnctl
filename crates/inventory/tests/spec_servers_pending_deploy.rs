@@ -563,3 +563,66 @@ async fn server_agnostic_mutation_still_flags_all_servers() {
         .unwrap();
     assert_eq!(got.len(), 2, "disable must flag every granted server");
 }
+
+/// Boosty-bridge flips (`boosty.disable` / `boosty.enable`, actor
+/// `boosty-bridge`) are user mutations exactly like `user.disable` — the
+/// bridge auto-deploys after a flip, but when that deploy fails (or a
+/// CLI-applied flip is never deployed) the banner must catch the gap.
+/// Without these actions in the detector's list a bridge flip was
+/// INVISIBLE to the pending-deploy safety net.
+#[tokio::test]
+async fn boosty_bridge_flips_count_as_user_mutations() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("sub", 11)).await.unwrap();
+    inv.add_server(&srv("node")).await.unwrap();
+    inv.grant(&UserId("sub".into()), &ServerId("node".into()))
+        .await
+        .unwrap();
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("node"),
+        Some(&serde_json::json!({ "ssh_errors": [], "ssh_skip_reason": null })),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    // Bridge re-enables the user (re-subscribed) → node config is stale.
+    inv.audit("boosty-bridge", "boosty.enable", Some("sub"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("sub".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "boosty.enable after deploy → pending");
+
+    // Deploy catches up → cleared.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("node"),
+        Some(&serde_json::json!({ "ssh_errors": [], "ssh_skip_reason": null })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("sub".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert!(got.is_empty(), "deploy after the flip clears pending");
+
+    // Bridge disables the user (lapsed) → stale again.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit("boosty-bridge", "boosty.disable", Some("sub"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("sub".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "boosty.disable after deploy → pending");
+}

@@ -99,7 +99,61 @@ async fn run_sync(inv: &SqliteInventory, apply: bool, disable_lapsed: bool) -> a
 
     let report = sync_from_settings(inv, &settings, mode).await?;
     print_report(&report, mode);
+
+    // Applied flips only touch inv.db — the nodes keep serving their old
+    // `users[]` until a deploy re-renders their configs. (The daemon's
+    // poller/buttons auto-deploy; the CLI is the automation surface, so
+    // it prints the exact commands instead.)
+    if apply {
+        let flipped: Vec<&String> = report
+            .enabled
+            .iter()
+            .chain(report.disabled.iter())
+            .collect();
+        if !flipped.is_empty() {
+            let mut server_ids = std::collections::BTreeSet::new();
+            for uid in flipped {
+                for s in inv.servers_for_user(&UserId(uid.clone())).await? {
+                    server_ids.insert(s.id.0);
+                }
+            }
+            let ids: Vec<String> = server_ids.into_iter().collect();
+            print!("{}", deploy_hint(&ids));
+        }
+    }
     Ok(())
+}
+
+/// The post-apply reminder: which servers still run the pre-flip config
+/// and the exact command to push each one.
+fn deploy_hint(server_ids: &[String]) -> String {
+    if server_ids.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("note: flips are not on the nodes yet — deploy to apply them:\n");
+    for id in server_ids {
+        out.push_str(&format!("  vpnctl deploy {id}\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::deploy_hint;
+
+    #[test]
+    fn deploy_hint_lists_each_server_and_the_command() {
+        let hint = deploy_hint(&["de".to_string(), "is".to_string()]);
+        assert!(hint.contains("vpnctl deploy de\n"), "{hint}");
+        assert!(hint.contains("vpnctl deploy is\n"), "{hint}");
+        assert!(hint.starts_with("note:"), "{hint}");
+    }
+
+    #[test]
+    fn deploy_hint_is_empty_for_no_servers() {
+        assert_eq!(deploy_hint(&[]), "");
+    }
 }
 
 fn print_report(r: &SyncReport, mode: ApplyMode) {

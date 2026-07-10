@@ -177,9 +177,13 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // Boosty → VPN subscription bridge. When enabled in boosty_settings,
     // reconciles VPN access with the blog's subscriber roster on its own
     // cadence (auto-enable active subscribers; surface or auto-disable
-    // lapsed ones). No-op tick while disabled — safe to always spawn.
+    // lapsed ones), then re-deploys the affected users' servers so the
+    // flips reach the nodes. No-op tick while disabled — safe to always
+    // spawn.
     drop(crate::boosty_sync_poller::spawn_boosty_sync_poller(
         inv.clone(),
+        Arc::clone(&registry),
+        deploy_key_path.clone(),
     ));
 
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3

@@ -1962,6 +1962,45 @@ async fn boosty_disable_button_soft_mutes_user() {
     assert!(bob.disabled, "disable button must soft-mute the user");
 }
 
+/// AC-B3 (NM-10 audit-on-actual-mutation): double-submitting the confirm
+/// button writes exactly ONE `boosty.disable` audit row — the second POST
+/// is a no-op (user already disabled) and must not spam the timeline or
+/// trigger a second redeploy.
+#[tokio::test]
+async fn boosty_disable_double_submit_audits_once() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&mk_user("bob", false)).await.unwrap();
+    let app = router(s);
+
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/boosty/disable/bob")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    }
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    let disable_rows = audits
+        .iter()
+        .filter(|a| a.action == "boosty.disable")
+        .count();
+    assert_eq!(disable_rows, 1, "double-submit must audit exactly once");
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Phase C-2 — copy contracts (backend response texts + frontend voice)
 //
