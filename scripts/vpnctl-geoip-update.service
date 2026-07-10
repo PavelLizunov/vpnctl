@@ -19,11 +19,18 @@ Type=oneshot
 User=user
 Group=user
 # Reads VPNCTLD_GEOIP_DIR. Empty default = /var/lib/vpnctl/geoip
-# (resolved inside `cli/src/cmd/geoip.rs`).
+# (resolved inside the fetch script + `cli/src/cmd/geoip.rs`).
 EnvironmentFile=-/etc/vpnctl/vpnctld.env
-# `vpnctl` CLI binary co-installed with the daemon (path matches
-# the deploy pattern; tweak if your install prefix differs).
-ExecStart=/usr/local/bin/vpnctl geoip-update
+# ssh (spawned by the fetch script) looks under $HOME/.ssh; the daemon
+# user's real home (/home/user) is blocked by ProtectHome=true, so point
+# HOME at the vpnctl state dir where the deploy key already lives.
+Environment=HOME=/var/lib/vpnctl
+# Node-proxied fetch (see the script header): 192.168.0.236 can't
+# complete downloads from db-ip's Cloudflare CDN, so the DBs are pulled
+# THROUGH a VPN node via the deploy key. Replaces the direct
+# `/usr/local/bin/vpnctl geoip-update`, which times out every month on
+# this host. The script does the same decompress→validate→atomic-rename.
+ExecStart=/usr/local/bin/vpnctl-geoip-fetch-via-node.sh
 # Total budget: download + decompress + validate two .mmdb files
 # (~150 MB combined). 10 minutes is generous; on a flaky network
 # DB-IP can be slow but rarely 600s+.
