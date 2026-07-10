@@ -322,6 +322,21 @@ pub struct SubAccessAggregates {
     pub first_seen: Option<DateTime<Utc>>,
 }
 
+/// TT-2 — proxy-masked accounting for the Activity-tab honesty banner.
+/// See [`SqliteInventory::sub_access_proxy_masked_stats`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyMaskedStats {
+    /// Real-client-attempt rows (`is_vpn_egress = 0`) in the window.
+    pub window_rows: u64,
+    /// Of those, how many logged a private/reserved/proxy IP instead of
+    /// a real client IP (the front-proxy masking).
+    pub masked_rows: u64,
+    /// RFC3339 ts of the oldest masked row (banner date span), if any.
+    pub masked_min_ts: Option<String>,
+    /// RFC3339 ts of the newest masked row, if any.
+    pub masked_max_ts: Option<String>,
+}
+
 /// One row of the per-user "Subscription origins · by country" breakdown
 /// (abuse-origins PR). Built from `sub_access_by_country`, which groups a
 /// user's real (`is_vpn_egress = 0`, non-NULL `user_id`) `sub_access_log`
@@ -3539,6 +3554,51 @@ impl SqliteInventory {
         })
     }
 
+    // (ProxyMaskedStats struct defined just below SubAccessAggregates.)
+    /// TT-2 — proxy-masked stats for the Activity-tab honesty banner.
+    /// Counts, within the `days` window and among real-client-attempt
+    /// rows (`is_vpn_egress = 0`), how many carry an IP that is NOT a
+    /// real client IP — i.e. a private/reserved/proxy address (the
+    /// front proxy .210 that landed because it isn't in
+    /// `VPNCTLD_TRUSTED_PROXIES`). Reuses `real_client_ip_predicate` so
+    /// the "masked" set is the exact complement of what the verdict
+    /// scorer keeps. `masked_min_ts`/`masked_max_ts` bound the banner's
+    /// date span. When `window_rows == 0` the caller shows nothing.
+    pub async fn sub_access_proxy_masked_stats(
+        &self,
+        user_id: &UserId,
+        days: u32,
+    ) -> Result<ProxyMaskedStats> {
+        let real = real_client_ip_predicate("ip");
+        // `real` is a hardcoded range predicate (no user input); safe to
+        // interpolate. `NOT (real)` = the IP is reserved/private/proxy
+        // or a known server address.
+        let sql = format!(
+            "SELECT
+                COUNT(*)                                        AS window_rows,
+                SUM(CASE WHEN NOT ({real}) THEN 1 ELSE 0 END)   AS masked_rows,
+                MIN(CASE WHEN NOT ({real}) THEN ts END)         AS masked_min_ts,
+                MAX(CASE WHEN NOT ({real}) THEN ts END)         AS masked_max_ts
+             FROM sub_access_log
+             WHERE user_id = ?1
+               AND is_vpn_egress = 0
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)"
+        );
+        let row = sqlx::query(&sql)
+            .bind(&user_id.0)
+            .bind(format!("-{days} days"))
+            .fetch_one(&self.pool)
+            .await?;
+        let window_rows: i64 = row.try_get("window_rows")?;
+        let masked_rows: i64 = row.try_get("masked_rows").unwrap_or(0);
+        Ok(ProxyMaskedStats {
+            window_rows: window_rows.max(0) as u64,
+            masked_rows: masked_rows.max(0) as u64,
+            masked_min_ts: row.try_get("masked_min_ts").ok().flatten(),
+            masked_max_ts: row.try_get("masked_max_ts").ok().flatten(),
+        })
+    }
+
     /// UA-cluster aggregate for the Phase Track-4 fingerprint
     /// heuristic. Groups this user's recent `sub_access_log` rows
     /// by User-Agent and reports per-UA distinct IPs, distinct /16
@@ -5409,12 +5469,17 @@ impl SqliteInventory {
         user_id: &UserId,
         limit: i64,
     ) -> Result<Vec<VpnUserSessionRow>> {
+        // TT-4: ORDER BY last_seen (not started_at) so a currently-open
+        // or long-running session — which may have STARTED before newer
+        // short ones — can never be buried past the LIMIT. The render
+        // tags rows whose last_seen is within one poll interval of now
+        // as «live».
         let rows = sqlx::query(
             "SELECT id, user_id, server_id, started_at, last_seen,
                     conn_count_peak, total_bytes
              FROM vpn_user_sessions
              WHERE user_id = ?1
-             ORDER BY started_at DESC
+             ORDER BY last_seen DESC
              LIMIT ?2",
         )
         .bind(&user_id.0)

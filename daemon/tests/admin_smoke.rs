@@ -16473,10 +16473,16 @@ async fn admin_user_detail_origins_renders_country_isp_ip_breakdown() {
     for ip in ["203.0.113.10", "198.51.100.20", "192.0.2.30"] {
         assert!(html.contains(ip), "IP {ip} missing from by-IP table");
     }
-    // Device-count line: two distinct device classes + a UA breakout.
+    // Device-count line (TT-5): two distinct device_classes present →
+    // leads with «client families» + a raw-UA breakout (was the
+    // false-precision «≈N devices» + a dead «0 TLS-fingerprints» term).
     assert!(
-        html.contains("devices"),
-        "device-count line missing from origins section"
+        html.contains("client families"),
+        "device-count line must lead with 'client families' when device_class is populated"
+    );
+    assert!(
+        !html.contains("TLS-fingerprints") && !html.contains("0 TLS"),
+        "dead JA4/TLS-fingerprint term must be gone from the device line"
     );
     // No empty-state when rows are present.
     assert!(

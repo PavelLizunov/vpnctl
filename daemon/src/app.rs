@@ -56,6 +56,14 @@ pub struct AppState {
     /// to render the «Live connections» drill-down. Cheap to
     /// `.clone()` (internal `Arc`).
     pub snapshot_cache: crate::snapshot_cache::SnapshotCache,
+    /// TT-1 — the MaxMind GeoIP reader (mmap-backed, Arc-inside, cheap
+    /// to clone), built once at startup via `GeoLookup::from_env()`.
+    /// The access-log WRITER already enriches sub_access_log rows at
+    /// insert time; this lets RENDER paths resolve an arbitrary IP
+    /// directly — notably the clash-api «Source IPs» table, whose geo
+    /// used to be parasitically borrowed from sub_access_log (broken
+    /// once the front proxy masked client IPs).
+    pub geo: crate::geoip::GeoLookup,
 }
 
 impl std::fmt::Debug for AppState {
@@ -245,6 +253,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         }
     }
 
+    // TT-1 — same env-driven loader the access-log writer uses, so
+    // render-side geo resolution and write-side enrichment read the
+    // exact same DB files.
+    let geo = crate::geoip::GeoLookup::from_env();
     let state = AppState {
         inv,
         registry,
@@ -252,6 +264,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         rate_limiter,
         wizard,
         snapshot_cache,
+        geo,
     };
     Ok(router(state))
 }
@@ -292,6 +305,10 @@ pub fn make_app_state_with_rate_limiter(
             rate_limiter,
             wizard: Arc::new(WizardStore::new()),
             snapshot_cache: crate::snapshot_cache::SnapshotCache::new(),
+            // Tests run without mmdb files — the disabled stub falls
+            // back to the sub_access_log join + reserved-range labels,
+            // exactly the pre-TT-1 behaviour the existing specs pin.
+            geo: crate::geoip::GeoLookup::disabled(),
         },
         handle,
     )

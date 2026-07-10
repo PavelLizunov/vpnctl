@@ -4005,12 +4005,34 @@ async fn user_detail_render(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "top_source_ips_for_user failed");
             Vec::new()
         });
+    // TT-1 — resolve the clash-api source IPs' geo DIRECTLY from the
+    // MMDB, not by borrowing a geo-resolved sub_access_log row for the
+    // same IP. The borrow (`geo_labels_for_ips`) broke once the front
+    // proxy started masking client IPs: real VPN-connection IPs stopped
+    // appearing in sub_access_log, so ~95% of public source IPs showed
+    // "(unknown)". Layering: start from the join (covers any IP the
+    // MMDB doesn't know but an operator-labelled fetch did), then let
+    // the authoritative MMDB win wherever it resolves. Private/CGNAT
+    // IPs resolve to None here and fall through to the render's
+    // reserved-range classifier, unchanged.
     let source_ip_geo = {
         let ips: Vec<String> = source_ips.iter().map(|r| r.source_ip.clone()).collect();
-        state.inv.geo_labels_for_ips(&ips).await.unwrap_or_else(|e| {
+        let mut map = state.inv.geo_labels_for_ips(&ips).await.unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "geo_labels_for_ips failed");
             std::collections::HashMap::new()
-        })
+        });
+        for ip_str in &ips {
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                if let Some(info) = state.geo.lookup(ip) {
+                    let country = info.country_iso.clone();
+                    let asn = info.asn_label();
+                    if country.is_some() || asn.is_some() {
+                        map.insert(ip_str.clone(), (country, asn));
+                    }
+                }
+            }
+        }
+        map
     };
     // PR-User user#5 — lifecycle facts (Q-4d). created_at +
     // last_sub_fetch + age_days. On failure compose a defensible
@@ -4059,7 +4081,7 @@ async fn user_detail_render(
     // the «of M» count + the older/newer link visibility.
     const LOG_PAGE_SIZE: i64 = 25;
     let log_page = query.log_page();
-    let (recent_log, sharing, log_total) = if tab == UserTab::Activity {
+    let (recent_log, sharing, log_total, proxy_masked) = if tab == UserTab::Activity {
         let log = state
             .inv
             .recent_sub_access_paged(&uid, LOG_PAGE_SIZE, log_page * LOG_PAGE_SIZE)
@@ -4074,9 +4096,21 @@ async fn user_detail_render(
             .into_iter()
             .find(|sig| sig.user_id == uid)
             .map(|sig| crate::sharing_score::score(&sig));
-        (log, sc, total)
+        // TT-2 — proxy-masked accounting over the same 30d window the
+        // tiles use, for the honesty banner.
+        let masked = state
+            .inv
+            .sub_access_proxy_masked_stats(&uid, 30)
+            .await
+            .unwrap_or_default();
+        (log, sc, total, masked)
     } else {
-        (Vec::new(), None, 0)
+        (
+            Vec::new(),
+            None,
+            0,
+            vpnctl_inventory::ProxyMaskedStats::default(),
+        )
     };
     // 4b Access: per-grant dates + per-server visible protocol lists.
     let (user_grant_dates, access_protos) = if tab == UserTab::Access {
@@ -5302,6 +5336,38 @@ async fn user_detail_render(
 
     }
     @if tab == UserTab::Activity {
+        // TT-2 — proxy-masked honesty banner. When a MATERIAL fraction
+        // of the 30d real-client fetches logged the front proxy's IP
+        // instead of the client's, the empty geo below is a config gap,
+        // not "no data" — say so, with the count/%/date-span + the fix.
+        @let pm = &proxy_masked;
+        @let masked_pct = pm.masked_rows.saturating_mul(100).checked_div(pm.window_rows).unwrap_or(0);
+        @if pm.masked_rows > 0 && masked_pct >= 20 {
+            div style="border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 12px 0 4px; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+                b style="color: var(--warm);" {
+                    "⚠ " (pm.masked_rows) (crate::i18n::tr(lang, " of ", " из ")) (pm.window_rows)
+                    (crate::i18n::tr(lang, " fetches (", " обращений ("))
+                    (masked_pct) (crate::i18n::tr(lang, "%) arrived via the front proxy — client IP not captured.", "%) пришли через фронт-прокси — клиентский IP не пойман."))
+                }
+                " "
+                (crate::i18n::tr(
+                    lang,
+                    "Those rows carry the proxy's private address, so their country/ISP below is blank and the sharing signal can't see them. Fix: add the proxy IP to ",
+                    "Эти строки несут приватный адрес прокси, поэтому страна/ISP ниже пустые, а сигнал шаринга их не видит. Фикс: добавь IP прокси в ",
+                ))
+                span.ed-mono { "VPNCTLD_TRUSTED_PROXIES" }
+                (crate::i18n::tr(lang, " + set Caddy ", " + в Caddy "))
+                span.ed-mono { "header_up X-Real-IP {remote_host}" }
+                (crate::i18n::tr(lang, " and restart vpnctld.", " и перезапусти vpnctld."))
+                @if let (Some(mn), Some(mx)) = (&pm.masked_min_ts, &pm.masked_max_ts) {
+                    @if let (Ok(a), Ok(b)) = (chrono::DateTime::parse_from_rfc3339(mn), chrono::DateTime::parse_from_rfc3339(mx)) {
+                        " " span style="color: var(--mute);" {
+                            "(" (format_msk_iso(a.with_timezone(&chrono::Utc))) " – " (format_msk_iso(b.with_timezone(&chrono::Utc))) ")"
+                        }
+                    }
+                }
+            }
+        }
         // v2 4c — four fact tiles + the geo-resolved fetch log.
         div.ed-status-strip style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 12px;" {
             @let (verdict_txt, verdict_color, score_note) = match &sharing {
@@ -5986,21 +6052,33 @@ fn user_subscription_origins_section(
             }
 
             // Device-count line — a sharing signal on its own.
-            // «≈N devices (M UA · K TLS-fingerprints)». N is the max of
-            // the device_class / UA / JA4 distinct counts (the best
-            // proxy we have), with UA + JA4 broken out so the operator
-            // sees what fed the estimate.
-            @let approx_devices = device_fp
-                .distinct_device_classes
-                .max(device_fp.distinct_uas)
-                .max(device_fp.distinct_ja4);
+            // TT-5: the old estimate was max(device_class, UA, JA4).
+            // JA4 is ALWAYS 0 (no JA4-forwarding proxy is wired), so
+            // «· 0 TLS-fingerprints» was permanent dead noise that read
+            // as a broken feature — dropped. UA over-counts (every app
+            // version is a distinct string); device_class collapses that
+            // churn (4 Streisand builds → 1) but under-counts because
+            // the parser leaves the custom ninitux client NULL. So we
+            // lead with device_class when we have it (labelled honestly
+            // as «client families»), fall back to the raw UA count
+            // otherwise, and always show the raw UA count as the upper
+            // bound — never a single false-precision «≈N devices».
+            @let has_families = device_fp.distinct_device_classes > 0;
+            @let lead_n = if has_families { device_fp.distinct_device_classes } else { device_fp.distinct_uas };
             p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 16px;" {
-                "≈ " b { (approx_devices) } " "
-                (tr(lang, "devices", "устройств"))
+                "≈ " b { (lead_n) } " "
+                @if has_families { (tr(lang, "client families", "клиентских семейств")) }
+                @else { (tr(lang, "distinct user-agents", "уникальных user-agent")) }
                 " "
-                span style="color: var(--mute);" {
-                    "(" (device_fp.distinct_uas) " " (tr(lang, "UA", "UA"))
-                    " · " (device_fp.distinct_ja4) " " (tr(lang, "TLS-fingerprints", "TLS-отпечатков")) ")"
+                span.ed-tip title=(tr(
+                    lang,
+                    "«Client families» collapse app-version churn — four Streisand builds count as one client. The raw user-agent count is the upper bound (each version is a distinct string). Clients the UA parser doesn't recognise (the custom ninitux app) leave device_class NULL, so families under-count. TLS fingerprints (JA4) aren't captured — no fingerprint-forwarding proxy is wired.",
+                    "«Клиентские семейства» схлопывают версии приложения — четыре сборки Streisand считаются одним клиентом. Сырое число user-agent — верхняя граница (каждая версия — отдельная строка). Клиенты, которых парсер UA не узнаёт (кастомный ninitux), оставляют device_class NULL, поэтому семейства недосчитывают. TLS-отпечатки (JA4) не снимаются — прокси с их форвардингом не подключён.",
+                )) { "ⓘ" }
+                @if has_families {
+                    " " span style="color: var(--mute);" {
+                        "(" (device_fp.distinct_uas) " " (tr(lang, "distinct UA", "уник. UA")) ")"
+                    }
                 }
             }
 
@@ -7052,6 +7130,10 @@ async fn user_sessions_section(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sessions_for_user failed");
             Vec::new()
         });
+    // TT-4: a session is "live" if its last tick landed within ~one
+    // poll interval (5-min poll + slack) of now.
+    let now = chrono::Utc::now();
+    let live_cutoff = chrono::Duration::minutes(6);
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow {
@@ -7060,8 +7142,8 @@ async fn user_sessions_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Implicit «active from-to» windows per (user, server). Derived from 5-min clash-poll observations: consecutive ticks extend the session; a gap >15 minutes closes it and the next tick opens a new row. Peak conns shows the busiest snapshot during the session.",
-                "Окна «активна с-по» на (юзер, сервер). Источник — 5-минутные тики clash-poll: последовательные тики расширяют сессию, пропуск >15 минут закрывает её, следующий тик открывает новую. Peak conns — самый загруженный snapshot в этой сессии.",
+                "Implicit «active from-to» windows per (user, server), newest activity first. Derived from 5-min clash-poll observations: consecutive ticks extend the session; a gap >15 minutes closes it and the next tick opens a new row. Because activity is sampled every 5 minutes, a window seen in a single tick renders «≤5m» (real duration unknown below that granularity). Peak conns shows the busiest snapshot during the session.",
+                "Окна «активна с-по» на (юзер, сервер), свежая активность сверху. Источник — 5-минутные тики clash-poll: последовательные тики расширяют сессию, пропуск >15 минут закрывает её, следующий тик открывает новую. Активность сэмплится раз в 5 минут, поэтому окно, увиденное одним тиком, показывается как «≤5m» (точная длительность ниже этой гранулярности неизвестна). Peak conns — самый загруженный snapshot в этой сессии.",
             ))
         }
         @if rows.is_empty() {
@@ -7098,17 +7180,31 @@ async fn user_sessions_section(
                     @for r in &rows {
                         @let dur = r.duration();
                         @let mins = dur.num_minutes().max(0);
-                        @let dur_str = if mins >= 60 {
+                        // TT-4: single-tick windows (started==last_seen)
+                        // are «≤5m» not the misleading «0m» — the user
+                        // WAS active, we just can't resolve below the
+                        // 5-min poll granularity.
+                        @let dur_str = if mins == 0 {
+                            "≤5m".to_string()
+                        } else if mins >= 60 {
                             format!("{}h{:02}m", mins / 60, mins % 60)
                         } else {
                             format!("{mins}m")
                         };
-                        tr style="border-bottom: 1px dotted var(--rule);" {
+                        @let is_live = now.signed_duration_since(r.last_seen) < live_cutoff;
+                        tr style=(if is_live { "border-bottom: 1px dotted var(--rule); background: color-mix(in oklab, var(--green) 7%, var(--paper));" } else { "border-bottom: 1px dotted var(--rule);" }) {
                             td style="padding: 4px 8px;" {
                                 a href=(format!("/admin/servers/{}", crate::http_util::path_segment_encode(&r.server_id.0))) style="color: var(--ink); text-decoration: none;" { (r.server_id.0) }
                             }
                             td style="padding: 4px 8px;" { (format_msk(r.started_at)) }
-                            td style="padding: 4px 8px;" { (format_msk(r.last_seen)) }
+                            td style="padding: 4px 8px;" {
+                                (format_msk(r.last_seen))
+                                @if is_live {
+                                    " " span style="color: var(--green); font-weight: 600;" {
+                                        "● " (tr(lang, "live", "активна"))
+                                    }
+                                }
+                            }
                             td style="padding: 4px 8px; text-align: right; font-weight: 500;" { (dur_str) }
                             td style="padding: 4px 8px; text-align: right;" { (r.conn_count_peak) }
                         }
