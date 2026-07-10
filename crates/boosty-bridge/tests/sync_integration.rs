@@ -10,7 +10,24 @@ use vpnctl_boosty_bridge::{ApplyMode, build_client, sync_from_settings_at, sync_
 use vpnctl_core::{User, UserId};
 use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
+/// A PAID subscriber (level price 200) — the default in these tests, since
+/// the paid-only gate now decides VPN-eligibility.
 fn subscriber(id: i64, name: &str, status: &str) -> serde_json::Value {
+    subscriber_priced(id, name, status, 200.0, "Пингвин-одиночка")
+}
+
+/// A subscriber on the free "Follower" level (level price 0) — VPN-excluded.
+fn follower(id: i64, name: &str, status: &str) -> serde_json::Value {
+    subscriber_priced(id, name, status, 0.0, "Follower")
+}
+
+fn subscriber_priced(
+    id: i64,
+    name: &str,
+    status: &str,
+    level_price: f64,
+    level_name: &str,
+) -> serde_json::Value {
     json!({
         "id": id,
         "name": name,
@@ -24,12 +41,12 @@ fn subscriber(id: i64, name: &str, status: &str) -> serde_json::Value {
         "subscribed": true,
         "status": status,
         "onTime": 1_700_000_000,
-        "price": 0,
+        "price": level_price,
         "payments": 0,
         "level": {
             "id": 1,
-            "name": "L",
-            "price": 0,
+            "name": level_name,
+            "price": level_price,
             "currencyPrices": {},
             "createdAt": 1,
             "ownerId": 1,
@@ -164,6 +181,251 @@ async fn enable_only_mode_leaves_lapsed_pending() {
     assert!(report.disabled.is_empty());
     let users = inv.list_users().await.unwrap();
     assert!(!users[0].disabled, "EnableOnly must not disable bob");
+}
+
+/// BB-2 (operator policy 2026-07-10, paid tiers only): a free "Follower"
+/// (level price 0) is never surfaced as a new subscriber to link, even when
+/// active — and is counted in `excluded_unpaid`. A paid active subscriber
+/// on the same roster still surfaces.
+#[tokio::test]
+async fn free_followers_are_excluded_from_vpn() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [
+            subscriber(300, "Payer", "active"),     // paid + active → surface
+            follower(400, "Freeloader", "active"),  // free + active → excluded
+            follower(500, "ExFree", "inactive"),    // free + inactive → ignored
+        ],
+        "total": 3, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.active_subscribers, 1,
+        "only the paid payer is eligible"
+    );
+    assert_eq!(
+        report.excluded_unpaid, 1,
+        "one active free follower excluded"
+    );
+    assert_eq!(report.new_subscribers.len(), 1);
+    assert_eq!(report.new_subscribers[0].subscriber_id, 300);
+    assert!(
+        report
+            .new_subscribers
+            .iter()
+            .all(|s| s.subscriber_id != 400),
+        "free follower must NOT be surfaced to link"
+    );
+}
+
+/// BB-2 downgrade semantics: a LINKED user whose subscriber drops to the
+/// free "Follower" level (still status active, price 0) is treated as
+/// lapsed — disabled in Full mode. A paid subscriber keeps `active_count`
+/// above zero so the zero-eligible fail-safe does NOT engage (this is a
+/// single downgrade, not a fleet-wide anomaly).
+#[tokio::test]
+async fn linked_user_downgraded_to_free_is_disabled() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [
+            follower(600, "Downgraded", "active"),    // carol linked here → now free
+            subscriber(700, "StillPaying", "active"), // keeps a paid-active on the roster
+        ],
+        "total": 2, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("carol", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("carol".into()), 600)
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.disabled,
+        vec!["carol"],
+        "downgrade to free = disable"
+    );
+    assert!(
+        report.suppressed_disables.is_empty(),
+        "fail-safe must not engage when a paid subscriber remains"
+    );
+    let users = inv.list_users().await.unwrap();
+    let carol = users.iter().find(|u| u.id.0 == "carol").unwrap();
+    assert!(carol.disabled, "carol disabled after downgrade to free");
+}
+
+/// BB-2 fractional price (the model doc says fractional prices occur live):
+/// a level.price of 0.5 is paid → eligible → surfaced.
+#[tokio::test]
+async fn fractional_paid_price_is_eligible() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [ subscriber_priced(800, "Centsub", "active", 0.5, "Promo") ],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
+        .await
+        .unwrap();
+    assert_eq!(report.active_subscribers, 1, "0.5 price is paid → eligible");
+    assert_eq!(report.excluded_unpaid, 0);
+    assert_eq!(report.new_subscribers.len(), 1);
+    assert_eq!(report.new_subscribers[0].subscriber_id, 800);
+}
+
+/// BB-2 × EnableOnly (the poller's default mode): a linked user whose
+/// subscriber is a free follower is NOT auto-disabled — it surfaces as
+/// `lapsed_pending` for the operator to confirm, exactly like any lapse.
+/// A paid subscriber keeps the zero-eligible fail-safe from engaging.
+#[tokio::test]
+async fn linked_free_follower_under_enable_only_is_pending_not_disabled() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [
+            follower(600, "Freeloader", "active"),    // dave linked here
+            subscriber(700, "StillPaying", "active"), // keeps active_count > 0
+        ],
+        "total": 2, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("dave", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("dave".into()), 600)
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::EnableOnly)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.lapsed_pending,
+        vec!["dave"],
+        "free-tier linked → pending"
+    );
+    assert!(
+        report.disabled.is_empty(),
+        "EnableOnly must not auto-disable"
+    );
+    let users = inv.list_users().await.unwrap();
+    let dave = users.iter().find(|u| u.id.0 == "dave").unwrap();
+    assert!(!dave.disabled, "dave stays enabled until operator confirms");
+}
+
+/// BB-2 fail-safe: a NON-empty roster where every ACTIVE subscriber is free
+/// (the signature of a Boosty price-serialization quirk, or every payer
+/// downgrading at once) must NOT mass-disable a linked payer in Full mode —
+/// the disable is suppressed for the operator to confirm. A genuinely
+/// all-*inactive* roster is a real lapse and is NOT covered here (see
+/// `enable_only_mode_leaves_lapsed_pending`).
+#[tokio::test]
+async fn all_active_free_roster_suppresses_disable_of_linked_payer() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [
+            follower(600, "NowFree", "active"),      // carol linked here
+            follower(601, "AlsoFree", "active"),     // still no paid-active
+        ],
+        "total": 2, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("carol", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("carol".into()), 600)
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
+        .await
+        .unwrap();
+
+    assert!(
+        report.disabled.is_empty(),
+        "must NOT disable on zero-eligible anomaly"
+    );
+    assert_eq!(report.suppressed_disables, vec!["carol"]);
+    let users = inv.list_users().await.unwrap();
+    let carol = users.iter().find(|u| u.id.0 == "carol").unwrap();
+    assert!(
+        !carol.disabled,
+        "carol kept enabled pending operator confirm"
+    );
 }
 
 /// AC-C1: an EMPTY roster (typo'd blog_url — Boosty happily 200s with zero

@@ -143,8 +143,8 @@ fn print_report(r: &SyncReport, mode: ApplyMode) {
         _ => "did",
     };
     println!(
-        "roster: {} subscribers ({} active), {} linked",
-        r.total_subscribers, r.active_subscribers, r.linked
+        "roster: {} subscribers ({} paid-active, {} free excluded), {} linked",
+        r.total_subscribers, r.active_subscribers, r.excluded_unpaid, r.linked
     );
     if !r.enabled.is_empty() {
         println!(

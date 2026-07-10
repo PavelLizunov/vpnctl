@@ -18,7 +18,11 @@ use std::collections::{HashMap, HashSet};
 pub struct SubscriberState {
     /// Boosty's numeric subscriber id.
     pub subscriber_id: i64,
-    /// Whether the subscription is currently active (paying).
+    /// Whether the subscriber is VPN-eligible: actively subscribed to a
+    /// PAID level. The caller (`sync_once`) already folds the paid-tier
+    /// gate into this flag — a free "Follower" is `active = false` here, so
+    /// the reconciler never enables/surfaces them and disables a linked
+    /// user who downgrades to free.
     pub active: bool,
 }
 

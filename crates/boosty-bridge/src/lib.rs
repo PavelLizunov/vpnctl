@@ -56,8 +56,11 @@ pub struct NewSubscriberInfo {
 pub struct SyncReport {
     /// Total subscribers fetched from Boosty.
     pub total_subscribers: usize,
-    /// How many of those are currently active.
+    /// How many of those are VPN-eligible (active AND on a paid level).
     pub active_subscribers: usize,
+    /// Active subscribers on the free "Follower" level, excluded from VPN
+    /// by the paid-only gate (transparency, not an error).
+    pub excluded_unpaid: usize,
     /// How many vpnctl users are linked to a Boosty subscriber.
     pub linked: usize,
     /// User ids re-enabled (or, in dry-run, that would be).
@@ -71,10 +74,12 @@ pub struct SyncReport {
     pub new_subscribers: Vec<NewSubscriberInfo>,
     /// Non-fatal per-action errors (one failed write doesn't abort the run).
     pub errors: Vec<String>,
-    /// Disables suppressed by the empty-roster fail-safe: the roster came
-    /// back with ZERO subscribers while users are linked — far more likely
-    /// a wrong `blog_url` (or a Boosty-side filter quirk) than every
-    /// subscriber lapsing at once, so nothing was touched.
+    /// Disables suppressed by the zero-eligible fail-safe: the roster was
+    /// EMPTY, or non-empty with active subscribers but NONE paid-eligible
+    /// (a wrong `blog_url` / expired token / Boosty price-serialization
+    /// quirk) — far more likely than every payer lapsing at once, so
+    /// nothing was touched. A genuine single lapse/downgrade still flows
+    /// through to disable.
     pub suppressed_disables: Vec<String>,
 }
 
@@ -220,6 +225,14 @@ pub async fn sync_from_settings_at(
     result
 }
 
+/// Whether a Boosty subscriber should have VPN access: actively subscribed
+/// to a PAID level. The free "Follower" pseudo-level reports `price == 0`
+/// and is excluded (operator policy 2026-07-10). `NaN` price → excluded
+/// (`NaN > 0.0` is false), the safe default.
+fn is_vpn_eligible(s: &boosty_api::model::Subscriber) -> bool {
+    s.is_active() && s.level.price > 0.0
+}
+
 /// Run one reconciliation pass against the live Boosty roster.
 ///
 /// Fetches every subscriber of `blog`, joins them with the linked vpnctl
@@ -242,14 +255,32 @@ pub async fn sync_once(
         .map(|s| (s.id as i64, s.name.clone()))
         .collect();
 
+    // VPN-eligibility = actively subscribed to a PAID level. Boosty's free
+    // "Follower" pseudo-level has `level.price == 0`; those follows report
+    // status "active" but must NOT get VPN (operator policy 2026-07-10:
+    // paid tiers only). So the reconciler's `active` flag means "paid-
+    // active", not merely "active": a free follower is never enabled, never
+    // surfaced to link, and a linked user who DOWNGRADES to free gets
+    // disabled — exactly like a lapse.
+    // ponytail: gate is `level.price > 0`; if a blog ever needs per-level
+    // rules (e.g. only tiers ≥ N₽), add a level allow-list to
+    // boosty_settings then — not needed for a single paid/free split.
     let states: Vec<SubscriberState> = subscribers
         .iter()
         .map(|s| SubscriberState {
             subscriber_id: s.id as i64,
-            active: s.is_active(),
+            active: is_vpn_eligible(s),
         })
         .collect();
     let active_count = states.iter().filter(|s| s.active).count();
+    // Active-but-not-eligible subscribers, excluded from VPN by the paid-only
+    // gate (surfaced for operator transparency, not an error). Exact
+    // complement of `is_vpn_eligible` among active subscribers, so NaN /
+    // negative prices land HERE rather than vanishing from both totals.
+    let excluded_unpaid = subscribers
+        .iter()
+        .filter(|s| s.is_active() && !is_vpn_eligible(s))
+        .count();
 
     // 2. Join links with each linked user's current disabled state.
     let link_pairs = inv.list_boosty_links().await?;
@@ -275,16 +306,27 @@ pub async fn sync_once(
     let mut report = SyncReport {
         total_subscribers: subscribers.len(),
         active_subscribers: active_count,
+        excluded_unpaid,
         linked: links.len(),
         ..Default::default()
     };
 
-    // Fail-safe: an EMPTY roster while users are linked is far more likely
-    // a wrong blog_url / Boosty-side quirk than every subscriber lapsing
-    // at once — suppress every disable instead of mass-cutting the fleet.
+    // Fail-safe: suppress ALL disables (Full mode) when the roster looks
+    // fleet-cuttingly wrong while payers are linked. Two signatures:
+    //   * an EMPTY roster (wrong blog_url / API error), and
+    //   * subscribers are present and ACTIVE, yet NONE are paid-eligible
+    //     (`active_count == 0 && excluded_unpaid > 0`) — the signature of a
+    //     Boosty `level.price` serialization quirk returning 0 for paid
+    //     tiers, far likelier than every payer downgrading to free at once.
+    // Crucially this does NOT fire on a genuine all-*inactive* roster
+    // (everyone lapsed): those are real lapses and flow through to
+    // lapse/disable. A single downgrade among payers also flows through
+    // (others keep active_count > 0). Only the anomaly is held for the
+    // operator to confirm — matching the codebase's safe-default posture.
     // (API *errors* abort before this point; this guards the successful-
     // but-wrong response.)
-    let suppress_disables = subscribers.is_empty() && !links.is_empty();
+    let suppress_disables =
+        !links.is_empty() && (subscribers.is_empty() || (active_count == 0 && excluded_unpaid > 0));
 
     // 3. Reconcile + apply.
     for action in reconcile(&states, &links) {
@@ -314,7 +356,8 @@ pub async fn sync_once(
         tracing::warn!(
             target = "boosty_bridge",
             users = ?report.suppressed_disables,
-            "roster came back EMPTY — suppressed all disables (blog_url typo or Boosty-side filter?)"
+            total_subscribers = subscribers.len(),
+            "roster yielded ZERO vpn-eligible subscribers — suppressed all disables (blog_url typo, expired token, or Boosty price serialization quirk?)"
         );
     }
 
