@@ -6180,55 +6180,84 @@ async fn admin_audit_csv_export_returns_well_formed_csv() {
 // ────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn admin_monitoring_renders_kpis_and_sparklines() {
+async fn admin_monitoring_renders_fleet_health() {
+    // Design v2 3a — monitoring is the fleet-health surface: six
+    // status tiles, per-node uptime + trend tables, the monitor's
+    // REAL thresholds, probe failures and the GeoIP line. The former
+    // sub-access analytics are gone from the page (the JSON API at
+    // /api/v1/stats/sub-access stays — pinned by its own test).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 0, 1, &[]).await;
-    // Seed a couple of access rows so the sparklines have non-zero
-    // peaks (the KPIs read from these).
+    seed(&s.inv, 1, 0, &[]).await;
+    // One health row (mem 75% > the 70 heat watermark) so the tiles,
+    // uptime table and trend table all have real cells.
     s.inv
-        .log_sub_access(&UserId("u0".into()), "1.1.1.1", None, 200, 500)
-        .await
-        .unwrap();
-    s.inv
-        .log_sub_access(&UserId("u0".into()), "2.2.2.2", None, 200, 500)
+        .record_node_health(
+            &ServerId("s0".into()),
+            Some(true),
+            Some(true),
+            Some(4096),
+            Some(20480),
+            Some(2048),
+            Some(8192),
+            Some(120),
+            None,
+            Some(1_048_576),
+            Some(r#"{"sing-box":"1.13.12"}"#),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
     let app = router(s);
     let html = fetch_html(app, "/admin/monitoring").await;
 
-    // KPI labels (the trio of headline counters).
-    assert!(html.contains("hits · 24h"), "24h hits KPI label missing");
+    // Headrow: Fleet health h1 + the manual sweep button (POST form).
+    assert!(html.contains("Fleet"), "Fleet health h1 missing");
     assert!(
-        html.contains("peak distinct IPs / hour"),
-        "peak-IPs KPI label missing"
+        html.contains(r#"action="/admin/monitoring/probe-all""#),
+        "probe-all POST form missing"
     );
-    assert!(html.contains("hits · 7 days"), "7d hits KPI label missing");
-
-    // Sparkline section eyebrows.
-    assert!(html.contains("Hourly hits · last 24h"));
-    assert!(html.contains("Hourly distinct IPs · last 24h"));
-    assert!(html.contains("Daily hits · last 7 days"));
-
-    // SVG shape pin: width=720, height=60, stroke uses var(--acc).
+    // Six-tile strip renders with the fleet up-count.
     assert!(
-        html.contains(r#"width="720""#),
-        "sparkline width pinned to 720px"
+        html.contains("ed-status-strip") && html.contains("1 / 1 up"),
+        "fleet tile must show 1 / 1 up"
+    );
+    // Mem peak 75% crosses the 70 heat watermark → warm tile.
+    assert!(
+        html.contains(r#"class="ed-status-tile warn""#),
+        "mem-peak tile above 70% must render warm"
+    );
+    // Uptime table: dense grid with the server link + 100% (1 up probe).
+    assert!(
+        html.contains(r#"class="ed-grid__id" href="/admin/servers/s0""#),
+        "uptime row must link the server"
+    );
+    // Thresholds table shows the monitor's REAL constants.
+    assert!(
+        html.contains("mem_used_pct") && html.contains("95%"),
+        "threshold table must show the real mem trigger (95%)"
     );
     assert!(
-        html.contains(r#"height="60""#),
-        "sparkline height pinned to 60px"
+        html.contains("disk_used_pct") && html.contains("90%"),
+        "threshold table must show the real disk trigger (90%)"
     );
     assert!(
-        html.contains(r#"stroke="var(--acc)""#),
-        "sparkline stroke must use accent variable"
+        html.contains("singbox_log_mib") && html.contains("500"),
+        "threshold table must show the 500 MiB log trigger"
     );
-
-    // Footer hint to the JSON endpoint.
+    // GeoIP line renders (files absent in test env → «missing») and
+    // points at Settings instead of a state-changing GET.
     assert!(
-        html.contains("/api/v1/stats/sub-access"),
-        "footer hint to JSON endpoint missing"
+        html.contains("/admin/settings#geoip"),
+        "GeoIP line must link to Settings"
+    );
+    // The old sub-access analytics are gone.
+    assert!(
+        !html.contains("hits · 24h") && !html.contains("Hourly hits"),
+        "sub-access KPIs must be gone from the monitoring page"
     );
 }
 
@@ -11969,15 +11998,15 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
         "PR-Dash kernel-rollup eyebrow must be translated under ru"
     );
 
-    // Monitoring
+    // Monitoring (v2 3a — fleet health)
     let h = fetch("/admin/monitoring").await;
     assert!(
-        h.contains("за последние 24 часа"),
-        "monitoring H1 must contain 'за последние 24 часа'"
+        h.contains("Здоровье"),
+        "monitoring H1 must read 'Здоровье флота' under ru"
     );
     assert!(
-        h.contains("Агрегированные счётчики"),
-        "monitoring deck must be translated"
+        h.contains("Пороги алертов"),
+        "monitoring thresholds eyebrow must be translated"
     );
 
     // Servers list (empty in fresh inventory — empty-state copy)

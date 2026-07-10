@@ -944,6 +944,12 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/activity", get(admin::dashboard_activity))
         .route("/admin/monitoring", get(admin::monitoring))
         .route("/admin/monitoring/", get(admin::monitoring))
+        // v2 3a — manual probe sweep. POST-only (state-changing: writes
+        // node_health rows) so the Origin CSRF middleware covers it.
+        .route(
+            "/admin/monitoring/probe-all",
+            post(admin::monitoring_probe_all),
+        )
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
         // Phase H chunk 3: server detail page with live telemetry +
