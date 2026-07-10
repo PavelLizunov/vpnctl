@@ -142,9 +142,81 @@
     });
   }
 
+  // ── auto-start SSE (design v2 6b wizard) ────────────────────────
+  // A `<pre data-sse-autostart="/url" [data-redirect-on-ok]>` opens its
+  // EventSource on page load (no button) and streams step/ok/error into
+  // itself. Optional `[data-steps="phaseA,phaseB,…"]` container id lets
+  // us light up a checklist: each `step` event with a `phase` marks the
+  // row `[data-step-phase="<phase>"]` done + the earlier ones. Replaces
+  // the wizard's inline <script>, which `script-src 'self'` blocked.
+  function wireAutoSse(pre) {
+    var url = pre.getAttribute("data-sse-autostart");
+    if (!url) return;
+    var stepsBox = pre.getAttribute("data-steps-box");
+    var steps = stepsBox ? document.getElementById(stepsBox) : null;
+    var order = [];
+    if (steps) {
+      var rows = steps.querySelectorAll("[data-step-phase]");
+      for (var r = 0; r < rows.length; r++)
+        order.push(rows[r].getAttribute("data-step-phase"));
+    }
+    function line(text, color) {
+      var row = document.createElement("div");
+      row.textContent = text;
+      if (color) row.style.color = color;
+      pre.appendChild(row);
+      pre.scrollTop = pre.scrollHeight;
+    }
+    function markPhase(phase) {
+      if (!steps) return;
+      var idx = order.indexOf(phase);
+      if (idx < 0) return;
+      for (var k = 0; k <= idx; k++) {
+        var el = steps.querySelector('[data-step-phase="' + order[k] + '"] .step-mark');
+        if (el) {
+          el.textContent = "✓";
+          el.style.color = "var(--green)";
+        }
+      }
+    }
+    pre.textContent = "";
+    var done = false;
+    var es = new EventSource(url);
+    es.addEventListener("step", function (ev) {
+      try {
+        var d = JSON.parse(ev.data);
+        markPhase(d.phase);
+        line((d.phase ? "[" + d.phase + "] " : "") + d.message);
+      } catch (_) {
+        line(ev.data);
+      }
+    });
+    es.addEventListener("ok", function (ev) {
+      done = true;
+      var redirect = null;
+      try {
+        redirect = JSON.parse(ev.data).redirect;
+      } catch (_) {}
+      line("✓ complete.", "var(--green)");
+      es.close();
+      if (redirect) setTimeout(function () { window.location = redirect; }, 1400);
+    });
+    es.addEventListener("error", function (ev) {
+      if (done) return;
+      var msg = "bootstrap failed — see the log above";
+      if (ev && ev.data) {
+        try { msg = JSON.parse(ev.data).message || msg; } catch (_) {}
+      }
+      line("✗ " + msg, "var(--red)");
+      es.close();
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
+    var autos = document.querySelectorAll("[data-sse-autostart]");
+    for (var a = 0; a < autos.length; a++) wireAutoSse(autos[a]);
     var confirms = document.querySelectorAll("[data-confirm]");
     for (var c = 0; c < confirms.length; c++) wireConfirm(confirms[c]);
     var prompts = document.querySelectorAll("[data-confirm-prompt]");
