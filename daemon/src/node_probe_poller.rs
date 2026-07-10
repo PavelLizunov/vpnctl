@@ -75,7 +75,7 @@ const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 /// `server.unreachable` alert. Three ticks at the 10-min default
 /// cadence ≈ 30 min ceiling on flapping noise. Override via env
 /// `VPNCTLD_UNREACHABLE_THRESHOLD`.
-const DEFAULT_UNREACHABLE_THRESHOLD: u32 = 3;
+pub(crate) const DEFAULT_UNREACHABLE_THRESHOLD: u32 = 3;
 
 /// Outcome of one `probe_one_server` invocation. The poller's state
 /// machine reads this to drive the `server.unreachable` consecutive-
@@ -1038,7 +1038,10 @@ async fn auto_ack(inv: &SqliteInventory, server_id: &ServerId, kind: &str, reaso
 /// detector. Pure side-effect, never panics. Every error is logged
 /// at warn-or-info and folded into the outcome enum (callers don't
 /// need to re-check Result variants).
-async fn probe_one_server(inv: &SqliteInventory, server: &vpnctl_core::Server) -> ProbeOutcome {
+pub(crate) async fn probe_one_server(
+    inv: &SqliteInventory,
+    server: &vpnctl_core::Server,
+) -> ProbeOutcome {
     // Skip non-sing-box kernels for now via the centralised filter
     // (see `probeable` doc-comment for the AmneziaWG TODO). Once-per-
     // tick info log so the operator can grep + spot the no-op state

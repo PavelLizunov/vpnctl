@@ -67,20 +67,22 @@ use vpnctl_inventory::{NodeHealthRow, SqliteInventory};
 /// scanning faster than the probe writes.
 const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 
-/// Disk-pressure thresholds, with 5-pp hysteresis.
-const DISK_PRESSURE_TRIGGER_PCT: u8 = 90;
-const DISK_PRESSURE_RECOVER_PCT: u8 = 85;
+/// Disk-pressure thresholds, with 5-pp hysteresis. `pub(crate)` so the
+/// monitoring page's threshold table renders the SAME numbers the
+/// monitor actually evaluates (single source of truth).
+pub(crate) const DISK_PRESSURE_TRIGGER_PCT: u8 = 90;
+pub(crate) const DISK_PRESSURE_RECOVER_PCT: u8 = 85;
 
 /// Memory-pressure thresholds.
-const MEM_PRESSURE_TRIGGER_PCT: u8 = 95;
-const MEM_PRESSURE_RECOVER_PCT: u8 = 90;
+pub(crate) const MEM_PRESSURE_TRIGGER_PCT: u8 = 95;
+pub(crate) const MEM_PRESSURE_RECOVER_PCT: u8 = 90;
 
 /// sing-box log size threshold (bytes). 500 MiB — Pavel's earlier
 /// disk-fill concern. The logrotate fragment we install in
 /// `kernels::sing_box::ensure_installed` caps growth, but a freshly
 /// bootstrapped node before the first rotation OR a node where the
 /// fragment got blown away will eventually trip this.
-const SINGBOX_LOG_TRIGGER_BYTES: u64 = 500 * 1024 * 1024;
+pub(crate) const SINGBOX_LOG_TRIGGER_BYTES: u64 = 500 * 1024 * 1024;
 
 /// One state-change detected by `diff_rows`. Materialised into an
 /// `admin_alerts` row + `audit_log` row by the caller. Exposed as a
