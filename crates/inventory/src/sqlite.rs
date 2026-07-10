@@ -3145,6 +3145,41 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_sub_access).collect()
     }
 
+    /// v2 4c — paginated sub-access rows for the user Activity log.
+    /// Newest first; `offset` walks older pages. 25/page in the UI.
+    pub async fn recent_sub_access_paged(
+        &self,
+        user_id: &UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SubAccessEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, user_id, ip, ua, status, bytes,
+                    accept_language, http_version, device_class,
+                    geo_country, geo_asn, tls_ja3, tls_ja4,
+                    is_vpn_egress
+             FROM sub_access_log
+             WHERE user_id = ?1
+             ORDER BY id DESC
+             LIMIT ?2 OFFSET ?3",
+        )
+        .bind(&user_id.0)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_sub_access).collect()
+    }
+
+    /// v2 4c — total sub-access rows for a user (the «of M» count).
+    pub async fn sub_access_count_for_user(&self, user_id: &UserId) -> Result<u64> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sub_access_log WHERE user_id = ?1")
+            .bind(&user_id.0)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(u64::try_from(row.0).unwrap_or(0))
+    }
+
     /// Phase 4a — `recent_sub_access` with VPN-egress filter. When
     /// `include_egress = false` (the user-detail page's default),
     /// returns ONLY rows where the src IP is a real client device,
@@ -6168,6 +6203,21 @@ impl SqliteInventory {
     /// re-fired. The new row remains unacked; the operator sees it.
     /// This is the correct semantics for a state-machine that
     /// distinguishes «raised → cleared → raised again».
+    /// v2 5a — ack every unacked alert whose kind starts with `prefix`
+    /// (e.g. `sub_access.` clears the whole suspicious-IP family in one
+    /// click). Prefix is escaped for LIKE. Returns rows affected.
+    pub async fn ack_unacked_by_kind_prefix(&self, prefix: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE admin_alerts
+             SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE kind LIKE ?1 ESCAPE '\\' AND acked_at IS NULL",
+        )
+        .bind(format!("{}%", escape_like(prefix)))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn ack_open_alerts(&self, kind: &str, server_id: Option<&ServerId>) -> Result<u64> {
         let server_id_str = server_id.map(|s| s.0.as_str());
         let res = sqlx::query(

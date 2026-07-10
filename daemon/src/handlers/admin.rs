@@ -3633,11 +3633,18 @@ pub(crate) struct UserDetailQuery {
     /// `pick_vpn_sparkline_window`.
     #[serde(default)]
     vpn_window: Option<String>,
+    /// v2 4c — Activity sub-access log page (0-based). 25 rows/page.
+    #[serde(default)]
+    log_page: Option<i64>,
 }
 
 impl UserDetailQuery {
     fn show_egress(&self) -> bool {
         matches!(self.show_egress.as_deref(), Some("1") | Some("true"))
+    }
+    /// Clamped 0-based log page.
+    fn log_page(&self) -> i64 {
+        self.log_page.unwrap_or(0).clamp(0, 10_000)
     }
 }
 
@@ -4074,12 +4081,17 @@ async fn user_detail_render(
     // Design v2 group C — tab-scoped data loads.
     // 4c Activity: newest geo-resolved fetch rows + this user's
     // composite sharing score (same scorer as the dashboard panel).
-    let (recent_log, sharing) = if tab == UserTab::Activity {
+    // v2 4c — 25 rows/page, walked by `?log_page`; `log_total` backs
+    // the «of M» count + the older/newer link visibility.
+    const LOG_PAGE_SIZE: i64 = 25;
+    let log_page = query.log_page();
+    let (recent_log, sharing, log_total) = if tab == UserTab::Activity {
         let log = state
             .inv
-            .recent_sub_access(&uid, 8)
+            .recent_sub_access_paged(&uid, LOG_PAGE_SIZE, log_page * LOG_PAGE_SIZE)
             .await
             .unwrap_or_default();
+        let total = state.inv.sub_access_count_for_user(&uid).await.unwrap_or(0);
         let sc = state
             .inv
             .sharing_signals_all_users(30, 2.0)
@@ -4088,9 +4100,9 @@ async fn user_detail_render(
             .into_iter()
             .find(|sig| sig.user_id == uid)
             .map(|sig| crate::sharing_score::score(&sig));
-        (log, sc)
+        (log, sc, total)
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, 0)
     };
     // 4b Access: per-grant dates + per-server visible protocol lists.
     let (user_grant_dates, access_protos) = if tab == UserTab::Access {
@@ -5395,6 +5407,33 @@ async fn user_detail_render(
                             }
                         }
                     }
+                }
+            }
+        }
+        // v2 4c — «showing N of M» + newer/older paging + CSV export.
+        @if log_total > 0 {
+            @let uid_enc_log = path_segment_encode(&user.id.0);
+            @let shown_from = log_page * LOG_PAGE_SIZE + 1;
+            @let shown_to = (log_page * LOG_PAGE_SIZE) + recent_log.len() as i64;
+            @let has_older = shown_to < log_total as i64;
+            div style="display: flex; align-items: center; gap: 14px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--mute);" {
+                span {
+                    (crate::i18n::tr(lang, "showing ", "показано "))
+                    (shown_from) "–" (shown_to)
+                    (crate::i18n::tr(lang, " of ", " из ")) (log_total)
+                }
+                @if log_page > 0 {
+                    a href=(format!("/admin/users/{uid_enc_log}/activity?log_page={}", log_page - 1)) style="color: var(--acc);" {
+                        (crate::i18n::tr(lang, "← newer", "← новее"))
+                    }
+                }
+                @if has_older {
+                    a href=(format!("/admin/users/{uid_enc_log}/activity?log_page={}", log_page + 1)) style="color: var(--acc);" {
+                        (crate::i18n::tr(lang, "older →", "старше →"))
+                    }
+                }
+                a href=(format!("/admin/users/{uid_enc_log}/access.csv")) style="margin-left: auto; color: var(--acc);" {
+                    (crate::i18n::tr(lang, "export csv →", "экспорт csv →"))
                 }
             }
         }
@@ -11224,6 +11263,56 @@ fn audit_timeline_grouped(
     }
 }
 
+/// `GET /admin/users/{id}/access.csv` — v2 4c: the full GeoIP-resolved
+/// sub-access log for one user as CSV (up to 10k newest rows).
+pub(crate) async fn user_access_csv(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user_id_str),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    const CSV_LIMIT: i64 = 10_000;
+    let rows = match state.inv.recent_sub_access_paged(&uid, CSV_LIMIT, 0).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let mut out = String::from("ts,ip,country,asn,user_agent,status,is_vpn_egress\n");
+    for e in &rows {
+        out.push_str(&csv_field(&e.ts.to_rfc3339()));
+        out.push(',');
+        out.push_str(&csv_field(&e.ip));
+        out.push(',');
+        out.push_str(&csv_field(e.geo_country.as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&csv_field(e.geo_asn.as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&csv_field(e.ua.as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&e.status.to_string());
+        out.push(',');
+        out.push_str(if e.is_vpn_egress { "1" } else { "0" });
+        out.push('\n');
+    }
+    let stamp = chrono::Utc::now().format("%Y%m%d");
+    let filename = format!("vpnctl-access-{}-{stamp}.csv", user_id_str);
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "text/csv; charset=utf-8".to_string()),
+            (
+                "content-disposition",
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
 /// `GET /admin/audit.csv?actor=...&action=...` — same filter set as
 /// the HTML timeline but returns a CSV body with `Content-Disposition:
 /// attachment; filename="vpnctl-audit-<YYYYMMDD>.csv"`. Limit is high
@@ -11480,13 +11569,29 @@ pub(crate) async fn alerts(
             }
         }
         @if !sub_rows.is_empty() {
-            div.ed-art-eyebrow style="margin-top: 14px;" {
-                "sub_access · " (sub_rows.len()) " "
-                span.ed-tip title=(crate::i18n::tr(
-                    lang,
-                    "A /sub fetch arrived from a private-range source IP. Usually a client refreshing over its own tunnel; occasionally a proxy hiding the real origin. Ack after review — a repeat fetch reopens.",
-                    "Обращение к /sub пришло с приватного диапазона. Обычно клиент обновлялся через собственный туннель; изредка — прокси, скрывающий источник. Ack после просмотра — повторное обращение переоткроет.",
-                )) { "ⓘ" }
+            @let sub_unacked = sub_rows.iter().filter(|a| a.acked_at.is_none()).count();
+            div.ed-headrow style="margin-top: 14px;" {
+                div.ed-art-eyebrow {
+                    "sub_access · " (sub_rows.len()) " "
+                    span.ed-tip title=(crate::i18n::tr(
+                        lang,
+                        "A /sub fetch arrived from a private-range source IP. Usually a client refreshing over its own tunnel; occasionally a proxy hiding the real origin. Ack after review — a repeat fetch reopens.",
+                        "Обращение к /sub пришло с приватного диапазона. Обычно клиент обновлялся через собственный туннель; изредка — прокси, скрывающий источник. Ack после просмотра — повторное обращение переоткроет.",
+                    )) { "ⓘ" }
+                }
+                @if sub_unacked > 0 {
+                    // v2 5a — ack the whole family in one click.
+                    form.ed-headrow__actions method="post" action="/admin/alerts/ack-family/sub_access."
+                         data-confirm=(crate::i18n::tr(
+                             lang,
+                             "Ack every unacked sub_access alert? They stay under «show all» for 30 days.",
+                             "Принять все непринятые sub_access-алерты? Останутся в «показать всё» 30 дней.",
+                         )) {
+                        button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                            (crate::i18n::tr(lang, "ack all ", "принять все ")) "(" (sub_unacked) ")"
+                        }
+                    }
+                }
             }
             table.ed-grid style="margin-top: 8px;" {
                 thead {
@@ -11616,6 +11721,36 @@ pub(crate) async fn alert_ack(
         }
     }
     Redirect::to("/admin/alerts").into_response()
+}
+
+/// `POST /admin/alerts/ack-family/{prefix}` — v2 5a: ack a whole alert
+/// family (all unacked kinds under `prefix`) in one click. Only two
+/// safe prefixes are accepted so the route can't be abused to ack an
+/// arbitrary kind by crafting a URL: `sub_access.` and `server.`.
+pub(crate) async fn alert_ack_family(
+    State(state): State<AppState>,
+    Path(prefix): Path<String>,
+) -> Response {
+    let allowed = matches!(prefix.as_str(), "sub_access." | "server.");
+    if !allowed {
+        return bad_request("alerts: only the sub_access. and server. families can be group-acked");
+    }
+    let count = match state.inv.ack_unacked_by_kind_prefix(&prefix).await {
+        Ok(n) => n,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if count > 0 {
+        let _ = state
+            .inv
+            .audit(
+                "admin",
+                "alerts.ack_family",
+                Some(&prefix),
+                Some(&serde_json::json!({ "count": count, "prefix": prefix })),
+            )
+            .await;
+    }
+    axum::response::Redirect::to("/admin/alerts").into_response()
 }
 
 /// `POST /admin/alerts/ack-all` — operator dismisses every currently-
@@ -14532,6 +14667,9 @@ pub(crate) struct ServerDetailQuery {
     drift: Option<String>,
     #[serde(default)]
     vpn_window: Option<String>,
+    /// v2 3d — grants-tab sort: `id` (default) · `presence` · `traffic`.
+    #[serde(default)]
+    grant_sort: Option<String>,
 }
 
 impl ServerDetailQuery {
@@ -15362,21 +15500,40 @@ async fn server_detail_render(
                     }
                 }
             }
-            // Granted users — dense table. Sort: pending-deploy first,
-            // then live conns desc, then 24h traffic desc, then id.
+            // v2 3d — sort links. `presence`/`traffic` sort desc by their
+            // metric; `id` (default) is A→Z. Pending-deploy rows always
+            // float to the top of any sort so the silent-failure set stays
+            // visible. The link row lives just under the grant bar.
+            @let grant_sort = query.grant_sort.as_deref().unwrap_or("id");
+            @let sort_href = |kind: &str| -> String {
+                format!("/admin/servers/{}/grants?grant_sort={kind}", path_segment_encode(&server.id.0))
+            };
+            div style="font-family: var(--mono); font-size: 10.5px; color: var(--mute); margin: 2px 0 6px;" {
+                (crate::i18n::tr(lang, "sort: ", "сортировка: "))
+                @for (kind, label) in [("id", "id ↑"), ("presence", crate::i18n::tr(lang, "online ↓", "онлайн ↓")), ("traffic", crate::i18n::tr(lang, "traffic ↓", "трафик ↓"))] {
+                    @if grant_sort == kind {
+                        span style="color: var(--ink); text-decoration: underline; margin-right: 8px;" { (label) }
+                    } @else {
+                        a href=(sort_href(kind)) style="color: var(--mute); margin-right: 8px;" { (label) }
+                    }
+                }
+            }
             @let granted_rows = {
                 let mut v = all_users.iter().filter(|u| granted_user_ids.contains(&u.id)).collect::<Vec<_>>();
                 v.sort_by(|a, b| {
+                    // Pending-deploy first in every sort (silent-failure set).
                     let pa = pending_users.contains(&a.id);
                     let pb = pending_users.contains(&b.id);
                     let ca = grants_presence.get(&a.id.0).copied().unwrap_or(0);
                     let cb = grants_presence.get(&b.id.0).copied().unwrap_or(0);
                     let ta = grants_traffic.get(&a.id).copied().unwrap_or(0);
                     let tb = grants_traffic.get(&b.id).copied().unwrap_or(0);
-                    pb.cmp(&pa)
-                        .then(cb.cmp(&ca))
-                        .then(tb.cmp(&ta))
-                        .then(a.id.0.cmp(&b.id.0))
+                    let by_metric = match grant_sort {
+                        "presence" => cb.cmp(&ca).then(tb.cmp(&ta)),
+                        "traffic" => tb.cmp(&ta).then(cb.cmp(&ca)),
+                        _ => std::cmp::Ordering::Equal, // id → fall through to id cmp
+                    };
+                    pb.cmp(&pa).then(by_metric).then(a.id.0.cmp(&b.id.0))
                 });
                 v
             };

@@ -18032,3 +18032,151 @@ async fn v2_user_delivery_renders_subscription_recap() {
         "legacy /sub fallback note missing"
     );
 }
+
+/// v2 5a gap-close — the sub_access family header carries a group-ack
+/// button that acks the whole family via the prefix route.
+#[tokio::test]
+async fn v2_alerts_sub_access_family_group_ack() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for u in ["a", "b", "c"] {
+        s.inv
+            .insert_alert(
+                &format!("sub_access.suspicious_local_ip:{u}"),
+                None,
+                "warning",
+                "loop",
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s.clone()), "/admin/alerts").await;
+    assert!(
+        html.contains(r#"action="/admin/alerts/ack-family/sub_access.""#),
+        "sub_access family must expose a group-ack form"
+    );
+    assert!(
+        html.contains("ack all ") && html.contains("(3)"),
+        "group-ack button must show the unacked family count"
+    );
+    // The prefix route acks the whole family.
+    let n = s
+        .inv
+        .ack_unacked_by_kind_prefix("sub_access.")
+        .await
+        .unwrap();
+    assert_eq!(n, 3, "prefix ack must clear all 3 family rows");
+    assert_eq!(
+        s.inv.unacked_alert_count().await.unwrap(),
+        0,
+        "no unacked alerts remain after the family ack"
+    );
+}
+
+/// v2 5a — the family-ack route rejects an arbitrary prefix (can't be
+/// abused to ack a single crafted kind).
+#[tokio::test]
+async fn v2_alerts_ack_family_rejects_unknown_prefix() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/alerts/ack-family/user.traffic_limit"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// v2 3d gap-close — the Grants tab renders clickable sort links and the
+/// `?grant_sort=` param drives the row order.
+#[tokio::test]
+async fn v2_server_grants_sort_links_render() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 2, &[(0, 0), (1, 0)]).await; // s0 granted to u0,u1
+    let html = fetch_html(router(s), "/admin/servers/s0/grants?grant_sort=traffic").await;
+    assert!(
+        html.contains("sort:") || html.contains("сортировка:"),
+        "sort label missing"
+    );
+    assert!(
+        html.contains("grant_sort=presence") && html.contains("grant_sort=id"),
+        "sort links for the other keys must render"
+    );
+    // The active key renders as unlinked bold text (no href for traffic).
+    assert!(
+        !html.contains("grant_sort=traffic\""),
+        "the active sort key must not link to itself"
+    );
+}
+
+/// v2 4c gap-close — the Activity sub-access log shows a «showing N of M»
+/// pager with an older→ link and a CSV export link; the CSV endpoint
+/// returns a text/csv attachment.
+#[tokio::test]
+async fn v2_user_activity_log_pagination_and_csv() {
+    use vpnctl_core::UserId;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    // 30 fetches → 2 pages of 25.
+    for i in 0..30 {
+        s.inv
+            .log_sub_access(
+                &UserId("u0".into()),
+                &format!("5.5.5.{i}"),
+                Some("Hiddify"),
+                200,
+                100,
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s.clone()), "/admin/users/u0/activity").await;
+    assert!(
+        html.contains("showing ") && html.contains(" of "),
+        "log must show the «showing N of M» counter"
+    );
+    assert!(
+        html.contains("older →") || html.contains("старше →"),
+        "page 1 of 2 must offer an older→ link"
+    );
+    assert!(
+        html.contains("/admin/users/u0/access.csv"),
+        "log must offer a CSV export link"
+    );
+    // CSV endpoint.
+    let resp = router(s)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/u0/access.csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("text/csv"), "CSV must be text/csv, got {ct}");
+    let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    let csv = std::str::from_utf8(&body).unwrap();
+    assert!(
+        csv.starts_with("ts,ip,country,asn,user_agent,status,is_vpn_egress"),
+        "CSV header drifted"
+    );
+    assert_eq!(csv.lines().count(), 31, "header + 30 data rows");
+}
