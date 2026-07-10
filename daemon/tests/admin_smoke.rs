@@ -7465,25 +7465,36 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         .unwrap();
 
     let html = fetch_html(router(s), "/admin/servers/driftnode/protocols").await;
+    // v2 3c grid: the silent tuic port renders the warm flag + the
+    // declared-but-NOT-listening line names it.
     assert!(
-        html.contains("drift detected"),
-        "must surface drift banner; got: {}",
+        html.contains("✗ silent") || html.contains("✗ молчит"),
+        "silent declared port must carry the ✗ flag; got: {}",
         &html[..html.len().min(400)]
+    );
+    assert!(
+        html.contains("declared but NOT listening"),
+        "missing-port warning line must render"
     );
     assert!(
         html.contains("udp/8443"),
         "missing tuic udp/8443 must be listed"
     );
+    // The extra hysteria2 socket lands in the grouped undeclared table
+    // (unclassified group names raw ports).
+    assert!(
+        html.contains("Listening but undeclared"),
+        "undeclared group table must render"
+    );
     assert!(
         html.contains("udp/8444"),
-        "extra hysteria2 udp/8444 must be listed"
+        "extra hysteria2 udp/8444 must be listed in a group"
     );
     // SSH port 22 must NOT be flagged as "extra" (always-listening).
-    let drift_section = html.split("drift detected").nth(1).unwrap_or("");
+    let undeclared = html.split("Listening but undeclared").nth(1).unwrap_or("");
     assert!(
-        !drift_section.contains("tcp/22"),
-        "ssh port must be excluded from drift; got drift section: {}",
-        &drift_section[..drift_section.len().min(400)]
+        !undeclared.contains("tcp/22"),
+        "ssh port must be excluded from the undeclared groups"
     );
 }
 
@@ -16860,7 +16871,7 @@ async fn server_detail_audit_timeline_renders_server_scoped_rows() {
         .audit("admin", "server.deploy", Some("s0"), None)
         .await
         .unwrap();
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("Audit timeline · this server"),
         "server-audit eyebrow missing"
@@ -16881,7 +16892,7 @@ async fn server_detail_audit_timeline_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await; // seed writes no audit rows
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("No audit rows reference this server yet"),
         "server-audit must render an empty-state with no rows"
@@ -16944,12 +16955,13 @@ async fn server_detail_info_cards_headlines_match_voice() {
     let act = fetch_html(app.clone(), "/admin/servers/s0/activity").await;
     let status = fetch_html(app, "/admin/servers/s0").await;
     for (html, needle) in [
-        (&proto, "Drift detail · on-node UUIDs"),  // server#1
-        (&proto, "Kernel rollup · sing-box"),      // server#2
-        (&act, "Top users · last 24h"),            // server#3
-        (&act, "Server traffic · "),               // server#4
-        (&act, "TCP / UDP split"),                 // server#5
-        (&status, "Audit timeline · this server"), // server#7
+        (&proto, "Drift detail · on-node UUIDs"), // server#1
+        (&proto, "Kernel rollup · sing-box"),     // server#2
+        (&act, "Top users · last 24h"),           // server#3
+        (&act, "Server traffic · "),              // server#4
+        (&act, "TCP / UDP split"),                // server#5
+        (&status, "drift-summary"),               // status keeps the drift verdict
+        (&act, "Audit timeline · this server"),   // server#7 (v2 3b: activity)
     ] {
         assert!(
             html.contains(needle),
@@ -16977,7 +16989,8 @@ async fn server_detail_info_cards_headlines_ru() {
         (&act, "Топ пользователей · за 24ч"),       // server#3
         (&act, "Трафик сервера · "),                // server#4
         (&act, "Разбивка TCP / UDP"),               // server#5
-        (&status, "Лента аудита · этот сервер"),    // server#7
+        (&status, "drift-summary"),                 // status keeps the drift verdict
+        (&act, "Лента аудита · этот сервер"),       // server#7 (v2 3b: activity)
     ] {
         assert!(
             html.contains(needle),
@@ -17007,7 +17020,7 @@ async fn server_detail_tabs_render_gate_and_mark_active() {
         (
             "/admin/servers/s0/status",
             "status",
-            "Audit timeline · this server",
+            "drift-summary",
             "Enabled protocols",
         ),
         (
@@ -17020,12 +17033,12 @@ async fn server_detail_tabs_render_gate_and_mark_active() {
             "/admin/servers/s0/protocols",
             "protocols",
             "Enabled protocols",
-            "Audit timeline · this server",
+            "Live activity · last 24h",
         ),
         (
             "/admin/servers/s0/grants",
             "grants",
-            "have access on this server",
+            "users granted",
             "Enabled protocols",
         ),
         (
@@ -17070,7 +17083,7 @@ async fn server_detail_bare_url_renders_status_tab() {
         "bare URL must mark the status tab active"
     );
     assert!(
-        html.contains("Audit timeline · this server"),
+        html.contains(r#"id="drift-summary""#),
         "bare URL must render the status tab's sections"
     );
     assert!(
