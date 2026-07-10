@@ -1865,6 +1865,32 @@ async fn boosty_page_renders_and_is_in_nav() {
         html.contains("(unset)"),
         "unset creds must render as (unset)"
     );
+    // 2026-07-10 editorial restyle — the page now uses the shared
+    // component system, not the bespoke `.ed-title` / `.ed-eyebrow`
+    // scaffold, and the status renders as a tile strip.
+    assert!(
+        html.contains(r#"class="ed-art-h1""#) && html.contains(r#"class="ed-art-deck""#),
+        "boosty page must use the editorial h1 + deck"
+    );
+    assert!(
+        html.contains(r#"class="ed-status-strip""#),
+        "bridge status must render as a status-tile strip"
+    );
+    assert!(
+        !html.contains(r#"class="ed-title""#) && !html.contains(r#"class="ed-eyebrow""#),
+        "legacy .ed-title / .ed-eyebrow scaffold must be gone"
+    );
+    // Regression: the sync-health callouts referenced an undefined
+    // `--bad` CSS var (rendered black, not red) before the restyle.
+    assert!(
+        !html.contains("var(--bad)"),
+        "must not reference the undefined --bad token"
+    );
+    // Disabled bridge → the «polling off» pill.
+    assert!(
+        html.contains("polling off"),
+        "a disabled bridge must show the polling-off pill"
+    );
 }
 
 #[tokio::test]

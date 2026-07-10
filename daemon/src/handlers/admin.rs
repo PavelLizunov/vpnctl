@@ -8048,71 +8048,155 @@ pub(crate) async fn boosty_page(
     let report = last_report.as_ref().map(|(r, _)| r);
     let last_sync_at = last_report.as_ref().map(|(_, ts)| ts.as_str());
 
+    use crate::i18n::tr;
+    let configured = settings.blog_url.is_some()
+        && settings.access_token.is_some()
+        && settings.refresh_token.is_some();
     let body = html! {
-        header.ed-head {
-            h1.ed-title { "Boosty" }
-            p.ed-deck {
-                (crate::i18n::tr(lang,
-                    "Link Boosty subscribers to VPN users; access follows the subscription.",
-                    "Связь подписчиков Boosty с VPN-пользователями; доступ следует за подпиской."))
+        div.ed-art-eyebrow { "Boosty" }
+        div.ed-headrow {
+            h1.ed-art-h1 {
+                (tr(lang, "subscription ", "мост ")) em { (tr(lang, "bridge", "подписок")) }
+            }
+            span.ed-tip title=(tr(
+                lang,
+                "The poller reconciles vpnctl access with Boosty subscription state on its own interval: active subscribers get their VPN user enabled, lapses are surfaced here to disable (or auto-disabled). This page renders the LAST APPLIED sync — a GET never triggers a live pass (it would rotate the refresh token and race the poller).",
+                "Поллер сам сверяет доступ vpnctl со статусом подписки Boosty по своему интервалу: активным подписчикам включается VPN-юзер, отвалившиеся всплывают здесь для отключения (или отключаются авто). Страница показывает ПОСЛЕДНИЙ применённый синк — GET не запускает живой проход (он бы ротировал refresh-токен и гонялся с поллером).",
+            )) { "ⓘ" }
+            // Live enabled/disabled pill.
+            span.ed-stat style=(if settings.enabled { "color: var(--green);" } else { "color: var(--mute);" }) {
+                @if settings.enabled {
+                    span.ed-stat__dot style="background: var(--green);" {}
+                    (tr(lang, "polling on", "опрос включён"))
+                } @else {
+                    (tr(lang, "polling off", "опрос выключен"))
+                }
+            }
+            div.ed-headrow__actions {
+                form method="post" action="/admin/boosty/sync" style="margin: 0;" {
+                    button type="submit"
+                           title=(tr(
+                               lang,
+                               "Run one reconcile pass right now (POST — safe). Auto-enables active subscribers; lapses appear below.",
+                               "Прогнать один проход сверки сейчас (POST — безопасно). Включает активных; отвалившиеся появятся ниже.",
+                           ))
+                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                        (tr(lang, "sync now →", "синхронизировать →"))
+                    }
+                }
             }
         }
+        p.ed-art-deck {
+            (tr(lang,
+                "Link Boosty subscribers to VPN users; access follows the subscription.",
+                "Связь подписчиков Boosty с VPN-пользователями; доступ следует за подпиской."))
+        }
 
+        // ── Sync-health callouts (only when the last report carries them).
         @if let Some(r) = report {
             @if !r.suppressed_disables.is_empty() {
-                p style="color: var(--bad); font-family: var(--mono); font-size: 12px;" {
-                    (crate::i18n::tr(lang,
-                        "Last sync: roster came back EMPTY — all disables were suppressed (check the blog url). Untouched: ",
-                        "Последний синк: ростер пришёл ПУСТЫМ — все отключения подавлены (проверьте blog url). Не тронуты: "))
-                    (r.suppressed_disables.join(", "))
+                div style="border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 8px 12px; margin: 12px 0; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+                    b style="color: var(--red);" { (tr(lang, "⚠ Empty roster — disables suppressed.", "⚠ Пустой ростер — отключения подавлены.")) }
+                    " "
+                    (tr(lang,
+                        "The last sync got zero subscribers back (likely a wrong blog url or expired token). No one was disabled. Untouched: ",
+                        "Последний синк вернул ноль подписчиков (скорее всего неверный blog url или протухший токен). Никто не отключён. Не тронуты: "))
+                    span.ed-mono { (r.suppressed_disables.join(", ")) }
                 }
             }
             @if !r.errors.is_empty() {
-                p style="color: var(--bad); font-family: var(--mono); font-size: 12px;" {
-                    (crate::i18n::tr(lang, "Last sync errors: ", "Ошибки последнего синка: "))
-                    (r.errors.join(" · "))
+                div style="border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 8px 12px; margin: 12px 0; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+                    b style="color: var(--red);" { (tr(lang, "Last sync errors:", "Ошибки последнего синка:")) }
+                    " " span.ed-mono { (r.errors.join(" · ")) }
                 }
             }
         }
 
-        // ── Status ──────────────────────────────────────────────
-        section style="margin: 16px 0;" {
-            p style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
-                (crate::i18n::tr(lang, "enabled: ", "включено: ")) b { (settings.enabled) } br;
-                (crate::i18n::tr(lang, "blog: ", "блог: "))
-                    b { (settings.blog_url.as_deref().unwrap_or("(unset)")) } br;
-                "access_token: " (boosty_mask_secret(settings.access_token.as_deref())) br;
-                "refresh_token: " (boosty_mask_secret(settings.refresh_token.as_deref())) br;
-                "device_id: " (boosty_mask_secret(settings.device_id.as_deref())) br;
-                (crate::i18n::tr(lang, "interval: ", "интервал: ")) (settings.poll_interval_secs) "s" br;
-                (crate::i18n::tr(lang, "auto-disable lapsed: ", "авто-отключение отвалившихся: "))
-                    b { (settings.auto_disable_lapsed) } br;
-                (crate::i18n::tr(lang, "linked users: ", "привязано пользователей: ")) b { (links.len()) } br;
-                (crate::i18n::tr(lang, "last applied sync: ", "последний применённый синк: "))
-                    b { (last_sync_at.unwrap_or("(never)")) }
+        // ── Status strip — the runtime facts at a glance ─────────
+        div.ed-status-strip style="grid-template-columns: repeat(4, minmax(0, 1fr));" {
+            div.ed-status-tile {
+                div.ed-status-tile__k { (tr(lang, "bridge", "мост")) }
+                div.ed-status-tile__v style=(if configured { "color: var(--green);" } else { "color: var(--warm);" }) {
+                    @if configured { (tr(lang, "configured", "настроен")) }
+                    @else { (tr(lang, "incomplete", "не настроен")) }
+                }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" {
+                    @match &settings.blog_url {
+                        Some(b) => (b),
+                        None => (tr(lang, "no blog url", "нет blog url")),
+                    }
+                }
             }
-            form method="post" action="/admin/boosty/sync" style="margin-top: 8px;" {
-                button type="submit" { (crate::i18n::tr(lang, "sync now", "синхронизировать")) }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (tr(lang, "linked users", "привязано")) }
+                div.ed-status-tile__v { (links.len()) }
+            }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (tr(lang, "poll interval", "интервал опроса")) }
+                div.ed-status-tile__v { (settings.poll_interval_secs / 60) (tr(lang, " min", " мин")) }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                    (tr(lang, "auto-disable ", "авто-откл. "))
+                    @if settings.auto_disable_lapsed { b style="color: var(--green);" { (tr(lang, "on", "вкл")) } }
+                    @else { (tr(lang, "off", "выкл")) }
+                }
+            }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (tr(lang, "last applied sync", "последний синк")) }
+                div.ed-status-tile__v style="font-size: 14px;" {
+                    @match last_sync_at {
+                        Some(ts) => @match chrono::DateTime::parse_from_rfc3339(ts) {
+                            Ok(t) => (format_msk_iso(t.with_timezone(&chrono::Utc))),
+                            Err(_) => (ts),
+                        },
+                        None => (tr(lang, "never", "никогда")),
+                    }
+                }
             }
         }
 
-        // ── New unlinked active subscribers ─────────────────────
+        // ── Actionable: new subscribers to link ─────────────────
         @if let Some(r) = report {
             @if !r.new_subscribers.is_empty() {
-                section style="margin: 16px 0;" {
-                    h2.ed-eyebrow { (crate::i18n::tr(lang, "New subscribers", "Новые подписчики")) }
-                    @for sub in &r.new_subscribers {
-                        form method="post" action="/admin/boosty/link"
-                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
-                            span { (sub.subscriber_id) " — " (sub.name) }
-                            input type="hidden" name="subscriber_id" value=(sub.subscriber_id);
-                            select name="user" required {
-                                option value="" { (crate::i18n::tr(lang, "link to user…", "привязать к…")) }
-                                @for uid in &unlinked_users {
-                                    option value=(uid) { (uid) }
+                div.ed-rule {}
+                div.ed-art-eyebrow {
+                    (tr(lang, "New subscribers", "Новые подписчики")) " · " (r.new_subscribers.len()) " "
+                    span.ed-tip title=(tr(
+                        lang,
+                        "Active Boosty subscribers the last sync found that aren't linked to a vpnctl user yet. Pick a user to bind them — access then follows the subscription automatically.",
+                        "Активные подписчики Boosty из последнего синка, ещё не привязанные к юзеру vpnctl. Выбери юзера — дальше доступ следует за подпиской автоматически.",
+                    )) { "ⓘ" }
+                }
+                table.ed-grid style="margin-top: 8px;" {
+                    thead { tr {
+                        th { (tr(lang, "subscriber", "подписчик")) }
+                        th { (tr(lang, "link to user", "привязать к")) }
+                        th style="width: 110px;" {}
+                    }}
+                    tbody {
+                        @for sub in &r.new_subscribers {
+                            @let form_id = format!("boosty-link-{}", sub.subscriber_id);
+                            tr {
+                                td {
+                                    b { (sub.name) }
+                                    " " span.ed-grid__mut { (sub.subscriber_id) }
+                                }
+                                td {
+                                    form id=(form_id) method="post" action="/admin/boosty/link" style="margin: 0;" {
+                                        input type="hidden" name="subscriber_id" value=(sub.subscriber_id);
+                                        select name="user" required {
+                                            option value="" { (tr(lang, "link to user…", "привязать к…")) }
+                                            @for uid in &unlinked_users {
+                                                option value=(uid) { (uid) }
+                                            }
+                                        }
+                                    }
+                                }
+                                td.num {
+                                    button type="submit" form=(form_id) class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                                        (tr(lang, "link →", "привязать →"))
+                                    }
                                 }
                             }
-                            button type="submit" { (crate::i18n::tr(lang, "link", "привязать")) }
                         }
                     }
                 }
@@ -8120,75 +8204,147 @@ pub(crate) async fn boosty_page(
 
             // ── Lapsed, awaiting confirm to disable ─────────────
             @if !r.lapsed_pending.is_empty() {
-                section style="margin: 16px 0;" {
-                    h2.ed-eyebrow {
-                        (crate::i18n::tr(lang, "Lapsed — confirm disable", "Отвалились — подтвердите отключение"))
-                    }
+                div.ed-rule {}
+                div.ed-art-eyebrow {
+                    (tr(lang, "Lapsed — confirm disable", "Отвалились — подтвердите отключение")) " · " (r.lapsed_pending.len()) " "
+                    span.ed-tip title=(tr(
+                        lang,
+                        "Linked users whose Boosty subscription has lapsed. With auto-disable OFF you confirm each one here; disabling cuts their VPN access (reversible — re-subscribing re-enables on the next sync).",
+                        "Привязанные юзеры, чья подписка Boosty истекла. При выключенном авто-отключении подтверждаешь каждого здесь; отключение режет VPN-доступ (обратимо — при возобновлении подписки включится на следующем синке).",
+                    )) { "ⓘ" }
+                }
+                div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;" {
                     @for uid in &r.lapsed_pending {
-                        form method="post" action=(format!("/admin/boosty/disable/{uid}"))
-                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
-                            span { (uid) }
-                            button type="submit" { (crate::i18n::tr(lang, "disable", "отключить")) }
+                        form method="post" action=(format!("/admin/boosty/disable/{uid}")) style="margin: 0;" {
+                            button type="submit"
+                                   title=(tr(lang, "Disable this user's VPN access (subscription lapsed).", "Отключить VPN-доступ юзера (подписка истекла)."))
+                                   class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                                (uid) " · " (tr(lang, "disable", "отключить"))
+                            }
                         }
                     }
                 }
             }
 
-            @if !r.enabled.is_empty() {
-                section style="margin: 16px 0;" {
-                    h2.ed-eyebrow { (crate::i18n::tr(lang, "Enabled by last sync", "Включены последним синком")) }
-                    p style="font-family: var(--mono); font-size:12px;" { (r.enabled.join(", ")) }
-                }
-            }
-
-            @if !r.disabled.is_empty() {
-                section style="margin: 16px 0;" {
-                    h2.ed-eyebrow { (crate::i18n::tr(lang, "Auto-disabled by last sync", "Авто-отключены последним синком")) }
-                    p style="font-family: var(--mono); font-size:12px;" { (r.disabled.join(", ")) }
-                }
-            }
-        }
-
-        // ── Linked users ────────────────────────────────────────
-        section style="margin: 16px 0;" {
-            h2.ed-eyebrow { (crate::i18n::tr(lang, "Linked users", "Привязанные пользователи")) }
-            @if links.is_empty() {
-                p style="color: var(--dim); font-family: var(--mono); font-size:12px;" {
-                    (crate::i18n::tr(lang, "none yet", "пока нет"))
-                }
-            } @else {
-                @for (uid, sid) in &links {
-                    form method="post" action=(format!("/admin/boosty/unlink/{}", uid.0))
-                         style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
-                        span { (uid.0) " ↔ " (sid) }
-                        button type="submit" { (crate::i18n::tr(lang, "unlink", "отвязать")) }
+            @if !r.enabled.is_empty() || !r.disabled.is_empty() {
+                div.ed-rule {}
+                div style="display: flex; flex-wrap: wrap; gap: 28px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    @if !r.enabled.is_empty() {
+                        div {
+                            (tr(lang, "Enabled by last sync: ", "Включены последним синком: "))
+                            span style="color: var(--green);" { (r.enabled.join(", ")) }
+                        }
+                    }
+                    @if !r.disabled.is_empty() {
+                        div {
+                            (tr(lang, "Auto-disabled by last sync: ", "Авто-отключены последним синком: "))
+                            span style="color: var(--warm);" { (r.disabled.join(", ")) }
+                        }
                     }
                 }
             }
         }
 
-        // ── Settings form ───────────────────────────────────────
-        section style="margin: 24px 0;" {
-            h2.ed-eyebrow { (crate::i18n::tr(lang, "Settings", "Настройки")) }
-            form method="post" action="/admin/boosty/settings"
-                 style="display:flex; flex-direction:column; gap:8px; max-width:520px; font-family: var(--mono); font-size:12px;" {
-                label { (crate::i18n::tr(lang, "Blog url/slug", "Блог (url/slug)"))
-                    input type="text" name="blog_url" value=(settings.blog_url.as_deref().unwrap_or("")); }
-                label { (crate::i18n::tr(lang, "Access token (leave blank to keep)", "Access token (пусто — не менять)"))
-                    input type="password" name="access_token" autocomplete="off"; }
-                label { (crate::i18n::tr(lang, "Refresh token (leave blank to keep)", "Refresh token (пусто — не менять)"))
-                    input type="password" name="refresh_token" autocomplete="off"; }
-                label { (crate::i18n::tr(lang, "Device id (leave blank to keep)", "Device id (пусто — не менять)"))
-                    input type="password" name="device_id" autocomplete="off"; }
-                label { (crate::i18n::tr(lang,
-                        "Poll interval (seconds, min 60 — applies after a daemon restart)",
-                        "Интервал опроса (сек, мин 60 — применится после рестарта демона)"))
-                    input type="number" name="poll_interval_secs" min="60" value=(settings.poll_interval_secs); }
-                label { input type="checkbox" name="enabled" checked[settings.enabled];
-                    " " (crate::i18n::tr(lang, "enabled", "включено")) }
-                label { input type="checkbox" name="auto_disable_lapsed" checked[settings.auto_disable_lapsed];
-                    " " (crate::i18n::tr(lang, "auto-disable lapsed subscribers", "авто-отключать отвалившихся")) }
-                button type="submit" { (crate::i18n::tr(lang, "save", "сохранить")) }
+        // ── Linked users ────────────────────────────────────────
+        div.ed-rule {}
+        div.ed-art-eyebrow { (tr(lang, "Linked users", "Привязанные пользователи")) }
+        @if links.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                (tr(lang,
+                    "No Boosty links yet. Configure the bridge below, run a sync, then bind new subscribers to users.",
+                    "Привязок Boosty пока нет. Настрой мост ниже, запусти синк, затем привяжи новых подписчиков к юзерам."))
+            }
+        } @else {
+            table.ed-grid style="margin-top: 8px;" {
+                thead { tr {
+                    th { (tr(lang, "user", "пользователь")) }
+                    th { (tr(lang, "boosty subscriber", "подписчик boosty")) }
+                    th style="width: 110px;" {}
+                }}
+                tbody {
+                    @for (uid, sid) in &links {
+                        @let uid_enc = path_segment_encode(&uid.0);
+                        tr {
+                            td { a.ed-grid__id href=(format!("/admin/users/{uid_enc}")) { (uid.0) } }
+                            td.ed-grid__mut { (sid) }
+                            td.num {
+                                form method="post" action=(format!("/admin/boosty/unlink/{}", uid_enc)) style="margin: 0;" {
+                                    button type="submit"
+                                           title=(tr(lang, "Remove the Boosty↔user link. Does NOT disable the VPN user; just stops the subscription driving their access.", "Убрать связь Boosty↔юзер. НЕ отключает VPN-юзера; лишь перестаёт управлять доступом по подписке."))
+                                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                                        (tr(lang, "unlink →", "отвязать →"))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Bridge settings ─────────────────────────────────────
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Bridge settings", "Настройки моста")) " "
+            span.ed-tip title=(tr(
+                lang,
+                "Boosty API credentials + poll cadence. Secret fields are masked after save; leave blank to keep the stored value, clear + save to remove. Interval applies after a daemon restart.",
+                "Учётные данные API Boosty + интервал опроса. Секретные поля маскируются после сохранения; пусто = оставить, очистить + сохранить = удалить. Интервал применяется после рестарта демона.",
+            )) { "ⓘ" }
+        }
+        // Current credential state (masked) so the operator sees what's
+        // stored without the write-only form fields revealing it.
+        div style="display: flex; flex-wrap: wrap; gap: 24px; margin: 8px 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+            span { "access " span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
+            span { "refresh " span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
+            span { "device " span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
+        }
+        form method="post" action="/admin/boosty/settings" {
+            div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
+                label for="boosty_blog_url" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "blog url / slug", "блог url / slug"))
+                }
+                input id="boosty_blog_url" type="text" name="blog_url"
+                      value=(settings.blog_url.as_deref().unwrap_or(""))
+                      placeholder="boosty.to/yourblog";
+
+                label for="boosty_access" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "access token", "access token"))
+                }
+                input id="boosty_access" type="password" name="access_token" autocomplete="off"
+                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                label for="boosty_refresh" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "refresh token", "refresh token"))
+                }
+                input id="boosty_refresh" type="password" name="refresh_token" autocomplete="off"
+                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                label for="boosty_device" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "device id", "device id"))
+                }
+                input id="boosty_device" type="password" name="device_id" autocomplete="off"
+                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                label for="boosty_interval" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "poll interval (s)", "интервал опроса (с)"))
+                }
+                input id="boosty_interval" type="number" name="poll_interval_secs" min="60"
+                      title=(tr(lang, "Minimum 60 seconds. Applies after a daemon restart.", "Минимум 60 секунд. Применяется после рестарта демона."))
+                      value=(settings.poll_interval_secs);
+            }
+            div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0;" {
+                label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
+                    input type="checkbox" name="enabled" checked[settings.enabled];
+                    (tr(lang, "enabled (poller runs)", "включено (поллер работает)"))
+                }
+                label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
+                    input type="checkbox" name="auto_disable_lapsed" checked[settings.auto_disable_lapsed];
+                    (tr(lang, "auto-disable lapsed subscribers", "авто-отключать отвалившихся"))
+                }
+            }
+            button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                (crate::i18n::t(lang, crate::i18n::K::BtnSave))
             }
         }
     };
