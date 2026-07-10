@@ -275,6 +275,27 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
   overflow: hidden;
 }
 
+/* ── form controls — token defaults (design review R2 2026-07-10).
+   Raw <input>/<select>/<textarea> rendered browser-white against the
+   cream paper on every page that forgot an inline style (naive config,
+   reserved ports, fingerprint pin, display name, root password, audit
+   selects, notifications form). One rule instead of chasing inline
+   styles; inline `style=` attrs still win where a screen needs to
+   deviate. Buttons/checkboxes excluded on purpose. ── */
+.ed-main input:not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]),
+.ed-main select,
+.ed-main textarea {
+  background: var(--paper);
+  border: 1px solid var(--rule-s);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.ed-main input::placeholder,
+.ed-main textarea::placeholder { color: var(--dim); }
+.ed-main select { cursor: pointer; }
+
 /* ── masthead ── */
 /* ── topbar (design v2) — one compact bar, all colours from the ink
    token family so it inverts sensibly across the 4 themes. On the 3
@@ -462,20 +483,28 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 }
 
 /* ── timeline (editorial) ── */
+/* R2 2026-07-10: was `70px 110px …` — the 70px date column wrapped
+   every timestamp onto two lines (airy rows) and 110px overlapped
+   long actions (`server.grants.bulk_grant`) straight into the target
+   column. Single-line time + room for the longest real action. */
 .ed-time-row {
   display:grid;
-  grid-template-columns: 70px 110px 220px 1fr;
-  gap: 18px;
-  padding: 8px 0;
+  grid-template-columns: 150px 210px 150px 1fr;
+  gap: 14px;
+  padding: 5px 0;
   border-bottom: 1px dotted var(--rule);
   font-size: 13px;
   align-items: baseline;
 }
+/* Server-scoped timelines drop the target column (it would repeat the
+   page's own server id on every row). */
+.ed-time--compact .ed-time-row { grid-template-columns: 150px 230px 1fr; }
 .ed-time-row:last-child { border-bottom: 0; }
-.ed-time-row__t { font-family: var(--mono); color: var(--mute); font-size: 11px; }
+.ed-time-row__t { font-family: var(--mono); color: var(--mute); font-size: 11px; white-space: nowrap; }
 .ed-time-row__a {
   font-family: var(--serif); font-style: italic;
-  font-size: 14px;
+  font-size: 13px;
+  overflow-wrap: break-word;
 }
 .ed-time-row__a--deploy     { color: var(--acc); }
 .ed-time-row__a--create     { color: var(--green); }
