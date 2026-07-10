@@ -212,7 +212,25 @@
     });
   }
 
+  // ── "/" hotkey focuses the topbar search (design v2) ────────────
+  // Ignored while the operator is already typing in a field so "/" in
+  // a form stays a literal slash.
+  function wireSearchHotkey() {
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable)) return;
+      var box = document.getElementById("tb-search");
+      if (box) {
+        e.preventDefault();
+        box.focus();
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    wireSearchHotkey();
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
     var autos = document.querySelectorAll("[data-sse-autostart]");
