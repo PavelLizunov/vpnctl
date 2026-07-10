@@ -1163,6 +1163,35 @@ fn dashboard_abuse_summary(
 /// names we explicitly want to render); raw token/password fields
 /// stay invisible by default. Pinned by
 /// `audit_summary_never_leaks_secret_fields`.
+/// v2 5b — deep-copy a payload with secret-looking values replaced, so
+/// the <details> expander can show the STRUCTURE without leaking what
+/// the summary whitelist deliberately hides. Denylist by key substring.
+fn redact_audit_payload(payload: &serde_json::Value) -> serde_json::Value {
+    match payload {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    let kl = k.to_ascii_lowercase();
+                    let secret = kl.contains("password")
+                        || kl.contains("private")
+                        || kl.contains("token")
+                        || kl.contains("secret");
+                    let nv = if secret {
+                        serde_json::Value::String("<redacted>".into())
+                    } else {
+                        redact_audit_payload(v)
+                    };
+                    (k.clone(), nv)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_audit_payload).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 fn summarize_audit_payload(payload: &serde_json::Value) -> String {
     let Some(map) = payload.as_object() else {
         return String::new();
@@ -10678,16 +10707,32 @@ pub(crate) async fn search(
         div.ed-art-eyebrow {
             (crate::i18n::tr(lang, "Fleet search", "Поиск по флоту"))
         }
-        h1.ed-art-h1 {
-            (crate::i18n::tr(lang, "find ", "найти "))
-            em { (crate::i18n::tr(lang, "anything", "что угодно")) }
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
+        div.ed-headrow {
+            h1.ed-sumbar__h {
+                @if query.is_empty() {
+                    (crate::i18n::tr(lang, "find ", "найти "))
+                    em { (crate::i18n::tr(lang, "anything", "что угодно")) }
+                } @else {
+                    "«" (query) "» — " (total_hits) " "
+                    em { (crate::i18n::tr(lang, "matches", "совпадений")) }
+                }
+            }
+            span.ed-tip title=(crate::i18n::tr(
                 lang,
                 "Substring match across user ids / UUIDs / sub_tokens / device_ids, server ids / addresses, and alert kinds / summaries. Case-insensitive. Cap of 50 hits per group.",
                 "Подстрочный поиск по id / UUID / sub_token / device_id пользователей, по id / адресам серверов, по kind / summary алертов. Регистронезависимо. Не больше 50 совпадений в каждой группе.",
-            ))
+            )) { "ⓘ" }
+            @if !query.is_empty() {
+                span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (users.len()) " " (crate::i18n::tr(lang, "users", "польз."))
+                    " · " (servers.len()) " " (crate::i18n::tr(lang, "servers", "серверов"))
+                    " · " (alerts.len()) " " (crate::i18n::tr(lang, "alerts", "алертов"))
+                    " · "
+                    a href=(format!("/admin/audit?target={}", path_segment_encode(query))) style="color: var(--acc);" {
+                        (crate::i18n::tr(lang, "audit events →", "события аудита →"))
+                    }
+                }
+            }
         }
         form method="get" action="/admin/search"
              style="margin: 16px 0; display: flex; gap: 8px; align-items: baseline;" {
@@ -10842,6 +10887,7 @@ pub(crate) async fn audit(
 
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
+    let target = q.target.as_deref().filter(|s| !s.is_empty());
     /// Hard cap so `?page=99999...` can't overflow `page * PAGE_SIZE`.
     /// 1M pages × 50/page = 50M rows — way past any plausible audit
     /// history; clamping there is friendlier than panicking on overflow.
@@ -10859,10 +10905,16 @@ pub(crate) async fn audit(
     let offset = page * PAGE_SIZE;
     let entries = state
         .inv
-        .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action)
+        .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action, target)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // v2 5b — «N events on file · M match» header counts.
+    let (audit_total, audit_matched) = state
+        .inv
+        .audit_counts(actor, action, target)
+        .await
+        .unwrap_or((0, 0));
     let has_next = entries.len() as i64 > PAGE_SIZE;
     let visible: Vec<&vpnctl_inventory::AuditEntry> =
         entries.iter().take(PAGE_SIZE as usize).collect();
@@ -10889,8 +10941,15 @@ pub(crate) async fn audit(
             ))
         }
 
+        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 10px;" {
+            (audit_total) " " (crate::i18n::tr(lang, "events on file", "событий в записи"))
+            @if actor.is_some() || action.is_some() || target.is_some() {
+                " · " b style="color: var(--ink);" { (audit_matched) } " "
+                (crate::i18n::tr(lang, "match the filter", "подходят под фильтр"))
+            }
+        }
         form method="get" action="/admin/audit"
-             style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 16px 0 24px; font-family: var(--mono); font-size: 11px;" {
+             style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 10px 0 24px; font-family: var(--mono); font-size: 11px;" {
             label { (crate::i18n::tr(lang, "actor", "автор")) }
             select name="actor"
                    title=(crate::i18n::tr(
@@ -10922,6 +10981,16 @@ pub(crate) async fn audit(
                       "Поиск по ПРЕФИКСУ в колонке action (не подстрока — `sub_token` не найдёт `user.sub_token.regen`; `user.` найдёт). Конвенция: точка-разделитель domain.subdomain.verb (напр. `server.protocol.set_hidden`, `user.grant`, `user.sub_token.regen`). Подчёркивания допустимы ВНУТРИ verb.",
                   ))
                   style="padding: 3px 6px; max-width: 320px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
+            label { (crate::i18n::tr(lang, "target contains", "цель содержит")) }
+            input type="text" name="target"
+                  value=(target.unwrap_or(""))
+                  placeholder=(crate::i18n::tr(lang, "user or server id…", "id юзера или сервера…"))
+                  title=(crate::i18n::tr(
+                      lang,
+                      "SUBSTRING match on the target column — `brat` matches `main-brat`.",
+                      "Поиск ПОДСТРОКИ в колонке target — `brat` найдёт `main-brat`.",
+                  ))
+                  style="padding: 3px 6px; max-width: 180px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
             button type="submit"
                    title=(crate::i18n::tr(
                        lang,
@@ -10940,7 +11009,7 @@ pub(crate) async fn audit(
               style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
-            a href=(audit_url("/admin/audit.csv", actor, action, None))
+            a href=(audit_url("/admin/audit.csv", actor, action, target, None))
               title=(crate::i18n::tr(
                   lang,
                   "Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters.",
@@ -10973,7 +11042,7 @@ pub(crate) async fn audit(
 
         div style="display: flex; gap: 16px; padding: 16px 0; font-family: var(--mono); font-size: 12px;" {
             @if has_prev {
-                a href=(audit_url("/admin/audit", actor, action, Some(page - 1)))
+                a href=(audit_url("/admin/audit", actor, action, target, Some(page - 1)))
                   style="color: var(--ink); text-decoration: none;" {
                     (crate::i18n::tr(lang, "← prev", "← назад"))
                 }
@@ -10996,7 +11065,7 @@ pub(crate) async fn audit(
                 (crate::i18n::tr(lang, "page ", "стр. ")) (page + 1)
             }
             @if has_next {
-                a href=(audit_url("/admin/audit", actor, action, Some(page + 1)))
+                a href=(audit_url("/admin/audit", actor, action, target, Some(page + 1)))
                   style="color: var(--ink); text-decoration: none;" {
                     (crate::i18n::tr(lang, "next →", "вперёд →"))
                 }
@@ -11016,6 +11085,8 @@ pub(crate) async fn audit(
 pub(crate) struct AuditQuery {
     pub actor: Option<String>,
     pub action: Option<String>,
+    /// v2 5b — substring filter on the target column.
+    pub target: Option<String>,
     pub page: Option<i64>,
 }
 
@@ -11023,7 +11094,13 @@ pub(crate) struct AuditQuery {
 /// Pass `Some(page)` for paginated HTML targets, `None` for the CSV
 /// export endpoint (which doesn't paginate). Single helper avoids the
 /// near-duplicate URL builders that the previous chunk had.
-fn audit_url(base: &str, actor: Option<&str>, action: Option<&str>, page: Option<i64>) -> String {
+fn audit_url(
+    base: &str,
+    actor: Option<&str>,
+    action: Option<&str>,
+    target: Option<&str>,
+    page: Option<i64>,
+) -> String {
     let mut q = String::from(base);
     let mut sep = '?';
     if let Some(a) = actor {
@@ -11034,6 +11111,11 @@ fn audit_url(base: &str, actor: Option<&str>, action: Option<&str>, page: Option
     if let Some(a) = action {
         q.push(sep);
         q.push_str(&format!("action={}", path_segment_encode(a)));
+        sep = '&';
+    }
+    if let Some(t) = target {
+        q.push(sep);
+        q.push_str(&format!("target={}", path_segment_encode(t)));
         sep = '&';
     }
     if let Some(p) = page {
@@ -11095,6 +11177,15 @@ fn audit_timeline_grouped(
                             @if !summary.is_empty() {
                                 " · " span.ed-mono { (summary) }
                             }
+                            // v2 5b — full payload behind a pure-HTML
+                            // <details> expander (CSP-safe, no JS).
+                            " "
+                            details style="display: inline-block; vertical-align: baseline;" {
+                                summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { "{…}" }
+                                pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10.5px; white-space: pre-wrap; max-width: 680px;" {
+                                    (serde_json::to_string_pretty(&redact_audit_payload(p)).unwrap_or_default())
+                                }
+                            }
                         }
                     }
                 }
@@ -11115,6 +11206,7 @@ pub(crate) async fn audit_csv(
 ) -> Response {
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
+    let target = q.target.as_deref().filter(|s| !s.is_empty());
 
     /// Generous cap; the operator can re-export with ?limit= once we
     /// add that to AuditQuery in a follow-up.
@@ -11122,7 +11214,7 @@ pub(crate) async fn audit_csv(
 
     let entries = match state
         .inv
-        .recent_audit_paginated(CSV_LIMIT, 0, actor, action)
+        .recent_audit_paginated(CSV_LIMIT, 0, actor, action, target)
         .await
     {
         Ok(v) => v,
@@ -11210,9 +11302,6 @@ fn csv_field(s: &str) -> String {
 //  Phase G — admin_alerts feed + ack action
 // ────────────────────────────────────────────────────────────────────
 
-/// `GET /admin/alerts?show=all` — operator-facing alerts feed. Default
-/// view shows UNACKED only (the dashboard tile links here when count
-/// > 0); `?show=all` includes acked rows for historical browsing.
 pub(crate) async fn alerts(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -11236,68 +11325,99 @@ pub(crate) async fn alerts(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    // v2 5a — family split: the sub_access.* spam cluster gets its own
+    // grouped table; node/fleet/user alerts the second. Counts feed the
+    // header meta line.
+    let (sub_rows, node_rows): (Vec<_>, Vec<_>) = alerts_rows
+        .iter()
+        .partition(|a| a.kind.starts_with("sub_access."));
+    let auto_resolve_note = |kind: &str| -> &'static str {
+        if kind.starts_with("server.mem.pressure") {
+            "on drop < 90%"
+        } else if kind.starts_with("server.disk.pressure") {
+            "on drop < 85%"
+        } else if kind.starts_with("server.singbox.log") {
+            "on rotate"
+        } else if kind.starts_with("server.unreachable") {
+            "on next ok probe"
+        } else if kind.starts_with("server.fingerprint.drift") {
+            "on match"
+        } else if kind.starts_with("user.traffic_limit") {
+            "on usage drop"
+        } else {
+            "manual ack"
+        }
+    };
+    let subject_cell = |a: &vpnctl_inventory::AdminAlert| -> Markup {
+        match (&a.server_id, a.kind.split_once(':')) {
+            (Some(sid), _) => html! {
+                a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (sid.0) }
+            },
+            (None, Some((_, subj))) if !subj.is_empty() => html! {
+                a.ed-grid__id href=(format!("/admin/users/{}", path_segment_encode(subj))) { (subj) }
+            },
+            _ => html! { span.ed-grid__mut { "—" } },
+        }
+    };
+    let ack_cell = |a: &vpnctl_inventory::AdminAlert| -> Markup {
+        if a.acked_at.is_some() {
+            html! { span.ed-grid__mut.ed-grid__sm { (crate::i18n::tr(lang, "acked", "принят")) } }
+        } else {
+            html! {
+                form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
+                     style="margin: 0; padding: 0; display: inline;" {
+                    button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" { "ack" }
+                }
+            }
+        }
+    };
+    let now = chrono::Utc::now();
+
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageAlerts)) }
-        h1.ed-art-h1 {
-            (crate::i18n::tr(lang, "what the homelab is ", "на что homelab "))
-            em { (crate::i18n::tr(lang, "shouting", "ругается")) }
-            (crate::i18n::tr(lang, " about", ""))
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
+        div.ed-headrow {
+            h1.ed-sumbar__h {
+                (unacked_total) " " em { (crate::i18n::tr(lang, "open alerts", "открытых алертов")) }
+            }
+            span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "Infrastructure alerts written by the Phase G health-monitor on top of the Phase H node probe. Service flips, disk + memory pressure, runaway sing-box logs, unreachable hosts, and the «I locked myself out» class (fail2ban banned us). Ack each one when you've looked — the dashboard tile ",
-                "Алерты инфраструктуры, которые пишет health-monitor (Phase G) поверх node probe (Phase H). Сервис упал/поднялся, давление на диск/память, разрастающиеся логи sing-box, недоступные хосты, класс «сам себя забанил» (fail2ban забанил нас). Принимай каждое (ack) когда посмотрел — тайл дашборда ",
-            ))
-            em { (crate::i18n::tr(lang, "homelab health", "здоровье homelab")) }
-            (crate::i18n::tr(lang, " counts unacked items.", " считает непринятые."))
-        }
-        div.ed-rule {}
-        div style="display: flex; gap: 16px; align-items: baseline; margin-bottom: 14px;" {
-            span.ed-mono {
-                (unacked_total) " " (crate::i18n::tr(lang, "unacked", "непринятых"))
+                "Opened by the health monitor and the sub-access analyzer. Node alerts auto-resolve on recovery; sub-access alerts stay until acked. Ack is idempotent and audited; acked rows stay under «show all» for 30 days.",
+                "Открываются монитором здоровья и анализатором обращений. Нодовые алерты закрываются сами при восстановлении; sub-access висят до ack. Ack идемпотентен и аудируется; принятые видны в «показать всё» 30 дней.",
+            )) { "ⓘ" }
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (sub_rows.iter().filter(|a| a.acked_at.is_none()).count()) " sub-access · "
+                (node_rows.iter().filter(|a| a.acked_at.is_none()).count()) " node"
             }
-            @if include_acked {
-                a href="/admin/alerts" style="color: var(--mute); text-decoration: none;" {
-                    (crate::i18n::tr(lang, "← only unacked", "← только непринятые"))
+            div.ed-headrow__actions {
+                @if include_acked {
+                    a href="/admin/alerts" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
+                        (crate::i18n::tr(lang, "← only unacked", "← только непринятые"))
+                    }
+                } @else {
+                    a href="/admin/alerts?show=all" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
+                        (crate::i18n::tr(lang, "show all →", "показать всё →"))
+                    }
                 }
-            } @else {
-                a href="/admin/alerts?show=all" style="color: var(--mute); text-decoration: none;" {
-                    (crate::i18n::tr(lang, "show all (including acked) →", "показать всё (включая принятые) →"))
-                }
-            }
-            // Bulk-ack: only render when there's actually something
-            // to ack (otherwise an «ack all (0)» button is just a
-            // tiny invitation to misclick). `onsubmit` does an
-            // in-browser confirm() — the action is destructive (clears
-            // the whole feed), but reversible-via-history (acked rows
-            // stay in /admin/alerts?show=all for 30d), so a single
-            // confirm prompt is the right friction level. Pinned by
-            // `alerts_page_renders_ack_all_button_when_unacked_total_nonzero`.
-            @if unacked_total > 0 {
-                // CSP-safe confirm: the message rides in a `data-confirm`
-                // attribute (maud HTML-escapes it) and admin.js attaches
-                // the confirm() guard. An inline `onsubmit="…"` would be
-                // blocked by `script-src 'self'` → the guard would never
-                // run and ack-all would fire on a single click.
-                @let confirm_msg = crate::i18n::tr(
-                    lang,
-                    "Ack all unacked alerts? They will stay visible under «show all» for 30 days; nothing is deleted, just marked seen.",
-                    "Принять все непринятые алерты? Они останутся видимы в «показать всё» 30 дней; ничего не удаляется, только помечается просмотренным.",
-                );
-                form method="post"
-                     action="/admin/alerts/ack-all"
-                     style="display: inline; margin-left: auto;"
-                     data-confirm=(confirm_msg) {
-                    button type="submit"
-                           title=(crate::i18n::tr(
-                               lang,
-                               "Mark every unacked alert as seen in one click. Doesn't clear or fix the underlying conditions — just clears the dashboard tile. The alert rows stay in the feed under «show all».",
-                               "Отметить все непринятые алерты как просмотренные одним кликом. Не очищает и не чинит условия — лишь обнуляет тайл дашборда. Строки остаются в ленте под «показать всё».",
-                           ))
-                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "ack all", "принять все"))
-                        " (" (unacked_total) ")"
+                @if unacked_total > 0 {
+                    @let confirm_msg = crate::i18n::tr(
+                        lang,
+                        "Ack all unacked alerts? They will stay visible under «show all» for 30 days; nothing is deleted, just marked seen.",
+                        "Принять все непринятые алерты? Они останутся видимы в «показать всё» 30 дней; ничего не удаляется, только помечается просмотренным.",
+                    );
+                    form method="post"
+                         action="/admin/alerts/ack-all"
+                         style="display: inline; margin: 0;"
+                         data-confirm=(confirm_msg) {
+                        button type="submit"
+                               title=(crate::i18n::tr(
+                                   lang,
+                                   "Mark every unacked alert as seen in one click. Doesn't clear or fix the underlying conditions — just clears the dashboard tile.",
+                                   "Отметить все непринятые как просмотренные одним кликом. Не чинит условия — лишь обнуляет тайл дашборда.",
+                               ))
+                               class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                            (crate::i18n::tr(lang, "ack all", "принять все"))
+                            " (" (unacked_total) ")…"
+                        }
                     }
                 }
             }
@@ -11314,22 +11434,14 @@ pub(crate) async fn alerts(
                         em { (crate::i18n::tr(lang, "extraordinarily", "удивительно")) }
                         (crate::i18n::tr(
                             lang,
-                            " quiet, or vpnctld hasn't been running long enough for the probe to fire one. Check ",
-                            " тихим, либо vpnctld запущен недостаточно долго чтобы probe что-то поймал. Проверь ",
+                            " quiet, or vpnctld hasn't been running long enough for the probe to fire one.",
+                            " тихим, либо vpnctld запущен недостаточно долго чтобы probe что-то поймал.",
                         ))
-                        span.ed-mono { "journalctl -u vpnctld -t vpnctld::health_monitor" }
-                        (crate::i18n::tr(lang, " for the scan trail.", " на предмет следов сканера."))
                     } @else {
                         (crate::i18n::tr(
                             lang,
-                            "no unacked alerts. Everything the homelab is currently ",
-                            "нет непринятых алертов. Всё на что сейчас homelab ",
-                        ))
-                        em { (crate::i18n::tr(lang, "complaining", "жалуется")) }
-                        (crate::i18n::tr(
-                            lang,
-                            " about lives here; nothing means nothing's wrong (or every condition has been acknowledged). To browse history: ",
-                            " — здесь. Пусто значит всё хорошо (либо все условия приняты). Посмотреть историю: ",
+                            "no unacked alerts. Nothing means nothing's wrong (or every condition has been acknowledged). To browse history: ",
+                            "нет непринятых алертов. Пусто значит всё хорошо (либо все условия приняты). Посмотреть историю: ",
                         ))
                         a href="/admin/alerts?show=all" {
                             (crate::i18n::tr(lang, "show all →", "показать всё →"))
@@ -11337,8 +11449,92 @@ pub(crate) async fn alerts(
                     }
                 }
             }
-        } @else {
-            (alerts_table(&alerts_rows, lang))
+        }
+        @if !sub_rows.is_empty() {
+            div.ed-art-eyebrow style="margin-top: 14px;" {
+                "sub_access · " (sub_rows.len()) " "
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "A /sub fetch arrived from a private-range source IP. Usually a client refreshing over its own tunnel; occasionally a proxy hiding the real origin. Ack after review — a repeat fetch reopens.",
+                    "Обращение к /sub пришло с приватного диапазона. Обычно клиент обновлялся через собственный туннель; изредка — прокси, скрывающий источник. Ack после просмотра — повторное обращение переоткроет.",
+                )) { "ⓘ" }
+            }
+            table.ed-grid style="margin-top: 8px;" {
+                thead {
+                    tr {
+                        th style="width: 26px;" {}
+                        th style="width: 130px;" { (crate::i18n::tr(lang, "opened", "открыт")) }
+                        th style="width: 160px;" { (crate::i18n::tr(lang, "subject", "субъект")) }
+                        th { (crate::i18n::tr(lang, "detail", "детали")) }
+                        th style="width: 90px;" {}
+                    }
+                }
+                tbody {
+                    @for a in &sub_rows {
+                        tr class=(if a.acked_at.is_some() { "" } else { "on-warn" }) {
+                            td { span style="color: var(--warm);" { "⚠" } }
+                            td.ed-grid__mut.ed-grid__sm { (humanize_age(now - a.created_at, lang)) }
+                            td { (subject_cell(a)) }
+                            @let rendered = localized_alert(a, lang);
+                            td.ed-grid__mut.ed-grid__sm title=(a.summary) {
+                                (crate::alert_text::to_plain(&rendered.title))
+                                " — " (crate::alert_text::to_plain(&rendered.body))
+                            }
+                            td.num { (ack_cell(a)) }
+                        }
+                    }
+                }
+            }
+        }
+        @if !node_rows.is_empty() {
+            div.ed-art-eyebrow style="margin-top: 14px;" {
+                (crate::i18n::tr(lang, "node · fleet · user — ", "нода · флот · юзер — ")) (node_rows.len())
+            }
+            table.ed-grid style="margin-top: 8px;" {
+                thead {
+                    tr {
+                        th style="width: 26px;" {}
+                        th style="width: 130px;" { (crate::i18n::tr(lang, "opened", "открыт")) }
+                        th style="width: 210px;" { (crate::i18n::tr(lang, "kind", "тип")) }
+                        th { (crate::i18n::tr(lang, "subject · detail", "субъект · детали")) }
+                        th style="width: 130px;" { (crate::i18n::tr(lang, "auto-resolve", "автозакрытие")) }
+                        th style="width: 90px;" {}
+                    }
+                }
+                tbody {
+                    @for a in &node_rows {
+                        @let kind_base = a.kind.split(':').next().unwrap_or(&a.kind);
+                        tr class=(if a.acked_at.is_some() { "" } else if a.severity.eq_ignore_ascii_case("critical") { "on-warn" } else { "" }) {
+                            td {
+                                @if a.severity.eq_ignore_ascii_case("critical") {
+                                    span style="color: var(--red);" { "✖" }
+                                } @else {
+                                    span style="color: var(--warm);" { "⚠" }
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm {
+                                @if a.acked_at.is_some() { (crate::i18n::tr(lang, "resolved ", "закрыт ")) }
+                                (humanize_age(now - a.created_at, lang))
+                            }
+                            td.ed-grid__mut.ed-grid__sm { (kind_base) }
+                            @let rendered = localized_alert(a, lang);
+                            td.ed-grid__sm {
+                                (subject_cell(a))
+                                " " span.ed-grid__mut title=(crate::alert_text::to_plain(&rendered.body)) {
+                                    "· " (crate::alert_text::to_plain(&rendered.title))
+                                }
+                                @if let Some(act) = &rendered.action {
+                                    " " span.ed-grid__mut.ed-grid__sm style="font-style: italic;" {
+                                        "— " (crate::alert_text::to_plain(act))
+                                    }
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm { (auto_resolve_note(&a.kind)) }
+                            td.num { (ack_cell(a)) }
+                        }
+                    }
+                }
+            }
         }
     };
     Ok(shell("alerts", &theme, &accent, lang, body))
@@ -11442,199 +11638,6 @@ pub(crate) struct AlertsQuery {
     pub show: Option<String>,
 }
 
-/// Render the feed table — newest-first, severity badge, server link,
-/// per-row ack button (hidden when already acked). Inline styles keep
-/// this self-contained so admin.css doesn't need a Phase G section.
-/// Human-readable (title, what-to-do hint) for an alert kind. The raw
-/// kind stays available in the row tooltip; the title is what the
-/// operator scans. Returns `None` hint for recovery/info kinds — they
-/// need no action. (Alerts-cleanup 2026-06-10: Pavel's feedback —
-/// «алерты сумбурные и непонятные» — raw kinds + mixed summaries gave
-/// no answer to "так что мне ДЕЛАТЬ?".)
-fn alert_explainer(kind: &str, lang: crate::i18n::Locale) -> (&'static str, Option<&'static str>) {
-    use crate::i18n::tr;
-    // Per-user suspicious kinds carry a `:<user>` suffix — match on prefix.
-    if kind.starts_with("sub_access.suspicious_local_ip") {
-        return (
-            tr(
-                lang,
-                "subscription fetched from a LAN/loopback IP",
-                "подписку дёрнули с LAN/loopback IP",
-            ),
-            Some(tr(
-                lang,
-                "If this is your own service host (monitoring, claude-chat, smoke checks) — add its IP to VPNCTLD_SUSPICIOUS_IP_ALLOWLIST and ack. If you don't recognise the IP/UA, the sub link may have leaked into the LAN: regenerate the user's sub_token.",
-                "Если это твой служебный хост (мониторинг, claude-chat, smoke-проверки) — добавь его IP в VPNCTLD_SUSPICIOUS_IP_ALLOWLIST и прими. Если IP/UA незнакомы — sub-ссылка могла утечь в LAN: перегенерируй sub_token юзера.",
-            )),
-        );
-    }
-    match kind {
-        "server.singbox.down" => (
-            tr(
-                lang,
-                "sing-box is DOWN — VPN dead on this node",
-                "sing-box УПАЛ — VPN на ноде не работает",
-            ),
-            Some(tr(
-                lang,
-                "Every user on this server is offline. Open the server page → check live status → redeploy; if SSH is dead too, use the hoster console.",
-                "Все юзеры этого сервера оффлайн. Открой страницу сервера → проверь живой статус → redeploy; если SSH тоже мёртв — консоль хостера.",
-            )),
-        ),
-        "server.singbox.up" => (
-            tr(lang, "sing-box recovered", "sing-box восстановился"),
-            None,
-        ),
-        "server.fail2ban.down" => (
-            tr(
-                lang,
-                "fail2ban stopped — SSH brute-force shield off",
-                "fail2ban остановлен — защита SSH от перебора выключена",
-            ),
-            Some(tr(
-                lang,
-                "SSH is unprotected against password guessing. Redeploy from the server page (re-installs fail2ban).",
-                "SSH не защищён от перебора паролей. Передеплой со страницы сервера (переставит fail2ban).",
-            )),
-        ),
-        "server.fail2ban.up" => (
-            tr(lang, "fail2ban recovered", "fail2ban восстановился"),
-            None,
-        ),
-        "server.disk.pressure" => (
-            tr(lang, "disk almost full", "диск почти заполнен"),
-            Some(tr(
-                lang,
-                "Above 90% — sing-box logs are the usual culprit. Server page shows the trend; a redeploy rotates the log.",
-                "Выше 90% — обычно виноваты логи sing-box. Тренд на странице сервера; redeploy ротирует лог.",
-            )),
-        ),
-        "server.disk.recovered" => (tr(lang, "disk pressure cleared", "диск разгрузился"), None),
-        "server.mem.pressure" => (
-            tr(lang, "memory almost exhausted", "память почти исчерпана"),
-            Some(tr(
-                lang,
-                "Above 95% — check what's eating RAM on the node (sing-box leak? neighbour process?). OOM-kill of sing-box = outage.",
-                "Выше 95% — посмотри, что ест RAM на ноде (течёт sing-box? соседний процесс?). OOM-kill sing-box = простой.",
-            )),
-        ),
-        "server.mem.recovered" => (
-            tr(lang, "memory pressure cleared", "память разгрузилась"),
-            None,
-        ),
-        "server.singbox.log.too_big" => (
-            tr(
-                lang,
-                "sing-box log over 500 MiB",
-                "лог sing-box больше 500 MiB",
-            ),
-            Some(tr(
-                lang,
-                "Log rotation isn't keeping up. Redeploy from the server page (re-installs the logrotate fragment).",
-                "Ротация логов не справляется. Передеплой со страницы сервера (переставит logrotate-фрагмент).",
-            )),
-        ),
-        "server.unreachable" => (
-            tr(lang, "node unreachable over SSH", "нода недоступна по SSH"),
-            Some(tr(
-                lang,
-                "3+ probes failed in a row: host down, IP blocked, or sshd broken. Try the hoster console; if the node is gone for good — delete it from inventory.",
-                "3+ probe подряд не прошли: хост лежит, IP заблокирован или sshd сломан. Зайди через консоль хостера; если нода умерла насовсем — удали её из инвентаря.",
-            )),
-        ),
-        "server.fingerprint.drift" => (
-            tr(
-                lang,
-                "SSH host key CHANGED on the node",
-                "SSH host-ключ ноды ИЗМЕНИЛСЯ",
-            ),
-            Some(tr(
-                lang,
-                "Legit if you rebuilt the VPS; MITM if you didn't. Verify via the hoster console, then re-pin the fingerprint on the server page.",
-                "Норма, если ты пересобирал VPS; MITM — если нет. Проверь через консоль хостера, затем перепинь отпечаток на странице сервера.",
-            )),
-        ),
-        "server.fail2ban.banned_self" => (
-            tr(
-                lang,
-                "fail2ban banned OUR OWN IP",
-                "fail2ban забанил НАШ СОБСТВЕННЫЙ IP",
-            ),
-            Some(tr(
-                lang,
-                "The daemon can't SSH the node until unbanned. Via hoster console: fail2ban-client unban --all.",
-                "Демон не попадёт на ноду по SSH, пока бан не снят. Через консоль хостера: fail2ban-client unban --all.",
-            )),
-        ),
-        _ => (tr(lang, "", ""), None),
-    }
-}
-
-/// Sort key: open-first, then critical → warning → info, then newest.
-fn alert_sort_rank(a: &vpnctl_inventory::AdminAlert) -> (u8, u8, i64) {
-    let open = u8::from(a.acked_at.is_some()); // open=0 first
-    // Severity ranks only the OPEN section (triage order); acked rows
-    // are history and stay purely chronological — an old acked
-    // critical jumping above newer acked rows would misread as recent.
-    let sev = if a.acked_at.is_some() {
-        0
-    } else {
-        match a.severity.as_str() {
-            "critical" => 0,
-            "warning" => 1,
-            _ => 2,
-        }
-    };
-    (open, sev, -a.id)
-}
-
-fn alerts_table(rows: &[vpnctl_inventory::AdminAlert], lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::tr;
-    // Open-first, severity-ranked view (alerts-cleanup 2026-06-10) —
-    // the raw feed was strictly chronological, so one chatty info row
-    // could sit above an unacked critical.
-    let mut sorted: Vec<&vpnctl_inventory::AdminAlert> = rows.iter().collect();
-    sorted.sort_by_key(|a| alert_sort_rank(a));
-    // The suspicious-local-ip family is the known spam cluster — when
-    // 3+ are OPEN, collapse them into one <details> group (pure HTML,
-    // no JS) so they stop burying the rest of the feed. Below the
-    // threshold the single sorted list renders untouched (review
-    // 2026-06-10: an unconditional partition floated 1-2 warning-level
-    // spam rows above an open CRITICAL, contradicting the sort).
-    let susp_open_count = sorted
-        .iter()
-        .filter(|a| a.acked_at.is_none() && a.kind.starts_with("sub_access.suspicious_local_ip"))
-        .count();
-    let collapse_susp = susp_open_count >= 3;
-    let (susp_open, rest): (Vec<_>, Vec<_>) = if collapse_susp {
-        sorted.into_iter().partition(|a| {
-            a.acked_at.is_none() && a.kind.starts_with("sub_access.suspicious_local_ip")
-        })
-    } else {
-        (Vec::new(), sorted)
-    };
-    let (susp_title, susp_hint) = alert_explainer("sub_access.suspicious_local_ip", lang);
-    html! {
-        @if collapse_susp {
-            details style="border: 1px solid var(--rule); margin: 0 0 14px; padding: 8px 12px;" {
-                summary style="cursor: pointer; font-family: var(--mono); font-size: 12px;" {
-                    b { (susp_open.len()) " × " (susp_title) }
-                    span style="color: var(--mute);" { " — " (tr(lang, "expand for per-user rows", "раскрой для строк по юзерам")) }
-                }
-                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0;" {
-                    (susp_hint.unwrap_or(""))
-                }
-                div.ed-time {
-                    @for a in &susp_open { (alert_row(a, lang, false)) }
-                }
-            }
-        }
-        div.ed-time {
-            @for a in &rest { (alert_row(a, lang, true)) }
-        }
-    }
-}
-
 /// Render an `AdminAlert` into its localized `{icon,title,body,action}`
 /// for the admin UI — the SAME `alert_text::render_alert` the Telegram
 /// push uses, so the dashboard + /admin/alerts speak the operator's
@@ -11662,100 +11665,6 @@ fn localized_alert(
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(serde_json::Value::Null);
     crate::alert_text::render_alert(&a.kind, &a.severity, &subject, &payload, lang)
-}
-
-fn alert_row(
-    a: &vpnctl_inventory::AdminAlert,
-    lang: crate::i18n::Locale,
-    with_hint: bool,
-) -> Markup {
-    use crate::i18n::{K, t, tr};
-    let (_explainer_title, explainer_hint) = alert_explainer(&a.kind, lang);
-    // Localized render (icon + title + body + action) — replaces the
-    // stored English summary on the operator-facing surface.
-    let rendered = localized_alert(a, lang);
-    let r_title = crate::alert_text::to_plain(&rendered.title);
-    let r_body = crate::alert_text::to_plain(&rendered.body);
-    let r_hint: Option<String> = rendered
-        .action
-        .as_deref()
-        .map(crate::alert_text::to_plain)
-        .or_else(|| explainer_hint.map(|h| h.to_string()));
-    html! {
-                div.ed-time-row {
-                    span.ed-time-row__t { (format_msk_iso(a.created_at)) }
-                    span class=(format!("ed-time-row__a ed-time-row__a--{}", severity_class(&a.severity))) {
-                        (a.severity)
-                    }
-                    span.ed-time-row__tgt {
-                        @match &a.server_id {
-                            Some(sid) => {
-                                a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0)))
-                                  style="color: var(--ink); text-decoration: none;" {
-                                    (sid.0)
-                                }
-                            }
-                            None => "—",
-                        }
-                    }
-                    span.ed-time-row__pl {
-                        // Localized icon + title first (raw kind in the
-                        // tooltip) — operators scan titles, machines grep
-                        // kinds. Body is the localized description, not the
-                        // stored English summary.
-                        b title=(a.kind) { (rendered.icon) " " (r_title) }
-                        " · "
-                        (r_body)
-                        @match &a.acked_at {
-                            Some(when) => {
-                                " · " span style="color: var(--mute);" {
-                                    (tr(lang, "acked ", "принято "))
-                                    (format_msk_iso(*when))
-                                }
-                            }
-                            None => {
-                                " · "
-                                form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
-                                     style="display: inline;" {
-                                    button type="submit"
-                                           title=(tr(
-                                               lang,
-                                               "Mark this alert acknowledged. Doesn't clear or fix the underlying condition — just records 'I've seen it'. The alert row stays in the feed (with an acked-timestamp) until the condition resolves.",
-                                               "Отметить алерт принятым. Не очищает и не чинит условие — просто фиксирует «я это видел». Строка остаётся в ленте (с меткой времени принятия) пока условие не уйдёт.",
-                                           ))
-                                           class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                        (t(lang, K::BtnAck))
-                                    }
-                                }
-                            }
-                        }
-                        // What-to-do hint — rendered only while the
-                        // alert is OPEN (an acked row is history; the
-                        // operator already decided). Suppressed inside
-                        // the collapsed spam group, which shows the
-                        // hint once at group level instead.
-                        @if with_hint && a.acked_at.is_none() {
-                            @if let Some(h) = &r_hint {
-                                span style="display: block; font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 2px;" {
-                                    "→ " (h)
-                                }
-                            }
-                        }
-                    }
-                }
-    }
-}
-
-/// Map alert severity string to an `ed-time-row__a--*` modifier class
-/// matching what `audit_timeline_grouped` uses. Keeps colour-coding
-/// consistent across the audit + alerts feeds.
-fn severity_class(s: &str) -> &'static str {
-    match s {
-        "critical" => "fire",
-        "warning" => "warn",
-        "info" => "info",
-        _ => "info",
-    }
 }
 
 /// Render the «GeoIP — IP enrichment» section on Settings.
@@ -12290,7 +12199,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
     // «Never run».
     let last_self_test = state
         .inv
-        .recent_audit_paginated(1, 0, None, Some("backup.self_test"))
+        .recent_audit_paginated(1, 0, None, Some("backup.self_test"), None)
         .await
         .ok()
         .and_then(|rows| rows.into_iter().next());
@@ -19250,67 +19159,5 @@ mod csv_tests {
         // Plain fields stay untouched.
         assert_eq!(csv_field("user.grant"), "user.grant");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod alert_explainer_policy_tests {
-    use super::alert_explainer;
-    use crate::i18n::Locale;
-
-    /// Operator-action-policy (CLAUDE.md HARD rule): the explainer copy
-    /// rendered into the operator's browser must NOT tell them to run
-    /// `ssh` / `systemctl` / `cat` / `truncate` *on the node*. The
-    /// product surface for remediation is the server page (redeploy) or
-    /// the hoster console — never a shell instruction. Mirrors the
-    /// contract-pin idiom of `classify_ssh_failure_recognises_permission_denied`.
-    ///
-    /// Every alert kind handled by `alert_explainer`, both locales.
-    const ALL_KINDS: &[&str] = &[
-        "sub_access.suspicious_local_ip",
-        "sub_access.suspicious_local_ip:alice", // per-user suffix path
-        "server.singbox.down",
-        "server.singbox.up",
-        "server.fail2ban.down",
-        "server.fail2ban.up",
-        "server.fail2ban.banned_self",
-        "server.disk.pressure",
-        "server.disk.recovered",
-        "server.mem.pressure",
-        "server.mem.recovered",
-        "server.singbox.log.too_big",
-        "server.unreachable",
-        "server.fingerprint.drift",
-    ];
-
-    /// Substrings that signal a shell instruction the operator is told
-    /// to run *themselves*. Spaced so we don't false-positive on prose
-    /// (e.g. `fail2ban-client unban` via the hoster console is allowed —
-    /// it's a recovery step, not a "ssh in and run this" instruction).
-    const FORBIDDEN: &[&str] = &["systemctl ", "truncate ", " cat ", "ssh "];
-
-    #[test]
-    fn alert_explainer_copy_has_no_operator_shell_instructions() {
-        for &kind in ALL_KINDS {
-            for lang in [Locale::En, Locale::Ru] {
-                let (title, hint) = alert_explainer(kind, lang);
-                let blob = format!("{title}\n{}", hint.unwrap_or(""));
-                for &needle in FORBIDDEN {
-                    assert!(
-                        !blob.contains(needle),
-                        "kind={kind} lang={lang:?} leaks operator shell instruction {needle:?}: {blob}"
-                    );
-                }
-                // Spot-pin the two rewritten kinds say the compliant thing.
-                if kind == "server.fail2ban.down" {
-                    assert!(
-                        blob.to_lowercase().contains("redeploy")
-                            || blob.to_lowercase().contains("передеплой"),
-                        "fail2ban.down must point at redeploy, got: {blob}"
-                    );
-                }
-            }
-        }
     }
 }

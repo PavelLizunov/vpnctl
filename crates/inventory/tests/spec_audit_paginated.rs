@@ -49,7 +49,10 @@ async fn no_filters_returns_all_rows_newest_first() {
     let inv = open(&dir).await;
     seed_mixed(&inv).await;
 
-    let rows = inv.recent_audit_paginated(10, 0, None, None).await.unwrap();
+    let rows = inv
+        .recent_audit_paginated(10, 0, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 5, "rule 1: limit=10 > 5 → all 5 rows");
     let actions: Vec<_> = rows.iter().map(|r| r.action.as_str()).collect();
     assert_eq!(
@@ -80,17 +83,23 @@ async fn limit_and_offset_slice_window() {
     inv.audit("admin", "b", None, None).await.unwrap();
     inv.audit("admin", "c", None, None).await.unwrap();
 
-    let p1 = inv.recent_audit_paginated(2, 0, None, None).await.unwrap();
+    let p1 = inv
+        .recent_audit_paginated(2, 0, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(p1.len(), 2, "rule 2: limit=2 caps to 2");
     assert_eq!(p1[0].action, "c", "rule 2: page1[0]=newest");
     assert_eq!(p1[1].action, "b", "rule 2: page1[1]=2nd-newest");
 
-    let p2 = inv.recent_audit_paginated(2, 2, None, None).await.unwrap();
+    let p2 = inv
+        .recent_audit_paginated(2, 2, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(p2.len(), 1, "rule 2: only 1 row left after offset=2");
     assert_eq!(p2[0].action, "a", "rule 2: page2 = oldest 'a'");
 
     let past = inv
-        .recent_audit_paginated(100, 10, None, None)
+        .recent_audit_paginated(100, 10, None, None, None)
         .await
         .unwrap();
     assert!(past.is_empty(), "rule 2: offset past end → empty Vec");
@@ -104,7 +113,7 @@ async fn actor_filter_is_exact_match_not_like() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, Some("admin"), None)
+        .recent_audit_paginated(50, 0, Some("admin"), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -129,7 +138,7 @@ async fn action_prefix_matches_only_starting_with_prefix() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, None, Some("user."))
+        .recent_audit_paginated(50, 0, None, Some("user."), None)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "rule 4: 3 user.* rows expected");
@@ -154,7 +163,7 @@ async fn combined_filters_intersect() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, Some("admin"), Some("user."))
+        .recent_audit_paginated(50, 0, Some("admin"), Some("user."), None)
         .await
         .unwrap();
     assert_eq!(
@@ -186,7 +195,7 @@ async fn empty_action_prefix_matches_all_rows() {
     seed_mixed(&inv).await;
 
     let rows = inv
-        .recent_audit_paginated(50, 0, None, Some(""))
+        .recent_audit_paginated(50, 0, None, Some(""), None)
         .await
         .unwrap();
     assert_eq!(
@@ -211,7 +220,7 @@ async fn empty_table_with_filters_returns_empty_ok() {
     ];
     for (actor, prefix) in combos {
         let rows = inv
-            .recent_audit_paginated(10, 0, *actor, *prefix)
+            .recent_audit_paginated(10, 0, *actor, *prefix, None)
             .await
             .unwrap();
         assert!(
@@ -231,7 +240,10 @@ async fn limit_zero_returns_empty_vec() {
     let inv = open(&dir).await;
     seed_mixed(&inv).await;
 
-    let rows = inv.recent_audit_paginated(0, 0, None, None).await.unwrap();
+    let rows = inv
+        .recent_audit_paginated(0, 0, None, None, None)
+        .await
+        .unwrap();
     assert!(
         rows.is_empty(),
         "rule 8: limit=0 MUST return empty Vec, got {}",

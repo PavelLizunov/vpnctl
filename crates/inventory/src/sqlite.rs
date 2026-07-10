@@ -2891,6 +2891,7 @@ impl SqliteInventory {
         offset: i64,
         actor_filter: Option<&str>,
         action_prefix: Option<&str>,
+        target_contains: Option<&str>,
     ) -> Result<Vec<AuditEntry>> {
         // Build the WHERE clause incrementally. SQLite uses positional
         // `?` placeholders so we don't number them — the bind() calls
@@ -2908,6 +2909,14 @@ impl SqliteInventory {
                 "action LIKE ? ESCAPE '\\'"
             } else {
                 "AND action LIKE ? ESCAPE '\\'"
+            });
+        }
+        if target_contains.is_some() {
+            // v2 5b — substring match on the target column.
+            where_parts.push(if where_parts.is_empty() {
+                "target LIKE ? ESCAPE '\\'"
+            } else {
+                "AND target LIKE ? ESCAPE '\\'"
             });
         }
         let where_clause = if where_parts.is_empty() {
@@ -2935,9 +2944,58 @@ impl SqliteInventory {
             // Pairs with the `ESCAPE '\\'` clause above.
             q = q.bind(format!("{}%", escape_like(p)));
         }
+        if let Some(t) = target_contains {
+            q = q.bind(format!("%{}%", escape_like(t)));
+        }
         q = q.bind(limit).bind(offset);
         let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    /// v2 5b — «N events on file · M match filter» header counts. Same
+    /// WHERE semantics as [`Self::recent_audit_paginated`].
+    pub async fn audit_counts(
+        &self,
+        actor_filter: Option<&str>,
+        action_prefix: Option<&str>,
+        target_contains: Option<&str>,
+    ) -> Result<(u64, u64)> {
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await?;
+        let mut where_parts: Vec<&str> = Vec::with_capacity(3);
+        if actor_filter.is_some() {
+            where_parts.push("actor = ?");
+        }
+        if action_prefix.is_some() {
+            where_parts.push("action LIKE ? ESCAPE '\\'");
+        }
+        if target_contains.is_some() {
+            where_parts.push("target LIKE ? ESCAPE '\\'");
+        }
+        let matched = if where_parts.is_empty() {
+            total.0
+        } else {
+            let sql = format!(
+                "SELECT COUNT(*) FROM audit_log WHERE {}",
+                where_parts.join(" AND ")
+            );
+            let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+            if let Some(a) = actor_filter {
+                q = q.bind(a.to_string());
+            }
+            if let Some(pfx) = action_prefix {
+                q = q.bind(format!("{}%", escape_like(pfx)));
+            }
+            if let Some(t) = target_contains {
+                q = q.bind(format!("%{}%", escape_like(t)));
+            }
+            q.fetch_one(&self.pool).await?.0
+        };
+        Ok((
+            u64::try_from(total.0).unwrap_or(0),
+            u64::try_from(matched).unwrap_or(0),
+        ))
     }
 
     pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>> {

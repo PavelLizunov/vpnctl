@@ -3937,12 +3937,8 @@ async fn admin_alerts_empty_state_renders_with_copy_contract() {
     // up here. Catches drift on either the «unreachable hosts»
     // or «locked myself out» substring.
     assert!(
-        html.contains("unreachable hosts"),
-        "deck must mention the new server.unreachable detector"
-    );
-    assert!(
-        html.contains("locked myself out"),
-        "deck must mention the new fail2ban.banned_self detector"
+        html.contains("health monitor") && html.contains("sub-access analyzer"),
+        "headrow tooltip must explain both alert sources (v2 5a)"
     );
 }
 
@@ -12049,11 +12045,11 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
         "audit H1 must read 'каждое изменение в базе'"
     );
 
-    // Alerts page
+    // Alerts page (v2 5a — dense headrow)
     let h = fetch("/admin/alerts").await;
     assert!(
-        h.contains("ругается"),
-        "alerts H1 must read 'на что homelab ругается'"
+        h.contains("открытых алертов"),
+        "alerts H1 must read 'N открытых алертов' under ru"
     );
 
     // Settings page
@@ -14259,36 +14255,29 @@ async fn alerts_page_orders_titles_hints_and_collapses_spam() {
     }
     let html = fetch_html(router(st), "/admin/alerts").await;
 
-    // Severity ordering: critical title appears before the info title.
-    // Titles are the localized render (`alert_text::render_alert`), not
-    // the old explainer copy.
-    let crit_pos = html
-        .find("sing-box down")
-        .expect("critical localized title must render");
-    let info_pos = html
-        .find("fail2ban recovered")
-        .expect("info row must render");
+    // v2 5a — family grouping: the node/fleet section renders the
+    // localized titles (alert_text::render_alert), the sub_access
+    // section carries the spam cluster.
     assert!(
-        crit_pos < info_pos,
-        "open critical must render above open info (severity rank, not age)"
+        html.contains("sing-box down"),
+        "critical localized title must render"
+    );
+    assert!(html.contains("fail2ban recovered"), "info row must render");
+    assert!(
+        html.contains("sub_access · 3"),
+        "sub_access family section must count its 3 rows"
     );
     // What-to-do hint for the open critical — the localized render action.
     assert!(
         html.contains("reapplies the config"),
         "open critical must carry its localized what-to-do hint"
     );
-    // Spam collapse: <details> group with the count, individual rows inside.
+    // v2 5a — the family grouping replaced the <details> collapse:
+    // each suspicious row stays a first-class table row inside the
+    // sub_access section, subject linked.
     assert!(
-        html.contains("<details"),
-        "3+ suspicious rows must collapse"
-    );
-    assert!(
-        html.contains("3 ×") || html.contains("3 &#215;"),
-        "collapsed group must show the row count"
-    );
-    assert!(
-        html.contains("User ua") && html.contains("User uc"),
-        "per-user rows must stay reachable inside the group (localized body carries the user id)"
+        html.contains(r#"href="/admin/users/ua""#) && html.contains(r#"href="/admin/users/uc""#),
+        "per-user rows must link their subjects inside the sub_access section"
     );
 }
 
