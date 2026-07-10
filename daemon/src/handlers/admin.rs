@@ -8154,6 +8154,18 @@ pub(crate) async fn boosty_page(
             }
         }
 
+        // ── Paid-only note: free followers the gate excluded ────
+        @if let Some(r) = report {
+            @if r.excluded_unpaid > 0 {
+                p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 10px 0 0;" {
+                    (r.excluded_unpaid) " "
+                    (tr(lang,
+                        "active free-tier follower(s) excluded — VPN is for paid levels only.",
+                        "активных бесплатных подписчиков исключены — VPN только для платных уровней."))
+                }
+            }
+        }
+
         // ── Actionable: new subscribers to link ─────────────────
         @if let Some(r) = report {
             @if !r.new_subscribers.is_empty() {
