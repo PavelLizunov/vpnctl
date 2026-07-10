@@ -2915,7 +2915,7 @@ async fn admin_user_detail_track1_empty_state_renders_nudge() {
         "v2 geo-log eyebrow missing"
     );
     assert!(
-        html.contains("no fetches in 30d"),
+        html.contains("no real-client fetches in 30d"),
         "no-data verdict note missing on a fresh user"
     );
     assert!(
@@ -3020,7 +3020,7 @@ async fn admin_user_detail_track1_does_not_leak_other_users_access() {
     let html = fetch_html(router(s), "/admin/users/u1/activity").await;
     // u1 has no fetches — the v2 verdict tile says so.
     assert!(
-        html.contains("no fetches in 30d"),
+        html.contains("no real-client fetches in 30d"),
         "u1 should show the no-data verdict note"
     );
     // u0's row must NOT appear on u1's page.
@@ -18045,9 +18045,23 @@ async fn v2_user_activity_renders_tiles_and_geo_log() {
         .unwrap();
     let html = fetch_html(router(s), "/admin/users/u0/activity").await;
     assert!(html.contains("sharing verdict"), "verdict tile missing");
+    // TT-3 — the distinct-IP tile is labelled "client IPs · 30d" and
+    // counts only real client IPs (proxy/reserved excluded), matching the
+    // verdict + Source-IP origins.
     assert!(
-        html.contains("distinct IPs · 30d") && html.contains("sub fetches · 30d"),
+        html.contains("client IPs · 30d") && html.contains("sub fetches · 30d"),
         "count tiles missing"
+    );
+    // TT-3 — log scope caption describes the log's own scope (all sources,
+    // incl. proxy-masked + egress) so it reads as a deliberately-different
+    // view from the real-client «client IPs» tile.
+    assert!(
+        html.contains(
+            "includes proxy-masked and VPN-egress fetches the «client IPs» tile excludes"
+        ) || html.contains(
+            "включая proxy-masked и VPN-egress обращения, которые плитка «клиентских IP» исключает"
+        ),
+        "log scope caption missing"
     );
     assert!(
         html.contains("Sub-access log · GeoIP-resolved"),
