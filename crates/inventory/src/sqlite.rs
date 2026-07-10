@@ -3500,26 +3500,44 @@ impl SqliteInventory {
         days: u32,
     ) -> Result<SubAccessAggregates> {
         let cutoff = format!("-{days} days");
-        // One query returns 8 scalars. Wraps NULL aggregates in
-        // sensible defaults (zero / None) via the conversion below.
-        let row = sqlx::query(
+        // TT-3 — reconcile the distinct-client tile with the sharing
+        // verdict + Source-IP origins, which all count only REAL client
+        // IPs. `distinct_ips` AND its sub-label dims `distinct_countries`
+        // / `distinct_asns` all apply `real_client_ip_predicate` so the
+        // three numbers are drawn from ONE population. Gating only
+        // `distinct_ips` self-contradicts: `real` excludes not just
+        // RFC1918 (NULL geo) but also VPN-server addresses + the control
+        // egress `83.97.108.34` — PUBLIC IPs that DO carry geo — so an
+        // ip-gated / geo-ungated tile could read "0 client IPs · 30d"
+        // over "1 ASN · 1 country" for a user whose only rows are that
+        // control egress. `real` is a hardcoded range predicate (no user
+        // input), safe to interpolate.
+        //
+        // `last_seen`/`first_seen` stay UNFILTERED (MAX/MIN over every
+        // row): the tile is labelled "last fetch", and an egress pull
+        // (client refreshing over its own tunnel) is a genuine fetch —
+        // filtering it would show a staler time and desync last_seen
+        // from the unfiltered first_seen. Recency ≠ distinct-client.
+        let real = real_client_ip_predicate("ip");
+        let sql = format!(
             "SELECT
                 COUNT(*) FILTER (WHERE is_vpn_egress = 0)                    AS total_rows,
                 COUNT(*) FILTER (WHERE is_vpn_egress = 1)                    AS egress_rows,
-                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 THEN ip END)      AS distinct_ips,
-                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND geo_country IS NOT NULL THEN geo_country END) AS distinct_countries,
-                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND geo_asn IS NOT NULL THEN geo_asn END)         AS distinct_asns,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND ({real}) THEN ip END) AS distinct_ips,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND ({real}) AND geo_country IS NOT NULL THEN geo_country END) AS distinct_countries,
+                COUNT(DISTINCT CASE WHEN is_vpn_egress = 0 AND ({real}) AND geo_asn IS NOT NULL THEN geo_asn END)         AS distinct_asns,
                 COALESCE(SUM(CASE WHEN is_vpn_egress = 0 THEN bytes END), 0) AS total_bytes,
                 MAX(ts)                                                      AS last_seen,
                 MIN(ts)                                                      AS first_seen
              FROM sub_access_log
              WHERE user_id = ?1
-               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
-        )
-        .bind(&user_id.0)
-        .bind(&cutoff)
-        .fetch_one(&self.pool)
-        .await?;
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)"
+        );
+        let row = sqlx::query(&sql)
+            .bind(&user_id.0)
+            .bind(&cutoff)
+            .fetch_one(&self.pool)
+            .await?;
 
         let total_rows: i64 = row.try_get("total_rows")?;
         let egress_rows: i64 = row.try_get("egress_rows")?;

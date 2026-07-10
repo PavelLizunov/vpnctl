@@ -729,6 +729,111 @@ async fn phase4a_sub_access_aggregates_distinguishes_real_vs_egress_and_distinct
     assert!(agg.first_seen.is_some());
 }
 
+/// TT-3 — `distinct_ips` must count only REAL client IPs, matching the
+/// sharing verdict + Source-IP origins. A proxy-masked pull (reserved /
+/// private source, but NOT egress) stays a real pull for `total_rows`
+/// and drives `last_seen`, yet adds NO distinct client. Regression guard
+/// for the `.210` front-proxy case where every July fetch collapsed to
+/// one private IP and the tile read "1 distinct" beside a "shared"
+/// verdict scored over the real June clients.
+#[tokio::test]
+async fn tt3_aggregates_distinct_ips_excludes_proxy_masked_but_keeps_row_and_recency() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("brat")).await.unwrap();
+
+    // Two real public clients …
+    for ip in ["8.8.8.8", "1.1.1.1"] {
+        inv.log_sub_access(&UserId("brat".into()), ip, None, 200, 100)
+            .await
+            .unwrap();
+    }
+    // … then two proxy-masked pulls (front-proxy .210 + one 10.x), both
+    // is_vpn_egress=0. These are the freshest rows.
+    for ip in ["192.168.0.210", "10.0.0.5"] {
+        inv.log_sub_access(&UserId("brat".into()), ip, None, 200, 100)
+            .await
+            .unwrap();
+    }
+
+    let agg = inv
+        .sub_access_aggregates_for_user(&UserId("brat".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(agg.total_rows, 4, "all 4 non-egress pulls count as fetches");
+    assert_eq!(
+        agg.distinct_ips, 2,
+        "only the two public clients are distinct; .210 + 10.x are proxy-masked"
+    );
+    // last_seen is unfiltered (MAX over every row) — a proxy-masked pull
+    // is still a fetch and must drive the "last fetch" tile.
+    assert!(agg.last_seen.is_some());
+}
+
+/// TT-3 (re-audit) — the tile's sub-label dims `distinct_countries` /
+/// `distinct_asns` must be gated on the SAME real-client predicate as
+/// `distinct_ips`, else the tile self-contradicts. `real` excludes not
+/// just RFC1918 (which carries NULL geo anyway) but also the control
+/// egress `83.97.108.34` — a PUBLIC IP that DOES resolve to a country /
+/// ASN. A user whose only non-egress row is that control egress must
+/// read "0 client IPs" over "0 ASN · 0 country", never "0 · 1 · 1".
+#[tokio::test]
+async fn tt3_distinct_country_asn_gated_on_real_client_like_distinct_ips() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("brat")).await.unwrap();
+
+    // One real public client with geo …
+    inv.log_sub_access_rich(
+        &UserId("brat".into()),
+        "8.8.8.8",
+        None,
+        200,
+        100,
+        None,
+        None,
+        None,
+        Some("US"),
+        Some("AS15169 Google"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // … and the control egress (public, geo-resolved, NOT a server addr →
+    // is_vpn_egress stays 0) which `real` excludes.
+    inv.log_sub_access_rich(
+        &UserId("brat".into()),
+        "83.97.108.34",
+        None,
+        200,
+        100,
+        None,
+        None,
+        None,
+        Some("NL"),
+        Some("AS0000 Homelab"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let agg = inv
+        .sub_access_aggregates_for_user(&UserId("brat".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(agg.distinct_ips, 1, "only 8.8.8.8; control egress excluded");
+    assert_eq!(
+        agg.distinct_countries, 1,
+        "US only — the control egress's NL must NOT inflate the sub-label"
+    );
+    assert_eq!(
+        agg.distinct_asns, 1,
+        "AS15169 only — the control egress's ASN must NOT inflate the sub-label"
+    );
+}
+
 #[tokio::test]
 async fn phase4a_sub_access_aggregates_for_empty_user_returns_zeroes_and_none_timestamps() {
     let dir = TempDir::new().unwrap();

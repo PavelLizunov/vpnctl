@@ -4026,8 +4026,21 @@ async fn user_detail_render(
                 if let Some(info) = state.geo.lookup(ip) {
                     let country = info.country_iso.clone();
                     let asn = info.asn_label();
+                    // Merge FIELD-WISE, not whole-tuple: the country-MMDB
+                    // and ASN-MMDB have independent coverage, so lookup()
+                    // can resolve one field and leave the other None. A
+                    // whole-tuple insert would clobber a join-provided
+                    // ASN whenever only the country resolved (or vice
+                    // versa). MMDB wins per-field where it resolves;
+                    // join-provided fields it can't resolve survive.
                     if country.is_some() || asn.is_some() {
-                        map.insert(ip_str.clone(), (country, asn));
+                        let e = map.entry(ip_str.clone()).or_insert((None, None));
+                        if country.is_some() {
+                            e.0 = country;
+                        }
+                        if asn.is_some() {
+                            e.1 = asn;
+                        }
                     }
                 }
             }
@@ -5352,13 +5365,13 @@ async fn user_detail_render(
                 " "
                 (crate::i18n::tr(
                     lang,
-                    "Those rows carry the proxy's private address, so their country/ISP below is blank and the sharing signal can't see them. Fix: add the proxy IP to ",
-                    "Эти строки несут приватный адрес прокси, поэтому страна/ISP ниже пустые, а сигнал шаринга их не видит. Фикс: добавь IP прокси в ",
+                    "Those rows carry the proxy's private address, so their country/ISP below is blank and the sharing signal can't see them. This is a reverse-proxy trust gap the daemon can't close itself — the front proxy needs to be trusted in ",
+                    "Эти строки несут приватный адрес прокси, поэтому страна/ISP ниже пустые, а сигнал шаринга их не видит. Это разрыв доверия к reverse-proxy, который демон не может закрыть сам — фронт-прокси должен быть доверенным в ",
                 ))
                 span.ed-mono { "VPNCTLD_TRUSTED_PROXIES" }
-                (crate::i18n::tr(lang, " + set Caddy ", " + в Caddy "))
+                (crate::i18n::tr(lang, " and forward the real client IP via Caddy ", " и передавать реальный клиентский IP через Caddy "))
                 span.ed-mono { "header_up X-Real-IP {remote_host}" }
-                (crate::i18n::tr(lang, " and restart vpnctld.", " и перезапусти vpnctld."))
+                "."
                 @if let (Some(mn), Some(mx)) = (&pm.masked_min_ts, &pm.masked_max_ts) {
                     @if let (Ok(a), Ok(b)) = (chrono::DateTime::parse_from_rfc3339(mn), chrono::DateTime::parse_from_rfc3339(mx)) {
                         " " span style="color: var(--mute);" {
@@ -5384,7 +5397,18 @@ async fn user_detail_render(
                 None => (
                     crate::i18n::tr(lang, "no data", "нет данных"),
                     "var(--mute)",
-                    crate::i18n::tr(lang, "no fetches in 30d", "нет обращений за 30д").to_string(),
+                    // Re-audit: the scorer only sees REAL-client rows
+                    // (sharing_signals gates on real_client_ip_predicate),
+                    // so a fully proxy-masked user is absent from it while
+                    // «sub fetches · 30d» (ungated) still shows N. Say
+                    // "no real-client fetches" so the note never
+                    // contradicts a nonzero fetch tile.
+                    crate::i18n::tr(
+                        lang,
+                        "no real-client fetches in 30d",
+                        "нет обращений от реальных клиентов за 30д",
+                    )
+                    .to_string(),
                 ),
             };
             div.ed-status-tile {
@@ -5392,15 +5416,20 @@ async fn user_detail_render(
                     (crate::i18n::tr(lang, "sharing verdict", "вердикт шаринга")) " "
                     span.ed-tip title=(crate::i18n::tr(
                         lang,
-                        "Heuristic over the 30-day access window. Weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity.",
-                        "Эвристика по 30-дневному окну обращений. Одновременные клиентские IP + невозможные перемещения весят сильно больше простого разнообразия сетей.",
+                        "Heuristic over the 30-day window. Weights SIMULTANEOUS VPN-connection networks (/24s, from live clash data) + impossible travel between fetches, far above sub-fetch IP diversity — so it can differ from the «client IPs» tile, which counts sub-fetch source IPs.",
+                        "Эвристика по 30-дневному окну. Одновременные сети VPN-подключений (/24, из живых данных clash) + невозможные перемещения между обращениями весят намного больше, чем разнообразие source-IP обращений — поэтому может отличаться от плитки «клиентских IP», которая считает source-IP обращений.",
                     )) { "ⓘ" }
                 }
                 div.ed-status-tile__v style=(format!("color: {verdict_color}; font-size: 14px;")) { (verdict_txt) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" { (score_note) }
             }
             div.ed-status-tile {
-                div.ed-status-tile__k { (crate::i18n::tr(lang, "distinct IPs · 30d", "уникальных IP · 30д")) }
+                div.ed-status-tile__k
+                    title=(crate::i18n::tr(
+                        lang,
+                        "Distinct REAL client source IPs of sub-fetches over 30 days — private/reserved/proxy addresses excluded, the same real-client basis the «Subscription origins» section below uses. Proxy-masked fetches still count toward «sub fetches» but don't add a distinct client here. This is fetch-side diversity, not the sharing verdict.",
+                        "Уникальные РЕАЛЬНЫЕ клиентские source-IP обращений за 30 дней — приватные/зарезервированные/прокси-адреса исключены, та же основа реальных клиентов, что в разделе «Источники подписки» ниже. Proxy-masked обращения считаются в «обращениях», но не добавляют уникального клиента здесь. Это разнообразие со стороны обращений, а не вердикт шаринга.",
+                    )) { (crate::i18n::tr(lang, "client IPs · 30d", "клиентских IP · 30д")) }
                 div.ed-status-tile__v { (access_aggregates.distinct_ips) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
                     (crate::i18n::n_of(lang, access_aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
@@ -5432,6 +5461,17 @@ async fn user_detail_render(
                 "Every fetch of the config URL, resolved against the GeoIP DBs at request time. A local/VPN-range source usually means the client refreshed over its own tunnel.",
                 "Каждое обращение к config-URL, обогащённое GeoIP на момент запроса. Локальный/VPN-диапазон обычно значит, что клиент обновлялся через собственный туннель.",
             )) { "ⓘ" }
+        }
+        // TT-3 — the log is newest-first and UNBOUNDED (all rows, all
+        // sources), while the tiles above are a 30d, real-client-only
+        // slice. Say so, so «N client IPs» over a visibly-longer log
+        // reads as two intentionally-different views, not a bug.
+        p style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: 4px 0 0;" {
+            (crate::i18n::tr(
+                lang,
+                "newest first · every row, all sources — includes proxy-masked and VPN-egress fetches the «client IPs» tile excludes",
+                "новые сверху · все строки, все источники — включая proxy-masked и VPN-egress обращения, которые плитка «клиентских IP» исключает",
+            ))
         }
         @if recent_log.is_empty() {
             p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
