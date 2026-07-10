@@ -2513,7 +2513,7 @@ pub(crate) async fn monitoring(
                         None => (tr(lang, "missing", "нет")),
                     }
                     " · "
-                    a href="/admin/settings#geoip" style="color: var(--acc);" {
+                    a href="/admin/settings/system#geoip" style="color: var(--acc);" {
                         (tr(lang, "update in Settings →", "обновить в Настройках →"))
                     }
                 }
@@ -10155,56 +10155,130 @@ pub(crate) async fn user_delete_confirm(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Result<Markup, Response> {
+    use crate::i18n::tr;
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let uid = vpnctl_core::UserId(user_id_str.clone());
-    match state.inv.get_user(&uid).await {
-        Ok(Some(_)) => {}
+    let user = match state.inv.get_user(&uid).await {
+        Ok(Some(u)) => u,
         Ok(None) => return Err(user_not_found(&user_id_str)),
         Err(e) => return Err(internal_error(anyhow::Error::new(e))),
-    }
+    };
+    // v2 6c — the destroyed-scope table names the grants so the
+    // operator sees exactly which nodes get a deploy queued.
+    let granted: Vec<String> = state
+        .inv
+        .servers_for_user(&uid)
+        .await
+        .map(|v| v.into_iter().map(|s| s.id.0).collect())
+        .unwrap_or_default();
+    let uid_enc = path_segment_encode(&user_id_str);
     let body = html! {
-        div.ed-art-eyebrow {
-            a href=(format!("/admin/users/{}", path_segment_encode(&user_id_str)))
-              style="color: var(--mute); text-decoration: none;" { "← back to user" }
-            "  ·  delete"
-        }
-        h1.ed-art-h1 {
-            "delete "
-            em { (user_id_str) }
-            " — really?"
-        }
-        p.ed-art-deck {
-            "This drops the user from the inventory. "
-            b { "Grants" }
-            " (the user × server bridge) cascade-delete via FK. "
-            b { "Subscription-access log rows" }
-            " for this user SURVIVE with NULL user_id (per migration 0004) "
-            "so post-mortem forensics still works. "
-            b { "Persistent bans" }
-            " keyed by IP also survive (they're keyed by IP, not user)."
-        }
-        p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-            "Type the user-id "
-            span.ed-mono { (user_id_str) }
-            " in the box below to confirm. The id has to match exactly — copy/paste counts."
-        }
-        form method="post"
-             action=(format!("/admin/users/{}/delete", path_segment_encode(&user_id_str)))
-             style="display: flex; gap: 10px; align-items: baseline; padding: 14px 16px; border: 1px solid var(--rule); margin: 16px 0;" {
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                "confirm id"
+        nav.ed-crumb {
+            a href=(format!("/admin/users/{uid_enc}")) style="color: var(--mute); text-decoration: none;" {
+                "← " (tr(lang, "back to ", "назад к ")) (user_id_str)
             }
-            input type="text" name="confirm" required="required"
-                  autocomplete="off"
-                  style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-            button type="submit"
-                   title=(format!("Delete user {} permanently", user_id_str))
-                   class="ed-abtn ed-abtn--danger-solid" {
-                "delete forever"
+        }
+        div.ed-headrow {
+            h1.ed-sumbar__h { (tr(lang, "Delete ", "Удалить ")) em { (user_id_str) } "?" }
+        }
+        // Point-of-no-return banner (red family, not warm).
+        div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 9px 12px; margin: 10px 0 16px; font-family: var(--mono); font-size: 11px; color: var(--red);" {
+            "✗ " b { (tr(lang, "Point of no return.", "Точка невозврата.")) }
+            (tr(
+                lang,
+                " This removes the user, all keys, all grants — and queues a deploy on each granted server so the node configs drop the entries.",
+                " Удаляет пользователя, все ключи, все гранты — и ставит деплой на каждый выданный сервер, чтобы конфиги нод забыли записи.",
+            ))
+        }
+        div style="display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 20px; align-items: start;" {
+            div {
+                div.ed-art-eyebrow { (tr(lang, "What gets destroyed", "Что будет уничтожено")) }
+                table.ed-feed style="margin-top: 8px;" {
+                    tbody {
+                        tr {
+                            td style="width: 20px; color: var(--red);" { "−" }
+                            td { "uuid " span.ed-grid__mut { (user.uuid) } }
+                        }
+                        tr {
+                            td style="color: var(--red);" { "−" }
+                            td {
+                                (tr(lang, "keys: ", "ключи: "))
+                                @let keys = {
+                                    let mut v: Vec<&str> = Vec::new();
+                                    if user.tuic_password.is_some() { v.push("tuic password"); }
+                                    if user.wireguard_pubkey.is_some() { v.push("wg keypair"); }
+                                    if user.sub_token.is_some() { v.push("sub-token"); }
+                                    v
+                                };
+                                @if keys.is_empty() { span.ed-grid__mut { "—" } }
+                                @else { (keys.join(" · ")) }
+                            }
+                        }
+                        tr {
+                            td style="color: var(--red);" { "−" }
+                            td {
+                                (granted.len()) " " (tr(lang, "grants", "грантов"))
+                                @if !granted.is_empty() {
+                                    ": " (granted.join(", "))
+                                    " " span.ed-grid__mut { "· " (tr(lang, "deploy queued on each", "деплой встанет на каждый")) }
+                                }
+                            }
+                        }
+                        tr {
+                            td style="color: var(--red);" { "−" }
+                            td {
+                                (tr(lang, "subscription URL", "URL подписки"))
+                                " " span.ed-grid__mut { "· " (tr(lang, "the mobile app gets 404 on next poll", "приложение получит 404 при следующем опросе")) }
+                            }
+                        }
+                        tr {
+                            td style="color: var(--green);" { "✓" }
+                            td {
+                                b { (tr(lang, "kept: ", "остаётся: ")) }
+                                (tr(
+                                    lang,
+                                    "audit history · 30-day access log (rows survive with NULL user_id) · IP bans",
+                                    "история аудита · 30-дневный лог обращений (строки живут с NULL user_id) · IP-баны",
+                                ))
+                            }
+                        }
+                    }
+                }
             }
-            a href=(format!("/admin/users/{}", path_segment_encode(&user_id_str)))
-              class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                "cancel"
+            div {
+                div.ed-art-eyebrow {
+                    (tr(lang, "Type the id to confirm", "Введи id для подтверждения")) " "
+                    span.ed-tip title=(tr(
+                        lang,
+                        "Same guard as the CLI: the typed value is re-checked server-side; a mismatch submits nothing.",
+                        "Тот же предохранитель, что в CLI: введённое перепроверяется на сервере; несовпадение ничего не отправит.",
+                    )) { "ⓘ" }
+                }
+                form method="post"
+                     action=(format!("/admin/users/{uid_enc}/delete")) {
+                    input type="text" name="confirm" required="required"
+                          autocomplete="off"
+                          placeholder=(user_id_str)
+                          style="width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); margin: 8px 0 10px;";
+                    div style="display: flex; gap: 8px;" {
+                        a href=(format!("/admin/users/{uid_enc}"))
+                          class="ed-abtn ed-abtn--secondary" style="flex: 1; text-align: center;" {
+                            (tr(lang, "cancel — keep the user", "отмена — оставить"))
+                        }
+                        button type="submit"
+                               title=(format!("Delete user {user_id_str} permanently"))
+                               class="ed-abtn ed-abtn--danger-solid" style="flex: 1;" {
+                            (tr(lang, "delete forever", "удалить навсегда"))
+                        }
+                    }
+                }
+                p.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px; margin-top: 8px;" {
+                    (tr(
+                        lang,
+                        "the id has to match exactly — copy/paste counts",
+                        "id должен совпасть точно — копипаста считается",
+                    ))
+                }
             }
         }
     };
@@ -11952,6 +12026,7 @@ fn settings_disaster_recovery_section(
 /// `vpnctl geoip-update` subprocess until the terminal Ok/Error
 /// event closes the connection.
 fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
+    // anchor target for the monitoring page link
     use crate::i18n::tr;
     let dir = std::env::var_os("VPNCTLD_GEOIP_DIR")
         .map(std::path::PathBuf::from)
@@ -11979,7 +12054,7 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
     let asn_meta = describe(&asn);
     let any_loaded = city_meta.is_some() || asn_meta.is_some();
     maud::html! {
-        div.ed-art-eyebrow {
+        div #geoip.ed-art-eyebrow {
             (tr(lang, "GeoIP — IP enrichment", "GeoIP — обогащение IP-адресов"))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
@@ -12226,6 +12301,13 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
     // dropdown. If the listing fails the dropdown shows only the
     // «direct» option (empty Vec) + the rest of Settings still renders.
     let servers_for_proxy_dropdown = state.inv.list_servers().await.unwrap_or_default();
+
+    // v2 6a — one-glance «is the Telegram sink live» flag for the
+    // System facts table (token AND chat id both set).
+    let telegram_configured = matches!(
+        telegram_cfg.as_ref(),
+        Ok(Some(c)) if c.token.is_some() && c.chat_id.is_some()
+    );
 
     let body = html! {
             div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageSettings)) }
@@ -12786,6 +12868,50 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
 
     }
     @if tab == SettingsTab::System {
+            // v2 6a — system facts table: the daemon's moving parts and
+            // their cadence, one glance. Values come from the same env
+            // knobs the pollers read; alert sink state from inventory.
+            @let probe_min = std::env::var("VPNCTLD_NODE_PROBE_INTERVAL_SECS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(600) / 60;
+            @let clash_min = std::env::var("VPNCTLD_POLL_INTERVAL_SECS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(300) / 60;
+            div.ed-art-eyebrow { (crate::i18n::tr(lang, "System", "Система")) }
+            table.ed-feed style="margin: 8px 0 16px;" {
+                tbody {
+                    tr {
+                        td.ed-grid__mut style="width: 160px;" { (crate::i18n::tr(lang, "probe tick", "тик проб")) }
+                        td { b { (probe_min) " " (crate::i18n::tr(lang, "min", "мин")) } }
+                        td.num.ed-grid__mut.ed-grid__sm { "node_probe_poller · VPNCTLD_NODE_PROBE_INTERVAL_SECS" }
+                    }
+                    tr {
+                        td.ed-grid__mut { (crate::i18n::tr(lang, "clash poll", "опрос clash")) }
+                        td { b { (clash_min) " " (crate::i18n::tr(lang, "min", "мин")) } " · " (crate::i18n::tr(lang, "per-node traffic attribution", "атрибуция трафика по нодам")) }
+                        td.num.ed-grid__mut.ed-grid__sm { "clash_poller · VPNCTLD_POLL_INTERVAL_SECS" }
+                    }
+                    tr {
+                        td.ed-grid__mut { (crate::i18n::tr(lang, "alert sink", "канал алертов")) }
+                        td {
+                            "telegram "
+                            @if telegram_configured {
+                                b style="color: var(--green);" { "on" }
+                            } @else {
+                                b.ed-grid__mut { "off" }
+                            }
+                        }
+                        td.num.ed-grid__mut.ed-grid__sm {
+                            a href="/admin/settings/notifications" style="color: var(--acc);" {
+                                (crate::i18n::tr(lang, "configure →", "настроить →"))
+                            }
+                        }
+                    }
+                    tr {
+                        td.ed-grid__mut { (crate::i18n::tr(lang, "rate limit", "rate limit")) }
+                        td.ed-grid__sm { "/sub + /api/v1/app/config · " (crate::i18n::tr(lang, "per-device + non-egress per-IP buckets", "пер-девайс + пер-IP (не-egress) бакеты")) }
+                        td.num.ed-grid__mut.ed-grid__sm { "rate_limit.rs" }
+                    }
+                }
+            }
+
             div.ed-rule {}
             (settings_geoip_section(lang))
 
@@ -13830,124 +13956,72 @@ pub(crate) async fn wizard_step2_stub(
         div.ed-art-eyebrow {
             (crate::i18n::tr(lang, "Add server · step 2 of 2", "Добавить сервер · шаг 2 из 2"))
         }
-        h1.ed-art-h1 {
-            (crate::i18n::tr(lang, "Bootstrapping ", "Bootstrap ")) span.ed-mono { (session.address) }
-        }
-        p.ed-art-deck {
-            (crate::i18n::tr(
+        div.ed-headrow {
+            h1.ed-sumbar__h {
+                (crate::i18n::tr(lang, "Bootstrap ", "Bootstrap ")) em { (crate::i18n::tr(lang, "a fresh node", "свежую ноду")) }
+            }
+            span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "The daemon is SSHing in as ",
-                "Демон заходит по SSH под ",
-            ))
-            span.ed-mono { "root" }
-            // Honest copy (review 2026-06-04): no host lockdown happens
-            // here (fail2ban install ≠ SSH hardening), and the SSE
-            // session is SINGLE-SHOT — a refresh loses the live log
-            // (the bootstrap itself keeps running server-side).
-            (crate::i18n::tr(
-                lang,
-                " (one-time password use), pushing its deploy key, installing fail2ban + ",
-                " (одноразовое использование пароля), закидывает deploy-ключ, ставит fail2ban + ",
-            ))
-            span.ed-mono { "sing-box" }
-            (crate::i18n::tr(
-                lang,
-                " and pushing the rendered config. Every step shows up below as it happens. Don't close or refresh this tab — the live log attaches once; if you lose it, the bootstrap still finishes server-side and the result lands on the server's detail page + the audit timeline.",
-                " и пушит готовый конфиг. Каждый шаг появится ниже по мере выполнения. Не закрывай и не обновляй вкладку — живой лог подключается один раз; если потерял его, bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
-            ))
-        }
-        div id="wizard-status" role="status"
-            style="margin: 18px 0 6px 0; padding: 8px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                "connecting…"
-        }
-        pre id="wizard-log"
-            style="margin: 0 0 18px 0; padding: 14px 18px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); max-height: 480px; overflow-y: auto; white-space: pre-wrap;" {
-            "▸ waiting for the daemon…\n"
-        }
-        div id="wizard-actions" style="display: flex; gap: 12px; align-items: center;" {
-            a href="/admin/servers/new"
-              style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
-                "← start over"
+                "SSHes in with the root password once, installs the deploy key, discards the password, installs kernels, mints secrets, deploys, probes. Don't close this tab — the live log attaches once; the bootstrap finishes server-side either way and the result lands on the server's detail page + audit timeline.",
+                "Заходит по SSH с root-паролем один раз, ставит deploy-ключ, забывает пароль, ставит ядра, чеканит секреты, деплоит, пробит. Не закрывай вкладку — живой лог подключается один раз; bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
+            )) { "ⓘ" }
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (session.address) ":" (session.ssh_port) " · root " (crate::i18n::tr(lang, "· password used once", "· пароль одноразово"))
             }
         }
-        // The EventSource emits `step` / `ok` / `error` named events;
-        // we attach a handler to each and append to the log. On `ok`
-        // we navigate to the success URL; on `error` we leave the
-        // log as-is so the operator can read what went wrong.
-        //
-        // No external JS dep — the whole client is ~30 lines of
-        // hand-written script that any 2026-era browser supports
-        // natively (EventSource is in every browser since IE was
-        // alive). Inline rather than a separate asset because it's
-        // tiny and the rest of the admin UI has no other JS files
-        // to belong to.
-        script {
-            (maud::PreEscaped(r#"
-(function () {
-    var log = document.getElementById('wizard-log');
-    var status = document.getElementById('wizard-status');
-    var actions = document.getElementById('wizard-actions');
-    var es = new EventSource('/admin/servers/new/step-2/sse');
 
-    function append(line, cls) {
-        var span = document.createElement('span');
-        span.textContent = line + '\n';
-        if (cls) { span.className = cls; }
-        log.appendChild(span);
-        log.scrollTop = log.scrollHeight;
-    }
-
-    es.addEventListener('step', function (ev) {
-        try {
-            var d = JSON.parse(ev.data);
-            append('▸ [' + d.phase + '] ' + d.message);
-            status.textContent = d.phase;
-        } catch (e) { append('(unparsable step event: ' + ev.data + ')'); }
-    });
-    es.addEventListener('ok', function (ev) {
-        try {
-            var d = JSON.parse(ev.data);
-            append('✓ done — server ' + d.server_id + ' is live.');
-            status.textContent = 'done';
-            status.style.color = 'var(--ink)';
-            var a = document.createElement('a');
-            a.href = d.redirect;
-            a.textContent = '→ open ' + d.server_id;
-            a.style.cssText = 'font-family: var(--mono); font-size: 12px; color: var(--ink); border: 1px solid var(--ink); padding: 6px 12px; text-decoration: none;';
-            actions.prepend(a);
-            // Auto-redirect after 2s so a passive operator (the most
-            // common case) lands on the detail page without an extra
-            // click. Operator wanting to re-read the log can hit Esc
-            // or click ← start over.
-            setTimeout(function () { window.location.href = d.redirect; }, 2000);
-        } catch (e) { append('(unparsable ok event: ' + ev.data + ')'); }
-        es.close();
-    });
-    es.addEventListener('error', function (ev) {
-        // Browsers fire a generic 'error' event when the connection
-        // closes (including after our last 'ok' or 'error' event).
-        // We only treat it as a real failure if there's a payload.
-        if (ev.data) {
-            try {
-                var d = JSON.parse(ev.data);
-                append('✗ FAILED at [' + d.phase + ']: ' + d.message, 'wizard-err');
-                status.textContent = 'failed at ' + d.phase;
-                status.style.color = 'var(--acc)';
-            } catch (e) { append('(unparsable error event: ' + ev.data + ')'); }
-            es.close();
-        } else if (es.readyState === EventSource.CLOSED) {
-            // Connection ended without a terminal event. This means
-            // the daemon dropped the connection mid-stream (rare —
-            // usually the SSE handler always finishes with `ok` or
-            // `error`). Show a graceful note.
-            status.textContent = 'connection closed';
-        }
-    });
-    es.addEventListener('open', function () {
-        status.textContent = 'streaming…';
-    });
-})();
-"#))
+        div style="display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 12px;" {
+            div {
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "Target", "Цель")) }
+                table.ed-feed style="margin: 8px 0 16px;" {
+                    tbody {
+                        tr { td.ed-grid__mut style="width: 90px;" { "host" } td { (session.address) ":" (session.ssh_port) } }
+                        tr { td.ed-grid__mut { "ssh user" } td { "root · " span.ed-grid__mut { (crate::i18n::tr(lang, "password used once", "пароль одноразово")) } } }
+                        tr { td.ed-grid__mut { "kernels" } td.ed-grid__sm { "sing-box" } }
+                    }
+                }
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "Steps", "Шаги")) }
+                // The checklist lights up as `step` events arrive
+                // (admin.js maps each phase to its row). Phases are the
+                // ones wizard_bootstrap actually emits.
+                table.ed-feed id="wizard-steps" style="margin-top: 8px;" {
+                    tbody {
+                        @let step_row = |phase: &str, label: &str| -> Markup {
+                            html! {
+                                tr data-step-phase=(phase) {
+                                    td.step-mark style="width: 20px; color: var(--mute);" { "•" }
+                                    td { (label) }
+                                }
+                            }
+                        };
+                        (step_row("server", crate::i18n::tr(lang, "ssh + deploy key + harden", "ssh + deploy-ключ + харденинг")))
+                        (step_row("deploy", crate::i18n::tr(lang, "install kernels + mint secrets", "установка ядер + секреты")))
+                        (step_row("apply", crate::i18n::tr(lang, "apply config + start services", "применить конфиг + сервисы")))
+                        (step_row("probe", crate::i18n::tr(lang, "probe ports + pin fingerprint", "проба портов + отпечаток")))
+                        (step_row("done", crate::i18n::tr(lang, "complete", "готово")))
+                    }
+                }
+                div style="margin-top: 12px;" {
+                    a href="/admin/servers/new"
+                      style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
+                        "← " (crate::i18n::tr(lang, "start over", "начать заново"))
+                    }
+                }
+            }
+            div {
+                div.ed-art-eyebrow {
+                    (crate::i18n::tr(lang, "Live log", "Живой лог"))
+                    " " span.ed-grid__mut style="font-family: var(--mono); font-size: 10px;" { "SSE · autoscroll" }
+                }
+                // CSP-safe: admin.js opens the EventSource on load
+                // (data-sse-autostart) — no inline <script>.
+                pre id="wizard-log"
+                    data-sse-autostart="/admin/servers/new/step-2/sse"
+                    data-steps-box="wizard-steps"
+                    style="margin: 8px 0 0; padding: 14px 18px; border: 1px solid var(--rule); background: var(--paper-tint); font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); height: 360px; overflow-y: auto; white-space: pre-wrap;" {
+                    (crate::i18n::tr(lang, "▸ connecting to the daemon…", "▸ подключение к демону…"))
+                }
+            }
         }
     };
     shell("servers", &theme, &accent, lang, body).into_response()

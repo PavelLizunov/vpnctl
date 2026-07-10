@@ -6247,8 +6247,8 @@ async fn admin_monitoring_renders_fleet_health() {
     // GeoIP line renders (files absent in test env → «missing») and
     // points at Settings instead of a state-changing GET.
     assert!(
-        html.contains("/admin/settings#geoip"),
-        "GeoIP line must link to Settings"
+        html.contains("/admin/settings/system#geoip"),
+        "GeoIP line must link to the Settings System tab"
     );
     // The old sub-access analytics are gone.
     assert!(
@@ -6735,9 +6735,11 @@ async fn admin_wizard_submit_happy_path_sets_scoped_cookie_and_redirects() {
 async fn admin_wizard_step2_renders_address_with_valid_session() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    let session_id = s
-        .wizard
-        .insert("vpn-de1.example.org".into(), "secret".into(), 22);
+    let session_id = s.wizard.insert(
+        "vpn-de1.example.org".into(),
+        "r00tpwXYZ-distinct".into(),
+        22,
+    );
     let app = router(s);
 
     let resp = app
@@ -6760,7 +6762,7 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
         "address must echo on step-2"
     );
     assert!(
-        !html.contains("secret"),
+        !html.contains("r00tpwXYZ-distinct"),
         "root password must NEVER appear in step-2 HTML"
     );
     // Step indicator («of 2» — see step-1's copy-contract note).
@@ -6838,7 +6840,7 @@ async fn admin_wizard_step2_rejects_bogus_cookie_400() {
 // ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn admin_wizard_step2_page_attaches_inline_eventsource_to_sse_endpoint() {
+async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let session_id = s.wizard.insert("198.51.100.42".into(), "pw".into(), 22);
@@ -6851,21 +6853,28 @@ async fn admin_wizard_step2_page_attaches_inline_eventsource_to_sse_endpoint() {
     )
     .await;
 
+    // v2 6b — CSP-safe: admin.js opens the EventSource from the
+    // data-sse-autostart attribute (the old inline <script> was blocked
+    // by script-src 'self').
     assert!(
-        html.contains("new EventSource('/admin/servers/new/step-2/sse')"),
-        "step-2 page must wire EventSource to the SSE endpoint"
+        html.contains(r#"data-sse-autostart="/admin/servers/new/step-2/sse""#),
+        "step-2 log pane must carry the autostart SSE URL"
+    );
+    // The old inline EventSource block is gone (CSP-blocked); the
+    // only <script> is the external admin.js the shell always ships.
+    assert!(
+        !html.contains("new EventSource("),
+        "step-2 must not ship an inline EventSource script (CSP-blocked)"
     );
     assert!(
         html.contains("id=\"wizard-log\""),
         "step-2 must have a log pane the SSE handlers append into"
     );
+    // v2 6b — the live steps checklist replaced the status <div>;
+    // admin.js maps each `step` event's phase to a row here.
     assert!(
-        html.contains("id=\"wizard-status\""),
-        "step-2 must have a status indicator the EventSource updates"
-    );
-    assert!(
-        html.contains("addEventListener('step'") && html.contains("addEventListener('ok'"),
-        "EventSource must subscribe to the named 'step' + 'ok' events"
+        html.contains("id=\"wizard-steps\"") && html.contains("data-step-phase="),
+        "step-2 must have the live steps checklist"
     );
     assert!(
         !html.contains(">pw<") && !html.contains("\"pw\""),
