@@ -902,3 +902,44 @@ async fn phase4c_users_for_source_ips_excludes_vpn_egress_rows() {
         "egress-flagged rows must NOT contribute to source-IP correlation"
     );
 }
+
+/// TT-2 — proxy-masked stats separate real-client rows from rows whose
+/// logged IP is a private/reserved/proxy address (the front-proxy
+/// masking), inside the window, egress excluded.
+#[tokio::test]
+async fn proxy_masked_stats_counts_reserved_ip_rows() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("brat")).await.unwrap();
+    // 3 real public + 2 proxy(.210) + 1 other-private, all is_vpn_egress=0.
+    for ip in ["8.8.8.8", "1.1.1.1", "9.9.9.9"] {
+        inv.log_sub_access(&UserId("brat".into()), ip, None, 200, 100)
+            .await
+            .unwrap();
+    }
+    for ip in ["192.168.0.210", "192.168.0.210", "10.0.0.5"] {
+        inv.log_sub_access(&UserId("brat".into()), ip, None, 200, 100)
+            .await
+            .unwrap();
+    }
+
+    let s = inv
+        .sub_access_proxy_masked_stats(&UserId("brat".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(s.window_rows, 6, "all 6 non-egress rows are in the window");
+    assert_eq!(s.masked_rows, 3, "the two .210 + one 10.x are proxy-masked");
+    assert!(s.masked_min_ts.is_some() && s.masked_max_ts.is_some());
+
+    // A user with only real public IPs → zero masked.
+    inv.add_user(&user("clean")).await.unwrap();
+    inv.log_sub_access(&UserId("clean".into()), "203.0.113.7", None, 200, 100)
+        .await
+        .unwrap();
+    let clean = inv
+        .sub_access_proxy_masked_stats(&UserId("clean".into()), 30)
+        .await
+        .unwrap();
+    assert_eq!(clean.window_rows, 1);
+    assert_eq!(clean.masked_rows, 0, "a public IP is never masked");
+}
