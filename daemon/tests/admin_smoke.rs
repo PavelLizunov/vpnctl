@@ -2041,6 +2041,55 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
     assert!(html.contains("dave"), "suppressed-disables banner renders");
 }
 
+/// BB-3 (link-UX): a subscriber the operator already linked must NOT linger
+/// in the "new subscribers to link" list rendered from the (stale) stored
+/// report — the redirect after a link must show them gone WITHOUT waiting
+/// for the next sync. The linked subscriber still appears under "Linked
+/// users", so we assert the *new-subscriber link form* (`boosty-link-<id>`)
+/// is what's absent.
+#[tokio::test]
+async fn boosty_page_drops_already_linked_subscriber_from_new_list() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&mk_user("pyrojokk", false)).await.unwrap();
+    let mut cfg = inv.get_boosty_settings().await.unwrap();
+    cfg.enabled = true;
+    cfg.blog_url = Some("ninitux".into());
+    inv.set_boosty_settings(&cfg).await.unwrap();
+    // Stored report (pre-link snapshot) still lists 45221733 as "new".
+    inv.set_boosty_last_report(
+        &serde_json::json!({
+            "total_subscribers": 2,
+            "active_subscribers": 2,
+            "linked": 0,
+            "new_subscribers": [
+                {"subscriber_id": 45221733, "name": "Alyona"},
+                {"subscriber_id": 999, "name": "Other"}
+            ]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    // Operator links 45221733 → pyrojokk (no sync yet).
+    inv.link_boosty_subscriber(&vpnctl_core::UserId("pyrojokk".into()), 45221733)
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/boosty").await;
+    assert!(
+        !html.contains("boosty-link-45221733"),
+        "already-linked subscriber must not have a new-subscriber link form"
+    );
+    assert!(
+        html.contains("boosty-link-999"),
+        "the still-unlinked subscriber keeps its link form"
+    );
+    assert!(html.contains("pyrojokk"), "linked user rendered");
+}
+
 /// AC-B3 (NM-10 audit-on-actual-mutation): double-submitting the confirm
 /// button writes exactly ONE `boosty.disable` audit row — the second POST
 /// is a no-op (user already disabled) and must not spam the timeline or

@@ -8037,6 +8037,13 @@ pub(crate) async fn boosty_page(
         .map(|u| u.id.0.as_str())
         .filter(|id| !linked_ids.contains(id))
         .collect();
+    // Subscriber ids already linked — used to drop them from the stored
+    // report's "new subscribers to link" list at render time. The report
+    // is a snapshot of the last sync; after the operator links someone the
+    // redirect must show them gone WITHOUT waiting for the next sync (else
+    // the just-linked row lingers and reads as "nothing happened").
+    let linked_sub_ids: std::collections::HashSet<i64> =
+        links.iter().map(|(_, sid)| *sid).collect();
 
     // Last applied sync report (best-effort: absent/unparseable → None —
     // the page degrades to settings + links, never 500s on report drift).
@@ -8168,10 +8175,15 @@ pub(crate) async fn boosty_page(
 
         // ── Actionable: new subscribers to link ─────────────────
         @if let Some(r) = report {
-            @if !r.new_subscribers.is_empty() {
+            @let new_to_link: Vec<&vpnctl_boosty_bridge::NewSubscriberInfo> = r
+                .new_subscribers
+                .iter()
+                .filter(|s| !linked_sub_ids.contains(&s.subscriber_id))
+                .collect();
+            @if !new_to_link.is_empty() {
                 div.ed-rule {}
                 div.ed-art-eyebrow {
-                    (tr(lang, "New subscribers", "Новые подписчики")) " · " (r.new_subscribers.len()) " "
+                    (tr(lang, "New subscribers", "Новые подписчики")) " · " (new_to_link.len()) " "
                     span.ed-tip title=(tr(
                         lang,
                         "Active Boosty subscribers the last sync found that aren't linked to a vpnctl user yet. Pick a user to bind them — access then follows the subscription automatically.",
@@ -8185,7 +8197,7 @@ pub(crate) async fn boosty_page(
                         th style="width: 110px;" {}
                     }}
                     tbody {
-                        @for sub in &r.new_subscribers {
+                        @for sub in &new_to_link {
                             @let form_id = format!("boosty-link-{}", sub.subscriber_id);
                             tr {
                                 td {
