@@ -58,29 +58,49 @@ async fn link_then_list_and_unlink() {
 }
 
 #[tokio::test]
-async fn one_subscriber_cannot_link_two_users() {
+async fn one_subscriber_can_link_many_users() {
+    // BB-4 (migration 0041): one paying person's several devices
+    // (demonnot-1..5) are separate vpnctl users gated by ONE Boosty
+    // subscription. Linking a second user to the same subscriber must
+    // SUCCEED (was rejected pre-0041).
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
     inv.add_user(&user("bob")).await.unwrap();
 
-    inv.link_boosty_subscriber(&UserId("alice".into()), 999)
+    let a = inv
+        .link_boosty_subscriber(&UserId("alice".into()), 999)
         .await
         .unwrap();
-    // Same subscriber → different user must be rejected.
-    let err = inv
+    let b = inv
         .link_boosty_subscriber(&UserId("bob".into()), 999)
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("already linked"), "{err}");
+        .unwrap();
+    assert!(a && b, "both users link to the same subscriber");
 
-    // Re-linking the SAME user to the SAME subscriber is a no-op success —
+    // Both appear in the link set, sharing subscriber 999.
+    let links = inv.list_boosty_links().await.unwrap();
+    assert_eq!(
+        links,
+        vec![(UserId("alice".into()), 999), (UserId("bob".into()), 999),]
+    );
+
+    // Re-linking a user to the SAME subscriber is a no-op success —
     // callers must not audit it.
     let changed = inv
         .link_boosty_subscriber(&UserId("alice".into()), 999)
         .await
         .unwrap();
     assert!(!changed, "same-pair re-link is a no-op");
+
+    // Unlinking one leaves the other linked.
+    inv.unlink_boosty_subscriber(&UserId("alice".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.list_boosty_links().await.unwrap(),
+        vec![(UserId("bob".into()), 999)]
+    );
 }
 
 #[tokio::test]
