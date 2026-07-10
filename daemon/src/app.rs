@@ -1193,6 +1193,10 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/users/{id}/overview", get(admin::user_detail))
         .route("/admin/users/{id}/delivery", get(admin::user_detail_delivery))
         .route("/admin/users/{id}/access", get(admin::user_detail_access))
+        .route(
+            "/admin/users/{id}/access.csv",
+            get(admin::user_access_csv),
+        )
         .route("/admin/users/{id}/activity", get(admin::user_detail_activity))
         .route("/admin/users/{id}/traffic", get(admin::user_detail_traffic))
         // Phase C-3 writes (Users). Each write goes via POST so a casual
@@ -1296,6 +1300,10 @@ fn admin_router(state: AppState) -> Router {
         .route("/admin/alerts/", get(admin::alerts))
         .route("/admin/alerts/{id}/ack", post(admin::alert_ack))
         .route("/admin/alerts/ack-all", post(admin::alert_ack_all))
+        .route(
+            "/admin/alerts/ack-family/{prefix}",
+            post(admin::alert_ack_family),
+        )
         .route("/admin/settings", get(admin::settings))
         .route("/admin/settings/", get(admin::settings))
         // ui-audit §5 Phase 3 — settings split into 4 sub-route tabs.
