@@ -195,6 +195,13 @@ fn print_report(r: &SyncReport, mode: ApplyMode) {
             println!("  {} — {}", s.subscriber_id, s.name);
         }
     }
+    if !r.suppressed_disables.is_empty() {
+        eprintln!(
+            "SUPPRESSED disables ({}): roster came back EMPTY — check blog_url. Untouched: {}",
+            r.suppressed_disables.len(),
+            r.suppressed_disables.join(", ")
+        );
+    }
     for e in &r.errors {
         eprintln!("error: {e}");
     }
@@ -202,6 +209,7 @@ fn print_report(r: &SyncReport, mode: ApplyMode) {
         && r.disabled.is_empty()
         && r.lapsed_pending.is_empty()
         && r.new_subscribers.is_empty()
+        && r.suppressed_disables.is_empty()
     {
         println!("nothing to do — access already matches subscriptions");
     }

@@ -31,6 +31,10 @@ use vpnctl_inventory::SqliteInventory;
 /// Fallback cadence when settings carry no positive interval.
 const DEFAULT_INTERVAL_SECS: u64 = 3600;
 
+/// Alert kind for a failed sync pass. One bridge → one instance (no
+/// per-server suffix); the partial-UNIQUE dedup keeps a single open row.
+const SYNC_FAILED_ALERT_KIND: &str = "boosty.sync.failed";
+
 /// Spawn the Boosty sync poller. Returns the handle so production (which
 /// discards) and tests share one interface, matching the other pollers.
 pub fn spawn_boosty_sync_poller(
@@ -93,12 +97,17 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
 
     match sync_from_settings(inv, &settings, mode).await {
         Ok(report) => {
+            // Recovery: a working pass silently acks the open failure
+            // alert (auto-recovery pattern — good news needs no manual
+            // ack).
+            note_sync_recovery(inv).await;
             tracing::info!(
                 target = "vpnctld::boosty",
                 enabled = report.enabled.len(),
                 disabled = report.disabled.len(),
                 lapsed_pending = report.lapsed_pending.len(),
                 new_subscribers = report.new_subscribers.len(),
+                suppressed_disables = report.suppressed_disables.len(),
                 errors = report.errors.len(),
                 "boosty sync tick"
             );
@@ -119,11 +128,61 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
                 deploy_flipped_users(inv, registry, deploy_key_path, &flipped, "boosty.sync").await;
             }
         }
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::boosty",
+                error = %e,
+                "boosty sync failed"
+            );
+            note_sync_failure(inv, &e).await;
+        }
+    }
+}
+
+/// Fire the sync-failure alert (dedup'd while open) + Telegram push. A
+/// dead bridge is otherwise INVISIBLE: new subscribers silently stop
+/// being enabled and the operator finds out from users. Text contract
+/// lives in [`vpnctl_boosty_bridge::sync_failure_summary`] (auth = dead
+/// creds + the web fix surface; anything else = transient).
+async fn note_sync_failure(inv: &SqliteInventory, err: &vpnctl_boosty_bridge::BridgeError) {
+    let summary = vpnctl_boosty_bridge::sync_failure_summary(err);
+    match inv
+        .insert_alert_if_no_unacked(SYNC_FAILED_ALERT_KIND, None, "warning", &summary, None)
+        .await
+    {
+        Ok(Some(alert_id)) => {
+            let payload = serde_json::json!({
+                "auth": matches!(err, vpnctl_boosty_bridge::BridgeError::Auth(_)),
+                "summary": summary,
+            });
+            crate::node_probe_poller::push_alert(
+                inv,
+                SYNC_FAILED_ALERT_KIND,
+                "warning",
+                "boosty",
+                &payload,
+                Some(alert_id),
+            )
+            .await;
+        }
+        // Already open — dedup'd; no push spam while the operator ignores it.
+        Ok(None) => {}
         Err(e) => tracing::warn!(
             target = "vpnctld::boosty",
             error = %e,
-            "boosty sync failed"
+            "insert boosty.sync.failed alert failed"
         ),
+    }
+}
+
+/// Recovery half of [`note_sync_failure`]: silently ack the open alert.
+async fn note_sync_recovery(inv: &SqliteInventory) {
+    if let Err(e) = inv.ack_open_alerts(SYNC_FAILED_ALERT_KIND, None).await {
+        tracing::warn!(
+            target = "vpnctld::boosty",
+            error = %e,
+            "auto-ack boosty.sync.failed failed"
+        );
     }
 }
 
@@ -244,6 +303,40 @@ mod tests {
         run_tick(&inv, &registry, Path::new("/nonexistent-key")).await;
         // Nothing to assert beyond "did not panic / hang"; the bridge is
         // off so no Boosty call was attempted.
+    }
+
+    /// AC-D1: a failed pass fires ONE dedup'd warning alert; a second
+    /// failure while it's open adds nothing; a successful pass silently
+    /// acks it; the next failure after recovery opens a NEW alert.
+    #[tokio::test]
+    async fn sync_failure_alert_dedups_and_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let err = vpnctl_boosty_bridge::BridgeError::Config("x".into());
+
+        note_sync_failure(&inv, &err).await;
+        note_sync_failure(&inv, &err).await;
+        assert_eq!(
+            inv.unacked_alert_count().await.unwrap(),
+            1,
+            "dedup while open"
+        );
+
+        note_sync_recovery(&inv).await;
+        assert_eq!(
+            inv.unacked_alert_count().await.unwrap(),
+            0,
+            "recovery auto-acks"
+        );
+
+        note_sync_failure(&inv, &err).await;
+        assert_eq!(
+            inv.unacked_alert_count().await.unwrap(),
+            1,
+            "re-fires after recovery"
+        );
     }
 
     /// Flipped users with no grants (or unknown ids) deploy nothing and

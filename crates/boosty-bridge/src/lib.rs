@@ -66,6 +66,11 @@ pub struct SyncReport {
     pub new_subscribers: Vec<NewSubscriberInfo>,
     /// Non-fatal per-action errors (one failed write doesn't abort the run).
     pub errors: Vec<String>,
+    /// Disables suppressed by the empty-roster fail-safe: the roster came
+    /// back with ZERO subscribers while users are linked — far more likely
+    /// a wrong `blog_url` (or a Boosty-side filter quirk) than every
+    /// subscriber lapsing at once, so nothing was touched.
+    pub suppressed_disables: Vec<String>,
 }
 
 /// Errors that abort a whole sync pass (as opposed to a single-action
@@ -245,11 +250,21 @@ pub async fn sync_once(
         ..Default::default()
     };
 
+    // Fail-safe: an EMPTY roster while users are linked is far more likely
+    // a wrong blog_url / Boosty-side quirk than every subscriber lapsing
+    // at once — suppress every disable instead of mass-cutting the fleet.
+    // (API *errors* abort before this point; this guards the successful-
+    // but-wrong response.)
+    let suppress_disables = subscribers.is_empty() && !links.is_empty();
+
     // 3. Reconcile + apply.
     for action in reconcile(&states, &links) {
         match action {
             Action::Enable { user_id } => {
                 apply_disabled(inv, &mut report, &user_id, false, mode).await;
+            }
+            Action::Disable { user_id } if suppress_disables => {
+                report.suppressed_disables.push(user_id);
             }
             Action::Disable { user_id } => match mode {
                 ApplyMode::DryRun => report.disabled.push(user_id),
@@ -265,6 +280,13 @@ pub async fn sync_once(
                 });
             }
         }
+    }
+    if !report.suppressed_disables.is_empty() {
+        tracing::warn!(
+            target = "boosty_bridge",
+            users = ?report.suppressed_disables,
+            "roster came back EMPTY — suppressed all disables (blog_url typo or Boosty-side filter?)"
+        );
     }
 
     Ok(report)
@@ -323,5 +345,48 @@ impl SyncReport {
         } else {
             self.enabled.push(user_id.to_string());
         }
+    }
+}
+
+/// Operator-facing one-liner for a failed sync pass (alert summaries).
+///
+/// An auth failure means the stored credentials are DEAD — Boosty rotates
+/// the refresh token one-shot, so the bridge cannot self-heal and the fix
+/// is to paste fresh credentials on /admin/boosty (never an SSH
+/// instruction — operator-action policy). Everything else (network, 5xx,
+/// model drift) is flagged transient.
+pub fn sync_failure_summary(err: &BridgeError) -> String {
+    match err {
+        BridgeError::Auth(_) => format!(
+            "Boosty auth failed — stored credentials are dead (the bridge cannot self-heal): \
+             paste a fresh refresh token + device id on /admin/boosty. ({err})"
+        ),
+        _ => format!("Boosty sync failed (network/API; usually transient): {err}"),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_failure_summary_names_the_web_fix_surface_not_ssh() {
+        let err = BridgeError::Auth(boosty_api::error::AuthError::EmptyRefreshToken);
+        let s = sync_failure_summary(&err);
+        assert!(s.contains("/admin/boosty"), "{s}");
+        assert!(s.contains("cannot self-heal"), "{s}");
+        assert!(
+            !s.to_lowercase().contains("ssh"),
+            "operator-action policy: {s}"
+        );
+    }
+
+    #[test]
+    fn transient_failure_summary_is_marked_transient() {
+        let err = BridgeError::Config("blog_url not set".into());
+        let s = sync_failure_summary(&err);
+        assert!(s.contains("transient"), "{s}");
+        assert!(s.contains("blog_url not set"), "{s}");
     }
 }

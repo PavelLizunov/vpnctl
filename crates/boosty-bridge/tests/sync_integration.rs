@@ -166,6 +166,81 @@ async fn enable_only_mode_leaves_lapsed_pending() {
     assert!(!users[0].disabled, "EnableOnly must not disable bob");
 }
 
+/// AC-C1: an EMPTY roster (typo'd blog_url — Boosty happily 200s with zero
+/// data for an unknown blog) must not mass-disable every linked user, even
+/// in Full mode. The would-be disables land in `suppressed_disables`.
+#[tokio::test]
+async fn empty_roster_suppresses_disables() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({ "data": [], "total": 0, "limit": 100, "offset": 0 }).to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("bob", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("bob".into()), 200)
+        .await
+        .unwrap();
+
+    let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
+        .await
+        .unwrap();
+
+    assert!(report.disabled.is_empty(), "{report:?}");
+    assert!(report.lapsed_pending.is_empty(), "{report:?}");
+    assert_eq!(report.suppressed_disables, vec!["bob"]);
+    let users = inv.list_users().await.unwrap();
+    assert!(!users[0].disabled, "empty roster must not disable bob");
+}
+
+/// AC-C2 (the spec's fail-safe rule): an API error aborts the pass with
+/// ZERO inventory writes — nothing flipped, no audit rows.
+#[tokio::test]
+async fn api_error_aborts_with_zero_writes() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(500)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("bob", false)).await.unwrap();
+    inv.add_user(&user("alice", true)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("bob".into()), 200)
+        .await
+        .unwrap();
+    inv.link_boosty_subscriber(&UserId("alice".into()), 100)
+        .await
+        .unwrap();
+
+    let res = sync_once(&client, &inv, "ninitux", ApplyMode::Full).await;
+    assert!(res.is_err(), "500 must abort the pass");
+
+    let users = inv.list_users().await.unwrap();
+    let bob = users.iter().find(|u| u.id.0 == "bob").unwrap();
+    let alice = users.iter().find(|u| u.id.0 == "alice").unwrap();
+    assert!(!bob.disabled, "bob untouched");
+    assert!(alice.disabled, "alice untouched");
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert!(audits.is_empty(), "no writes on API error: {audits:?}");
+}
+
 /// AC-A1: Boosty invalidates the old refresh token at refresh time, so the
 /// rotated value must be persisted even when the sync itself fails AFTER a
 /// successful refresh — otherwise the next pass authenticates with a
