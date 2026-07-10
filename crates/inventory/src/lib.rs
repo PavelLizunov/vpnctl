@@ -29,9 +29,10 @@ pub use migrate::{
     derive_server_id_from_ip, parse_bash_inventory_env, parse_bash_singbox,
 };
 pub use sqlite::{
-    AccessBucket, AdminAlert, AuditEntry, Ban, HeavyUser, NodeHealthRow, ServerLiveActivity,
-    SharingSignals, SqliteInventory, SqliteInventoryError, SubAccessAggregates, SubAccessEntry,
-    SubDeviceFp, SubOriginAsn, SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest,
-    TrafficBreakdown, UaCluster, UptimeStat, UserLifecycle, VpnStatsDelta, VpnStatsRow,
-    VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
+    AccessBucket, AdminAlert, AuditEntry, Ban, BoostySettings, HeavyUser, NodeHealthRow,
+    ServerLiveActivity, SharingSignals, SqliteInventory, SqliteInventoryError, SubAccessAggregates,
+    SubAccessEntry, SubDeviceFp, SubOriginAsn, SubOriginCountry, SubOriginIp, TelegramConfig,
+    TodayDigest, TrafficBreakdown, UaCluster, UptimeStat, UserLifecycle, VpnStatsDelta,
+    VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow,
+    sum_nic_deltas,
 };

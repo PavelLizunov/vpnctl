@@ -132,6 +132,7 @@ pub enum K {
     NavAudit,
     NavAlerts,
     NavSettings,
+    NavBoosty,
     NavOperator, // "operator pavel" tagline
     FootStack,   // "axum + maud"
 
@@ -297,6 +298,8 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         (Ru, NavAlerts) => "Алерты",
         (En, NavSettings) => "Settings",
         (Ru, NavSettings) => "Настройки",
+        // Brand name — identical in both locales.
+        (En, NavBoosty) | (Ru, NavBoosty) => "Boosty",
         (En, NavOperator) => "homelab · operator pavel",
         (Ru, NavOperator) => "homelab · оператор pavel",
         (En, FootStack) => "· axum + maud",

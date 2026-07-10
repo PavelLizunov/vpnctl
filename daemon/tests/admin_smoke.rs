@@ -1831,6 +1831,230 @@ async fn admin_pages_do_not_render_inline_tweaks_indicator() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+//  Boosty subscription bridge (/admin/boosty)
+// ────────────────────────────────────────────────────────────────────────
+
+fn mk_user(id: &str, disabled: bool) -> User {
+    User {
+        id: UserId(id.into()),
+        uuid: format!("uuid-{id}"),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled,
+    }
+}
+
+#[tokio::test]
+async fn boosty_page_renders_and_is_in_nav() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app, "/admin/boosty").await;
+    assert!(
+        html.contains("Boosty"),
+        "page must render the Boosty heading"
+    );
+    assert!(
+        html.contains("/admin/boosty"),
+        "nav must link to the boosty page"
+    );
+    // Default seeded settings: disabled, no creds → secrets show masked/unset.
+    assert!(
+        html.contains("(unset)"),
+        "unset creds must render as (unset)"
+    );
+}
+
+#[tokio::test]
+async fn boosty_link_then_unlink_via_web() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&mk_user("alice", false)).await.unwrap();
+    let app = router(s);
+
+    // Link.
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/boosty/link")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+            )
+            .body(Body::from("user=alice&subscriber_id=4242"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "link must redirect");
+    let links = inv.list_boosty_links().await.unwrap();
+    assert_eq!(links, vec![(UserId("alice".into()), 4242)]);
+
+    // Unlink.
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/boosty/unlink/alice")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "unlink must redirect");
+    assert!(inv.list_boosty_links().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn boosty_settings_save_via_web() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/boosty/settings")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+            )
+            .body(Body::from(
+                "blog_url=ninitux&poll_interval_secs=1800&enabled=on",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let got = inv.get_boosty_settings().await.unwrap();
+    assert!(got.enabled);
+    assert_eq!(got.blog_url.as_deref(), Some("ninitux"));
+    assert_eq!(got.poll_interval_secs, 1800);
+}
+
+#[tokio::test]
+async fn boosty_disable_button_soft_mutes_user() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&mk_user("bob", false)).await.unwrap();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/boosty/disable/bob")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let users = inv.list_users().await.unwrap();
+    let bob = users.iter().find(|u| u.id.0 == "bob").unwrap();
+    assert!(bob.disabled, "disable button must soft-mute the user");
+}
+
+/// The page renders its actionable sections from the LAST STORED sync
+/// report — no live Boosty call on GET (no mock server exists here, so a
+/// live sync would error or hang; csrf contract: admin GETs don't mutate).
+#[tokio::test]
+async fn boosty_page_renders_stored_report_without_live_sync() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let mut cfg = inv.get_boosty_settings().await.unwrap();
+    cfg.enabled = true;
+    cfg.blog_url = Some("ninitux".into());
+    cfg.refresh_token = Some("r".into());
+    cfg.device_id = Some("d".into());
+    inv.set_boosty_settings(&cfg).await.unwrap();
+    inv.set_boosty_last_report(
+        &serde_json::json!({
+            "total_subscribers": 2,
+            "active_subscribers": 1,
+            "linked": 1,
+            "enabled": [],
+            "disabled": [],
+            "lapsed_pending": ["bob"],
+            "new_subscribers": [{"subscriber_id": 300, "name": "Carol"}],
+            "errors": [],
+            "suppressed_disables": ["dave"]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/boosty").await;
+    assert!(
+        html.contains("/admin/boosty/disable/bob"),
+        "lapsed user gets a confirm-disable button: {html}"
+    );
+    assert!(html.contains("Carol"), "new subscriber from stored report");
+    assert!(html.contains("dave"), "suppressed-disables banner renders");
+}
+
+/// AC-B3 (NM-10 audit-on-actual-mutation): double-submitting the confirm
+/// button writes exactly ONE `boosty.disable` audit row — the second POST
+/// is a no-op (user already disabled) and must not spam the timeline or
+/// trigger a second redeploy.
+#[tokio::test]
+async fn boosty_disable_double_submit_audits_once() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_user(&mk_user("bob", false)).await.unwrap();
+    let app = router(s);
+
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/boosty/disable/bob")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    }
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    let disable_rows = audits
+        .iter()
+        .filter(|a| a.action == "boosty.disable")
+        .count();
+    assert_eq!(disable_rows, 1, "double-submit must audit exactly once");
+}
+
+// ────────────────────────────────────────────────────────────────────────
 //  Phase C-2 — copy contracts (backend response texts + frontend voice)
 //
 //  These tests pin USER-FACING STRINGS — both the backend's plaintext

@@ -174,6 +174,18 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // the operator configures the Telegram transport.
     drop(spawn_digest_scheduler(inv.clone()));
 
+    // Boosty → VPN subscription bridge. When enabled in boosty_settings,
+    // reconciles VPN access with the blog's subscriber roster on its own
+    // cadence (auto-enable active subscribers; surface or auto-disable
+    // lapsed ones), then re-deploys the affected users' servers so the
+    // flips reach the nodes. No-op tick while disabled — safe to always
+    // spawn.
+    drop(crate::boosty_sync_poller::spawn_boosty_sync_poller(
+        inv.clone(),
+        Arc::clone(&registry),
+        deploy_key_path.clone(),
+    ));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker
@@ -1325,6 +1337,13 @@ fn admin_router(state: AppState) -> Router {
             get(admin::settings_notifications),
         )
         .route("/admin/settings/system", get(admin::settings_system))
+        // Boosty subscription bridge.
+        .route("/admin/boosty", get(admin::boosty_page))
+        .route("/admin/boosty/settings", post(admin::boosty_settings_save))
+        .route("/admin/boosty/sync", post(admin::boosty_sync_now))
+        .route("/admin/boosty/link", post(admin::boosty_link))
+        .route("/admin/boosty/unlink/{user}", post(admin::boosty_unlink))
+        .route("/admin/boosty/disable/{user}", post(admin::boosty_disable))
         // 2026-05-23 — operator-configurable display TZ. POST writes
         // inventory + invalidates the global cache so subsequent
         // page renders use the new zone immediately.

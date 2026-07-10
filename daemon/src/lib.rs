@@ -28,6 +28,7 @@ pub mod ip_kind;
 // peer is a trusted reverse proxy (post-Phase-5 nginx cutover).
 // Without this every external client collapses to the nginx peer IP
 // → rate-limit single-bucket + per-user distinct-IP counter = 1.
+pub mod boosty_sync_poller;
 pub mod clash_api;
 pub mod clash_poller;
 pub mod config;

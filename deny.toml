@@ -64,3 +64,7 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The Boosty API client (rustls) lives in the operator's own fork; the
+# boosty-bridge crate pins it by commit. Whitelisted so cargo-deny's
+# unknown-git guard accepts it.
+allow-git = ["https://github.com/PavelLizunov/boosty_api_rs"]

@@ -67,6 +67,42 @@ fn map_unique<T>(
 
 pub type Result<T> = std::result::Result<T, SqliteInventoryError>;
 
+/// Raw column tuple for the `boosty_settings` singleton row.
+/// (enabled, blog_url, access_token, refresh_token, device_id,
+/// poll_interval_secs, auto_disable_lapsed)
+type BoostySettingsRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
+
+/// Bridge configuration (migration `0040_boosty_bridge.sql`, singleton row).
+///
+/// The three credential fields are SECRETS — never audit-log them, never
+/// render them verbatim in admin HTML (mask to `••••<last4>`).
+#[derive(Debug, Clone, Default)]
+pub struct BoostySettings {
+    /// Whether the sync poller is active.
+    pub enabled: bool,
+    /// Blog url/slug whose subscribers are managed (e.g. `"ninitux"`).
+    pub blog_url: Option<String>,
+    /// Static bearer token (short-lived; expires ~hourly).
+    pub access_token: Option<String>,
+    /// Refresh token (long-lived, rotating — daemon persists rotations).
+    pub refresh_token: Option<String>,
+    /// Device id for the refresh flow.
+    pub device_id: Option<String>,
+    /// Reconciliation cadence in seconds.
+    pub poll_interval_secs: u64,
+    /// When true, lapsed subscribers are auto-disabled; when false, they
+    /// are only surfaced for the operator to confirm.
+    pub auto_disable_lapsed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: i64,
@@ -2021,6 +2057,172 @@ impl SqliteInventory {
         Ok(())
     }
 
+    // ── Boosty bridge (migration 0040) ──────────────────────────────────
+
+    /// All user → Boosty-subscriber links (users with a non-NULL
+    /// `boosty_subscriber_id`). The reconciler joins these with each
+    /// user's `disabled` state.
+    pub async fn list_boosty_links(&self) -> Result<Vec<(UserId, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT id, boosty_subscriber_id FROM users
+              WHERE boosty_subscriber_id IS NOT NULL
+              ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, sid)| (UserId(id), sid))
+            .collect())
+    }
+
+    /// Link a vpnctl user to a Boosty subscriber id. Errors if the user
+    /// doesn't exist or the subscriber is already linked to a different
+    /// user. Returns whether anything changed (`false` = the exact same
+    /// pair was already linked) so callers audit only actual mutations.
+    pub async fn link_boosty_subscriber(&self, user: &UserId, subscriber_id: i64) -> Result<bool> {
+        // Reject linking one subscriber to two users up front (clearer than
+        // a raw UNIQUE-violation error).
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE boosty_subscriber_id = ?1")
+                .bind(subscriber_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some(other) = existing {
+            if other == user.0 {
+                // Same pair — idempotent no-op.
+                return Ok(false);
+            }
+            return Err(SqliteInventoryError::Invalid(format!(
+                "Boosty subscriber {subscriber_id} already linked to user {other}"
+            )));
+        }
+
+        let res = sqlx::query("UPDATE users SET boosty_subscriber_id = ?1 WHERE id = ?2")
+            .bind(subscriber_id)
+            .bind(&user.0)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such user: {}",
+                user.0
+            )));
+        }
+        Ok(true)
+    }
+
+    /// Remove a user's Boosty link. Idempotent; returns whether a link was
+    /// actually removed so callers audit only actual mutations.
+    pub async fn unlink_boosty_subscriber(&self, user: &UserId) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE users SET boosty_subscriber_id = NULL
+              WHERE id = ?1 AND boosty_subscriber_id IS NOT NULL",
+        )
+        .bind(&user.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Read the singleton bridge settings row.
+    pub async fn get_boosty_settings(&self) -> Result<BoostySettings> {
+        let row: Option<BoostySettingsRow> = sqlx::query_as(
+            "SELECT enabled, blog_url, access_token, refresh_token, device_id,
+                        poll_interval_secs, auto_disable_lapsed
+                   FROM boosty_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(match row {
+            Some((
+                enabled,
+                blog_url,
+                access_token,
+                refresh_token,
+                device_id,
+                interval,
+                auto_disable,
+            )) => BoostySettings {
+                enabled: enabled != 0,
+                blog_url,
+                access_token,
+                refresh_token,
+                device_id,
+                poll_interval_secs: u64::try_from(interval).unwrap_or(3600),
+                auto_disable_lapsed: auto_disable != 0,
+            },
+            None => BoostySettings::default(),
+        })
+    }
+
+    /// Overwrite the singleton bridge settings row.
+    pub async fn set_boosty_settings(&self, s: &BoostySettings) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET enabled = ?1, blog_url = ?2, access_token = ?3,
+                    refresh_token = ?4, device_id = ?5, poll_interval_secs = ?6,
+                    auto_disable_lapsed = ?7,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1",
+        )
+        .bind(i64::from(s.enabled))
+        .bind(&s.blog_url)
+        .bind(&s.access_token)
+        .bind(&s.refresh_token)
+        .bind(&s.device_id)
+        .bind(i64::try_from(s.poll_interval_secs).unwrap_or(3600))
+        .bind(i64::from(s.auto_disable_lapsed))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persist a rotated refresh token (Boosty rotates it on every refresh).
+    pub async fn set_boosty_refresh_token(&self, refresh_token: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET refresh_token = ?1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1",
+        )
+        .bind(refresh_token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persist the last APPLIED sync report (serialized `SyncReport`).
+    /// `/admin/boosty` renders its actionable sections from this instead of
+    /// doing a live (state-mutating) sync on GET.
+    pub async fn set_boosty_last_report(&self, report_json: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET last_report_json = ?1,
+                    last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1",
+        )
+        .bind(report_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The last applied sync report as `(report_json, synced_at)`, when one
+    /// has ever been stored.
+    pub async fn boosty_last_report(&self) -> Result<Option<(String, String)>> {
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT last_report_json, last_sync_at FROM boosty_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some((Some(json), Some(ts))) => Some((json, ts)),
+            _ => None,
+        })
+    }
+
     // ── Grants (user × server) ──────────────────────────────────────────
 
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
@@ -2596,7 +2798,8 @@ impl SqliteInventory {
     /// subset of servers whose **latest `server.deploy` audit row
     /// is older than the user's latest mutation** (`user.add`,
     /// `user.grant`, `user.revoke`, `user.set_vpn_router_device_id`,
-    /// `user.disable`, `user.enable`). Those servers' running sing-box
+    /// `user.disable`, `user.enable`, and the Boosty-bridge flips
+    /// `boosty.disable` / `boosty.enable`). Those servers' running sing-box
     /// config does NOT yet include the user's current state — clicking
     /// their detail page's «deploy» button pushes the fresh render and
     /// closes the gap.
@@ -2658,7 +2861,8 @@ impl SqliteInventory {
                              OR json_extract(payload, '$.server') IS NULL))
                      OR action IN ('user.add',
                                    'user.set_vpn_router_device_id',
-                                   'user.disable', 'user.enable')
+                                   'user.disable', 'user.enable',
+                                   'boosty.disable', 'boosty.enable')
                    )",
             )
             .bind(&user_id.0)

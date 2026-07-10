@@ -462,6 +462,49 @@ pub fn render_alert(
             )
         }
 
+        // ───────────────────── boosty.sync.failed ───────────────────
+        "boosty.sync.failed" => {
+            // payload.auth=true → dead credentials (cannot self-heal);
+            // false → transient network/API failure, next tick retries.
+            let auth = payload
+                .get("auth")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if auth {
+                (
+                    pick(
+                        loc,
+                        "Boosty bridge — credentials dead".into(),
+                        "Boosty-мост — креды недействительны".into(),
+                    ),
+                    pick(
+                        loc,
+                        "Boosty auth failed and the bridge cannot self-heal: the stored refresh token was consumed or revoked. New subscribers are NOT being enabled.".into(),
+                        "Авторизация Boosty упала, и мост не восстановится сам: сохранённый refresh-токен использован или отозван. Новые подписчики НЕ включаются.".into(),
+                    ),
+                    Some(pick(
+                        loc,
+                        "Paste a fresh refresh token + device id on /admin/boosty.".into(),
+                        "Вставь свежий refresh token + device id на /admin/boosty.".into(),
+                    )),
+                )
+            } else {
+                (
+                    pick(
+                        loc,
+                        "Boosty sync failed".into(),
+                        "Boosty-синк упал".into(),
+                    ),
+                    pick(
+                        loc,
+                        "The subscriber-roster sync failed (network / Boosty API). Usually transient — the next tick retries automatically.".into(),
+                        "Синхронизация ростера подписчиков упала (сеть / API Boosty). Обычно временно — следующий тик повторит сам.".into(),
+                    ),
+                    None,
+                )
+            }
+        }
+
         // ───────────────────────── fallback ─────────────────────────
         other => {
             // Unknown kind: neutral, still localized scaffolding so a new
@@ -587,6 +630,7 @@ mod tests {
         ("server.attribution.stalled", "warning"),
         ("user.sub_no_traffic", "warning"),
         ("sub_access.suspicious_local_ip", "warning"),
+        ("boosty.sync.failed", "warning"),
     ];
 
     #[test]

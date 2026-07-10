@@ -58,6 +58,7 @@ A quick sense of scale (mirrors the badges above):
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
 | Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
+| Boosty subscription bridge — links subscribers to users, reconciles access (auto-enable active, disable-on-button for lapses) | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY/wgturn Strong; tuic/anytls Moderate; rest Weak) | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + per-user UA fingerprint heuristic | ✅ |

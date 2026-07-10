@@ -86,6 +86,10 @@ const NAV: &[NavItem] = &[
         key: "settings",
         label_key: crate::i18n::K::NavSettings,
     },
+    NavItem {
+        key: "boosty",
+        label_key: crate::i18n::K::NavBoosty,
+    },
 ];
 
 /// URL for a nav item. Dashboard lives at `/admin/` (canonical home),
@@ -7972,6 +7976,466 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
     Redirect::to("/admin/settings/backups#backups-section").into_response()
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Boosty subscription bridge (/admin/boosty)
+//
+// Links Boosty subscribers to vpnctl users and reconciles VPN access with
+// subscription state (see `vpnctl-boosty-bridge`). The poller auto-enables
+// active subscribers; lapses are surfaced here for the operator to disable
+// with a button (or auto-disabled when `auto_disable_lapsed` is on).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Mask a credential to `••••<last4>` — never render secrets verbatim.
+fn boosty_mask_secret(secret: Option<&str>) -> String {
+    match secret {
+        None => "(unset)".to_string(),
+        Some(v) if v.chars().count() <= 4 => "••••".to_string(),
+        Some(v) => {
+            let last4: String = {
+                let mut c: Vec<char> = v.chars().rev().take(4).collect();
+                c.reverse();
+                c.into_iter().collect()
+            };
+            format!("••••{last4}")
+        }
+    }
+}
+
+/// `GET /admin/boosty` — bridge status, settings form, and the actionable
+/// link/disable surfaces, rendered from the LAST APPLIED sync report
+/// (stored by the poller / «sync now» / CLI `--apply`). Deliberately NO
+/// live sync on a GET: admin GETs must not mutate state (csrf.rs
+/// contract), and a live pass would rotate the Boosty refresh token and
+/// race the poller (spurious invalid_grant).
+pub(crate) async fn boosty_page(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+
+    let settings = state
+        .inv
+        .get_boosty_settings()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let links = state
+        .inv
+        .list_boosty_links()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let users = state
+        .inv
+        .list_users()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Users not yet linked → candidates for the link dropdown.
+    let linked_ids: std::collections::HashSet<&str> =
+        links.iter().map(|(u, _)| u.0.as_str()).collect();
+    let unlinked_users: Vec<&str> = users
+        .iter()
+        .map(|u| u.id.0.as_str())
+        .filter(|id| !linked_ids.contains(id))
+        .collect();
+
+    // Last applied sync report (best-effort: absent/unparseable → None —
+    // the page degrades to settings + links, never 500s on report drift).
+    let last_report: Option<(vpnctl_boosty_bridge::SyncReport, String)> =
+        match state.inv.boosty_last_report().await {
+            Ok(Some((json, ts))) => serde_json::from_str(&json).ok().map(|r| (r, ts)),
+            _ => None,
+        };
+    let report = last_report.as_ref().map(|(r, _)| r);
+    let last_sync_at = last_report.as_ref().map(|(_, ts)| ts.as_str());
+
+    let body = html! {
+        header.ed-head {
+            h1.ed-title { "Boosty" }
+            p.ed-deck {
+                (crate::i18n::tr(lang,
+                    "Link Boosty subscribers to VPN users; access follows the subscription.",
+                    "Связь подписчиков Boosty с VPN-пользователями; доступ следует за подпиской."))
+            }
+        }
+
+        @if let Some(r) = report {
+            @if !r.suppressed_disables.is_empty() {
+                p style="color: var(--bad); font-family: var(--mono); font-size: 12px;" {
+                    (crate::i18n::tr(lang,
+                        "Last sync: roster came back EMPTY — all disables were suppressed (check the blog url). Untouched: ",
+                        "Последний синк: ростер пришёл ПУСТЫМ — все отключения подавлены (проверьте blog url). Не тронуты: "))
+                    (r.suppressed_disables.join(", "))
+                }
+            }
+            @if !r.errors.is_empty() {
+                p style="color: var(--bad); font-family: var(--mono); font-size: 12px;" {
+                    (crate::i18n::tr(lang, "Last sync errors: ", "Ошибки последнего синка: "))
+                    (r.errors.join(" · "))
+                }
+            }
+        }
+
+        // ── Status ──────────────────────────────────────────────
+        section style="margin: 16px 0;" {
+            p style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                (crate::i18n::tr(lang, "enabled: ", "включено: ")) b { (settings.enabled) } br;
+                (crate::i18n::tr(lang, "blog: ", "блог: "))
+                    b { (settings.blog_url.as_deref().unwrap_or("(unset)")) } br;
+                "access_token: " (boosty_mask_secret(settings.access_token.as_deref())) br;
+                "refresh_token: " (boosty_mask_secret(settings.refresh_token.as_deref())) br;
+                "device_id: " (boosty_mask_secret(settings.device_id.as_deref())) br;
+                (crate::i18n::tr(lang, "interval: ", "интервал: ")) (settings.poll_interval_secs) "s" br;
+                (crate::i18n::tr(lang, "auto-disable lapsed: ", "авто-отключение отвалившихся: "))
+                    b { (settings.auto_disable_lapsed) } br;
+                (crate::i18n::tr(lang, "linked users: ", "привязано пользователей: ")) b { (links.len()) } br;
+                (crate::i18n::tr(lang, "last applied sync: ", "последний применённый синк: "))
+                    b { (last_sync_at.unwrap_or("(never)")) }
+            }
+            form method="post" action="/admin/boosty/sync" style="margin-top: 8px;" {
+                button type="submit" { (crate::i18n::tr(lang, "sync now", "синхронизировать")) }
+            }
+        }
+
+        // ── New unlinked active subscribers ─────────────────────
+        @if let Some(r) = report {
+            @if !r.new_subscribers.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow { (crate::i18n::tr(lang, "New subscribers", "Новые подписчики")) }
+                    @for sub in &r.new_subscribers {
+                        form method="post" action="/admin/boosty/link"
+                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                            span { (sub.subscriber_id) " — " (sub.name) }
+                            input type="hidden" name="subscriber_id" value=(sub.subscriber_id);
+                            select name="user" required {
+                                option value="" { (crate::i18n::tr(lang, "link to user…", "привязать к…")) }
+                                @for uid in &unlinked_users {
+                                    option value=(uid) { (uid) }
+                                }
+                            }
+                            button type="submit" { (crate::i18n::tr(lang, "link", "привязать")) }
+                        }
+                    }
+                }
+            }
+
+            // ── Lapsed, awaiting confirm to disable ─────────────
+            @if !r.lapsed_pending.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow {
+                        (crate::i18n::tr(lang, "Lapsed — confirm disable", "Отвалились — подтвердите отключение"))
+                    }
+                    @for uid in &r.lapsed_pending {
+                        form method="post" action=(format!("/admin/boosty/disable/{uid}"))
+                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                            span { (uid) }
+                            button type="submit" { (crate::i18n::tr(lang, "disable", "отключить")) }
+                        }
+                    }
+                }
+            }
+
+            @if !r.enabled.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow { (crate::i18n::tr(lang, "Enabled by last sync", "Включены последним синком")) }
+                    p style="font-family: var(--mono); font-size:12px;" { (r.enabled.join(", ")) }
+                }
+            }
+
+            @if !r.disabled.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow { (crate::i18n::tr(lang, "Auto-disabled by last sync", "Авто-отключены последним синком")) }
+                    p style="font-family: var(--mono); font-size:12px;" { (r.disabled.join(", ")) }
+                }
+            }
+        }
+
+        // ── Linked users ────────────────────────────────────────
+        section style="margin: 16px 0;" {
+            h2.ed-eyebrow { (crate::i18n::tr(lang, "Linked users", "Привязанные пользователи")) }
+            @if links.is_empty() {
+                p style="color: var(--dim); font-family: var(--mono); font-size:12px;" {
+                    (crate::i18n::tr(lang, "none yet", "пока нет"))
+                }
+            } @else {
+                @for (uid, sid) in &links {
+                    form method="post" action=(format!("/admin/boosty/unlink/{}", uid.0))
+                         style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                        span { (uid.0) " ↔ " (sid) }
+                        button type="submit" { (crate::i18n::tr(lang, "unlink", "отвязать")) }
+                    }
+                }
+            }
+        }
+
+        // ── Settings form ───────────────────────────────────────
+        section style="margin: 24px 0;" {
+            h2.ed-eyebrow { (crate::i18n::tr(lang, "Settings", "Настройки")) }
+            form method="post" action="/admin/boosty/settings"
+                 style="display:flex; flex-direction:column; gap:8px; max-width:520px; font-family: var(--mono); font-size:12px;" {
+                label { (crate::i18n::tr(lang, "Blog url/slug", "Блог (url/slug)"))
+                    input type="text" name="blog_url" value=(settings.blog_url.as_deref().unwrap_or("")); }
+                label { (crate::i18n::tr(lang, "Access token (leave blank to keep)", "Access token (пусто — не менять)"))
+                    input type="password" name="access_token" autocomplete="off"; }
+                label { (crate::i18n::tr(lang, "Refresh token (leave blank to keep)", "Refresh token (пусто — не менять)"))
+                    input type="password" name="refresh_token" autocomplete="off"; }
+                label { (crate::i18n::tr(lang, "Device id (leave blank to keep)", "Device id (пусто — не менять)"))
+                    input type="password" name="device_id" autocomplete="off"; }
+                label { (crate::i18n::tr(lang,
+                        "Poll interval (seconds, min 60 — applies after a daemon restart)",
+                        "Интервал опроса (сек, мин 60 — применится после рестарта демона)"))
+                    input type="number" name="poll_interval_secs" min="60" value=(settings.poll_interval_secs); }
+                label { input type="checkbox" name="enabled" checked[settings.enabled];
+                    " " (crate::i18n::tr(lang, "enabled", "включено")) }
+                label { input type="checkbox" name="auto_disable_lapsed" checked[settings.auto_disable_lapsed];
+                    " " (crate::i18n::tr(lang, "auto-disable lapsed subscribers", "авто-отключать отвалившихся")) }
+                button type="submit" { (crate::i18n::tr(lang, "save", "сохранить")) }
+            }
+        }
+    };
+
+    Ok(render_page(&state, "boosty", &theme, &accent, lang, body).await)
+}
+
+/// `POST /admin/boosty/settings` — save bridge config. Blank secret inputs
+/// leave the stored value untouched (so the masked display never wipes a
+/// credential). Audited WITHOUT secret values.
+pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
+    let mut s = match state.inv.get_boosty_settings().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Some(b) = form_field(&body, "blog_url") {
+        let b = b.trim();
+        s.blog_url = if b.is_empty() {
+            None
+        } else {
+            Some(b.to_string())
+        };
+    }
+    // Secrets: only overwrite when a non-blank value is supplied (a blank
+    // input keeps the stored value, so the masked display can't wipe it).
+    if let Some(t) = form_field(&body, "access_token")
+        && !t.trim().is_empty()
+    {
+        s.access_token = Some(t.trim().to_string());
+    }
+    if let Some(t) = form_field(&body, "refresh_token")
+        && !t.trim().is_empty()
+    {
+        s.refresh_token = Some(t.trim().to_string());
+    }
+    if let Some(d) = form_field(&body, "device_id")
+        && !d.trim().is_empty()
+    {
+        s.device_id = Some(d.trim().to_string());
+    }
+    if let Some(i) = form_field(&body, "poll_interval_secs").and_then(|v| v.parse::<u64>().ok())
+        && i > 0
+    {
+        // The HTML min=60 is client-side only — clamp server-side too so a
+        // hand-crafted POST can't turn the poller into a tight loop.
+        s.poll_interval_secs = i.max(60);
+    }
+    // Checkboxes: present only when checked.
+    s.enabled = form_field(&body, "enabled").is_some();
+    s.auto_disable_lapsed = form_field(&body, "auto_disable_lapsed").is_some();
+
+    if let Err(e) = state.inv.set_boosty_settings(&s).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "boosty.configure",
+            None,
+            Some(&serde_json::json!({
+                "enabled": s.enabled,
+                "blog_url": s.blog_url,
+                "poll_interval_secs": s.poll_interval_secs,
+                "auto_disable_lapsed": s.auto_disable_lapsed,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.configure failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/sync` — run one reconcile now (auto-enable active,
+/// surface lapses). Redirects back; the report is logged.
+pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
+    use vpnctl_boosty_bridge::ApplyMode;
+
+    let settings = match state.inv.get_boosty_settings().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // A disabled bridge must not apply flips or deploy nodes — «sync now»
+    // is a manual tick of the ENABLED bridge, not a bypass of the switch.
+    if !settings.enabled {
+        return bad_request("boosty bridge is disabled — enable it in the settings first");
+    }
+    let mode = if settings.auto_disable_lapsed {
+        ApplyMode::Full
+    } else {
+        ApplyMode::EnableOnly
+    };
+    match vpnctl_boosty_bridge::sync_from_settings(&state.inv, &settings, mode).await {
+        Ok(report) => {
+            tracing::info!(
+                target = "vpnctld::boosty",
+                enabled = report.enabled.len(),
+                disabled = report.disabled.len(),
+                "manual boosty sync"
+            );
+            // Push the applied flips to the nodes (same pipeline as the
+            // poller tick); backgrounded so the redirect stays instant.
+            let flipped: Vec<String> = report
+                .enabled
+                .iter()
+                .chain(report.disabled.iter())
+                .cloned()
+                .collect();
+            if !flipped.is_empty() {
+                let inv = state.inv.clone();
+                let registry = std::sync::Arc::clone(&state.registry);
+                let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+                tokio::spawn(async move {
+                    crate::boosty_sync_poller::deploy_flipped_users(
+                        &inv,
+                        &registry,
+                        &key,
+                        &flipped,
+                        "boosty.sync_now",
+                    )
+                    .await;
+                });
+            }
+        }
+        Err(e) => return bad_request(&format!("boosty sync failed: {e}")),
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/link` — link a subscriber to a user.
+pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> Response {
+    let user = form_field(&body, "user").unwrap_or_default();
+    if user.is_empty() {
+        return bad_request("missing `user` field");
+    }
+    let subscriber_id = match form_field(&body, "subscriber_id").and_then(|v| v.parse::<i64>().ok())
+    {
+        Some(id) => id,
+        None => return bad_request("missing or invalid `subscriber_id`"),
+    };
+
+    let uid = vpnctl_core::UserId(user.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    // Audit-on-actual-mutation: a same-pair re-link is a no-op.
+    let changed = match state.inv.link_boosty_subscriber(&uid, subscriber_id).await {
+        Ok(b) => b,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if changed
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "boosty.link",
+                Some(&user),
+                Some(&serde_json::json!({ "subscriber_id": subscriber_id })),
+            )
+            .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.link failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/unlink/{user}` — remove a user's Boosty link.
+pub(crate) async fn boosty_unlink(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+) -> Response {
+    // Audit-on-actual-mutation: unlinking an unlinked user is a no-op.
+    let changed = match state
+        .inv
+        .unlink_boosty_subscriber(&vpnctl_core::UserId(user.clone()))
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if changed
+        && let Err(e) = state
+            .inv
+            .audit("admin", "boosty.unlink", Some(&user), None)
+            .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.unlink failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/disable/{user}` — disable a lapsed subscriber's
+/// user (soft-mute; the "confirm disable" button), then re-deploy the
+/// user's servers so the node-side access is actually cut.
+pub(crate) async fn boosty_disable(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user.clone());
+    // Same error mapping as user_set_disabled_inner: unknown user → 404,
+    // DB failure → 500 (a 400 would blame the operator's request).
+    let changed = match state.inv.set_user_disabled(&uid, true).await {
+        Ok(b) => b,
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg))
+            if msg.starts_with("no such user") =>
+        {
+            return user_not_found(&user);
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // Audit-on-actual-mutation (NM-10): a double-submit of the confirm
+    // button writes nothing and deploys nothing.
+    if changed {
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "boosty.disable",
+                Some(&user),
+                Some(&serde_json::json!({ "reason": "operator-confirmed lapse" })),
+            )
+            .await
+        {
+            tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.disable failed");
+        }
+        let inv = state.inv.clone();
+        let registry = std::sync::Arc::clone(&state.registry);
+        let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+        let users = vec![user.clone()];
+        tokio::spawn(async move {
+            crate::boosty_sync_poller::deploy_flipped_users(
+                &inv,
+                &registry,
+                &key,
+                &users,
+                "boosty.disable",
+            )
+            .await;
+        });
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
 /// `GET /admin/backup/download/{name}` — stream a snapshot file with
 /// `Content-Disposition: attachment`. The operator-supplied `name`
 /// is validated strictly (the snapshot prefix + safe-charset filename)
@@ -10226,65 +10690,13 @@ fn spawn_user_servers_redeploy(
         "user.autodeploy"
     };
     tokio::spawn(async move {
-        use tokio_stream::StreamExt;
-        let mut errors: Vec<String> = Vec::new();
-        if key_path.exists() {
-            // Per-server run_redeploy (NOT run_deploy_all): the deploy-all
-            // stream wraps per-server failures as Step lines and always
-            // ends Ok, so this dispatcher would record ok=true even when
-            // every server failed. Driving each server's stream directly
-            // keeps the terminal Ok/Error per server observable.
-            for server in servers {
-                let sid = server.id.0.clone();
-                // Bounded retry on the per-server deploy lock: a deploy
-                // already in flight rendered its config BEFORE this
-                // mutation committed, so being refused here would leave
-                // the mutation off the node until a manual deploy.
-                // ponytail: 3 retries × 5s covers back-to-back operator
-                // clicks; a node mid-`ensure_installed` for minutes still
-                // ends in errors + the pending banner staying up.
-                let mut failure: Option<String> = None;
-                for attempt in 0u32..4 {
-                    if attempt > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                    failure = None;
-                    let mut stream = Box::pin(crate::wizard_bootstrap::run_redeploy(
-                        server.clone(),
-                        inv.clone(),
-                        std::sync::Arc::clone(&registry),
-                        key_path.clone(),
-                    ));
-                    while let Some(ev) = stream.next().await {
-                        if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } =
-                            ev
-                        {
-                            failure = Some(format!("{phase}: {message}"));
-                        }
-                    }
-                    match &failure {
-                        Some(msg)
-                            if msg.contains(
-                                crate::wizard_bootstrap::DEPLOY_ALREADY_RUNNING_PREFIX,
-                            ) =>
-                        {
-                            continue;
-                        }
-                        _ => break,
-                    }
-                }
-                if let Some(msg) = failure {
-                    errors.push(format!("{sid}: {msg}"));
-                }
-            }
-        } else {
-            // No deploy key → running the pipeline would only stamp a
-            // `server.deploy` row with ssh_skip_reason per server, which
-            // clears the pending-deploy banner while the nodes stay
-            // stale. Record the failure on the autodeploy row instead
-            // and leave the banner up.
-            errors.push(crate::wizard_bootstrap::DEPLOY_KEY_ABSENT_MSG.into());
-        }
+        let errors = crate::wizard_bootstrap::redeploy_servers_collect_errors(
+            servers,
+            inv.clone(),
+            registry,
+            key_path,
+        )
+        .await;
         if errors.is_empty() {
             tracing::info!(
                 target = "vpnctld::admin",
