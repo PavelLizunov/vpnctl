@@ -2077,8 +2077,10 @@ impl SqliteInventory {
     }
 
     /// Link a vpnctl user to a Boosty subscriber id. Errors if the user
-    /// doesn't exist or the subscriber is already linked to a different user.
-    pub async fn link_boosty_subscriber(&self, user: &UserId, subscriber_id: i64) -> Result<()> {
+    /// doesn't exist or the subscriber is already linked to a different
+    /// user. Returns whether anything changed (`false` = the exact same
+    /// pair was already linked) so callers audit only actual mutations.
+    pub async fn link_boosty_subscriber(&self, user: &UserId, subscriber_id: i64) -> Result<bool> {
         // Reject linking one subscriber to two users up front (clearer than
         // a raw UNIQUE-violation error).
         let existing: Option<String> =
@@ -2086,9 +2088,11 @@ impl SqliteInventory {
                 .bind(subscriber_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        if let Some(other) = existing
-            && other != user.0
-        {
+        if let Some(other) = existing {
+            if other == user.0 {
+                // Same pair — idempotent no-op.
+                return Ok(false);
+            }
             return Err(SqliteInventoryError::Invalid(format!(
                 "Boosty subscriber {subscriber_id} already linked to user {other}"
             )));
@@ -2105,16 +2109,20 @@ impl SqliteInventory {
                 user.0
             )));
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// Remove a user's Boosty link. Idempotent (no-op if already unlinked).
-    pub async fn unlink_boosty_subscriber(&self, user: &UserId) -> Result<()> {
-        sqlx::query("UPDATE users SET boosty_subscriber_id = NULL WHERE id = ?1")
-            .bind(&user.0)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Remove a user's Boosty link. Idempotent; returns whether a link was
+    /// actually removed so callers audit only actual mutations.
+    pub async fn unlink_boosty_subscriber(&self, user: &UserId) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE users SET boosty_subscriber_id = NULL
+              WHERE id = ?1 AND boosty_subscriber_id IS NOT NULL",
+        )
+        .bind(&user.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// Read the singleton bridge settings row.
@@ -2183,6 +2191,36 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Persist the last APPLIED sync report (serialized `SyncReport`).
+    /// `/admin/boosty` renders its actionable sections from this instead of
+    /// doing a live (state-mutating) sync on GET.
+    pub async fn set_boosty_last_report(&self, report_json: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET last_report_json = ?1,
+                    last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1",
+        )
+        .bind(report_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The last applied sync report as `(report_json, synced_at)`, when one
+    /// has ever been stored.
+    pub async fn boosty_last_report(&self) -> Result<Option<(String, String)>> {
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT last_report_json, last_sync_at FROM boosty_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some((Some(json), Some(ts))) => Some((json, ts)),
+            _ => None,
+        })
     }
 
     // ── Grants (user × server) ──────────────────────────────────────────

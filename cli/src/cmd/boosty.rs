@@ -137,25 +137,6 @@ fn deploy_hint(server_ids: &[String]) -> String {
     out
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::deploy_hint;
-
-    #[test]
-    fn deploy_hint_lists_each_server_and_the_command() {
-        let hint = deploy_hint(&["de".to_string(), "is".to_string()]);
-        assert!(hint.contains("vpnctl deploy de\n"), "{hint}");
-        assert!(hint.contains("vpnctl deploy is\n"), "{hint}");
-        assert!(hint.starts_with("note:"), "{hint}");
-    }
-
-    #[test]
-    fn deploy_hint_is_empty_for_no_servers() {
-        assert_eq!(deploy_hint(&[]), "");
-    }
-}
-
 fn print_report(r: &SyncReport, mode: ApplyMode) {
     let verb = match mode {
         ApplyMode::DryRun => "would",
@@ -219,24 +200,35 @@ async fn run_link(inv: &SqliteInventory, user: &str, subscriber_id: i64) -> anyh
     if inv.get_user(&UserId(user.to_string())).await?.is_none() {
         return Err(anyhow::anyhow!("no such user: {user}"));
     }
-    inv.link_boosty_subscriber(&UserId(user.to_string()), subscriber_id)
+    // Audit-on-actual-mutation: a same-pair re-link writes nothing.
+    let changed = inv
+        .link_boosty_subscriber(&UserId(user.to_string()), subscriber_id)
         .await?;
-    inv.audit(
-        "cli",
-        "boosty.link",
-        Some(user),
-        Some(&json!({ "subscriber_id": subscriber_id })),
-    )
-    .await?;
-    println!("linked '{user}' to Boosty subscriber {subscriber_id}");
+    if changed {
+        inv.audit(
+            "cli",
+            "boosty.link",
+            Some(user),
+            Some(&json!({ "subscriber_id": subscriber_id })),
+        )
+        .await?;
+        println!("linked '{user}' to Boosty subscriber {subscriber_id}");
+    } else {
+        println!("'{user}' is already linked to Boosty subscriber {subscriber_id} — nothing to do");
+    }
     Ok(())
 }
 
 async fn run_unlink(inv: &SqliteInventory, user: &str) -> anyhow::Result<()> {
-    inv.unlink_boosty_subscriber(&UserId(user.to_string()))
+    let changed = inv
+        .unlink_boosty_subscriber(&UserId(user.to_string()))
         .await?;
-    inv.audit("cli", "boosty.unlink", Some(user), None).await?;
-    println!("unlinked '{user}'");
+    if changed {
+        inv.audit("cli", "boosty.unlink", Some(user), None).await?;
+        println!("unlinked '{user}'");
+    } else {
+        println!("'{user}' has no Boosty link — nothing to do");
+    }
     Ok(())
 }
 
@@ -329,4 +321,23 @@ async fn run_configure(
     .await?;
     println!("boosty settings updated");
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::deploy_hint;
+
+    #[test]
+    fn deploy_hint_lists_each_server_and_the_command() {
+        let hint = deploy_hint(&["de".to_string(), "is".to_string()]);
+        assert!(hint.contains("vpnctl deploy de\n"), "{hint}");
+        assert!(hint.contains("vpnctl deploy is\n"), "{hint}");
+        assert!(hint.starts_with("note:"), "{hint}");
+    }
+
+    #[test]
+    fn deploy_hint_is_empty_for_no_servers() {
+        assert_eq!(deploy_hint(&[]), "");
+    }
 }

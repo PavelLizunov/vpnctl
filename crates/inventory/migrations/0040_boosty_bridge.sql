@@ -47,6 +47,12 @@ CREATE TABLE boosty_settings (
     device_id           TEXT,               -- nullable (refresh flow)
     poll_interval_secs  INTEGER NOT NULL DEFAULT 3600,
     auto_disable_lapsed INTEGER NOT NULL DEFAULT 0,
+    -- Last APPLIED (non-dry-run) SyncReport as JSON + when it finished.
+    -- /admin/boosty renders its actionable sections from THIS — a GET must
+    -- never talk to Boosty (CSRF contract: admin GETs don't mutate state,
+    -- and a live sync would rotate the refresh token).
+    last_report_json    TEXT,
+    last_sync_at        TEXT,
     updated_at          TEXT NOT NULL
                           DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

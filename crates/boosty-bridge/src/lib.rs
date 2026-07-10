@@ -38,7 +38,7 @@ pub enum ApplyMode {
 
 /// An active subscriber with no linked vpnctl user, surfaced for the
 /// operator to link or provision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSubscriberInfo {
     /// Boosty numeric subscriber id.
     pub subscriber_id: i64,
@@ -47,7 +47,12 @@ pub struct NewSubscriberInfo {
 }
 
 /// Outcome of one [`sync_once`] pass.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Serializable: the daemon persists the last APPLIED report so the admin
+/// page can render it without a live (state-mutating) sync on GET.
+/// `#[serde(default)]` keeps old stored rows readable when fields grow.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SyncReport {
     /// Total subscribers fetched from Boosty.
     pub total_subscribers: usize,
@@ -185,6 +190,30 @@ pub async fn sync_from_settings_at(
                 error = %e,
                 "persisting rotated refresh token failed after a failed sync"
             );
+        }
+    }
+
+    // Persist the applied report so /admin/boosty can render its actionable
+    // sections without a live (state-mutating) sync on GET. Dry-run passes
+    // are pure previews and deliberately leave the stored report untouched.
+    if mode != ApplyMode::DryRun
+        && let Ok(report) = &result
+    {
+        match serde_json::to_string(report) {
+            Ok(json) => {
+                if let Err(e) = inv.set_boosty_last_report(&json).await {
+                    tracing::warn!(
+                        target = "boosty_bridge",
+                        error = %e,
+                        "persisting last sync report failed"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                target = "boosty_bridge",
+                error = %e,
+                "serializing sync report failed"
+            ),
         }
     }
 

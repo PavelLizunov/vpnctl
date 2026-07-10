@@ -1,5 +1,5 @@
 //! Contract tests for the Boosty-bridge inventory methods
-//! (migration 0036): user↔subscriber links + singleton settings.
+//! (migration 0040): user↔subscriber links + singleton settings.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -34,16 +34,27 @@ async fn link_then_list_and_unlink() {
 
     assert!(inv.list_boosty_links().await.unwrap().is_empty());
 
-    inv.link_boosty_subscriber(&UserId("alice".into()), 12345)
+    let changed = inv
+        .link_boosty_subscriber(&UserId("alice".into()), 12345)
         .await
         .unwrap();
+    assert!(changed, "first link is a mutation");
     let links = inv.list_boosty_links().await.unwrap();
     assert_eq!(links, vec![(UserId("alice".into()), 12345)]);
 
-    inv.unlink_boosty_subscriber(&UserId("alice".into()))
+    let changed = inv
+        .unlink_boosty_subscriber(&UserId("alice".into()))
         .await
         .unwrap();
+    assert!(changed, "unlink of a linked user is a mutation");
     assert!(inv.list_boosty_links().await.unwrap().is_empty());
+
+    // Second unlink is a no-op — callers must not audit it.
+    let changed = inv
+        .unlink_boosty_subscriber(&UserId("alice".into()))
+        .await
+        .unwrap();
+    assert!(!changed, "unlink of an unlinked user is a no-op");
 }
 
 #[tokio::test]
@@ -63,10 +74,29 @@ async fn one_subscriber_cannot_link_two_users() {
         .unwrap_err();
     assert!(err.to_string().contains("already linked"), "{err}");
 
-    // Re-linking the SAME user to the SAME subscriber is a no-op success.
-    inv.link_boosty_subscriber(&UserId("alice".into()), 999)
+    // Re-linking the SAME user to the SAME subscriber is a no-op success —
+    // callers must not audit it.
+    let changed = inv
+        .link_boosty_subscriber(&UserId("alice".into()), 999)
         .await
         .unwrap();
+    assert!(!changed, "same-pair re-link is a no-op");
+}
+
+#[tokio::test]
+async fn last_report_round_trip() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    // Nothing stored yet.
+    assert!(inv.boosty_last_report().await.unwrap().is_none());
+
+    inv.set_boosty_last_report(r#"{"total_subscribers":3}"#)
+        .await
+        .unwrap();
+    let (json, ts) = inv.boosty_last_report().await.unwrap().unwrap();
+    assert!(json.contains("total_subscribers"), "{json}");
+    assert!(!ts.is_empty(), "sync timestamp recorded");
 }
 
 #[tokio::test]

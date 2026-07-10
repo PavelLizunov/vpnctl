@@ -397,6 +397,64 @@ async fn deploy_all_pipeline(
         .await;
 }
 
+/// Drive [`run_redeploy`] over `servers` sequentially and return per-server
+/// error strings (`"<sid>: <phase>: <msg>"`; empty = all deployed). Shared
+/// by every after-mutation auto-deploy dispatcher (user disable/enable,
+/// grant/revoke, the Boosty bridge) so they all get the same semantics:
+///
+/// * **Deploy-lock retry** — a deploy already in flight rendered its config
+///   BEFORE the caller's mutation committed, so a lock refusal would leave
+///   the mutation off the node until a manual deploy. Bounded retry
+///   (3 × 5 s) covers back-to-back operator clicks; a node stuck for
+///   minutes still ends in an error + the pending banner staying up.
+/// * **Missing-key guard** — with no deploy key, running the pipeline would
+///   only stamp `ssh_skip_reason` `server.deploy` rows; return one error
+///   instead and leave the pending banner up.
+/// * Per-server terminal Ok/Error stays observable (run_deploy_all's
+///   stream wraps failures as Step lines and always ends Ok — wrong here).
+pub(crate) async fn redeploy_servers_collect_errors(
+    servers: Vec<Server>,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+) -> Vec<String> {
+    use tokio_stream::StreamExt;
+    let mut errors: Vec<String> = Vec::new();
+    if !deploy_key_path.exists() {
+        errors.push(DEPLOY_KEY_ABSENT_MSG.into());
+        return errors;
+    }
+    for server in servers {
+        let sid = server.id.0.clone();
+        let mut failure: Option<String> = None;
+        for attempt in 0u32..4 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            failure = None;
+            let mut stream = Box::pin(run_redeploy(
+                server.clone(),
+                inv.clone(),
+                Arc::clone(&registry),
+                deploy_key_path.clone(),
+            ));
+            while let Some(ev) = stream.next().await {
+                if let BootstrapEvent::Error { phase, message } = ev {
+                    failure = Some(format!("{phase}: {message}"));
+                }
+            }
+            match &failure {
+                Some(msg) if msg.contains(DEPLOY_ALREADY_RUNNING_PREFIX) => continue,
+                _ => break,
+            }
+        }
+        if let Some(msg) = failure {
+            errors.push(format!("{sid}: {msg}"));
+        }
+    }
+    errors
+}
+
 async fn redeploy_pipeline(
     server: Server,
     inv: SqliteInventory,

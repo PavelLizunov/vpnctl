@@ -1962,6 +1962,47 @@ async fn boosty_disable_button_soft_mutes_user() {
     assert!(bob.disabled, "disable button must soft-mute the user");
 }
 
+/// The page renders its actionable sections from the LAST STORED sync
+/// report — no live Boosty call on GET (no mock server exists here, so a
+/// live sync would error or hang; csrf contract: admin GETs don't mutate).
+#[tokio::test]
+async fn boosty_page_renders_stored_report_without_live_sync() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let mut cfg = inv.get_boosty_settings().await.unwrap();
+    cfg.enabled = true;
+    cfg.blog_url = Some("ninitux".into());
+    cfg.refresh_token = Some("r".into());
+    cfg.device_id = Some("d".into());
+    inv.set_boosty_settings(&cfg).await.unwrap();
+    inv.set_boosty_last_report(
+        &serde_json::json!({
+            "total_subscribers": 2,
+            "active_subscribers": 1,
+            "linked": 1,
+            "enabled": [],
+            "disabled": [],
+            "lapsed_pending": ["bob"],
+            "new_subscribers": [{"subscriber_id": 300, "name": "Carol"}],
+            "errors": [],
+            "suppressed_disables": ["dave"]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/boosty").await;
+    assert!(
+        html.contains("/admin/boosty/disable/bob"),
+        "lapsed user gets a confirm-disable button: {html}"
+    );
+    assert!(html.contains("Carol"), "new subscriber from stored report");
+    assert!(html.contains("dave"), "suppressed-disables banner renders");
+}
+
 /// AC-B3 (NM-10 audit-on-actual-mutation): double-submitting the confirm
 /// button writes exactly ONE `boosty.disable` audit row — the second POST
 /// is a no-op (user already disabled) and must not spam the timeline or

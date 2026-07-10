@@ -146,15 +146,23 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
 /// creds + the web fix surface; anything else = transient).
 async fn note_sync_failure(inv: &SqliteInventory, err: &vpnctl_boosty_bridge::BridgeError) {
     let summary = vpnctl_boosty_bridge::sync_failure_summary(err);
+    // The payload is STORED on the alert row: /admin/alerts re-renders the
+    // localized text from (kind, payload), so the auth-vs-transient branch
+    // must live in the row, not only in the Telegram push.
+    let payload = serde_json::json!({
+        "auth": matches!(err, vpnctl_boosty_bridge::BridgeError::Auth(_)),
+    });
     match inv
-        .insert_alert_if_no_unacked(SYNC_FAILED_ALERT_KIND, None, "warning", &summary, None)
+        .insert_alert_if_no_unacked(
+            SYNC_FAILED_ALERT_KIND,
+            None,
+            "warning",
+            &summary,
+            Some(&payload.to_string()),
+        )
         .await
     {
         Ok(Some(alert_id)) => {
-            let payload = serde_json::json!({
-                "auth": matches!(err, vpnctl_boosty_bridge::BridgeError::Auth(_)),
-                "summary": summary,
-            });
             crate::node_probe_poller::push_alert(
                 inv,
                 SYNC_FAILED_ALERT_KIND,
@@ -191,12 +199,12 @@ async fn note_sync_recovery(inv: &SqliteInventory) {
 /// users at render time — without this, a re-subscribed user stays locked
 /// out at the node and a lapsed one keeps VPN access).
 ///
-/// Servers are deduplicated across users and deployed one at a time via
-/// [`crate::wizard_bootstrap::run_redeploy`] (which carries the per-server
-/// DeployGuard and writes the `server.deploy` audit row that clears the
-/// pending-deploy banner). Per-server failures are collected, logged, and
-/// audited — one summary `boosty.autodeploy` row per batch (bulk-op
-/// convention), never a panic.
+/// Servers are deduplicated across users and driven through the shared
+/// [`crate::wizard_bootstrap::redeploy_servers_collect_errors`] pipeline
+/// (per-server DeployGuard + lock retry + missing-key guard + the
+/// `server.deploy` audit row that clears the pending-deploy banner).
+/// Per-server failures are collected, logged, and audited — one summary
+/// `boosty.autodeploy` row per batch (bulk-op convention), never a panic.
 pub(crate) async fn deploy_flipped_users(
     inv: &SqliteInventory,
     registry: &Arc<Registry>,
@@ -204,8 +212,6 @@ pub(crate) async fn deploy_flipped_users(
     user_ids: &[String],
     trigger: &'static str,
 ) {
-    use tokio_stream::StreamExt;
-
     // Union of the users' granted servers, deduplicated by server id.
     let mut by_id: BTreeMap<String, Server> = BTreeMap::new();
     for uid in user_ids {
@@ -229,25 +235,13 @@ pub(crate) async fn deploy_flipped_users(
     let servers: Vec<Server> = by_id.into_values().collect();
     let server_ids: Vec<String> = servers.iter().map(|s| s.id.0.clone()).collect();
 
-    let mut failed: Vec<String> = Vec::new();
-    for server in servers {
-        let sid = server.id.0.clone();
-        let mut stream = Box::pin(crate::wizard_bootstrap::run_redeploy(
-            server,
-            inv.clone(),
-            Arc::clone(registry),
-            deploy_key_path.to_path_buf(),
-        ));
-        let mut err: Option<String> = None;
-        while let Some(ev) = stream.next().await {
-            if let crate::wizard_bootstrap::BootstrapEvent::Error { phase, message } = ev {
-                err = Some(format!("{phase}: {message}"));
-            }
-        }
-        if let Some(e) = err {
-            failed.push(format!("{sid}: {e}"));
-        }
-    }
+    let failed = crate::wizard_bootstrap::redeploy_servers_collect_errors(
+        servers,
+        inv.clone(),
+        Arc::clone(registry),
+        deploy_key_path.to_path_buf(),
+    )
+    .await;
 
     if failed.is_empty() {
         tracing::info!(
