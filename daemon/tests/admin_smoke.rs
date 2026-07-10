@@ -685,8 +685,10 @@ async fn admin_dashboard_counts_match_seeded_inventory() {
 
     assert_summary_stat(&html, "3", "servers");
     assert_summary_stat(&html, "2", "users");
-    // distinct enabled_protocols is 1 (every seeded server gets vless+reality)
-    assert_summary_stat(&html, "1", "protocols");
+    // distinct enabled_protocols is 1 (every seeded server gets
+    // vless+reality) — and the label declines: «1 protocol», not the
+    // old always-plural «1 protocols» (i18n::noun_for, polish pass).
+    assert_summary_stat(&html, "1", "protocol");
     assert!(
         html.contains("<b>4</b> grants"),
         "grants subtitle missing or wrong (expected 4 grants, plural)"
@@ -2956,17 +2958,19 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     );
 }
 
-/// REGRESSION (audit 2026-06-10) — mirror of the grant fix: a REVOKE
-/// through any real handler must be visible to the pending-deploy
-/// detector. The handlers used to write `action="revoke",
-/// target=<server>` (bulk only a summary), invisible to
-/// `servers_pending_deploy_for_user` — so a revoked UUID stayed live
-/// on the node with no warning anywhere. The detector is coarse by
-/// design: a revoke timestamps a user mutation, so the user's
-/// REMAINING granted servers go pending (the revoked one leaves the
-/// granted list and can't appear on this per-user surface).
+/// REGRESSION (audit 2026-06-10, re-scoped 2026-07-10) — a REVOKE
+/// through any real handler must stay visible to the pending-deploy
+/// detectors. The handlers used to write `action="revoke",
+/// target=<server>` (bulk only a summary), invisible to the detectors
+/// — so a revoked UUID stayed live on the node with no warning
+/// anywhere. Post-scoping the contract is: the REVOKED server is
+/// flagged by the SERVER-side detector (`server_pending_deploy`,
+/// membership changed since last deploy), while the user's REMAINING
+/// servers stay quiet — their configs didn't change, and the old
+/// coarse any-mutation-flags-everything reading produced a permanent
+/// phantom banner after every grant/revoke (design review 2026-07-10).
 #[tokio::test]
-async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
+async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -2980,7 +2984,9 @@ async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let app = router(s);
 
-    // 1. user-detail revoke: u0 loses s0 → remaining s1 goes pending.
+    // 1. user-detail revoke: u0 loses s0 → the REVOKED server flags on
+    //    the server-side detector; the untouched remaining server (s1)
+    //    stays quiet on the per-user surface.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -2993,17 +2999,22 @@ async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
         )
         .await
         .unwrap();
+    assert!(
+        inv.server_pending_deploy(&ServerId("s0".into()))
+            .await
+            .unwrap(),
+        "revoked server must flag on the server-side detector"
+    );
     let pending = inv
         .servers_pending_deploy_for_user(&UserId("u0".into()), &[ServerId("s1".into())])
         .await
         .unwrap();
-    assert_eq!(
-        pending,
-        vec![ServerId("s1".into())],
-        "user-detail revoke must timestamp a user.revoke mutation"
+    assert!(
+        pending.is_empty(),
+        "revoke of s0 must NOT flag the untouched s1 (scoped detector), got {pending:?}"
     );
 
-    // 2. server-detail revoke: u1 loses s1 → remaining s2 goes pending.
+    // 2. server-detail revoke: same contract from the other handler.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -3016,14 +3027,19 @@ async fn revokes_via_real_handlers_mark_remaining_servers_pending_deploy() {
         )
         .await
         .unwrap();
+    assert!(
+        inv.server_pending_deploy(&ServerId("s1".into()))
+            .await
+            .unwrap(),
+        "revoked server must flag on the server-side detector (server-detail path)"
+    );
     let pending = inv
         .servers_pending_deploy_for_user(&UserId("u1".into()), &[ServerId("s2".into())])
         .await
         .unwrap();
-    assert_eq!(
-        pending,
-        vec![ServerId("s2".into())],
-        "server-detail revoke must timestamp a user.revoke mutation"
+    assert!(
+        pending.is_empty(),
+        "revoke of s1 must NOT flag the untouched s2 (scoped detector), got {pending:?}"
     );
 
     // 3. Canonical row shape + idempotency: re-revoking writes nothing.
@@ -6008,6 +6024,51 @@ async fn admin_audit_filter_by_actor_narrows() {
     assert!(
         !html.contains("server.deploy"),
         "cli actor's row must be filtered out"
+    );
+}
+
+/// v2 polish — the «hide snapshots» chip: `?hide=snapshots` drops the
+/// hourly `backup.snapshot` housekeeping rows (and only them), the
+/// counts line says «M match the filter», and the chip flips to a
+/// «show snapshots» link that preserves other filters.
+#[tokio::test]
+async fn admin_audit_hide_snapshots_chip_filters_housekeeping() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for _ in 0..2 {
+        s.inv
+            .audit("admin", "backup.snapshot", None, None)
+            .await
+            .unwrap();
+    }
+    s.inv
+        .audit("admin", "user.grant", Some("alice"), None)
+        .await
+        .unwrap();
+    let app = router(s);
+
+    // Default view: housekeeping visible + the hide chip offered.
+    let html = fetch_html(app.clone(), "/admin/audit").await;
+    assert!(html.contains("backup.snapshot"));
+    assert!(
+        html.contains("hide=snapshots"),
+        "default view must offer the hide-snapshots chip"
+    );
+
+    // Hidden view: snapshots gone, real mutation stays, chip flips.
+    let html = fetch_html(app, "/admin/audit?hide=snapshots").await;
+    assert!(
+        !html.contains("backup.snapshot"),
+        "hidden view must not render snapshot rows"
+    );
+    assert!(html.contains("user.grant"), "real mutations must survive");
+    assert!(
+        html.contains("show snapshots"),
+        "hidden view must offer the way back"
+    );
+    assert!(
+        html.contains("match the filter"),
+        "hiding counts as an active filter in the counts line"
     );
 }
 
@@ -9616,11 +9677,16 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
     let app = router(s);
     let html = fetch_html(app, "/admin/users/flowtest/delivery").await;
 
-    // Flow A card MUST contain the click-to-select-all textarea
-    // attribute that ships in `share_link_card`.
+    // Flow A card MUST carry the click-to-select marker that admin.js
+    // wires up (the old inline `onclick` was CSP-dead — polish pass
+    // 2026-07-10 moved it to a data-attribute + delegated listener).
     assert!(
-        html.contains("onclick=\"this.select()\""),
-        "share_link_card must use onclick=\"this.select()\" so the textarea selects on click"
+        html.contains("data-select-on-click"),
+        "share_link_card textarea must carry data-select-on-click for the admin.js wiring"
+    );
+    assert!(
+        !html.contains("onclick="),
+        "no inline event handlers — the CSP refuses them silently"
     );
     // The sub URL goes inside a <textarea readonly>. The user-detail
     // page renders the sub-token TWICE: once in the Subscription

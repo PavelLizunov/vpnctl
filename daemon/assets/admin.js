@@ -229,8 +229,39 @@
     });
   }
 
+  // ── click-to-select for share-link textareas ────────────────────
+  // The old inline `onclick="this.select()"` was dead under the CSP
+  // (`script-src 'self'` refuses inline handlers) — the title promised
+  // click-to-select but nothing happened. Delegated here instead;
+  // marker attribute keeps it opt-in per textarea.
+  function wireSelectOnClick() {
+    document.addEventListener("click", function (e) {
+      var t = e.target;
+      if (t && t.tagName === "TEXTAREA" && t.hasAttribute("data-select-on-click")) t.select();
+    });
+  }
+
+  // ── live user-id normalisation (NM-7 naming gate) ───────────────
+  // <input data-lowercase-id>: lowercase, spaces → '-', strip anything
+  // outside [a-z0-9._-], cap at 32. Replaces an inline `oninput` that
+  // the CSP silently refused — `pattern=` + the server gate always
+  // enforced the rule, this just restores the promised live feedback.
+  function wireLowercaseId() {
+    document.addEventListener("input", function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== "INPUT" || !t.hasAttribute("data-lowercase-id")) return;
+      t.value = t.value
+        .toLowerCase()
+        .replace(/\s+/g, "-")
+        .replace(/[^a-z0-9._-]/g, "")
+        .slice(0, 32);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     wireSearchHotkey();
+    wireSelectOnClick();
+    wireLowercaseId();
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
     var autos = document.querySelectorAll("[data-sse-autostart]");

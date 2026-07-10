@@ -169,7 +169,10 @@ fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Marku
                             (other.cookie_value().to_uppercase())
                         }
                     }
-                    " · " (t(lang, K::NavOperator))
+                    // Hidden below 1180px (see .ed-tb__host in the CSS)
+                    // so the RU nav keeps to one bar row on narrow
+                    // laptop windows.
+                    span.ed-tb__host { " · " (t(lang, K::NavOperator)) }
                     " · "
                     form method="post" action="/admin/logout" style="display: inline; margin: 0; padding: 0;" {
                         button type="submit"
@@ -223,14 +226,15 @@ fn foot(lang: crate::i18n::Locale) -> Markup {
 /// `sanitize_referer` redirect path still works — operator hits a
 /// theme button on Settings, the POST handler reads Referer header,
 /// sees `/admin/settings`, redirects back there.
-fn tweaks_inline(theme: &str, accent: &str) -> Markup {
+fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale) -> Markup {
+    use crate::i18n::tr;
     html! {
         div style="display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--soft); max-width: 480px;" {
             form method="post" action="/admin/tweak/theme" style="display: flex; gap: 6px; align-items: baseline;" {
-                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "paper" }
+                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "paper", "бумага")) }
                 @for &name in VALID_THEMES {
                     button name="value" value=(name)
-                           title=(format!("Switch paper theme to {name}"))
+                           title=(format!("{} {name}", tr(lang, "Switch paper theme to", "Переключить тему бумаги на")))
                            style=(format!(
                                "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
                                if name == theme { "var(--ink)" } else { "transparent" },
@@ -241,10 +245,10 @@ fn tweaks_inline(theme: &str, accent: &str) -> Markup {
                 }
             }
             form method="post" action="/admin/tweak/accent" style="display: flex; gap: 6px; align-items: baseline;" {
-                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "accent" }
+                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "accent", "акцент")) }
                 @for &name in VALID_ACCENTS {
                     button name="value" value=(name)
-                           title=(format!("Switch accent colour to {name}"))
+                           title=(format!("{} {name}", tr(lang, "Switch accent colour to", "Переключить акцентный цвет на")))
                            style=(format!(
                                "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
                                if name == accent { "var(--acc)" } else { "transparent" },
@@ -337,9 +341,10 @@ pub(crate) fn shell(
                 // tale "unfinished homepage" signal even when the rest
                 // of the chrome is polished.
                 link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg" {}
-                link rel="preconnect" href="https://fonts.googleapis.com" {}
-                link rel="preconnect" href="https://fonts.gstatic.com" crossorigin {}
-                link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,300;1,6..72,400&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" {}
+                // Webfonts are self-hosted (@font-face at the top of
+                // admin.css). The old Google-Fonts stylesheet was
+                // CSP-refused (`style-src 'self'`) since 2026-05-18 —
+                // every browser silently fell back to Georgia/Consolas.
                 link rel="stylesheet" href="/admin/assets/admin.css" {}
                 // External JS (CSP `script-src 'self'` forbids inline).
                 // Wires `data-sse-url` triggers (SSE-streamed re-deploy)
@@ -461,9 +466,13 @@ fn dashboard_summary_bar(
                 em { (tr(lang, "at a glance", "одним взглядом")) }
             }
             span.ed-tip title=(tip) { "ⓘ" }
-            span.ed-sumbar__stat { b { (stats.servers) } " " (tr(lang, "servers", "серверов")) }
             span.ed-sumbar__stat {
-                b { (stats.users) } " " (tr(lang, "users", "юзеров"))
+                b { (stats.servers) } " "
+                (crate::i18n::noun_for(lang, stats.servers as u64, "server", "servers", "сервер", "сервера", "серверов"))
+            }
+            span.ed-sumbar__stat {
+                b { (stats.users) } " "
+                (crate::i18n::noun_for(lang, stats.users as u64, "user", "users", "юзер", "юзера", "юзеров"))
                 @if stats.disabled_users > 0 {
                     " · "
                     a.ed-sumbar__warn href="/admin/users"
@@ -478,10 +487,12 @@ fn dashboard_summary_bar(
             }
             span.ed-sumbar__stat {
                 b { (stats.grants) } " "
-                @if stats.grants == 1 { (tr(lang, "grant", "доступ")) }
-                @else { (tr(lang, "grants", "доступов")) }
+                (crate::i18n::noun_for(lang, stats.grants as u64, "grant", "grants", "доступ", "доступа", "доступов"))
             }
-            span.ed-sumbar__stat { b { (stats.distinct_protocols) } " " (tr(lang, "protocols", "протоколов")) }
+            span.ed-sumbar__stat {
+                b { (stats.distinct_protocols) } " "
+                (crate::i18n::noun_for(lang, stats.distinct_protocols as u64, "protocol", "protocols", "протокол", "протокола", "протоколов"))
+            }
             span.ed-sumbar__stat { b { (conns_now) } " " (tr(lang, "conns now", "подкл. сейчас")) }
             span.ed-sumbar__live {
                 span.ed-sumbar__dot {}
@@ -538,7 +549,18 @@ fn fleet_majority_version(
             *counts.entry(v).or_insert(0) += 1;
         }
     }
-    counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v)
+    // Tie-break by the NEWER version, not HashMap iteration order — a
+    // 2-vs-2 fleet mid-upgrade otherwise flips the ≠ drift marker
+    // between renders. Preferring the newer side marks the not-yet-
+    // upgraded nodes as drifted, which is the actionable reading.
+    counts
+        .into_iter()
+        .max_by(|(va, na), (vb, nb)| {
+            na.cmp(nb)
+                .then_with(|| parse_version_tuple(va).cmp(&parse_version_tuple(vb)))
+                .then_with(|| va.cmp(vb))
+        })
+        .map(|(v, _)| v)
 }
 
 /// GeoIP MMDB file freshness — mtimes of the city + ASN databases in
@@ -619,7 +641,7 @@ fn kernel_floor_rollup(
     html! {
         section id="kernel-rollup" style="margin-top: 28px;" {
             div.ed-art-eyebrow { (t(lang, K::EyebrowKernelRollup)) }
-            p style="font-family: var(--serif); font-size: 15px; margin: 8px 0 0;" {
+            p style="font-family: var(--serif); font-size: 14px; margin: 8px 0 0;" {
                 "sing-box "
                 b { (at_floor) "/" (reporting) }
                 " @ "
@@ -998,7 +1020,7 @@ fn dashboard_health_feed(
                 }
             }
             div style="margin-top: 6px;" {
-                a href="/admin/alerts" style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--acc); text-decoration: none;" {
+                a href="/admin/alerts" style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--acc); text-decoration: none;" {
                     (tr(lang, "full feed →", "весь поток →"))
                 }
             }
@@ -1016,11 +1038,17 @@ fn sharing_reason_label(
 ) -> String {
     use crate::i18n::tr;
     use crate::sharing_score::SharingReason as R;
+    let network =
+        |n: u64| crate::i18n::noun_for(lang, n, "network", "networks", "сеть", "сети", "сетей");
     match r {
         R::ConcurrentNets(n) => {
-            format!("{n} {}", tr(lang, "networks at once", "сетей одновременно"))
+            format!(
+                "{n} {} {}",
+                network(n as u64),
+                tr(lang, "at once", "одновременно")
+            )
         }
-        R::DailyNets(n) => format!("{n} {}", tr(lang, "networks/day", "сетей/день")),
+        R::DailyNets(n) => format!("{n} {}/{}", network(n as u64), tr(lang, "day", "день")),
         R::ImpossibleTravel(h) => {
             format!(
                 "{h}× {}",
@@ -1095,7 +1123,7 @@ fn dashboard_abuse_summary(
             }
             @if n > 6 {
                 div style="margin-top: 6px;" {
-                    span.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px;" {
+                    span.ed-grid__mut style="font-family: var(--mono); font-size: 10px;" {
                         "+" (n - 6) " " (tr(lang, "more flagged", "ещё под флагом"))
                     }
                 }
@@ -1691,7 +1719,7 @@ fn dashboard_fleet_uptime(
                     (pct_text)
                 }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                    (dec) " " (tr(lang, "probes", "проб"))
+                    (dec) " " (crate::i18n::noun_for(lang, dec, "probe", "probes", "проба", "пробы", "проб"))
                     " · " (polled) "/" (total_servers) " " (tr(lang, "polled", "опрош."))
                 }
             }
@@ -1799,7 +1827,7 @@ fn dashboard_vpn_activity(
                     }
                 }
                 // Per-server breakdown — compact mono table.
-                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                     thead {
                         tr style="border-bottom: 1px solid var(--ink);" {
                             th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "server", "сервер")) }
@@ -2302,11 +2330,16 @@ pub(crate) async fn monitoring(
                         @let (dmax, mmax, lmax) = (fmax(&disk_series), fmax(&mem_series), fmax(&log_series));
                         @let load = h.as_ref().and_then(|h| h.load_1min_x100).map(|l| format!("{:.2}", l as f64 / 100.0));
                         @let cell = |series: &[f64], max: f64, warm: bool, unit: &str| -> Markup {
+                            // % series get the fixed 0–100 axis; the
+                            // MiB series auto-scales (shape only). The
+                            // caption below is the max label, so the
+                            // in-SVG one is off.
+                            let y_max = if unit == "%" { Some(100.0) } else { None };
                             html! {
                                 @if series.is_empty() {
                                     span.ed-grid__mut { "—" }
                                 } @else {
-                                    (sparkline_svg(series, 200, 30))
+                                    (sparkline_svg_scaled(series, 200, 30, y_max, false))
                                     div style=(if warm { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
                                         "max " b { (format!("{max:.0}")) } (unit)
                                         @if warm { " ⚠" }
@@ -2517,6 +2550,27 @@ pub(crate) async fn monitoring_probe_all(
 /// stroke uses `var(--acc)` so the accent toggle in the Tweaks panel
 /// recolours every chart on the page consistently.
 fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
+    sparkline_svg_scaled(values, width, height, None, true)
+}
+
+/// The general form behind [`sparkline_svg`].
+///
+/// * `y_max = Some(cap)` pins the y-axis — **percent series pass 100**
+///   so a flat 28 % disk line sits at 28 % of the box height instead of
+///   gluing to the top edge and reading as "maxed out" (design review
+///   2026-07-10). `None` auto-scales to the window max (byte/MiB
+///   series, where only the shape matters).
+/// * `label_max = false` drops the in-SVG "max N" corner text for
+///   callers that render their own max caption under the chart —
+///   previously both rendered and disagreed by one (SVG truncated,
+///   caption rounded: «max 51» inside, «max 52%» below).
+fn sparkline_svg_scaled(
+    values: &[f64],
+    width: u32,
+    height: u32,
+    y_max: Option<f64>,
+    label_max: bool,
+) -> Markup {
     if values.is_empty() {
         return html! {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 6px 0;" {
@@ -2524,7 +2578,8 @@ fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
             }
         };
     }
-    let max = values.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+    let data_max = values.iter().cloned().fold(0.0_f64, f64::max);
+    let scale = y_max.unwrap_or(data_max).max(1.0);
     let n = values.len();
     let stride = if n > 1 {
         (width as f64 - 4.0) / (n - 1) as f64
@@ -2537,7 +2592,9 @@ fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
         .enumerate()
         .map(|(i, v)| {
             let x = 2.0 + (i as f64) * stride;
-            let y = 2.0 + h - (v / max) * h;
+            // min(1.0) guards a >cap outlier (e.g. % rounding artifacts)
+            // from drawing outside the box.
+            let y = 2.0 + h - (v / scale).min(1.0) * h;
             format!("{x:.1},{y:.1}")
         })
         .collect::<Vec<_>>()
@@ -2554,11 +2611,15 @@ fn sparkline_svg(values: &[f64], width: u32, height: u32) -> Markup {
             style="display: block; margin: 8px 0;" {
             polygon points=(area_points) fill="var(--acc)" opacity="0.10" {}
             polyline points=(points) fill="none" stroke="var(--acc)" stroke-width="1.5" {}
-            // Right-side max-value label so operator can read the peak.
-            text x=(width - 4) y="14"
-                 text-anchor="end"
-                 style="font-family: var(--mono); font-size: 10px; fill: var(--mute);" {
-                "max " (max as u64)
+            @if label_max {
+                // Right-side max-value label so operator can read the
+                // peak. Rounded (not truncated) so it always agrees
+                // with any {:.0}-formatted caption of the same series.
+                text x=(width - 4) y="14"
+                     text-anchor="end"
+                     style="font-family: var(--mono); font-size: 10px; fill: var(--mute);" {
+                    "max " (data_max.round() as u64)
+                }
             }
         }
     }
@@ -2724,8 +2785,7 @@ pub(crate) async fn servers(
         div.ed-headrow {
             h1.ed-sumbar__h {
                 (server_list.len()) " "
-                @if server_list.len() == 1 { em { (crate::i18n::tr(lang, "server", "сервер")) } }
-                @else { em { (crate::i18n::tr(lang, "servers", "серверов")) } }
+                em { (crate::i18n::noun_for(lang, server_list.len() as u64, "server", "servers", "сервер", "сервера", "серверов")) }
                 (crate::i18n::tr(lang, " in inventory", " в инвентаре"))
             }
             span.ed-tip
@@ -3075,8 +3135,7 @@ pub(crate) async fn users(
         div.ed-headrow {
             h1.ed-sumbar__h {
                 (users_list.len()) " "
-                @if users_list.len() == 1 { em { (crate::i18n::tr(lang, "user", "пользователь")) } }
-                @else { em { (crate::i18n::tr(lang, "users", "пользователей")) } }
+                em { (crate::i18n::noun_for(lang, users_list.len() as u64, "user", "users", "пользователь", "пользователя", "пользователей")) }
                 (crate::i18n::tr(lang, " on file", " в базе"))
             }
             span.ed-tip title=(crate::i18n::tr(
@@ -3087,10 +3146,13 @@ pub(crate) async fn users(
             @if !users_list.is_empty() {
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
+                    // One direction per metric — matches the grants-tab
+                    // sort vocabulary (`id ↑ · online ↓ · traffic ↓`).
+                    // `?sort=id-desc` still parses for old bookmarks;
+                    // it just isn't offered.
                     (sort_link("id", "id ↑"))
-                    (sort_link("id-desc", "id ↓"))
-                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
                     (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
+                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
                 }
             }
         }
@@ -3125,11 +3187,15 @@ pub(crate) async fn users(
             form method="post" action="/admin/users"
                  style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--accent);" {
                 span.ed-inbar__label { (crate::i18n::tr(lang, "new user", "новый пользователь")) }
+                // Live-lowercase/sanitize moved to admin.js
+                // (`data-lowercase-id`) — the old inline `oninput` was
+                // CSP-refused and never ran in a real browser; the
+                // `pattern=` + server-side gate were the only guards.
                 input type="text" name="id" required="required"
                       placeholder="alice"
                       pattern="[a-z0-9._-]{2,32}"
                       maxlength="32"
-                      oninput="this.value=this.value.toLowerCase().replace(/\\s+/g,'-').replace(/[^a-z0-9._-]/g,'').slice(0,32);"
+                      data-lowercase-id
                       title=(crate::i18n::tr(
                           lang,
                           "2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type.",
@@ -3207,7 +3273,7 @@ pub(crate) async fn users(
                     }
                 }
             }
-            p.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px; margin-top: 8px;" {
+            p.ed-grid__mut style="font-family: var(--mono); font-size: 10px; margin-top: 8px;" {
                 (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
                 (crate::i18n::tr(lang, " of ", " из ")) (total_users)
             }
@@ -3284,12 +3350,14 @@ fn ninitux_url(device_id: &str) -> Option<String> {
 /// уже много», CLAUDE.md) won't notice. Collapsing to one arg makes
 /// the mismatch unrepresentable at the type level.
 ///
-/// The textarea uses `onclick="this.select()"` so a single click selects
-/// the full link. Avoids the Clipboard API which requires a secure
-/// context (HTTPS or localhost) — the admin UI runs over plain HTTP on
-/// the homelab LAN, so navigator.clipboard would silently fail on
-/// 192.168.0.236. Triple-click is the JS-free fallback every browser
-/// supports; the `title` attribute spells out both interactions.
+/// The textarea carries `data-select-on-click` (admin.js delegated
+/// listener) so a single click selects the full link — the old inline
+/// `onclick` was refused by the CSP and silently did nothing. Avoids
+/// the Clipboard API which requires a secure context (HTTPS or
+/// localhost) — the admin UI runs over plain HTTP on the homelab LAN,
+/// so navigator.clipboard would silently fail on 192.168.0.236.
+/// Triple-click is the JS-free fallback every browser supports; the
+/// `title` attribute spells out both interactions.
 fn share_link_card(link: &str, footnote: &Markup) -> Markup {
     html! {
         // `min-height: 244px` matches the QR card's outer dimension
@@ -3315,9 +3383,9 @@ fn share_link_card(link: &str, footnote: &Markup) -> Markup {
                     (mask_secret(link))
                 }
                 textarea readonly="readonly" rows="3"
-                         onclick="this.select()"
+                         data-select-on-click
                          title="Click to select the full link (or triple-click if JS is disabled), then Ctrl+C / Cmd+C to copy"
-                         style="width: 100%; padding: 8px 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.45; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); resize: vertical; word-break: break-all; box-sizing: border-box;" {
+                         style="width: 100%; padding: 8px 10px; font-family: var(--mono); font-size: 10px; line-height: 1.45; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); resize: vertical; word-break: break-all; box-sizing: border-box;" {
                     (link)
                 }
                 div style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; line-height: 1.5;" {
@@ -4415,7 +4483,7 @@ async fn user_detail_render(
             span.ed-inbar__label { (crate::i18n::tr(lang, "subscription", "подписка")) }
             @match (&ninitux_url_str, &sub_url_str) {
                 (Some(u), _) | (None, Some(u)) => {
-                    span style="font-family: var(--mono); font-size: 10.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;" { (u) }
+                    span style="font-family: var(--mono); font-size: 10px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;" { (u) }
                 },
                 (None, None) => {
                     em.ed-grid__mut { (crate::i18n::tr(lang, "no subscription URL yet — mint a sub-token below", "URL подписки нет — сгенерируй sub-token ниже")) }
@@ -4430,7 +4498,7 @@ async fn user_detail_render(
                 "Приложение опрашивает этот URL по расписанию; ротация sub-token ниже мгновенно гасит старый URL.",
             )) { "ⓘ" }
             @if let Some(t) = &sub_token {
-                span.ed-grid__mut style="margin-left: auto; font-family: var(--mono); font-size: 10.5px;" {
+                span.ed-grid__mut style="margin-left: auto; font-family: var(--mono); font-size: 10px;" {
                     (crate::i18n::tr(lang, "legacy /sub/", "легаси /sub/"))
                     (mask_secret(t))
                     " · " (crate::i18n::tr(lang, "LAN-only fallback", "LAN-only fallback"))
@@ -4873,7 +4941,7 @@ async fn user_detail_render(
                                                     span.ed-mono { "wgturn-cli" }
                                                     " — the user pastes the link AND their own VK Calls invite at connect time: "
                                                     br {}
-                                                    span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10.5px;" {
+                                                    span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10px;" {
                                                         "wgturn-cli connect-url '<this-link>' --vk-link '<https://vk.com/call/join/...>'"
                                                     }
                                                     br {}
@@ -5272,11 +5340,16 @@ async fn user_detail_render(
                     }
                     @if share_links.is_empty() {
                         p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
-                            "No share-links could be rendered (missing secrets or unregistered protocols). "
-                            "Check " span.ed-mono { "journalctl -u vpnctld" } " for warnings."
+                            (crate::i18n::tr(
+                                lang,
+                                "No share-links could be rendered (missing secrets or unregistered protocols). Check ",
+                                "Не удалось отрендерить ни одной ссылки (нет секретов или протокол не зарегистрирован). Смотри ",
+                            ))
+                            span.ed-mono { "journalctl -u vpnctld" }
+                            (crate::i18n::tr(lang, " for warnings.", " — там будут warnings."))
                         }
                     } @else {
-                        ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--soft);" {
+                        ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--soft);" {
                             @for (sid, pid, link) in &share_links {
                                 li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                                     span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
@@ -5318,14 +5391,16 @@ async fn user_detail_render(
                         "Эвристика по 30-дневному окну обращений. Одновременные клиентские IP + невозможные перемещения весят сильно больше простого разнообразия сетей.",
                     )) { "ⓘ" }
                 }
-                div.ed-status-tile__v style=(format!("color: {verdict_color}; font-size: 15px;")) { (verdict_txt) }
+                div.ed-status-tile__v style=(format!("color: {verdict_color}; font-size: 14px;")) { (verdict_txt) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" { (score_note) }
             }
             div.ed-status-tile {
                 div.ed-status-tile__k { (crate::i18n::tr(lang, "distinct IPs · 30d", "уникальных IP · 30д")) }
                 div.ed-status-tile__v { (access_aggregates.distinct_ips) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
-                    (access_aggregates.distinct_asns) " ASN · " (access_aggregates.distinct_countries) " " (crate::i18n::tr(lang, "countries", "стран"))
+                    (crate::i18n::n_of(lang, access_aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
+                    " · "
+                    (crate::i18n::n_of(lang, access_aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
                 }
             }
             div.ed-status-tile {
@@ -5337,7 +5412,7 @@ async fn user_detail_render(
             }
             div.ed-status-tile {
                 div.ed-status-tile__k { (crate::i18n::tr(lang, "last fetch", "последнее обращение")) }
-                div.ed-status-tile__v style="font-size: 15px;" {
+                div.ed-status-tile__v style="font-size: 14px;" {
                     @match access_aggregates.last_seen {
                         Some(ts) => (format_msk_iso(ts)),
                         None => (crate::i18n::tr(lang, "never", "никогда")),
@@ -5416,7 +5491,7 @@ async fn user_detail_render(
             @let shown_from = log_page * LOG_PAGE_SIZE + 1;
             @let shown_to = (log_page * LOG_PAGE_SIZE) + recent_log.len() as i64;
             @let has_older = shown_to < log_total as i64;
-            div style="display: flex; align-items: center; gap: 14px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--mute);" {
+            div style="display: flex; align-items: center; gap: 14px; margin-top: 8px; font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                 span {
                     (crate::i18n::tr(lang, "showing ", "показано "))
                     (shown_from) "–" (shown_to)
@@ -5460,25 +5535,25 @@ async fn user_detail_render(
             div style="display: flex; flex-wrap: wrap; gap: 36px; padding: 12px 0 6px; font-family: var(--serif);" {
                 div title=(crate::i18n::tr(lang, "Distinct real-client IPs over the last 30 days. VPN-egress rows (where src IP = one of our VPN servers, full-tunnel mode) excluded.", "Уникальные клиентские IP за 30 дней. Строки VPN-egress (когда src IP — один из наших VPN-серверов в full-tunnel) исключены.")) {
                     div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_ips) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "distinct IPs · 30 days", "уникальных IP · 30 дней"))
                     }
                 }
                 div title=(crate::i18n::tr(lang, "Distinct ISO country codes from GeoIP enrichment (DB-IP Lite City). Rows where GeoIP didn't resolve a country stay uncounted.", "Уникальные ISO-коды стран из GeoIP-обогащения (DB-IP Lite City). Строки где GeoIP не определил страну — не учтены.")) {
                     div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_countries) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "countries · 30 days", "стран · 30 дней"))
                     }
                 }
                 div title=(crate::i18n::tr(lang, "Distinct ASN labels (full AS-number + operator name) from GeoIP-ASN. High distinct_ASNs with low distinct_countries = single user roaming ISPs. High both = shared subscription URL.", "Уникальные ASN (номер AS + название оператора) из GeoIP-ASN. Много ASN при малом числе стран = один юзер мигрирует между провайдерами. Много и того и другого = расшаренная подписка.")) {
                     div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (access_aggregates.distinct_asns) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "ASNs · 30 days", "ASN · 30 дней"))
                     }
                 }
                 div title=(crate::i18n::tr(lang, "Sum of subscription payload bytes served over the last 30 days. Subscription JSON itself, NOT actual VPN traffic.", "Сумма байт payload подписки за 30 дней. Это сам JSON-конфиг подписки, НЕ реальный VPN-трафик.")) {
                     div style="font-size: 28px; font-weight: 400; color: var(--ink); line-height: 1;" { (humanize_bytes(access_aggregates.total_bytes)) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "served · 30 days", "отдано · 30 дней"))
                     }
                 }
@@ -5495,7 +5570,7 @@ async fn user_detail_render(
                             }
                         }
                     }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "last fetch", "последнее обращение"))
                     }
                 }
@@ -5550,19 +5625,19 @@ async fn user_detail_render(
             div style="display: flex; gap: 36px; padding: 4px 0 18px; font-family: var(--serif);" {
                 div {
                     div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_24h) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "distinct IPs · 24h", "уникальных IP · 24ч"))
                     }
                 }
                 div {
                     div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (ips_7d) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "distinct IPs · 7 days", "уникальных IP · 7 дней"))
                     }
                 }
                 div {
                     div style="font-size: 22px; font-weight: 400; color: var(--ink); line-height: 1;" { (recent_access.len()) }
-                    div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
+                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-top: 4px;" {
                         (crate::i18n::tr(lang, "rows in table", "строк в таблице"))
                     }
                 }
@@ -5576,7 +5651,7 @@ async fn user_detail_render(
                     ))
                 }
             } @else {
-                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                     thead {
                         tr style="border-bottom: 1px solid var(--ink);" {
                             th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -6017,7 +6092,7 @@ fn user_detail_traffic_by_server_section(
                     "Upload / download по каждому серверу за 24ч, взвешенные коэффициентом нагрузки ноды. Сумма per-тик дельт clash-api, отнесённых к этому юзеру.",
                 ))
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -6085,7 +6160,10 @@ fn user_overview_summary(
                 div.ed-fact__v style=(if likely_shared { "color: var(--warm); font-weight: 600;" } else { "color: var(--green);" }) {
                     @if likely_shared { (tr(lang, "likely shared", "вероятно расшарен")) }
                     @else { (tr(lang, "single-user", "один пользователь")) }
-                    " · " (aggregates.distinct_ips) " IP · " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN")) " · " (aggregates.distinct_countries) " " (tr(lang, "countries", "стран"))
+                    " · " (aggregates.distinct_ips) " IP · "
+                    (crate::i18n::n_of(lang, aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
+                    " · "
+                    (crate::i18n::n_of(lang, aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
                 }
             }
             div.ed-fact title=(tr(lang, "When this inventory row was created.", "Когда создана запись в инвентаре.")) {
@@ -6203,9 +6281,9 @@ fn user_sharing_verdict_section(
             p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--acc);" {
                 b { (tr(lang, "Verdict: likely shared", "Вердикт: вероятно расшарен")) }
                 " — "
-                (aggregates.distinct_ips) (tr(lang, " IPs", " IP"))
-                " / " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN"))
-                " / " (aggregates.distinct_countries) (tr(lang, " countries", " стран"))
+                (crate::i18n::n_of(lang, aggregates.distinct_ips, "IP", "IPs", "IP", "IP", "IP"))
+                " / " (crate::i18n::n_of(lang, aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
+                " / " (crate::i18n::n_of(lang, aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
                 @if ua_shared {
                     (tr(lang, " / UA spread across ISPs", " / UA-разброс по ISP"))
                 }
@@ -6214,12 +6292,12 @@ fn user_sharing_verdict_section(
             p style="font-family: var(--mono); font-size: 13px; margin: 6px 0 0; color: var(--soft);" {
                 (tr(lang, "Verdict: looks single-user", "Вердикт: похоже на одного юзера"))
                 " — "
-                (aggregates.distinct_ips) (tr(lang, " IPs", " IP"))
-                " / " (aggregates.distinct_asns) (tr(lang, " ASNs", " ASN"))
-                " / " (aggregates.distinct_countries) (tr(lang, " countries", " стран"))
+                (crate::i18n::n_of(lang, aggregates.distinct_ips, "IP", "IPs", "IP", "IP", "IP"))
+                " / " (crate::i18n::n_of(lang, aggregates.distinct_asns, "ASN", "ASNs", "ASN", "ASN", "ASN"))
+                " / " (crate::i18n::n_of(lang, aggregates.distinct_countries, "country", "countries", "страна", "страны", "стран"))
             }
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 4px 0 0;" {
+        p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 4px 0 0;" {
             (tr(
                 lang,
                 "Heuristic over the 30-day /sub access window — a subscription fetched from many ASNs / countries, or a single User-Agent spread across many ISP /16 networks, has probably escaped past one human. Not authoritative; cross-check the per-IP timeline below before acting.",
@@ -6368,7 +6446,7 @@ fn user_subscription_origins_section(
                 .distinct_device_classes
                 .max(device_fp.distinct_uas)
                 .max(device_fp.distinct_ja4);
-            p style="font-family: var(--mono); font-size: 12.5px; color: var(--ink); margin: 0 0 16px;" {
+            p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 16px;" {
                 "≈ " b { (approx_devices) } " "
                 (tr(lang, "devices", "устройств"))
                 " "
@@ -6382,7 +6460,7 @@ fn user_subscription_origins_section(
             div.ed-art-eyebrow style="margin-top: 4px;" {
                 (tr(lang, "By country", "По странам"))
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; margin-bottom: 18px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country", "страна")) }
@@ -6412,7 +6490,7 @@ fn user_subscription_origins_section(
             div.ed-art-eyebrow {
                 (tr(lang, "By ISP", "По провайдерам"))
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; margin-bottom: 18px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "ASN / ISP", "ASN / ISP")) }
@@ -6447,7 +6525,7 @@ fn user_subscription_origins_section(
             div.ed-art-eyebrow {
                 (tr(lang, "By IP", "По IP"))
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "ip", "ip")) }
@@ -6533,11 +6611,11 @@ fn user_source_ips_section(
                     "С каких клиентских IP юзер реально подключался (реальные VPN-соединения, не обращения к /sub) за 7 дней. Взвешено активностью: hits = 5-мин тики, в которых IP был живой, не байты. Приватные / LAN / CGNAT адреса подписаны, а не оставлены как «(неизвестно)». Много разных публичных IP или стран = самый достоверный сигнал расшаривания.",
                 ))
             }
-            p style="font-family: var(--mono); font-size: 12.5px; color: var(--ink); margin: 0 0 14px;" {
+            p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 14px;" {
                 "≈ " b { (distinct_public) } " "
                 (tr(lang, "distinct public IPs · 7d", "уник. публичных IP · 7д"))
             }
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "source ip", "source ip")) }
@@ -6631,7 +6709,7 @@ async fn ua_clusters_section(
                 "Эвристика. Одно устройство обычно ходит в пределах одного ISP /16, а расшаренный sub URL расползается по разным ISP. Метки: оранжевый = вероятно расшарен, зелёный = вероятно роуминг.",
             ))
         }
-        table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+        table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
             thead {
                 tr style="border-bottom: 1px solid var(--ink);" {
                     th title="Distinct User-Agent strings the subscription URL was pulled with in the last 24h. Each cluster is one row."
@@ -7351,9 +7429,9 @@ async fn user_traffic_limit_section(
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                     (tr(lang, "Used this month: ", "Использовано в этом месяце: "))
                     span.ed-mono { (humanize_bytes(used)) }
-                    (tr(lang, " — no monthly cap configured. Set one below if you want a ", " — месячный лимит не задан. Задай ниже если хочешь "))
+                    (tr(lang, " — no monthly cap configured. Set one below to get the ", " — месячный лимит не задан. Задай ниже, чтобы получать "))
                     span.ed-mono { (DEFAULT_TRAFFIC_THRESHOLD_PCT) "%-" (tr(lang, "of-limit alert", "от-лимита алерт")) }
-                    (tr(lang, " to fire on the dashboard.", " на дашборде."))
+                    (tr(lang, " on the dashboard.", " на дашборде."))
                 }
             }
         }
@@ -7365,27 +7443,42 @@ async fn user_traffic_limit_section(
                 (tr(lang, "limit", "лимит"))
             }
             // Operator-friendly input: GiB. Backend converts to
-            // bytes. 0 / empty = clear the limit.
-            @let limit_gib_default = limit_opt
-                .map(|b| b as f64 / 1_073_741_824.0)
-                .unwrap_or(0.0);
+            // bytes. 0 / empty = clear the limit. With no cap the
+            // field renders EMPTY + a placeholder — a literal «0.0»
+            // read as "limit is zero" (design review 2026-07-10).
+            @let limit_gib_value = limit_opt
+                .map(|b| format!("{:.1}", b as f64 / 1_073_741_824.0))
+                .unwrap_or_default();
             input type="number" name="limit_gib" step="0.1" min="0" max="100000"
-                  value=(format!("{limit_gib_default:.1}"))
-                  title="Monthly cap in GiB (upload + download summed). 0 / empty = no cap. Resets on the first of each month."
+                  value=(limit_gib_value)
+                  placeholder=(tr(lang, "no cap", "нет лимита"))
+                  title=(tr(
+                      lang,
+                      "Monthly cap in GiB (upload + download summed). 0 / empty = no cap. Resets on the first of each month.",
+                      "Месячный лимит в GiB (upload + download суммой). 0 / пусто = без лимита. Сбрасывается первого числа месяца.",
+                  ))
                   style="max-width: 80px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
-            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "GiB / month" }
+            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { (tr(lang, "GiB / month", "GiB / месяц")) }
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-left: 8px;" {
-                "alert at"
+                (tr(lang, "alert at", "алерт при"))
             }
             input type="number" name="threshold_pct" step="1" min="1" max="100"
                   value=(threshold_eff)
-                  title="Fire a dashboard alert (and Telegram if configured) when used / cap >= this percent. Default 80%."
+                  title=(tr(
+                      lang,
+                      "Fire a dashboard alert (and Telegram if configured) when used / cap >= this percent. Default 80%.",
+                      "Поднять алерт на дашборде (и в Telegram, если настроен), когда израсходовано ≥ этого процента лимита. По умолчанию 80%.",
+                  ))
                   style="max-width: 56px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "%" }
             button type="submit"
-                   title="Set both fields. 0 GiB = clear the limit (no cap)."
+                   title=(tr(
+                       lang,
+                       "Set both fields. 0 GiB = clear the limit (no cap).",
+                       "Сохраняет оба поля. 0 GiB = снять лимит.",
+                   ))
                    style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer; margin-left: auto;" {
-                "save"
+                (crate::i18n::t(lang, crate::i18n::K::BtnSave))
             }
         }
     }
@@ -7432,7 +7525,7 @@ async fn user_sessions_section(
                 ))
             }
         } @else {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -7547,7 +7640,7 @@ async fn user_top_destinations_section(
                 ))
             }
         } @else {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -7686,14 +7779,14 @@ async fn live_vpn_stats_section(
         @let trend = vpn_traffic_trend_series(&rows, window);
         @if trend.iter().any(|&v| v > 0.0) {
             div style="margin: 6px 0 18px;" {
-                div style="font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-bottom: 2px;" {
+                div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-bottom: 2px;" {
                     (tr(lang, "traffic trend · ", "тренд трафика · ")) (window_label)
                 }
                 (sparkline_svg(&trend, 720, 60))
             }
         }
         @if !per_server.is_empty() {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { "server" }
@@ -10266,7 +10359,7 @@ pub(crate) async fn user_delete_confirm(
                         }
                     }
                 }
-                p.ed-grid__mut style="font-family: var(--mono); font-size: 10.5px; margin-top: 8px;" {
+                p.ed-grid__mut style="font-family: var(--mono); font-size: 10px; margin-top: 8px;" {
                     (tr(
                         lang,
                         "the id has to match exactly — copy/paste counts",
@@ -10956,6 +11049,8 @@ pub(crate) async fn audit(
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
     let target = q.target.as_deref().filter(|s| !s.is_empty());
+    let exclude = q.action_exclude();
+    let hiding = exclude.is_some();
     /// Hard cap so `?page=99999...` can't overflow `page * PAGE_SIZE`.
     /// 1M pages × 50/page = 50M rows — way past any plausible audit
     /// history; clamping there is friendlier than panicking on overflow.
@@ -10973,14 +11068,14 @@ pub(crate) async fn audit(
     let offset = page * PAGE_SIZE;
     let entries = state
         .inv
-        .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action, target)
+        .recent_audit_paginated(PAGE_SIZE + 1, offset, actor, action, target, exclude)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     // v2 5b — «N events on file · M match» header counts.
     let (audit_total, audit_matched) = state
         .inv
-        .audit_counts(actor, action, target)
+        .audit_counts(actor, action, target, exclude)
         .await
         .unwrap_or((0, 0));
     let has_next = entries.len() as i64 > PAGE_SIZE;
@@ -11009,11 +11104,38 @@ pub(crate) async fn audit(
             ))
         }
 
-        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 10px;" {
-            (audit_total) " " (crate::i18n::tr(lang, "events on file", "событий в записи"))
-            @if actor.is_some() || action.is_some() || target.is_some() {
-                " · " b style="color: var(--ink);" { (audit_matched) } " "
-                (crate::i18n::tr(lang, "match the filter", "подходят под фильтр"))
+        div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 10px; display: flex; gap: 12px; align-items: baseline;" {
+            span {
+                (audit_total) " "
+                (crate::i18n::noun_for(lang, audit_total, "event on file", "events on file", "событие в записи", "события в записи", "событий в записи"))
+                @if actor.is_some() || action.is_some() || target.is_some() || hiding {
+                    " · " b style="color: var(--ink);" { (audit_matched) } " "
+                    (crate::i18n::tr(lang, "match the filter", "подходят под фильтр"))
+                }
+            }
+            // Housekeeping toggle — the hourly backup.snapshot rows
+            // otherwise fill the whole first page (design review
+            // 2026-07-10). Preserves the other filters either way.
+            @if hiding {
+                a href=(audit_url("/admin/audit", actor, action, target, false, None))
+                  style="color: var(--acc);"
+                  title=(crate::i18n::tr(
+                      lang,
+                      "Snapshots are hidden. Click to show every row again.",
+                      "Снапшоты скрыты. Кликни, чтобы снова показать все строки.",
+                  )) {
+                    (crate::i18n::tr(lang, "show snapshots →", "показать снапшоты →"))
+                }
+            } @else {
+                a href=(audit_url("/admin/audit", actor, action, target, true, None))
+                  style="color: var(--mute);"
+                  title=(crate::i18n::tr(
+                      lang,
+                      "Hide the hourly backup.snapshot housekeeping rows so real changes surface.",
+                      "Скрыть почасовые housekeeping-строки backup.snapshot, чтобы всплыли реальные изменения.",
+                  )) {
+                    (crate::i18n::tr(lang, "hide snapshots →", "скрыть снапшоты →"))
+                }
             }
         }
         form method="get" action="/admin/audit"
@@ -11077,7 +11199,7 @@ pub(crate) async fn audit(
               style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
-            a href=(audit_url("/admin/audit.csv", actor, action, target, None))
+            a href=(audit_url("/admin/audit.csv", actor, action, target, hiding, None))
               title=(crate::i18n::tr(
                   lang,
                   "Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters.",
@@ -11110,7 +11232,7 @@ pub(crate) async fn audit(
 
         div style="display: flex; gap: 16px; padding: 16px 0; font-family: var(--mono); font-size: 12px;" {
             @if has_prev {
-                a href=(audit_url("/admin/audit", actor, action, target, Some(page - 1)))
+                a href=(audit_url("/admin/audit", actor, action, target, hiding, Some(page - 1)))
                   style="color: var(--ink); text-decoration: none;" {
                     (crate::i18n::tr(lang, "← prev", "← назад"))
                 }
@@ -11133,7 +11255,7 @@ pub(crate) async fn audit(
                 (crate::i18n::tr(lang, "page ", "стр. ")) (page + 1)
             }
             @if has_next {
-                a href=(audit_url("/admin/audit", actor, action, target, Some(page + 1)))
+                a href=(audit_url("/admin/audit", actor, action, target, hiding, Some(page + 1)))
                   style="color: var(--ink); text-decoration: none;" {
                     (crate::i18n::tr(lang, "next →", "вперёд →"))
                 }
@@ -11155,7 +11277,22 @@ pub(crate) struct AuditQuery {
     pub action: Option<String>,
     /// v2 5b — substring filter on the target column.
     pub target: Option<String>,
+    /// `?hide=snapshots` — drop the hourly `backup.snapshot`
+    /// housekeeping rows that otherwise fill the first screen of the
+    /// timeline. Any other value is ignored.
+    pub hide: Option<String>,
     pub page: Option<i64>,
+}
+
+impl AuditQuery {
+    /// The exact audit action excluded by the current `hide` value —
+    /// single source for the handler, the CSV export and the chip URL.
+    pub(crate) fn action_exclude(&self) -> Option<&'static str> {
+        match self.hide.as_deref() {
+            Some("snapshots") => Some("backup.snapshot"),
+            _ => None,
+        }
+    }
 }
 
 /// Build a `/admin/audit*` URL preserving the current filter query.
@@ -11167,6 +11304,7 @@ fn audit_url(
     actor: Option<&str>,
     action: Option<&str>,
     target: Option<&str>,
+    hide_snapshots: bool,
     page: Option<i64>,
 ) -> String {
     let mut q = String::from(base);
@@ -11184,6 +11322,11 @@ fn audit_url(
     if let Some(t) = target {
         q.push(sep);
         q.push_str(&format!("target={}", path_segment_encode(t)));
+        sep = '&';
+    }
+    if hide_snapshots {
+        q.push(sep);
+        q.push_str("hide=snapshots");
         sep = '&';
     }
     if let Some(p) = page {
@@ -11223,7 +11366,7 @@ fn audit_timeline_grouped(
                     day.format("%Y-%m-%d").to_string()
                 };
                 @if Some(&label) != current_label.as_ref() {
-                    div style="margin: 18px 0 6px; padding: 4px 0; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); border-bottom: 1px solid var(--rule);" {
+                    div style="margin: 18px 0 6px; padding: 4px 0; font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); border-bottom: 1px solid var(--rule);" {
                         (label)
                     }
                 }
@@ -11250,7 +11393,7 @@ fn audit_timeline_grouped(
                             " "
                             details style="display: inline-block; vertical-align: baseline;" {
                                 summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { "{…}" }
-                                pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10.5px; white-space: pre-wrap; max-width: 680px;" {
+                                pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10px; white-space: pre-wrap; max-width: 680px;" {
                                     (serde_json::to_string_pretty(&redact_audit_payload(p)).unwrap_or_default())
                                 }
                             }
@@ -11325,6 +11468,7 @@ pub(crate) async fn audit_csv(
     let actor = q.actor.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
     let target = q.target.as_deref().filter(|s| !s.is_empty());
+    let exclude = q.action_exclude();
 
     /// Generous cap; the operator can re-export with ?limit= once we
     /// add that to AuditQuery in a follow-up.
@@ -11332,7 +11476,7 @@ pub(crate) async fn audit_csv(
 
     let entries = match state
         .inv
-        .recent_audit_paginated(CSV_LIMIT, 0, actor, action, target)
+        .recent_audit_paginated(CSV_LIMIT, 0, actor, action, target, exclude)
         .await
     {
         Ok(v) => v,
@@ -11449,21 +11593,24 @@ pub(crate) async fn alerts(
     let (sub_rows, node_rows): (Vec<_>, Vec<_>) = alerts_rows
         .iter()
         .partition(|a| a.kind.starts_with("sub_access."));
+    // The auto-resolve wording mirrors the health monitor's REAL
+    // hysteresis constants (trigger 95 → recover 90 mem, 90 → 85 disk).
     let auto_resolve_note = |kind: &str| -> &'static str {
+        use crate::i18n::tr;
         if kind.starts_with("server.mem.pressure") {
-            "on drop < 90%"
+            tr(lang, "on drop < 90%", "при спаде < 90%")
         } else if kind.starts_with("server.disk.pressure") {
-            "on drop < 85%"
+            tr(lang, "on drop < 85%", "при спаде < 85%")
         } else if kind.starts_with("server.singbox.log") {
-            "on rotate"
+            tr(lang, "on rotate", "после ротации")
         } else if kind.starts_with("server.unreachable") {
-            "on next ok probe"
+            tr(lang, "on next ok probe", "при следующей ok-пробе")
         } else if kind.starts_with("server.fingerprint.drift") {
-            "on match"
+            tr(lang, "on match", "при совпадении")
         } else if kind.starts_with("user.traffic_limit") {
-            "on usage drop"
+            tr(lang, "on usage drop", "при спаде расхода")
         } else {
-            "manual ack"
+            tr(lang, "manual ack", "только вручную")
         }
     };
     let subject_cell = |a: &vpnctl_inventory::AdminAlert| -> Markup {
@@ -11495,7 +11642,8 @@ pub(crate) async fn alerts(
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageAlerts)) }
         div.ed-headrow {
             h1.ed-sumbar__h {
-                (unacked_total) " " em { (crate::i18n::tr(lang, "open alerts", "открытых алертов")) }
+                (unacked_total) " "
+                em { (crate::i18n::noun_for(lang, unacked_total, "open alert", "open alerts", "открытый алерт", "открытых алерта", "открытых алертов")) }
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
@@ -11504,7 +11652,8 @@ pub(crate) async fn alerts(
             )) { "ⓘ" }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (sub_rows.iter().filter(|a| a.acked_at.is_none()).count()) " sub-access · "
-                (node_rows.iter().filter(|a| a.acked_at.is_none()).count()) " node"
+                (node_rows.iter().filter(|a| a.acked_at.is_none()).count()) " "
+                (crate::i18n::tr(lang, "node", "нодовых"))
             }
             div.ed-headrow__actions {
                 @if include_acked {
@@ -12022,7 +12171,7 @@ fn settings_disaster_recovery_section(
                 };
                 div style="display: flex; gap: 16px; align-items: center; margin: 8px 0 14px; padding: 10px 14px; border: 1px solid var(--rule); background: var(--paper);" {
                     span style=(format!("font-family: var(--serif); font-weight: 500; color: {color}; font-size: 14px;")) { (label) }
-                    span style="color: var(--mute); font-family: var(--mono); font-size: 11.5px;" {
+                    span style="color: var(--mute); font-family: var(--mono); font-size: 11px;" {
                         (format_msk_iso(*ts))
                         " · "
                         @match duration_ms {
@@ -12364,7 +12513,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
     // «Never run».
     let last_self_test = state
         .inv
-        .recent_audit_paginated(1, 0, None, Some("backup.self_test"), None)
+        .recent_audit_paginated(1, 0, None, Some("backup.self_test"), None, None)
         .await
         .ok()
         .and_then(|rows| rows.into_iter().next());
@@ -12415,8 +12564,10 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
 
     (detail_tabs("/admin/settings", tab.slug(), &[("appearance", crate::i18n::tr(lang, "Appearance", "Внешний вид")), ("backups", crate::i18n::tr(lang, "Backups", "Бэкапы")), ("notifications", crate::i18n::tr(lang, "Notifications", "Уведомления")), ("system", crate::i18n::tr(lang, "System", "Система"))]))
     @if tab == SettingsTab::Appearance {
-            div.ed-rule {}
-            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Appearance — theme + accent", "Внешний вид — тема + акцент")) }
+            // No ed-rule here — the tab row above already draws its own
+            // bottom border; stacking both produced a double line
+            // (design review 2026-07-10).
+            div.ed-art-eyebrow style="margin-top: 14px;" { (crate::i18n::tr(lang, "Appearance — theme + accent", "Внешний вид — тема + акцент")) }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (crate::i18n::tr(
                     lang,
@@ -12424,7 +12575,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     "Выбери бумажную тему (фон) и акцентный цвет. Сохраняется в cookies; настраивается один раз.",
                 ))
             }
-            (tweaks_inline(&theme, &accent))
+            (tweaks_inline(&theme, &accent, lang))
 
             div.ed-rule {}
             div id="timezone-section" {
@@ -13864,7 +14015,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                           "IPv4, IPv6 или хост — без shell-метасимволов",
                       ))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
-                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {
                     // Honest copy (review 2026-06-04): the wizard keeps
                     // whatever SSH port you enter — there is no
                     // automatic harden-to-2222 step.
@@ -13883,7 +14034,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 input id="root_password" name="root_password" type="password" required="required"
                       autocomplete="new-password"
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
-                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {
                     // Honest copy (review 2026-06-04): the wizard does
                     // NOT disable password auth — every later step just
                     // uses key auth instead.
@@ -13905,7 +14056,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                       pattern="[0-9]*"
                       title=(tr(lang, "leave blank for 22; Cloudzy ships 2222", "оставь пусто для 22; у Cloudzy — 2222"))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); max-width: 140px;";
-                p style="font-family: var(--serif); font-style: italic; font-size: 11.5px; color: var(--mute); margin: 0;" {
+                p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {
                     (tr(lang, "Leave blank for 22 (the common case). Cloudzy is ", "Оставь пусто для 22 (обычный случай). Cloudzy — это "))
                     span.ed-mono { "2222" }
                     (tr(
@@ -15401,7 +15552,11 @@ async fn server_detail_render(
                 }
                 span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len())
-                    (crate::i18n::tr(lang, " users granted", " пользователей с доступом"))
+                    " "
+                    // RU forms are GENITIVE (after «из»): из 41
+                    // пользователя / из 42 пользователей — not the
+                    // nominative counting forms.
+                    (crate::i18n::noun_for(lang, all_users.len() as u64, "user granted", "users granted", "пользователя с доступом", "пользователей с доступом", "пользователей с доступом"))
                     " · " (crate::i18n::tr(lang, "deployed config covers ", "задеплоенный конфиг покрывает "))
                     (deployed_count)
                 }
@@ -15508,7 +15663,7 @@ async fn server_detail_render(
             @let sort_href = |kind: &str| -> String {
                 format!("/admin/servers/{}/grants?grant_sort={kind}", path_segment_encode(&server.id.0))
             };
-            div style="font-family: var(--mono); font-size: 10.5px; color: var(--mute); margin: 2px 0 6px;" {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: 2px 0 6px;" {
                 (crate::i18n::tr(lang, "sort: ", "сортировка: "))
                 @for (kind, label) in [("id", "id ↑"), ("presence", crate::i18n::tr(lang, "online ↓", "онлайн ↓")), ("traffic", crate::i18n::tr(lang, "traffic ↓", "трафик ↓"))] {
                     @if grant_sort == kind {
@@ -15582,7 +15737,11 @@ async fn server_detail_render(
                             td.ed-grid__mut.ed-grid__sm {
                                 @match grant_dates.get(&u.id).copied().flatten() {
                                     Some(ts) => (format_msk_iso(ts)),
-                                    None => "—",
+                                    None => span title=(crate::i18n::tr(
+                                        lang,
+                                        "Grant predates migration 0039 (2026-07-10) — the date wasn't recorded back then.",
+                                        "Грант старше миграции 0039 (2026-07-10) — дата тогда не записывалась.",
+                                    )) { "—" },
                                 }
                             }
                             td.num {
@@ -15606,7 +15765,7 @@ async fn server_detail_render(
             // Not-granted footnote — each id carries its own inline
             // grant form so the operator never leaves the page.
             @if !ungranted.is_empty() {
-                div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--mono); font-size: 10.5px; color: var(--mute); margin-top: 8px;" {
+                div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 8px;" {
                     (crate::i18n::tr(lang, "not granted: ", "без доступа: "))
                     b style="color: var(--ink);" { (ungranted.len()) }
                     @for u in &ungranted {
@@ -15852,7 +16011,7 @@ fn server_detail_uptime_section(
                     (pct_text)
                 }
                 td.num.ed-grid__mut.ed-grid__sm {
-                    (row_count) " " (tr(lang, "probes", "проб"))
+                    (row_count) " " (crate::i18n::noun_for(lang, row_count, "probe", "probes", "проба", "пробы", "проб"))
                     @if down_count > 0 { " · " (down_count) " " (tr(lang, "down", "падений")) }
                 }
             }
@@ -16142,7 +16301,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "Disk %", "Диск %"))
                     }
-                    (sparkline_svg(&disk_pct_series, 280, 60))
+                    (sparkline_svg_scaled(&disk_pct_series, 280, 60, Some(100.0), false))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                         (tr(lang, "max ", "макс ")) (format!("{disk_max:.0}%"))
                         " · " (disk_pct_series.len()) " " (tr(lang, "samples", "точек"))
@@ -16152,7 +16311,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "Mem used %", "Память исп. %"))
                     }
-                    (sparkline_svg(&mem_used_pct_series, 280, 60))
+                    (sparkline_svg_scaled(&mem_used_pct_series, 280, 60, Some(100.0), false))
                     div style=(if mem_max > 70.0 { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
                         (tr(lang, "max ", "макс ")) (format!("{mem_max:.0}%"))
                         @if mem_max > 70.0 { " ⚠" }
@@ -16163,7 +16322,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "sing-box log MiB", "sing-box лог MiB"))
                     }
-                    (sparkline_svg(&log_mib_series, 280, 60))
+                    (sparkline_svg_scaled(&log_mib_series, 280, 60, None, false))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                         (tr(lang, "max ", "макс ")) (format!("{log_max:.0} MiB"))
                         " · " (log_mib_series.len()) " " (tr(lang, "samples", "точек"))
@@ -16411,7 +16570,7 @@ fn server_detail_live_connections_section(
                 (tr(lang, "no active connections", "активных соединений нет"))
             }
         } @else {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 18px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; margin-bottom: 18px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -16454,7 +16613,7 @@ fn server_detail_live_connections_section(
                 (tr(lang, "no active source IPs", "активных source IP нет"))
             }
         } @else {
-            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px;" {
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
                     tr style="border-bottom: 1px solid var(--ink);" {
                         th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
@@ -16582,7 +16741,7 @@ fn server_detail_kernels_section(
                 "Демоны, работающие на этой ноде. Один физический VPS может держать несколько (sing-box на 443/TCP + amneziawg на 51820/UDP уживаются нормально).",
             ))
         }
-        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
+        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (tr(
                     lang,
@@ -17858,7 +18017,7 @@ fn server_detail_protocols_section(
         // duplicated deliberately so an operator who scrolls straight
         // to «Enabled protocols» (the more frequently-touched section)
         // doesn't miss it.
-        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12.5px; line-height: 1.5;" {
+        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (tr(lang, "⚠ toggle here = inventory only", "⚠ тогл здесь = только инвентарь"))
             }
@@ -18463,7 +18622,7 @@ fn server_detail_top_users_section(
                     ))
                 }
             } @else {
-                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-top: 8px;" {
+                table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; margin-top: 8px;" {
                     thead {
                         tr style="border-bottom: 1px solid var(--ink);" {
                             th style="text-align: left; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {

@@ -7,6 +7,10 @@
 //! mutation row (user.add / user.grant / user.set_vpn_router_device_id
 //! / user.disable / user.enable). If a server has NO deploy row at all
 //! but the user has any mutation, the server is pending.
+//!
+//! 2026-07-10 refinement: grant/revoke rows carrying a
+//! `payload.server` count only against that server; payload-less rows
+//! and server-agnostic mutations count against every granted server.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -467,4 +471,95 @@ async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
         got.is_empty(),
         "wizard-bootstrap success row must count as a baseline"
     );
+}
+
+/// 2026-07-10 scoping: a `user.grant` row that NAMES a server via
+/// `payload.server` counts only against THAT server. Granting on a new
+/// node must not raise a phantom «not deployed» banner on every other
+/// node the user already has (post-#92 the affected node auto-deploys;
+/// the others didn't change). Payload-less legacy rows keep the old
+/// coarse all-servers reading (pinned by the earlier tests, which
+/// write no payload).
+#[tokio::test]
+async fn grant_scoped_by_payload_server_does_not_flag_other_servers() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("brat", 7)).await.unwrap();
+    for sid in ["old-node", "new-node"] {
+        inv.add_server(&srv(sid)).await.unwrap();
+        inv.grant(&UserId("brat".into()), &ServerId(sid.into()))
+            .await
+            .unwrap();
+    }
+    // Both nodes deployed successfully…
+    for sid in ["old-node", "new-node"] {
+        inv.audit(
+            "admin",
+            "server.deploy",
+            Some(sid),
+            Some(&serde_json::json!({ "ssh_errors": [], "ssh_skip_reason": null })),
+        )
+        .await
+        .unwrap();
+    }
+    // tiny delay so the grant ts is strictly greater than the deploys
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // …then a grant lands that names ONLY new-node.
+    inv.audit(
+        "admin",
+        "user.grant",
+        Some("brat"),
+        Some(&serde_json::json!({ "server": "new-node", "source": "test" })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(
+            &UserId("brat".into()),
+            &[ServerId("old-node".into()), ServerId("new-node".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        vec![ServerId("new-node".into())],
+        "only the server named by payload.server may go pending"
+    );
+}
+
+/// Server-agnostic mutations (disable) still flag every granted server
+/// — a disabled user must be excluded from EVERY node's config, so the
+/// broad reading is the correct one there.
+#[tokio::test]
+async fn server_agnostic_mutation_still_flags_all_servers() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("pausa", 8)).await.unwrap();
+    for sid in ["n1", "n2"] {
+        inv.add_server(&srv(sid)).await.unwrap();
+        inv.grant(&UserId("pausa".into()), &ServerId(sid.into()))
+            .await
+            .unwrap();
+        inv.audit(
+            "admin",
+            "server.deploy",
+            Some(sid),
+            Some(&serde_json::json!({ "ssh_errors": [], "ssh_skip_reason": null })),
+        )
+        .await
+        .unwrap();
+    }
+    // tiny delay so the disable ts is strictly greater than the deploys
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit("admin", "user.disable", Some("pausa"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(
+            &UserId("pausa".into()),
+            &[ServerId("n1".into()), ServerId("n2".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 2, "disable must flag every granted server");
 }

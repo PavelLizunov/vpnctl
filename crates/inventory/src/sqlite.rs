@@ -2601,15 +2601,18 @@ impl SqliteInventory {
     /// their detail page's «deploy» button pushes the fresh render and
     /// closes the gap.
     ///
-    /// **Coarse by design:** ANY user mutation marks ALL the user's
-    /// granted servers pending (a grant/revoke of server A also flags
-    /// B and C). Over-notifying costs one idempotent redeploy;
-    /// under-notifying leaves a stale UUID live on a node — the
-    /// silent-miss class this detector exists to catch. `user.revoke`
-    /// (added 2026-06-10) inherits the same semantics: the revoked
-    /// server itself leaves the user's granted list (so this per-user
-    /// surface can't show it), but the row still timestamps the
-    /// mutation for the remaining servers.
+    /// **Scoped since 2026-07-10** (was «coarse by design» before):
+    /// `user.grant` / `user.revoke` rows count only against the server
+    /// named in their `payload.server` — post-#92 the grant path
+    /// auto-deploys that very server, so the old any-mutation-flags-
+    /// every-server rule left a permanent phantom banner on all OTHER
+    /// nodes after each grant (live repro: granting main-brat on `us`
+    /// flagged cdn/de/is/nl «not deployed» though nothing about them
+    /// changed). Genuinely server-agnostic mutations (`user.add`,
+    /// device-id, disable/enable — they alter every node's desired
+    /// config) still flag ALL granted servers, and legacy grant rows
+    /// WITHOUT a `payload.server` field keep the old coarse reading
+    /// (can't tell which server → assume relevant).
     ///
     /// **Heuristic, not exact:** an alternative deploy via CLI (not
     /// through the web button) doesn't write the same audit row.
@@ -2639,28 +2642,36 @@ impl SqliteInventory {
         if granted_server_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // Latest user-mutation timestamp from audit_log.
-        let user_row = sqlx::query(
-            "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE target = ?1
-               AND action IN ('user.add', 'user.grant', 'user.revoke',
-                              'user.set_vpn_router_device_id',
-                              'user.disable', 'user.enable')",
-        )
-        .bind(&user_id.0)
-        .fetch_one(&self.pool)
-        .await?;
-        let user_latest_ts: Option<String> = user_row.try_get("ts")?;
-        let Some(user_ts) = user_latest_ts else {
-            // User has zero audit mutations (legacy import?) — nothing
-            // to flag.
-            return Ok(Vec::new());
-        };
-        // For each granted server, fetch its latest deploy ts and
-        // compare. Loop is cheap at homelab scale (≤100 servers
-        // ⇒ ≤100 indexed lookups).
+        // For each granted server: latest RELEVANT user-mutation ts
+        // (grant/revoke scoped to this server via payload.server;
+        // server-agnostic mutations + legacy no-payload rows always
+        // relevant) vs the server's latest good deploy. Loop is cheap
+        // at homelab scale (≤100 servers ⇒ ≤200 indexed lookups).
         let mut out: Vec<ServerId> = Vec::new();
         for sid in granted_server_ids {
+            let user_row = sqlx::query(
+                "SELECT MAX(ts) AS ts FROM audit_log
+                 WHERE target = ?1
+                   AND (
+                     (action IN ('user.grant', 'user.revoke')
+                        AND (json_extract(payload, '$.server') = ?2
+                             OR json_extract(payload, '$.server') IS NULL))
+                     OR action IN ('user.add',
+                                   'user.set_vpn_router_device_id',
+                                   'user.disable', 'user.enable')
+                   )",
+            )
+            .bind(&user_id.0)
+            .bind(&sid.0)
+            .fetch_one(&self.pool)
+            .await?;
+            let user_ts: Option<String> = user_row.try_get("ts")?;
+            let Some(user_ts) = user_ts else {
+                // No mutation relevant to this server (legacy import
+                // with zero audit rows, or all grants target other
+                // nodes) — nothing to flag here.
+                continue;
+            };
             let row = sqlx::query(
                 "SELECT MAX(ts) AS ts FROM audit_log
                  WHERE target = ?1 AND action = 'server.deploy'
@@ -2673,7 +2684,7 @@ impl SqliteInventory {
             .await?;
             let deploy_ts: Option<String> = row.try_get("ts")?;
             // Pending if: no deploy ever recorded (None) OR last
-            // deploy is older than the user's last change.
+            // deploy is older than the user's last relevant change.
             match deploy_ts {
                 None => out.push(sid.clone()),
                 Some(dts) if dts < user_ts => out.push(sid.clone()),
@@ -2892,6 +2903,7 @@ impl SqliteInventory {
         actor_filter: Option<&str>,
         action_prefix: Option<&str>,
         target_contains: Option<&str>,
+        action_exclude: Option<&str>,
     ) -> Result<Vec<AuditEntry>> {
         // Build the WHERE clause incrementally. SQLite uses positional
         // `?` placeholders so we don't number them — the bind() calls
@@ -2917,6 +2929,16 @@ impl SqliteInventory {
                 "target LIKE ? ESCAPE '\\'"
             } else {
                 "AND target LIKE ? ESCAPE '\\'"
+            });
+        }
+        if action_exclude.is_some() {
+            // «hide housekeeping» chip — exact-match exclusion (the
+            // hourly backup.snapshot rows drown the first screen of
+            // the timeline; design review 2026-07-10).
+            where_parts.push(if where_parts.is_empty() {
+                "action <> ?"
+            } else {
+                "AND action <> ?"
             });
         }
         let where_clause = if where_parts.is_empty() {
@@ -2947,6 +2969,9 @@ impl SqliteInventory {
         if let Some(t) = target_contains {
             q = q.bind(format!("%{}%", escape_like(t)));
         }
+        if let Some(x) = action_exclude {
+            q = q.bind(x);
+        }
         q = q.bind(limit).bind(offset);
         let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_audit_entry).collect()
@@ -2959,11 +2984,12 @@ impl SqliteInventory {
         actor_filter: Option<&str>,
         action_prefix: Option<&str>,
         target_contains: Option<&str>,
+        action_exclude: Option<&str>,
     ) -> Result<(u64, u64)> {
         let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&self.pool)
             .await?;
-        let mut where_parts: Vec<&str> = Vec::with_capacity(3);
+        let mut where_parts: Vec<&str> = Vec::with_capacity(4);
         if actor_filter.is_some() {
             where_parts.push("actor = ?");
         }
@@ -2972,6 +2998,9 @@ impl SqliteInventory {
         }
         if target_contains.is_some() {
             where_parts.push("target LIKE ? ESCAPE '\\'");
+        }
+        if action_exclude.is_some() {
+            where_parts.push("action <> ?");
         }
         let matched = if where_parts.is_empty() {
             total.0
@@ -2989,6 +3018,9 @@ impl SqliteInventory {
             }
             if let Some(t) = target_contains {
                 q = q.bind(format!("%{}%", escape_like(t)));
+            }
+            if let Some(x) = action_exclude {
+                q = q.bind(x.to_string());
             }
             q.fetch_one(&self.pool).await?.0
         };

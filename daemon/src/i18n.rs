@@ -211,6 +211,69 @@ pub fn tr(loc: Locale, en: &'static str, ru: &'static str) -> &'static str {
     }
 }
 
+/// `"{n} {noun}"` with the noun correctly declined for the count in
+/// both locales — before this every counted noun was glued in one
+/// fixed form («1 ASNs», «42 юзеров», «33 открытых алертов»), which is
+/// exactly the kind of micro-sloppiness the editorial voice can't
+/// afford (design review 2026-07-10).
+///
+/// * EN picks `en_one` for n == 1, `en_many` otherwise.
+/// * RU picks `ru_one` for 1/21/31… (but not 11), `ru_few` for
+///   2–4/22–24… (but not 12–14), `ru_many` for everything else —
+///   the standard three-form rule.
+///
+/// All six forms are `&'static str`; only the final concatenation
+/// allocates.
+pub fn n_of(
+    loc: Locale,
+    n: u64,
+    en_one: &'static str,
+    en_many: &'static str,
+    ru_one: &'static str,
+    ru_few: &'static str,
+    ru_many: &'static str,
+) -> String {
+    format!(
+        "{n} {}",
+        noun_for(loc, n, en_one, en_many, ru_one, ru_few, ru_many)
+    )
+}
+
+/// The bare declined noun for `n` — for call sites that already render
+/// the number themselves (bold counters, tile values).
+pub fn noun_for(
+    loc: Locale,
+    n: u64,
+    en_one: &'static str,
+    en_many: &'static str,
+    ru_one: &'static str,
+    ru_few: &'static str,
+    ru_many: &'static str,
+) -> &'static str {
+    match loc {
+        Locale::En => {
+            if n == 1 {
+                en_one
+            } else {
+                en_many
+            }
+        }
+        Locale::Ru => {
+            let last_two = n % 100;
+            let last = n % 10;
+            if (11..=14).contains(&last_two) {
+                ru_many
+            } else if last == 1 {
+                ru_one
+            } else if (2..=4).contains(&last) {
+                ru_few
+            } else {
+                ru_many
+            }
+        }
+    }
+}
+
 /// Translation lookup. Exhaustive — adding a `K` variant without
 /// translating it for both locales is a compile error.
 pub fn t(loc: Locale, k: K) -> &'static str {
@@ -448,5 +511,48 @@ mod tests {
             assert_eq!(t(Locale::Ru, k), ru, "RU mismatch for {k:?}");
             assert_ne!(en, ru, "expected EN != RU for {k:?}");
         }
+    }
+
+    #[test]
+    fn n_of_declines_english_by_one_vs_many() {
+        let f = |n| {
+            n_of(
+                Locale::En,
+                n,
+                "country",
+                "countries",
+                "страна",
+                "страны",
+                "стран",
+            )
+        };
+        assert_eq!(f(1), "1 country");
+        assert_eq!(f(2), "2 countries");
+        assert_eq!(f(0), "0 countries");
+    }
+
+    #[test]
+    fn n_of_declines_russian_three_forms_including_teens() {
+        let f = |n| {
+            n_of(
+                Locale::Ru,
+                n,
+                "country",
+                "countries",
+                "страна",
+                "страны",
+                "стран",
+            )
+        };
+        assert_eq!(f(1), "1 страна");
+        assert_eq!(f(2), "2 страны");
+        assert_eq!(f(4), "4 страны");
+        assert_eq!(f(5), "5 стран");
+        assert_eq!(f(11), "11 стран", "11 is teens → many, not one");
+        assert_eq!(f(12), "12 стран", "12 is teens → many, not few");
+        assert_eq!(f(21), "21 страна");
+        assert_eq!(f(22), "22 страны");
+        assert_eq!(f(111), "111 стран");
+        assert_eq!(f(33), "33 страны");
     }
 }
