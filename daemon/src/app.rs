@@ -969,7 +969,12 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/protocols",
             get(admin::server_detail_protocols_tab),
         )
-        .route("/admin/servers/{id}/grants", get(admin::server_detail_grants_tab))
+        .route(
+            "/admin/servers/{id}/grants",
+            // GET = the grants tab; POST = the v2 3d grant bar
+            // (user id as a form field).
+            get(admin::server_detail_grants_tab).post(admin::server_grant_user_form),
+        )
         .route("/admin/servers/{id}/setup", get(admin::server_detail_setup))
         // Phase v0.8 — TOFU pin via web. Manual paste OR auto-detect
         // via ssh-keyscan (form's `mode` field).

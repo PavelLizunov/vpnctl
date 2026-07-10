@@ -8547,6 +8547,26 @@ pub(crate) async fn server_grant_user(
     .into_response()
 }
 
+/// `POST /admin/servers/{sid}/grants` — the v2 3d grant bar: user id
+/// arrives as a form field instead of a path segment. Validates the
+/// field then delegates to [`server_grant_user`] (extractors are just
+/// values) so the mutation, audit shape and auto-deploy stay single-
+/// sourced.
+pub(crate) async fn server_grant_user_form(
+    State(state): State<AppState>,
+    Path(server_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let Some(user_id) = crate::http_util::form_field(&body, "user_id") else {
+        return bad_request("missing form field 'user_id'");
+    };
+    let user_id = user_id.trim().to_string();
+    if user_id.is_empty() {
+        return bad_request("empty 'user_id'");
+    }
+    server_grant_user(State(state), Path((server_id_str, user_id))).await
+}
+
 /// `POST /admin/servers/{sid}/grants/{uid}/revoke` — revoke from the
 /// SERVER side. Mirror of `server_grant_user`.
 pub(crate) async fn server_revoke_user(
@@ -14395,6 +14415,52 @@ async fn server_detail_render(
     // Best-effort: a detector error renders no banner, not a 500.
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.unwrap_or(false);
 
+    // Design v2 3e — is the clash-api poller currently holding a
+    // snapshot for this node (checklist row «clash api reachable»).
+    let clash_ok = state.snapshot_cache.get(&sid).is_some();
+
+    // Design v2 3d — Grants-tab-only data: grant dates (migration
+    // 0039), WHICH granted users still await a deploy, per-user live
+    // conns on THIS node (clash snapshot), and per-user 24h traffic.
+    let (grant_dates, pending_users, grants_presence, grants_traffic) = if tab == ServerTab::Grants
+    {
+        let dates: std::collections::HashMap<
+            vpnctl_core::UserId,
+            Option<chrono::DateTime<chrono::Utc>>,
+        > = state
+            .inv
+            .grant_dates_for_server(&sid)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let pending: std::collections::HashSet<vpnctl_core::UserId> = state
+            .inv
+            .users_pending_deploy_for_server(&sid)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut presence: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        if let Some(snap) = state.snapshot_cache.get(&sid) {
+            for c in &snap.snapshot.connections {
+                if let Some(uid) = c.metadata.user.as_deref() {
+                    *presence.entry(uid.to_string()).or_default() += 1;
+                }
+            }
+        }
+        let traffic: std::collections::HashMap<vpnctl_core::UserId, u64> = state
+            .inv
+            .top_users_by_traffic_for_server(&sid, 24, 1000)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        (dates, pending, presence, traffic)
+    } else {
+        Default::default()
+    };
+
     // Phase H+ — rolling uptime windows for the per-server SLO chip
     // section. Three independent SQL aggregates (24h / 7d / 30d) —
     // each is one indexed scan against `(server_id, ts)`. Failure
@@ -14842,12 +14908,30 @@ async fn server_detail_render(
                     (server_detail_resource_trend_section(&trend_rows, lang))
                 }
             }
-            // server#7 — server-scoped audit timeline (last 20).
-            (server_detail_audit_section(&server_audit, lang))
         }
 
-        // ── ACTIVITY — clash-api-snapshot-derived, read-only.
+        // ── ACTIVITY — clash-api-snapshot-derived + the audit trail
+        // (design v2 3b moved events here from Status: «what happened»
+        // belongs with «what's happening»).
         @if tab == ServerTab::Activity {
+            // v2 3b — last-deploy summary line above the events. The
+            // page-level #deploy-log pane (headrow deploy button)
+            // streams live runs; this line recalls the newest archived
+            // deploy from the audit trail.
+            @if let Some(last_deploy) = server_audit.iter().find(|e| e.action == "server.deploy") {
+                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 0 0 10px;" {
+                    (crate::i18n::tr(lang, "last deploy ", "последний деплой "))
+                    b { (format_msk_iso(last_deploy.ts)) }
+                    " · " (crate::i18n::tr(lang, "by ", "запустил ")) (last_deploy.actor)
+                    " · "
+                    a href="/admin/audit" style="color: var(--acc);" {
+                        (crate::i18n::tr(lang, "audit with this filter →", "аудит с этим фильтром →"))
+                    }
+                }
+            }
+            // server#7 — server-scoped audit timeline (last 20),
+            // moved from Status (v2 3b).
+            (server_detail_audit_section(&server_audit, lang))
             // Phase 4b — live activity tile (server-wide clash-api totals).
             (server_detail_live_activity_section(&live_activity, lang))
             // Traffic accounting — NIC ground-truth vs clash-attributed vs gap.
@@ -14888,7 +14972,7 @@ async fn server_detail_render(
             (server_detail_wgturn_section(&server, &server_secrets, lang))
             // Declared vs observed drift — full grid incl. the observed
             // listening-socket list (port-level, probe-derived).
-            (server_detail_drift_section(&server, &observed, &missing, &extra, latest.is_some(), lang))
+            (server_detail_drift_section(&server, &state.registry, &observed, &missing, &extra, latest.is_some(), lang))
             // Drift DETAIL — on-node orphan UUIDs; `?drift=live` arms a
             // best-effort 6s SSH read of the node's sing-box config.
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
@@ -14896,19 +14980,45 @@ async fn server_detail_render(
 
         // ── GRANTS — 2nd-most-frequent action; its own uncluttered page.
         @if tab == ServerTab::Grants {
-            // Centralised per-server view (Pavel iter B): every user with
-            // a per-row grant/revoke form + bulk grant/revoke.
-            div.ed-art-eyebrow { (crate::i18n::tr(lang, "Grants", "Выданные доступы")) }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len()) " "
-            @if all_users.len() == 1 { (crate::i18n::tr(lang, "user", "пользователь")) }
-            @else { (crate::i18n::tr(lang, "users", "пользователей")) }
-            (crate::i18n::tr(
-                lang,
-                " have access on this server. Toggle below — POST returns 303 here.",
-                " имеют доступ к этому серверу. Тогли ниже — POST возвращает 303 сюда же.",
-            ))
-        }
+            // Design v2 3d — dense grants table: presence, per-node 24h
+            // traffic, key-state (pending deploy vs on node), grant date.
+            @let deployed_count = user_count.saturating_sub(pending_users.len());
+            div.ed-headrow {
+                div.ed-art-eyebrow style="margin: 0;" {
+                    (crate::i18n::tr(lang, "Grants", "Выданные доступы")) " "
+                    span.ed-tip title=(crate::i18n::tr(
+                        lang,
+                        "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy. «on node» means the deployed config actually contains the user — grant + forget-to-deploy is the #1 silent failure, the banner below tracks it.",
+                        "Грант записывает пару в инвентарь; ключи чеканятся по протоколам на следующем деплое. «на ноде» значит, что задеплоенный конфиг реально содержит юзера — грант без деплоя это тихий сбой №1, баннер ниже его отслеживает.",
+                    )) { "ⓘ" }
+                }
+                span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len())
+                    (crate::i18n::tr(lang, " users granted", " пользователей с доступом"))
+                    " · " (crate::i18n::tr(lang, "deployed config covers ", "задеплоенный конфиг покрывает "))
+                    (deployed_count)
+                }
+            }
+            @if !pending_users.is_empty() {
+                div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 10px 0;" {
+                    span style="font-family: var(--mono); font-size: 11px; color: var(--warm);" {
+                        "⚠ " b {
+                            (pending_users.len())
+                            (crate::i18n::tr(lang, " grant(s) not yet deployed: ", " грант(ов) ещё не задеплоено: "))
+                        }
+                        (pending_users.iter().map(|u| u.0.as_str()).collect::<Vec<_>>().join(", "))
+                    }
+                    div style="margin-left: auto;" {
+                        button type="button"
+                               data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
+                               data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
+                               data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
+                               class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                            (crate::i18n::tr(lang, "deploy now →", "задеплоить сейчас →"))
+                        }
+                    }
+                }
+            }
         @if all_users.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
                 (crate::i18n::tr(lang, "No users in the inventory yet. Create one on ", "В инвентаре ещё нет пользователей. Создай на "))
@@ -14916,45 +15026,44 @@ async fn server_detail_render(
                 (crate::i18n::tr(lang, " — then come back to grant access.", " — затем вернись сюда чтобы выдать доступ."))
             }
         } @else {
-            // B2 (audit 2026-05-22) — bulk grant/revoke row above
-            // the per-user list. Grant-all is safe (idempotent,
-            // reversible per-row); revoke-all uses a JS confirm()
-            // since destructive. Rendered ONLY when at least one
-            // bulk action would be meaningful: grant-all visible
-            // when there's at least one un-granted user, revoke-all
-            // when at least one granted.
-            @let ungranted_count = all_users.iter().filter(|u| !granted_user_ids.contains(&u.id)).count();
+            @let sid_enc_b = path_segment_encode(&server.id.0);
+            @let ungranted = all_users.iter().filter(|u| !granted_user_ids.contains(&u.id)).collect::<Vec<_>>();
             @let granted_count = granted_user_ids.len();
-            @if ungranted_count > 0 || granted_count > 0 {
-                div style="display: flex; gap: 12px; padding: 8px 0; margin-bottom: 8px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);" {
-                    @let sid_enc_b = path_segment_encode(&server.id.0);
-                    @if ungranted_count > 0 {
+            // Grant bar (v2 3d) + the B2 bulk actions on one row.
+            div.ed-inbar {
+                span.ed-inbar__label { (crate::i18n::tr(lang, "grant access", "выдать доступ")) }
+                form method="post" action=(format!("/admin/servers/{sid_enc_b}/grants"))
+                     style="display: flex; gap: 6px; align-items: center;" {
+                    input type="text" name="user_id" required="required"
+                          placeholder=(crate::i18n::tr(lang, "user id…", "id пользователя…"))
+                          style="width: 150px;";
+                    button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
+                        (crate::i18n::tr(lang, "grant", "выдать"))
+                    }
+                }
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy (auto-deploy runs after).",
+                    "Грант пишет пару в инвентарь; ключи чеканятся на следующем деплое (авто-деплой запускается сам).",
+                )) { "ⓘ" }
+                div style="margin-left: auto; display: flex; gap: 8px;" {
+                    @if !ungranted.is_empty() {
                         form method="post"
                              action=(format!("/admin/servers/{sid_enc_b}/grants/_grant-all"))
                              style="margin: 0; padding: 0;" {
                             button type="submit"
                                    title=(crate::i18n::tr(
                                        lang,
-                                       "Grant access to every user currently in the inventory who doesn't have it yet. Idempotent — re-running this on a fully-granted server is a no-op.",
-                                       "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно — повторный запуск на сервере с уже выданными грантами ничего не сломает.",
+                                       "Grant access to every user currently in the inventory who doesn't have it yet. Idempotent.",
+                                       "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно.",
                                    ))
-                                   class="ed-abtn ed-abtn--secondary" {
+                                   class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                                 (crate::i18n::tr(lang, "grant all ", "выдать всем "))
-                                "(" (ungranted_count) ")"
+                                "(" (ungranted.len()) ")"
                             }
                         }
                     }
                     @if granted_count > 0 {
-                        // CSP-safe typed-confirm — destructive but
-                        // reversible (operator can re-grant individually).
-                        // The prompt text + required match value ride in
-                        // `data-confirm-prompt` / `data-confirm-match`
-                        // (maud HTML-escapes both); admin.js runs the
-                        // prompt(), checks the typed value, and copies it
-                        // into the hidden `confirm` field the handler
-                        // re-validates. An inline `onsubmit="…"` would be
-                        // blocked by `script-src 'self'` → the field would
-                        // stay empty and the POST would be rejected.
                         @let sid_clean = server.id.0.clone();
                         @let confirm_msg = match lang {
                             crate::i18n::Locale::En => format!(
@@ -14973,10 +15082,10 @@ async fn server_detail_render(
                             button type="submit"
                                    title=(crate::i18n::tr(
                                        lang,
-                                       "Revoke access for every currently-granted user on this server. Destructive — requires confirm. Re-granting per-user remains available.",
-                                       "Отозвать доступ у всех юзеров с текущим грантом на сервере. Деструктивно — нужно подтверждение. Перевыдать поштучно потом можно.",
+                                       "Revoke access for every currently-granted user on this server. Destructive — requires confirm.",
+                                       "Отозвать доступ у всех юзеров с текущим грантом. Деструктивно — нужно подтверждение.",
                                    ))
-                                   class="ed-abtn ed-abtn--danger" {
+                                   class="ed-abtn ed-abtn--danger ed-abtn--sm" {
                                 (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
                                 "(" (granted_count) ")…"
                             }
@@ -14984,56 +15093,107 @@ async fn server_detail_render(
                     }
                 }
             }
-            ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
-                @for u in &all_users {
-                    @let sid_enc = path_segment_encode(&server.id.0);
-                    @let uid_enc = path_segment_encode(&u.id.0);
-                    li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                        span style="flex: 1;" {
-                            // Pavel 2026-05-19: «и наоборот» — open the
-                            // user-detail page in a new tab from
-                            // the server-detail's Grants section.
-                            // Mirrors the user-detail → server link
-                            // for cross-navigation symmetry.
-                            a href=(format!("/admin/users/{uid_enc}"))
-                              target="_blank"
-                              rel="noopener"
-                              title=(format!("Open /admin/users/{} in a new tab", u.id.0))
-                              style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                b { (u.id.0) }
+            // Granted users — dense table. Sort: pending-deploy first,
+            // then live conns desc, then 24h traffic desc, then id.
+            @let granted_rows = {
+                let mut v = all_users.iter().filter(|u| granted_user_ids.contains(&u.id)).collect::<Vec<_>>();
+                v.sort_by(|a, b| {
+                    let pa = pending_users.contains(&a.id);
+                    let pb = pending_users.contains(&b.id);
+                    let ca = grants_presence.get(&a.id.0).copied().unwrap_or(0);
+                    let cb = grants_presence.get(&b.id.0).copied().unwrap_or(0);
+                    let ta = grants_traffic.get(&a.id).copied().unwrap_or(0);
+                    let tb = grants_traffic.get(&b.id).copied().unwrap_or(0);
+                    pb.cmp(&pa)
+                        .then(cb.cmp(&ca))
+                        .then(tb.cmp(&ta))
+                        .then(a.id.0.cmp(&b.id.0))
+                });
+                v
+            };
+            table.ed-grid style="margin-top: 4px;" {
+                thead {
+                    tr {
+                        th style="width: 34px;" { "№" }
+                        th { (crate::i18n::tr(lang, "user", "пользователь")) }
+                        th { (crate::i18n::tr(lang, "presence", "присутствие")) }
+                        th.num { (crate::i18n::tr(lang, "traffic 24h", "трафик 24ч")) }
+                        th { (crate::i18n::tr(lang, "keys on node", "ключи на ноде")) }
+                        th style="width: 130px;" { (crate::i18n::tr(lang, "granted", "выдан")) }
+                        th style="width: 110px;" {}
+                    }
+                }
+                tbody {
+                    @for (idx, u) in granted_rows.iter().enumerate() {
+                        @let uid_enc = path_segment_encode(&u.id.0);
+                        @let conns = grants_presence.get(&u.id.0).copied().unwrap_or(0);
+                        @let bytes = grants_traffic.get(&u.id).copied().unwrap_or(0);
+                        @let is_pending = pending_users.contains(&u.id);
+                        tr class=(if is_pending { "on-warn" } else if conns > 0 { "on-green" } else { "" }) {
+                            td.ed-grid__mut { (format!("{:02}", idx + 1)) }
+                            td { a.ed-grid__id href=(format!("/admin/users/{uid_enc}")) { (u.id.0) } }
+                            td.ed-grid__sm {
+                                @if conns > 0 {
+                                    span.ed-stat.ed-stat--active {
+                                        span.ed-stat__dot {}
+                                        (crate::i18n::tr(lang, "online", "онлайн")) " · " (conns)
+                                    }
+                                } @else {
+                                    span.ed-grid__mut { "— " (crate::i18n::tr(lang, "offline", "офлайн")) }
+                                }
+                            }
+                            td.num {
+                                @if bytes > 0 { (humanize_bytes(bytes)) }
+                                @else { span.ed-grid__mut { "—" } }
+                            }
+                            td.ed-grid__sm {
+                                @if is_pending {
+                                    span.ed-grid__flag { "⚠ " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
+                                } @else {
+                                    span style="color: var(--green);" { "✓ " (crate::i18n::tr(lang, "on node", "на ноде")) }
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm {
+                                @match grant_dates.get(&u.id).copied().flatten() {
+                                    Some(ts) => (format_msk_iso(ts)),
+                                    None => "—",
+                                }
+                            }
+                            td.num {
+                                form method="post"
+                                     action=(format!("/admin/servers/{sid_enc_b}/grants/{uid_enc}/revoke"))
+                                     style="margin: 0; padding: 0; display: inline;" {
+                                    button type="submit"
+                                           title=(match lang {
+                                               crate::i18n::Locale::En => format!("Revoke {}'s access on {}", u.id.0, server.id.0),
+                                               crate::i18n::Locale::Ru => format!("Отозвать доступ {} на {}", u.id.0, server.id.0),
+                                           })
+                                           class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                                        (crate::i18n::tr(lang, "revoke →", "отозвать →"))
+                                    }
+                                }
                             }
                         }
-                        @if granted_user_ids.contains(&u.id) {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
-                                (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
-                            }
-                            form method="post"
-                                 action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}/revoke"))
-                                 style="margin: 0; padding: 0;" {
-                                @let title_str = match lang {
-                                    crate::i18n::Locale::En => format!("Revoke {}'s access on {}", u.id.0, server.id.0),
-                                    crate::i18n::Locale::Ru => format!("Отозвать доступ {} на {}", u.id.0, server.id.0),
-                                };
-                                button type="submit"
-                                       title=(title_str)
-                                       class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                    (crate::i18n::tr(lang, "revoke", "отозвать"))
-                                }
-                            }
-                        } @else {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
-                            form method="post"
-                                 action=(format!("/admin/servers/{sid_enc}/grants/{uid_enc}"))
-                                 style="margin: 0; padding: 0;" {
-                                @let title_str = match lang {
-                                    crate::i18n::Locale::En => format!("Grant {} access on {}", u.id.0, server.id.0),
-                                    crate::i18n::Locale::Ru => format!("Выдать {} доступ на {}", u.id.0, server.id.0),
-                                };
-                                button type="submit"
-                                       title=(title_str)
-                                       class="ed-abtn ed-abtn--sm" {
-                                    (crate::i18n::tr(lang, "grant", "выдать"))
-                                }
+                    }
+                }
+            }
+            // Not-granted footnote — each id carries its own inline
+            // grant form so the operator never leaves the page.
+            @if !ungranted.is_empty() {
+                div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--mono); font-size: 10.5px; color: var(--mute); margin-top: 8px;" {
+                    (crate::i18n::tr(lang, "not granted: ", "без доступа: "))
+                    b style="color: var(--ink);" { (ungranted.len()) }
+                    @for u in &ungranted {
+                        form method="post"
+                             action=(format!("/admin/servers/{sid_enc_b}/grants/{}", path_segment_encode(&u.id.0)))
+                             style="margin: 0; padding: 0; display: inline;" {
+                            button type="submit"
+                                   title=(match lang {
+                                       crate::i18n::Locale::En => format!("Grant {} access on {}", u.id.0, server.id.0),
+                                       crate::i18n::Locale::Ru => format!("Выдать {} доступ на {}", u.id.0, server.id.0),
+                                   })
+                                   class="ed-grant-chip off" style="cursor: pointer;" {
+                                (u.id.0) " — " (crate::i18n::tr(lang, "grant →", "выдать →"))
                             }
                         }
                     }
@@ -15042,9 +15202,109 @@ async fn server_detail_render(
         }
         }
 
+
         // ── SETUP — the 0-2-uses/month config tail (ui-audit §4),
         // deliberately last.
         @if tab == ServerTab::Setup {
+            // Design v2 3e — node-setup checklist, re-verified from the
+            // latest probe (not just at bootstrap): a manually broken
+            // node surfaces here without a redeploy. Honest subset —
+            // only facts the probe/inventory actually carry today
+            // (bbr/ntp/logrotate-config checks need probe extensions).
+            div.ed-art-eyebrow {
+                (crate::i18n::tr(lang, "Node setup · verified at last probe", "Настройка ноды · сверено последней пробой")) " "
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "Each row is re-checked on every probe. A ⚠ here means the node drifted from its bootstrapped state.",
+                    "Каждая строка перепроверяется каждой пробой. ⚠ значит, что нода уехала от состояния после bootstrap.",
+                )) { "ⓘ" }
+            }
+            @let ok = |b: bool| -> Markup {
+                if b { html! { span style="color: var(--green);" { "✓" } } }
+                else { html! { span style="color: var(--warm);" { "⚠" } } }
+            };
+            @let kernels_reported = latest.as_ref()
+                .and_then(|h| h.kernel_versions_json.as_deref())
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                .and_then(|v| v.as_object().map(|o| {
+                    let mut parts: Vec<String> = o.iter()
+                        .map(|(k, ver)| format!("{k} {}", ver.as_str().unwrap_or("?")))
+                        .collect();
+                    parts.sort();
+                    parts.join(" · ")
+                }));
+            table.ed-feed style="margin: 8px 0 16px;" {
+                tbody {
+                    tr {
+                        td style="width: 20px;" { (ok(latest.is_some())) }
+                        td { b { (crate::i18n::tr(lang, "deploy key installed", "деплой-ключ установлен")) } }
+                        td.num.ed-grid__mut.ed-grid__sm {
+                            @if latest.is_some() { (crate::i18n::tr(lang, "probe reaches the node over it", "проба ходит на ноду по нему")) }
+                            @else { (crate::i18n::tr(lang, "no probe yet — key unverified", "проб ещё нет — ключ не проверен")) }
+                        }
+                    }
+                    tr {
+                        td { (ok(kernels_reported.is_some())) }
+                        td { b { (crate::i18n::tr(lang, "kernels installed", "ядра установлены")) } }
+                        td.num.ed-grid__mut.ed-grid__sm {
+                            @match &kernels_reported {
+                                Some(k) => (k),
+                                None => (crate::i18n::tr(lang, "no version report yet", "версий ещё нет")),
+                            }
+                        }
+                    }
+                    tr {
+                        td { (ok(latest.as_ref().and_then(|h| h.sing_box_active) == Some(true))) }
+                        td { b { "sing-box " (crate::i18n::tr(lang, "service active", "сервис активен")) } }
+                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                    }
+                    tr {
+                        td { (ok(latest.as_ref().and_then(|h| h.fail2ban_active) == Some(true))) }
+                        td { b { "fail2ban " (crate::i18n::tr(lang, "active · sshd jail", "активен · sshd jail")) } }
+                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                    }
+                    tr {
+                        td { (ok(server.trusted_host_fingerprint.is_some())) }
+                        td { b { (crate::i18n::tr(lang, "host fingerprint pinned", "отпечаток хоста запинен")) } }
+                        td.num.ed-grid__mut.ed-grid__sm title=(server.trusted_host_fingerprint.as_deref().unwrap_or("")) {
+                            @match server.trusted_host_fingerprint.as_deref() {
+                                Some(fp) => (fp_short(fp)),
+                                None => (crate::i18n::tr(lang, "pin below", "запинь ниже")),
+                            }
+                        }
+                    }
+                    tr {
+                        td { (ok(clash_ok)) }
+                        td { b { "clash api " (crate::i18n::tr(lang, "reachable · traffic attribution", "доступен · атрибуция трафика")) } }
+                        td.num.ed-grid__mut.ed-grid__sm {
+                            @if clash_ok { (crate::i18n::tr(lang, "snapshot in cache", "снимок в кеше")) }
+                            @else { (crate::i18n::tr(lang, "no snapshot — poller can't reach it", "нет снимка — поллер не достучался")) }
+                        }
+                    }
+                    tr {
+                        @let log_ok = latest.as_ref().and_then(|h| h.sing_box_log_bytes).is_none_or(|b| b <= 500 * 1024 * 1024);
+                        td { (ok(log_ok)) }
+                        td { b { "sing-box.log " (crate::i18n::tr(lang, "under the 500 MiB alert", "меньше алертных 500 MiB")) } }
+                        td.num.ed-grid__mut.ed-grid__sm {
+                            @match latest.as_ref().and_then(|h| h.sing_box_log_bytes) {
+                                Some(b) => { (humanize_bytes(b)) @if !log_ok { " — " (crate::i18n::tr(lang, "check logrotate on the node", "проверь logrotate на ноде")) } },
+                                None => "—",
+                            }
+                        }
+                    }
+                }
+            }
+            // v2 3e — bootstrap record from the audit trail (best
+            // effort; nodes imported outside the wizard have none).
+            @let bootstrap_row = server_audit.iter().find(|e| e.action.starts_with("server.bootstrap") || e.action == "bootstrap");
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 0 0 16px;" {
+                (crate::i18n::tr(lang, "bootstrap record: ", "запись bootstrap: "))
+                @match bootstrap_row {
+                    Some(e) => { b { (format_msk_iso(e.ts)) } " · " (crate::i18n::tr(lang, "by ", "запустил ")) (e.actor) },
+                    None => (crate::i18n::tr(lang, "none in the audit window (imported or pre-wizard node)", "нет в окне аудита (импорт или до-мастерная нода)")),
+                }
+            }
+
             // Trusted host fingerprint — TOFU pin for the SSH probe +
             // clash-api poller + deploy (web action + the
             // `vpnctl server set-fingerprint <id>` CLI, one source of truth).
@@ -18056,6 +18316,7 @@ fn server_detail_drift_summary(
 
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
+    registry: &vpnctl_core::Registry,
     observed: &std::collections::BTreeSet<(String, u16)>,
     missing: &[(String, u16)],
     extra: &[(String, u16)],
@@ -18063,92 +18324,144 @@ fn server_detail_drift_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    let declared: Vec<String> = server
+    // Design v2 3c — the declared × listening drift GRID: one row per
+    // declared protocol, its expected ports, and whether the latest
+    // probe saw each port open. Undeclared listeners follow, grouped
+    // by a small classifier instead of a 100-socket wall.
+    let has_wg = server
         .enabled_protocols
         .iter()
-        .map(|p| p.0.clone())
-        .collect();
+        .any(|p| p.0.contains("wireguard") || p.0.contains("amnezia") || p.0.contains("wgturn"));
+    // Group the undeclared listeners. Adopt/ignore actions are
+    // deliberately absent — the inventory doesn't model per-peer
+    // ports yet (NM-14); this table only keeps the wall readable.
+    let mut wg_peers = 0usize;
+    let mut caddy_internals: Vec<String> = Vec::new();
+    let mut unclassified: Vec<String> = Vec::new();
+    for (proto, port) in extra {
+        if proto == "tcp" && (*port == 2019 || *port == 80) {
+            caddy_internals.push(format!("{proto}/{port}"));
+        } else if has_wg && proto == "udp" && *port >= 30000 {
+            wg_peers += 1;
+        } else {
+            unclassified.push(format!("{proto}/{port}"));
+        }
+    }
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "Declared vs observed", "Заявлено vs наблюдается")) }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (tr(
+        div.ed-art-eyebrow {
+            (tr(lang, "Declared vs observed", "Заявлено vs наблюдается")) " "
+            span.ed-tip title=(tr(
                 lang,
-                "Inventory says this server runs the protocols below; the latest probe sees the listening sockets on the right. Drift in orange.",
-                "Инвентарь говорит что этот сервер крутит протоколы ниже; последний probe видит слушающие сокеты справа. Дрейф — оранжевым.",
-            ))
+                "Declared = protocol in the inventory for this node. Listening = the latest probe found the port open (ss -tlnup). A declared-but-silent port is the dangerous drift; undeclared listeners are usually per-user wg peers.",
+                "Заявлено = протокол в инвентаре этой ноды. Слушает = последняя проба нашла порт открытым (ss -tlnup). Заявлено-но-молчит — опасный дрейф; незаявленные слушатели обычно пер-пировые wg-порты.",
+            )) { "ⓘ" }
         }
-        div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;" {
-            div {
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
-                    (tr(lang, "declared protocols", "заявленные протоколы"))
-                }
-                @if declared.is_empty() {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        (tr(lang, "(none in inventory)", "(нет в инвентаре)"))
+        @if !have_probe {
+            p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
+                (tr(lang, "(no probe yet — poller runs every 10 min; sing-box nodes only)", "(probe ещё нет — поллер ходит раз в 10 минут; только sing-box ноды)"))
+            }
+        } @else {
+            table.ed-grid style="margin-top: 8px;" {
+                thead {
+                    tr {
+                        th { (tr(lang, "protocol", "протокол")) }
+                        th { (tr(lang, "port(s)", "порт(ы)")) }
+                        th { (tr(lang, "declared", "заявлен")) }
+                        th { (tr(lang, "listening", "слушает")) }
                     }
-                } @else {
-                    ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px;" {
-                        @for p in &declared {
-                            li style="padding: 2px 0;" { (p) }
+                }
+                tbody {
+                    @for pid in &server.enabled_protocols {
+                        @let ports = expected_ports_for_protocol(registry, pid);
+                        @let silent = ports.iter().any(|pp| !observed.contains(pp));
+                        tr class=(if silent && !ports.is_empty() { "on-warn" } else { "" }) {
+                            td { b { (pid.0) } }
+                            td.num.ed-grid__sm {
+                                @if ports.is_empty() {
+                                    span.ed-grid__mut { "—" }
+                                } @else {
+                                    @for (i, (proto, port)) in ports.iter().enumerate() {
+                                        @if i > 0 { " · " }
+                                        (port) "/" (proto)
+                                    }
+                                }
+                            }
+                            td { span style="color: var(--green);" { "✓" } }
+                            td.ed-grid__sm {
+                                @if ports.is_empty() {
+                                    span.ed-grid__mut { (tr(lang, "n/a (no fixed port)", "н/д (нет фикс. порта)")) }
+                                } @else {
+                                    @for (i, pp) in ports.iter().enumerate() {
+                                        @if i > 0 { " · " }
+                                        @if observed.contains(pp) {
+                                            span style="color: var(--green);" { "✓" }
+                                        } @else {
+                                            span.ed-grid__flag { "✗ " (tr(lang, "silent", "молчит")) }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-            div {
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 4px;" {
-                    (tr(lang, "observed listening sockets", "наблюдаемые слушающие сокеты"))
-                }
-                @if !have_probe {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        (tr(lang, "(no probe yet — poller runs every 10 min; sing-box nodes only)", "(probe ещё нет — поллер ходит раз в 10 минут; только sing-box ноды)"))
+            @if !missing.is_empty() {
+                p style="font-family: var(--mono); font-size: 11px; color: var(--warm); margin-top: 8px;" {
+                    "⚠ " (tr(lang, "declared but NOT listening: ", "заявлено, но НЕ слушает: "))
+                    @for (i, (proto, port)) in missing.iter().enumerate() {
+                        @if i > 0 { ", " }
+                        (proto) "/" (port)
                     }
-                } @else if observed.is_empty() {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                        (tr(lang, "(probe ran but no sockets listed)", "(probe прошёл, но сокетов не нашлось)"))
-                    }
-                } @else {
-                    // ponytail: 4 CSS columns — an amneziawg/wgturn/xray node
-                    // opens 100+ per-peer sockets; one <li>-per-line was ~4.5k px
-                    // of pure scroll. `columns: 4` (not 8 — too narrow for the
-                    // ~590px grid cell, would wrap `hysteria2/8444`) cuts it ~4×.
-                    ul style="list-style: none; padding: 0; margin: 0; font-family: var(--mono); font-size: 12px; columns: 4; column-gap: 16px;" {
-                        @for (proto, port) in observed {
-                            li style="padding: 2px 0; break-inside: avoid;" { (proto) "/" (port) }
-                        }
-                    }
+                    " — " (tr(lang, "re-deploy or check the service on the node", "передеплой или проверь сервис на ноде"))
                 }
             }
-        }
-        @if have_probe && (!missing.is_empty() || !extra.is_empty()) {
-            div style="margin-top: 14px; padding: 10px 12px; border: 1px solid var(--acc); background: var(--paper);" {
-                div style="font-family: var(--mono); font-size: 10px; color: var(--acc); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px;" {
-                    (tr(lang, "drift detected", "обнаружен дрейф"))
+            @if !extra.is_empty() {
+                div.ed-art-eyebrow style="margin-top: 14px;" {
+                    (tr(lang, "Listening but undeclared", "Слушает, но не заявлено"))
+                    " · " (extra.len()) " "
+                    span.ed-tip title=(tr(
+                        lang,
+                        "Per-user AmneziaWG peers each bind their own UDP port — expected, but the inventory doesn't model them yet (NM-14). This grouping keeps the wall readable; there's nothing to click.",
+                        "Каждый пер-пировый порт AmneziaWG — свой UDP-сокет: ожидаемо, но инвентарь их пока не моделирует (NM-14). Группировка держит стену читабельной; кликать тут нечего.",
+                    )) { "ⓘ" }
                 }
-                @if !missing.is_empty() {
-                    p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
-                        (tr(lang, "Declared but ", "Заявлено, но "))
-                        b { (tr(lang, "NOT listening", "НЕ слушает")) } ": "
-                        @for (i, (proto, port)) in missing.iter().enumerate() {
-                            @if i > 0 { ", " }
-                            span.ed-mono { (proto) "/" (port) }
+                table.ed-grid style="margin-top: 8px;" {
+                    thead {
+                        tr {
+                            th { (tr(lang, "group", "группа")) }
+                            th.num { (tr(lang, "ports", "портов")) }
+                            th { (tr(lang, "classification", "классификация")) }
+                        }
+                    }
+                    tbody {
+                        @if wg_peers > 0 {
+                            tr {
+                                td { b { (tr(lang, "wg per-user peers", "wg пер-пировые порты")) } }
+                                td.num { (wg_peers) }
+                                td.ed-grid__sm { span.ed-grid__flag { "⚠ " (tr(lang, "expected · unmodelled (NM-14)", "ожидаемо · не смоделировано (NM-14)")) } }
+                            }
+                        }
+                        @if !caddy_internals.is_empty() {
+                            tr {
+                                td { b { "caddy internals" } }
+                                td.num { (caddy_internals.len()) }
+                                td.ed-grid__mut.ed-grid__sm { (caddy_internals.join(" · ")) " · " (tr(lang, "known-benign", "заведомо безобидно")) }
+                            }
+                        }
+                        @if !unclassified.is_empty() {
+                            tr {
+                                td { b { (tr(lang, "unclassified", "не классифицировано")) } }
+                                td.num { (unclassified.len()) }
+                                td.ed-grid__sm { (unclassified.join(" · ")) }
+                            }
                         }
                     }
                 }
-                @if !extra.is_empty() {
-                    p style="font-family: var(--serif); font-size: 13px; margin: 4px 0;" {
-                        (tr(lang, "Listening but ", "Слушает, но "))
-                        b { (tr(lang, "NOT declared", "НЕ заявлено")) } ": "
-                        @for (i, (proto, port)) in extra.iter().enumerate() {
-                            @if i > 0 { ", " }
-                            span.ed-mono { (proto) "/" (port) }
-                        }
-                    }
+            } @else if missing.is_empty() {
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 10px;" {
+                    (tr(lang, "Declared and observed match. No drift.", "Заявленное и наблюдаемое совпадают. Дрейфа нет."))
                 }
-            }
-        } @else if have_probe {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 10px;" {
-                (tr(lang, "Declared and observed match. No drift.", "Заявленное и наблюдаемое совпадают. Дрейфа нет."))
             }
         }
     }

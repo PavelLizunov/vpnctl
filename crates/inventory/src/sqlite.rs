@@ -2025,7 +2025,8 @@ impl SqliteInventory {
 
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
         sqlx::query(
-            "INSERT INTO grants (user_id, server_id) VALUES (?1, ?2)
+            "INSERT INTO grants (user_id, server_id, granted_at)
+             VALUES (?1, ?2, datetime('now'))
              ON CONFLICT(user_id, server_id) DO NOTHING",
         )
         .bind(&user.0)
@@ -2033,6 +2034,64 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Design v2 3d — grant timestamps for one server's grants table.
+    /// `granted_at` is NULL for grants created before migration 0039;
+    /// the UI renders those as "—".
+    pub async fn grant_dates_for_server(
+        &self,
+        server: &ServerId,
+    ) -> Result<Vec<(UserId, Option<DateTime<Utc>>)>> {
+        let rows = sqlx::query(
+            "SELECT user_id, granted_at FROM grants WHERE server_id = ?1 ORDER BY user_id",
+        )
+        .bind(&server.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let uid: String = r.try_get("user_id")?;
+                let ts: Option<String> = r.try_get("granted_at")?;
+                let parsed = ts.and_then(|s| {
+                    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                        .ok()
+                        .map(|n| n.and_utc())
+                });
+                Ok((UserId(uid), parsed))
+            })
+            .collect()
+    }
+
+    /// Design v2 3d — which granted users' key material is NOT yet in
+    /// the node's deployed config: their `user.grant` audit row for
+    /// this server is newer than the last successful `server.deploy`.
+    /// Same timestamp logic as [`Self::server_pending_deploy`], but
+    /// per-user so the banner can NAME who's affected.
+    pub async fn users_pending_deploy_for_server(
+        &self,
+        server_id: &ServerId,
+    ) -> Result<Vec<UserId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT a.target AS uid FROM audit_log a
+             WHERE a.action = 'user.grant'
+               AND json_extract(a.payload, '$.server') = ?1
+               AND a.target IN (SELECT user_id FROM grants WHERE server_id = ?1)
+               AND a.ts > COALESCE(
+                     (SELECT MAX(d.ts) FROM audit_log d
+                      WHERE d.target = ?1 AND d.action = 'server.deploy'
+                        AND json_extract(d.payload, '$.ssh_skip_reason') IS NULL
+                        AND (json_extract(d.payload, '$.ssh_errors') IS NULL
+                             OR json_array_length(d.payload, '$.ssh_errors') = 0)),
+                     '')
+             ORDER BY uid",
+        )
+        .bind(&server_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| Ok(UserId(r.try_get("uid")?)))
+            .collect()
     }
 
     pub async fn revoke(&self, user: &UserId, server: &ServerId) -> Result<()> {
