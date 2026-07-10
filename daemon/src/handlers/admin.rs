@@ -11720,27 +11720,39 @@ pub(crate) async fn alerts(
                     }
                 }
             }
+            // R3 2026-07-10: the detail column used to repeat the full
+            // localized sentence («User X's subscription was fetched
+            // from a local/proxy IP … the logged client IP will be
+            // wrong») on EVERY row — the subject already names the user
+            // and the ⓘ above explains the rest, so 32 rows read as one
+            // paragraph copy-pasted 32×. Now: source IP + range kind +
+            // UA (the datum that actually varies row-to-row), full
+            // sentence still on hover.
             table.ed-grid style="margin-top: 8px;" {
                 thead {
                     tr {
                         th style="width: 26px;" {}
                         th style="width: 130px;" { (crate::i18n::tr(lang, "opened", "открыт")) }
                         th style="width: 160px;" { (crate::i18n::tr(lang, "subject", "субъект")) }
-                        th { (crate::i18n::tr(lang, "detail", "детали")) }
+                        th style="width: 150px;" { (crate::i18n::tr(lang, "source IP", "IP источника")) }
+                        th { (crate::i18n::tr(lang, "client", "клиент")) }
                         th style="width: 90px;" {}
                     }
                 }
                 tbody {
                     @for a in &sub_rows {
+                        @let fields = sub_access_detail_fields(a);
                         tr class=(if a.acked_at.is_some() { "" } else { "on-warn" }) {
                             td { span style="color: var(--warm);" { "⚠" } }
                             td.ed-grid__mut.ed-grid__sm { (humanize_age(now - a.created_at, lang)) }
                             td { (subject_cell(a)) }
-                            @let rendered = localized_alert(a, lang);
-                            td.ed-grid__mut.ed-grid__sm title=(a.summary) {
-                                (crate::alert_text::to_plain(&rendered.title))
-                                " — " (crate::alert_text::to_plain(&rendered.body))
+                            td.ed-grid__sm title=(a.summary) {
+                                (fields.0)
+                                @if let Some(kind) = fields.1 {
+                                    " " span.ed-grid__mut { "[" (kind) "]" }
+                                }
                             }
+                            td.ed-grid__mut.ed-grid__sm { (fields.2) }
                             td.num { (ack_cell(a)) }
                         }
                     }
@@ -11927,6 +11939,34 @@ pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
 pub(crate) struct AlertsQuery {
     /// `Some("all")` = include acked rows; default = unacked only.
     pub show: Option<String>,
+}
+
+/// R3 2026-07-10 — compact detail for a `sub_access.*` alert row:
+/// `(ip, ip_kind, ua)` pulled from the payload. Returns the raw IP
+/// string (empty → «—»), the range-kind tag (`Some("LAN")` etc.), and
+/// a short client label. The full localized sentence stays on the
+/// row's `title=` hover; this replaces 32× repeated boilerplate with
+/// the datum that actually varies per row (the source IP).
+fn sub_access_detail_fields(a: &vpnctl_inventory::AdminAlert) -> (String, Option<String>, String) {
+    let payload: Option<serde_json::Value> = a
+        .payload_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let get = |key: &str| -> Option<String> {
+        payload
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let ip = get("ip").unwrap_or_else(|| "—".into());
+    let ip_kind = get("ip_kind");
+    // device_class (parsed) beats the raw UA; fall back to «—».
+    let ua = get("device_class")
+        .or_else(|| get("ua"))
+        .unwrap_or_else(|| "—".into());
+    (ip, ip_kind, ua)
 }
 
 /// Render an `AdminAlert` into its localized `{icon,title,body,action}`

@@ -4219,6 +4219,45 @@ async fn admin_alerts_renders_unreachable_kind_row() {
     );
 }
 
+/// R3 2026-07-10 — the sub_access family table shows a COMPACT detail
+/// (source IP + range kind + client) instead of the full localized
+/// sentence repeated on every row. The boilerplate stays on hover.
+#[tokio::test]
+async fn alerts_sub_access_row_shows_compact_ip_detail_not_boilerplate() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .insert_alert(
+            "sub_access.suspicious_local_ip:brat",
+            None,
+            "warning",
+            "local-loop fetch · user=brat · ip=192.168.0.210 [LAN] · ua=Hiddify",
+            Some(r#"{"user_id":"brat","ip":"192.168.0.210","ip_kind":"LAN","device_class":"Hiddify"}"#),
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/alerts").await;
+    // The varying datum — the source IP — renders as its own cell.
+    assert!(
+        html.contains("192.168.0.210"),
+        "sub_access row must surface the source IP"
+    );
+    assert!(html.contains("[LAN]"), "range-kind tag must render");
+    assert!(html.contains("Hiddify"), "client label must render");
+    // The 30-word boilerplate must NOT be in the visible cell (it stays
+    // on the row's title= hover only).
+    assert!(
+        !html.contains("the logged client IP will be wrong"),
+        "verbose boilerplate must not repeat in the visible detail cell"
+    );
+    // The full sentence still lives in the hover title.
+    assert!(
+        html.contains(r#"title="local-loop fetch"#),
+        "the stored summary must remain available on hover"
+    );
+}
+
 #[tokio::test]
 async fn dispatch_alerts_banned_self_writes_row_with_payload() {
     // Phase G chunk 2 — full integration of the banned-self detector:
