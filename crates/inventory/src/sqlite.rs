@@ -2063,6 +2063,33 @@ impl SqliteInventory {
             .collect()
     }
 
+    /// Design v2 4b — the user-side mirror of
+    /// [`Self::grant_dates_for_server`]: when was each of this user's
+    /// grants made. NULL (pre-0039 rows) reads as `None`.
+    pub async fn grant_dates_for_user(
+        &self,
+        user: &UserId,
+    ) -> Result<Vec<(ServerId, Option<DateTime<Utc>>)>> {
+        let rows = sqlx::query(
+            "SELECT server_id, granted_at FROM grants WHERE user_id = ?1 ORDER BY server_id",
+        )
+        .bind(&user.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let sid: String = r.try_get("server_id")?;
+                let ts: Option<String> = r.try_get("granted_at")?;
+                let parsed = ts.and_then(|s| {
+                    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                        .ok()
+                        .map(|n| n.and_utc())
+                });
+                Ok((ServerId(sid), parsed))
+            })
+            .collect()
+    }
+
     /// Design v2 3d — which granted users' key material is NOT yet in
     /// the node's deployed config: their `user.grant` audit row for
     /// this server is newer than the last successful `server.deploy`.

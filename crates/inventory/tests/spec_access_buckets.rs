@@ -51,6 +51,22 @@ async fn raw_pool(dir: &TempDir) -> sqlx::SqlitePool {
 
 /// Inject ts = now + `offset` (e.g. `"-2 hours"`) in same ISO `T`-form
 /// as `log_sub_access` (per format-mismatch lesson in `spec_sub_access.rs`).
+/// Absolute-timestamp variant — anchors rows at an explicit UTC time
+/// so date-bucket tests can't straddle midnight (caught 2026-07-10 at
+/// 00:3x UTC: `-1h/-2h/-3h` offsets landed on two dates → flake).
+async fn inject_at_abs(pool: &sqlx::SqlitePool, uid: &str, ip: &str, ts: &str) {
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES (?1, ?2, ?3, 200, 100)",
+    )
+    .bind(ts)
+    .bind(uid)
+    .bind(ip)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn inject_at(pool: &sqlx::SqlitePool, uid: &str, ip: &str, offset: &str) {
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
@@ -145,9 +161,19 @@ async fn day_bucket_collapses_rows_from_same_date() {
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
     let raw = raw_pool(&dir).await;
-    inject_at(&raw, "alice", "1.1.1.1", "-1 hour").await;
-    inject_at(&raw, "alice", "2.2.2.2", "-2 hours").await;
-    inject_at(&raw, "alice", "3.3.3.3", "-3 hours").await;
+    // Yesterday noon — one calendar date no matter what time it is
+    // now (relative -1h/-2h/-3h offsets straddle midnight when the
+    // suite runs at 00:00-03:00 UTC).
+    let base = (chrono::Utc::now() - chrono::Duration::days(1))
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for (i, ip) in ["1.1.1.1", "2.2.2.2", "3.3.3.3"].iter().enumerate() {
+        let ts = (base + chrono::Duration::minutes(i as i64))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        inject_at_abs(&raw, "alice", ip, &ts).await;
+    }
     raw.close().await;
 
     let buckets = inv.sub_access_buckets("day", 48).await.unwrap();

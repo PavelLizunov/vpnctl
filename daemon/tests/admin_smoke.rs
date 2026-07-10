@@ -17952,3 +17952,86 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
         "granted user's UUID must be present in the rendered inbounds[*].users[]"
     );
 }
+
+/// Design v2 4c — the user Activity tab opens with the four fact
+/// tiles and the GeoIP-resolved fetch log (row per fetch incl. the
+/// geo/asn/ua columns and the egress ⚠ flag path).
+#[tokio::test]
+async fn v2_user_activity_renders_tiles_and_geo_log() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .log_sub_access(
+            &UserId("u0".into()),
+            "5.5.5.5",
+            Some("Hiddify/2.5 android"),
+            200,
+            500,
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/users/u0/activity").await;
+    assert!(html.contains("sharing verdict"), "verdict tile missing");
+    assert!(
+        html.contains("distinct IPs · 30d") && html.contains("sub fetches · 30d"),
+        "count tiles missing"
+    );
+    assert!(
+        html.contains("Sub-access log · GeoIP-resolved"),
+        "geo log eyebrow missing"
+    );
+    assert!(html.contains("5.5.5.5"), "fetch row IP missing");
+    assert!(html.contains("Hiddify/2.5 android"), "fetch row UA missing");
+}
+
+/// Design v2 4b — the user Access tab opens with the per-server
+/// grant/key-state table (granted date column from migration 0039,
+/// on-node state, protocols available, per-row grant/revoke) and the
+/// masked per-protocol identities list.
+#[tokio::test]
+async fn v2_user_access_renders_grant_state_table_and_identities() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0)]).await; // granted s0, not s1
+    let html = fetch_html(router(s), "/admin/users/u0/access").await;
+    assert!(
+        html.contains("Grants · per-server key state"),
+        "grant-state eyebrow missing"
+    );
+    assert!(html.contains("uuid ✓"), "keys-minted cell missing");
+    // granted s0 row has a revoke form; ungranted s1 row has a grant form.
+    assert!(
+        html.contains(r#"action="/admin/users/u0/grants/s0/revoke""#),
+        "granted row must carry revoke"
+    );
+    assert!(
+        html.contains(r#"action="/admin/users/u0/grants/s1""#),
+        "ungranted row must carry grant"
+    );
+    assert!(
+        html.contains("Per-protocol identities"),
+        "identities eyebrow missing"
+    );
+    // Secrets stay masked — the full uuid renders (public), the
+    // sub-token only as its masked preview.
+    assert!(html.contains("not granted") || html.contains("не выдан"));
+}
+
+/// Design v2 4a — Delivery opens with the compact subscription recap
+/// (URL + Overview QR link + legacy /sub fallback note).
+#[tokio::test]
+async fn v2_user_delivery_renders_subscription_recap() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0/delivery").await;
+    assert!(
+        html.contains("QR on Overview →") || html.contains("QR на Обзоре →"),
+        "recap must link the Overview QR"
+    );
+    assert!(
+        html.contains("LAN-only fallback"),
+        "legacy /sub fallback note missing"
+    );
+}
