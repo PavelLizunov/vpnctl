@@ -110,51 +110,53 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 }
 
 /* ── masthead ── */
-.ed-mast {
-  display:flex; align-items: baseline;
-  gap: 24px;
-  padding: 16px 56px 12px;
-  border-bottom: 1px solid var(--ink);
-  position: relative;
+/* ── topbar (design v2) — one compact bar, all colours from the ink
+   token family so it inverts sensibly across the 4 themes. On the 3
+   light papers this reads as a dark bar; on ink-dark it's a light bar
+   over the dark page — contrast holds either way. ── */
+.ed-tb {
+  display: flex; align-items: center; gap: 18px;
+  padding: 8px 56px;
+  background: var(--ink);
   flex: 0 0 auto;
 }
-.ed-mast::before {
-  content:""; position:absolute; left:56px; right:56px; bottom: -5px;
-  height: 1px; background: var(--ink); opacity: 0.4;
+.ed-tb__logo {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-weight: 700; font-size: 13px;
+  color: var(--paper); text-decoration: none;
 }
-.ed-mast__logo {
-  display:flex; align-items:center; gap: 8px;
-  font-family: var(--mono);
-  font-size: 14px;
-  letter-spacing: -0.01em;
+.ed-tb__nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.ed-tb__nav a {
+  font-family: var(--mono); font-weight: 500; font-size: 10px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: color-mix(in oklab, var(--paper) 60%, transparent);
+  text-decoration: none; padding: 3px 8px; border-radius: 3px; white-space: nowrap;
 }
-.ed-mast__sub {
-  font-family: var(--serif);
-  font-style: italic;
-  font-size: 13px;
-  color: var(--mute);
-  margin-left: 8px;
+.ed-tb__nav a:hover { color: var(--paper); }
+.ed-tb__nav a.on { color: var(--paper); background: color-mix(in oklab, var(--paper) 16%, transparent); }
+.ed-tb__nav a .ct { color: var(--warm); margin-left: 3px; font-weight: 700; }
+.ed-tb__r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.ed-tb__search {
+  font-family: var(--mono); font-size: 10.5px;
+  padding: 4px 8px; width: 160px; border-radius: 3px;
+  border: 1px solid color-mix(in oklab, var(--paper) 28%, transparent);
+  background: color-mix(in oklab, var(--paper) 8%, transparent);
+  color: var(--paper);
 }
-.ed-mast__nav-inline {
-  display:flex; gap: 22px; margin-left: 24px;
-  font-family: var(--sans);
-  font-size: 11.5px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--soft);
-  align-items: baseline;
+.ed-tb__search::placeholder { color: color-mix(in oklab, var(--paper) 45%, transparent); }
+.ed-tb__who {
+  display: flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 10px;
+  color: color-mix(in oklab, var(--paper) 60%, transparent);
 }
-.ed-mast__nav-inline a { color: var(--soft); cursor: default; padding-bottom: 2px; border-bottom: 1px solid transparent; }
-.ed-mast__nav-inline a.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
-.ed-mast__nav-inline a .ct { font-family: var(--serif); font-style: italic; color: var(--mute); margin-left: 4px; font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
-.ed-mast__date {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--mute);
-  letter-spacing: 0.02em;
+.ed-tb__who b { color: var(--paper); font-weight: 600; }
+.ed-tb__who button {
+  background: transparent; border: none; cursor: pointer; padding: 0;
+  font-family: var(--mono); font-size: 10px;
+  color: color-mix(in oklab, var(--paper) 60%, transparent); text-decoration: underline;
 }
-.ed-mast__date b { color: var(--ink); font-weight: 500; }
+.ed-tb__who button:hover { color: var(--paper); }
+@media (max-width: 900px) { .ed-tb { padding: 8px 20px; } .ed-tb__search { width: 110px; } }
 
 /* ── main scroll region ── */
 .ed-main {

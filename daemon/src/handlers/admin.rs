@@ -52,47 +52,39 @@ struct NavItem {
     /// The URL path segment AND the `active_nav` matcher token. Stays
     /// English in both locales (URLs aren't localised).
     key: &'static str,
-    /// The i18n key used to look up the localised label. nav() calls
+    /// The i18n key used to look up the localised label. topbar() calls
     /// `t(lang, label_key)` to get the actual rendered text.
     label_key: crate::i18n::K,
-    count: Option<usize>,
 }
 
 const NAV: &[NavItem] = &[
     NavItem {
         key: "dashboard",
         label_key: crate::i18n::K::NavDashboard,
-        count: None,
     },
     NavItem {
         key: "monitoring",
         label_key: crate::i18n::K::NavMonitoring,
-        count: None,
     },
     NavItem {
         key: "servers",
         label_key: crate::i18n::K::NavServers,
-        count: None,
     },
     NavItem {
         key: "users",
         label_key: crate::i18n::K::NavUsers,
-        count: None,
     },
     NavItem {
         key: "audit",
         label_key: crate::i18n::K::NavAudit,
-        count: None,
     },
     NavItem {
         key: "alerts",
         label_key: crate::i18n::K::NavAlerts,
-        count: None,
     },
     NavItem {
         key: "settings",
         label_key: crate::i18n::K::NavSettings,
-        count: None,
     },
 ];
 
@@ -106,149 +98,87 @@ fn nav_href(key: &str) -> String {
     }
 }
 
-fn nav(active: &str, lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::{K, t};
-    html! {
-        nav.ed-mast__nav-inline style="padding: 12px 56px 0; border-bottom: 1px solid var(--rule);" {
-            @for it in NAV {
-                // Real anchor with href — without it the previous version
-                // rendered styled text that didn't navigate on click.
-                //
-                // The active branch emits `class="on"`; the inactive one
-                // emits no class attribute at all. Maud's `.on[cond]` toggle
-                // would have emitted `class=""` when false (verified
-                // empirically), which is wasteful and would clutter
-                // selector-based assertions.
-                @if it.key == active {
-                    a.on href=(nav_href(it.key)) {
-                        (t(lang, it.label_key))
-                        @if let Some(c) = it.count {
-                            span.ct { (c) }
-                        }
-                    }
-                } @else {
-                    a href=(nav_href(it.key)) {
-                        (t(lang, it.label_key))
-                        @if let Some(c) = it.count {
-                            span.ct { (c) }
-                        }
-                    }
-                }
-            }
-            // A5 — inline search bar in the nav, right side.
-            // GET form so the URL stays bookmarkable. Compact
-            // styling that doesn't compete with nav links for
-            // attention.
-            form method="get" action="/admin/search"
-                 style="margin-left: auto; display: flex; gap: 4px; align-items: baseline;" {
-                input type="search" name="q"
-                      placeholder=(match lang {
-                          crate::i18n::Locale::En => "search…",
-                          crate::i18n::Locale::Ru => "поиск…",
-                      })
-                      style="width: 140px; padding: 2px 6px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--ink);";
-                button type="submit"
-                       title=(match lang {
-                           crate::i18n::Locale::En => "Fleet-wide search across users / servers / alerts",
-                           crate::i18n::Locale::Ru => "Поиск по флоту: пользователи / серверы / алерты",
-                       })
-                       style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                    "→"
-                }
-            }
-            span style="margin-left: 16px; font-family: var(--mono); font-size: 11px; color: var(--dim); letter-spacing: 0; text-transform: none;" {
-                (t(lang, K::NavOperator))
-            }
-        }
-    }
-}
-
-/// Today's UTC date formatted for the masthead, matching the
-/// editorial «— a daily report from your homelab» voice. Computed
-/// per-render — caches would be more code than it's worth, and the
-/// page is uncached anyway (every GET hits the admin handler).
-fn masthead_date() -> String {
-    // 2026-05-23 — render in the operator-configured display TZ
-    // so «today» matches alerts / audit / chart labels.
-    chrono::Utc::now()
-        .with_timezone(&display_tz())
-        .format("%Y-%m-%d")
-        .to_string()
-}
-
-fn masthead(date: &str, vol: &str, lang: crate::i18n::Locale) -> Markup {
+/// Design v2 topbar — one compact bar replacing the old masthead + nav.
+/// `[·] vpnctl` · UPPERCASE nav with an active pill · ALERTS carries the
+/// LIVE unacked count · search (`/` hotkey via admin.js) · EN|RU toggle ·
+/// operator · logout. All colours from the ink token family (see
+/// `.ed-tb*` in admin.css).
+fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Markup {
     use crate::i18n::{K, Locale, t};
-    // The [EN | RU] toggle clicks POST /admin/tweak/lang/<other>;
-    // the handler sets the vpnctl_lang cookie + 303-redirects back
-    // via Referer. The "active" side is unlinked + bold; the
-    // "other" side is a clickable form button. Two buttons (not one
-    // link with `?lang=...`) so the cookie is server-set, not
-    // URL-leaky.
     let other = match lang {
         Locale::En => Locale::Ru,
         Locale::Ru => Locale::En,
     };
-    let toggle_form = html! {
-        form method="post"
-             action="/admin/tweak/lang"
-             style="display: inline; margin: 0; padding: 0;" {
-            input type="hidden" name="value" value=(other.cookie_value()) {}
-            button type="submit"
-                   title=(match other {
-                       Locale::En => "Switch admin UI to English",
-                       Locale::Ru => "Переключить админку на русский",
-                   })
-                   style="background: transparent; border: none; cursor: pointer; padding: 0 4px; font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: underline;" {
-                (other.cookie_value().to_uppercase())
-            }
-        }
-    };
     html! {
-        div.ed-mast {
-            div.ed-mast__logo {
-                (glyph(20))
+        div.ed-tb {
+            a.ed-tb__logo href="/admin/" {
+                // The [·] brand mark is tinted with the operator's active
+                // accent — the one always-on accent hook in the chrome now
+                // that the masthead vol-number is gone.
+                span style="color: var(--acc); display: flex;" { (glyph(18)) }
                 "vpnctl"
             }
-            span.ed-mast__sub { (t(lang, K::MastSubtitle)) }
-            span.ed-mast__date {
-                // The volume number is always tinted with the active
-                // accent. Used to be the (now-removed) floating Tweaks
-                // panel that gave the accent toggle visible feedback
-                // on every page; with the panel gone we need an
-                // always-on accent hook in the chrome itself so
-                // operators see their accent choice land.
-                b style="color: var(--acc);" { (vol) }
-                " · "
-                (date)
-                " · "
-                // Active locale — bold, unlinked. Then the toggle
-                // button for the other locale. Visually:
-                //   `vol. 0.1.0 · 2026-05-21 · EN | [RU]`
-                b style="font-family: var(--mono); font-size: 11px; color: var(--ink);" {
-                    (lang.cookie_value().to_uppercase())
+            nav.ed-tb__nav {
+                @for it in NAV {
+                    // The alerts item carries the LIVE unacked count
+                    // (a warm chip); the rest have no count. The active
+                    // branch emits `class="on"` (the pill), inactive
+                    // emits no class attribute.
+                    @let count = if it.key == "alerts" && alerts_unacked > 0 {
+                        Some(alerts_unacked)
+                    } else {
+                        None
+                    };
+                    @if it.key == active {
+                        a.on href=(nav_href(it.key)) {
+                            (t(lang, it.label_key))
+                            @if let Some(c) = count { " " span.ct { (c) } }
+                        }
+                    } @else {
+                        a href=(nav_href(it.key)) {
+                            (t(lang, it.label_key))
+                            @if let Some(c) = count { " " span.ct { (c) } }
+                        }
+                    }
                 }
-                " | "
-                (toggle_form)
-                // Logout chip. Visible exit from the persistent
-                // session cookie (introduced 2026-05-26 to fix the
-                // «постоянно ввожу пароль» loop). Without this, the
-                // 30-day cookie has no operator-visible kill switch
-                // and rotating identity requires clearing browser
-                // cookies by hand.
-                " · "
-                form method="post"
-                     action="/admin/logout"
-                     style="display: inline; margin: 0; padding: 0;" {
-                    button type="submit"
-                           title=(match lang {
-                               Locale::En => "Sign out of the admin UI on this device",
-                               Locale::Ru => "Выйти из админки на этом устройстве",
-                           })
-                           style="background: transparent; border: none; cursor: pointer; padding: 0 4px; font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: underline;" {
-                        (match lang {
-                            Locale::En => "logout",
-                            Locale::Ru => "выйти",
-                        })
+            }
+            span.ed-tb__r {
+                form method="get" action="/admin/search" style="display: flex; margin: 0;" {
+                    input.ed-tb__search type="search" name="q" id="tb-search"
+                          title=(match lang {
+                              Locale::En => "Fleet-wide search — press / to focus",
+                              Locale::Ru => "Поиск по флоту — нажми / чтобы сфокусировать",
+                          })
+                          placeholder=(match lang {
+                              Locale::En => "search…  /",
+                              Locale::Ru => "поиск…  /",
+                          });
+                }
+                span.ed-tb__who {
+                    // Active locale bold, unlinked; the other locale is a
+                    // POST toggle (server-set cookie, not URL-leaky).
+                    b { (lang.cookie_value().to_uppercase()) }
+                    "|"
+                    form method="post" action="/admin/tweak/lang" style="display: inline; margin: 0; padding: 0;" {
+                        input type="hidden" name="value" value=(other.cookie_value()) {}
+                        button type="submit"
+                               title=(match other {
+                                   Locale::En => "Switch admin UI to English",
+                                   Locale::Ru => "Переключить админку на русский",
+                               }) {
+                            (other.cookie_value().to_uppercase())
+                        }
+                    }
+                    " · " (t(lang, K::NavOperator))
+                    " · "
+                    form method="post" action="/admin/logout" style="display: inline; margin: 0; padding: 0;" {
+                        button type="submit"
+                               title=(match lang {
+                                   Locale::En => "Sign out of the admin UI on this device",
+                                   Locale::Ru => "Выйти из админки на этом устройстве",
+                               }) {
+                            (match lang { Locale::En => "logout", Locale::Ru => "выйти" })
+                        }
                     }
                 }
             }
@@ -361,12 +291,36 @@ fn root_class(theme: &str, accent: &str) -> String {
 /// Pre-2026-05-17 this also took a `tweaks_open: bool` for the floating
 /// Tweaks panel state. Panel moved into /admin/settings; the arg is gone
 /// along with the cookie + the `/admin/tweak/tweaks` route.
+/// Load the live unacked-alert count for the topbar chip. Best-effort:
+/// a read failure renders no chip rather than 500-ing every page.
+pub(crate) async fn topbar_alert_count(state: &AppState) -> u64 {
+    state.inv.unacked_alert_count().await.unwrap_or(0)
+}
+
+/// Async chrome wrapper — resolves the live topbar alert count then
+/// renders the page. Handlers that already hold theme/accent/lang call
+/// this instead of `shell` directly so the topbar's ALERTS chip is
+/// live on every page (design v2 acceptance criterion 1).
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn render_page(
+    state: &AppState,
+    active_nav: &str,
+    theme: &str,
+    accent: &str,
+    lang: crate::i18n::Locale,
+    body: Markup,
+) -> Markup {
+    let alerts = topbar_alert_count(state).await;
+    shell(active_nav, theme, accent, lang, alerts, body)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn shell(
     active_nav: &str,
     theme: &str,
     accent: &str,
     lang: crate::i18n::Locale,
+    alerts_unacked: u64,
     body: Markup,
 ) -> Markup {
     let cls = root_class(theme, accent);
@@ -395,8 +349,7 @@ pub(crate) fn shell(
             }
             body {
                 div class=(cls) {
-                    (masthead(&masthead_date(), &format!("vol. {}", env!("CARGO_PKG_VERSION")), lang))
-                    (nav(active_nav, lang))
+                    (topbar(active_nav, lang, alerts_unacked))
                     main.ed-main {
                         (body)
                     }
@@ -1619,7 +1572,7 @@ async fn dashboard_render(
             (dashboard_heavy_users(&heavy_users, window, lang))
         }
     };
-    Ok(shell("dashboard", &theme, &accent, lang, body))
+    Ok(render_page(&state, "dashboard", &theme, &accent, lang, body).await)
 }
 
 /// Colour bucket for an uptime percentage. Shared by the per-server
@@ -2520,7 +2473,7 @@ pub(crate) async fn monitoring(
             }
         }
     };
-    Ok(shell("monitoring", &theme, &accent, lang, body))
+    Ok(render_page(&state, "monitoring", &theme, &accent, lang, body).await)
 }
 
 /// Design v2 3a — «probe all now». Runs the SAME per-server probe the
@@ -2923,7 +2876,7 @@ pub(crate) async fn servers(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, lang, body))
+    Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -3260,7 +3213,7 @@ pub(crate) async fn users(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, lang, body))
+    Ok(render_page(&state, "users", &theme, &accent, lang, body).await)
 }
 
 /// Build the canonical sub URL the QR encodes. Uses the request's `Host`
@@ -5829,7 +5782,7 @@ async fn user_detail_render(
 
     }
         };
-    Ok(shell("users", &theme, &accent, lang, body))
+    Ok(render_page(&state, "users", &theme, &accent, lang, body).await)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -8487,7 +8440,9 @@ pub(crate) async fn backup_self_test(
 
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let body = render_self_test_report(&report, lang);
-    shell("settings", &theme, &accent, lang, body).into_response()
+    render_page(&state, "settings", &theme, &accent, lang, body)
+        .await
+        .into_response()
 }
 
 /// Render the HTML body for the self-test result page. Pulled out
@@ -10282,7 +10237,7 @@ pub(crate) async fn user_delete_confirm(
             }
         }
     };
-    Ok(shell("users", &theme, &accent, lang, body))
+    Ok(render_page(&state, "users", &theme, &accent, lang, body).await)
 }
 
 /// `POST /admin/users/{id}/delete` — actually delete. Body must be
@@ -10445,7 +10400,7 @@ pub(crate) async fn server_delete_confirm(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, lang, body))
+    Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
 }
 
 /// `POST /admin/servers/{id}/delete` — actually delete. Body must be
@@ -10943,7 +10898,7 @@ pub(crate) async fn search(
             }
         }
     };
-    Ok(shell("search", &theme, &accent, lang, body))
+    Ok(render_page(&state, "search", &theme, &accent, lang, body).await)
 }
 
 /// Phase D — paginated, filterable audit timeline. Replaces the
@@ -11150,7 +11105,7 @@ pub(crate) async fn audit(
             }
         }
     };
-    Ok(shell("audit", &theme, &accent, lang, body))
+    Ok(render_page(&state, "audit", &theme, &accent, lang, body).await)
 }
 
 /// Query-string args for the audit timeline. All optional; empty
@@ -11611,7 +11566,7 @@ pub(crate) async fn alerts(
             }
         }
     };
-    Ok(shell("alerts", &theme, &accent, lang, body))
+    Ok(render_page(&state, "alerts", &theme, &accent, lang, body).await)
 }
 
 /// `POST /admin/alerts/{id}/ack` — operator dismisses one alert.
@@ -12987,7 +12942,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
             }
     }
         };
-    shell("settings", &theme, &accent, lang, body)
+    render_page(&state, "settings", &theme, &accent, lang, body).await
 }
 
 /// `POST /admin/servers/{id}/push-deploy-key` — append the daemon's
@@ -13735,7 +13690,7 @@ fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// Two fields: server address (IP or hostname) and root password.
 /// Submit POSTs to the same URL; success goes to `/admin/servers/new/step-2`.
 /// Cancel link leads back to `/admin/servers`.
-pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
+pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>) -> Markup {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     use crate::i18n::tr;
     let body = html! {
@@ -13842,7 +13797,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap) -> Markup {
             }
         }
     };
-    shell("servers", &theme, &accent, lang, body)
+    render_page(&state, "servers", &theme, &accent, lang, body).await
 }
 
 /// `POST /admin/servers/new` — validate the step-1 input, stash it in
@@ -14024,7 +13979,9 @@ pub(crate) async fn wizard_step2_stub(
             }
         }
     };
-    shell("servers", &theme, &accent, lang, body).into_response()
+    render_page(&state, "servers", &theme, &accent, lang, body)
+        .await
+        .into_response()
 }
 
 /// `GET /admin/servers/new/step-2/sse` — the EventSource endpoint
@@ -15648,7 +15605,7 @@ async fn server_detail_render(
             }
         }
     };
-    Ok(shell("servers", &theme, &accent, lang, body))
+    Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
 }
 
 /// Phase H+ — rolling uptime SLO section. Three chips (24h / 7d /

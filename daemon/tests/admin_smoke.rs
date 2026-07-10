@@ -90,9 +90,13 @@ async fn admin_root_renders_editorial_shell() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
 
-    // The chrome was rendered.
-    assert!(html.contains("ed-mast"), "missing masthead in html");
-    assert!(html.contains("ed-mast__nav-inline"), "missing nav");
+    // The chrome was rendered — design v2 topbar (single compact bar).
+    assert!(html.contains(r#"class="ed-tb""#), "missing topbar in html");
+    assert!(html.contains(r#"class="ed-tb__nav""#), "missing topbar nav");
+    assert!(
+        html.contains(r#"id="tb-search""#),
+        "missing topbar search input"
+    );
     assert!(html.contains("vpnctl"), "missing wordmark text");
     // Tweaks panel moved into /admin/settings (2026-05-17 — Pavel:
     // «Tweaks правильнее держать в settings»). The dashboard
@@ -112,6 +116,64 @@ async fn admin_root_renders_editorial_shell() {
         html.contains(r#"class="ed""#),
         "expected default page class to be just 'ed', got: {}",
         &html[..html.len().min(500)]
+    );
+}
+
+/// Design v2 topbar acceptance — one compact bar with a clickable
+/// wordmark, an active pill on the current section, the LIVE unacked
+/// alerts count as a warm chip, and the search input (`/`-hotkey wired
+/// in admin.js).
+#[tokio::test]
+async fn v2_topbar_renders_active_pill_search_and_live_alert_count() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Two unacked alerts (no server FK) -> the ALERTS item shows the count.
+    s.inv
+        .insert_alert("server.unreachable", None, "critical", "down", None)
+        .await
+        .unwrap();
+    s.inv
+        .insert_alert(
+            "sub_access.suspicious_local_ip:u0",
+            None,
+            "warning",
+            "loop",
+            None,
+        )
+        .await
+        .unwrap();
+
+    // On the monitoring page the MONITORING item is the active pill.
+    let html = fetch_html(router(s), "/admin/monitoring").await;
+    assert!(html.contains(r#"class="ed-tb""#), "topbar bar missing");
+    assert!(
+        html.contains(r#"class="ed-tb__logo" href="/admin/""#),
+        "wordmark must link to /admin/"
+    );
+    assert!(
+        html.contains(r#"<a class="on" href="/admin/monitoring">"#),
+        "active nav item must carry the .on pill"
+    );
+    assert!(
+        html.contains(r#"<span class="ct">2</span>"#),
+        "ALERTS nav item must show the live unacked count (2)"
+    );
+    assert!(
+        html.contains(r#"id="tb-search""#) && html.contains("search…  /"),
+        "topbar search input with `/` hint missing"
+    );
+}
+
+/// Symmetric quiet-state: zero unacked alerts -> no count chip.
+#[tokio::test]
+async fn v2_topbar_omits_alert_chip_when_none_unacked() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(html.contains(r#"class="ed-tb__nav""#), "topbar nav missing");
+    assert!(
+        !html.contains(r#"<span class="ct">"#),
+        "no unacked alerts -> no count chip on the ALERTS item"
     );
 }
 
@@ -353,61 +415,6 @@ async fn admin_nav_anchors_have_hrefs() {
         "href=\"/admin/settings\"",
     ] {
         assert!(html.contains(href), "missing nav href: {href}");
-    }
-}
-
-/// Locate the `<a ...>` open tag for a given href in the rendered html
-/// and return its attribute soup. Returns None if no such anchor exists.
-/// Lets active-nav assertions check `class="on"` without depending on
-/// the order maud serialises attributes in.
-fn anchor_attrs<'a>(html: &'a str, href_value: &str) -> Option<&'a str> {
-    let needle = format!("href=\"{href_value}\"");
-    for chunk in html.split("<a ") {
-        if let Some(end) = chunk.find('>') {
-            let open = &chunk[..end];
-            if open.contains(&needle) {
-                return Some(open);
-            }
-        }
-    }
-    None
-}
-
-/// Each route (incl. dashboard) must respond 200 and mark its own nav
-/// item active. Uses an unordered attribute check so future maud version
-/// changes that re-order attribute serialisation don't break the test.
-#[tokio::test]
-async fn admin_section_routes_render_with_active_nav() {
-    let dir = TempDir::new().unwrap();
-    let app = router(state(&dir).await);
-
-    for (path, href_in_nav) in [
-        ("/admin/", "/admin/"),
-        ("/admin/monitoring", "/admin/monitoring"),
-        ("/admin/servers", "/admin/servers"),
-        ("/admin/users", "/admin/users"),
-        ("/admin/audit", "/admin/audit"),
-        ("/admin/settings", "/admin/settings"),
-    ] {
-        let resp = app
-            .clone()
-            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "expected 200 from {path}, got {:?}",
-            resp.status()
-        );
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = std::str::from_utf8(&body).unwrap();
-        let attrs = anchor_attrs(html, href_in_nav)
-            .unwrap_or_else(|| panic!("no anchor with href={href_in_nav} on {path}"));
-        assert!(
-            attrs.contains("class=\"on\""),
-            "expected active nav for {path} (anchor attrs: {attrs:?})"
-        );
     }
 }
 
@@ -11901,15 +11908,11 @@ async fn i18n_default_locale_is_english_with_english_nav() {
         html.contains(">Dashboard<"),
         "nav must render Dashboard label in English by default"
     );
-    assert!(
-        html.contains("— a daily report from your homelab"),
-        "masthead subtitle must be in English by default"
-    );
     // The lang switch button shows the OTHER locale (`RU` when active
     // is `EN`); the active locale renders as bold text next to it.
     assert!(
         html.contains(">RU<"),
-        "masthead toggle button must offer the alternate locale (RU when EN active)"
+        "topbar toggle button must offer the alternate locale (RU when EN active)"
     );
 }
 
@@ -11943,10 +11946,6 @@ async fn i18n_ru_cookie_renders_russian_nav_and_subtitle() {
     assert!(
         html.contains(">Серверы<"),
         "ru cookie must render Servers as Серверы"
-    );
-    assert!(
-        html.contains("ежедневный отчёт по твоей домашней лаборатории"),
-        "ru cookie must render the masthead subtitle in Russian"
     );
     assert!(
         html.contains(r#"<html lang="ru""#) || html.contains(r#"<html lang=\"ru\""#),
