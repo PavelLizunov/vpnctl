@@ -3769,6 +3769,7 @@ async fn user_detail_render(
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid.0, error = %e, "servers_pending_deploy_for_user failed");
+
             Vec::new()
         });
 
@@ -4088,6 +4089,54 @@ async fn user_detail_render(
     )
     .await;
 
+    // Design v2 group C — tab-scoped data loads.
+    // 4c Activity: newest geo-resolved fetch rows + this user's
+    // composite sharing score (same scorer as the dashboard panel).
+    let (recent_log, sharing) = if tab == UserTab::Activity {
+        let log = state
+            .inv
+            .recent_sub_access(&uid, 8)
+            .await
+            .unwrap_or_default();
+        let sc = state
+            .inv
+            .sharing_signals_all_users(30, 2.0)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|sig| sig.user_id == uid)
+            .map(|sig| crate::sharing_score::score(&sig));
+        (log, sc)
+    } else {
+        (Vec::new(), None)
+    };
+    // 4b Access: per-grant dates + per-server visible protocol lists.
+    let (user_grant_dates, access_protos) = if tab == UserTab::Access {
+        let dates: std::collections::HashMap<
+            vpnctl_core::ServerId,
+            Option<chrono::DateTime<chrono::Utc>>,
+        > = state
+            .inv
+            .grant_dates_for_user(&uid)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut protos: std::collections::HashMap<vpnctl_core::ServerId, Vec<String>> =
+            std::collections::HashMap::new();
+        for srv in &all_servers {
+            let v = state
+                .inv
+                .visible_protocols_for_subscription(&uid, &srv.id)
+                .await
+                .unwrap_or_default();
+            protos.insert(srv.id.clone(), v.into_iter().map(|p| p.0).collect());
+        }
+        (dates, protos)
+    } else {
+        Default::default()
+    };
+
     let body = html! {
             nav.ed-crumb {
                 a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
@@ -4364,6 +4413,36 @@ async fn user_detail_render(
             // every artefact needed to onboard the user in one place.
     }
     @if tab == UserTab::Delivery {
+        // v2 4a — compact subscription recap on top of Delivery: the
+        // one artefact the operator actually hands out, plus the legacy
+        // fallback. The QR itself lives on Overview (linked) — the mock
+        // duplicates it here; we link instead of double-rendering.
+        div.ed-inbar {
+            span.ed-inbar__label { (crate::i18n::tr(lang, "subscription", "подписка")) }
+            @match (&ninitux_url_str, &sub_url_str) {
+                (Some(u), _) | (None, Some(u)) => {
+                    span style="font-family: var(--mono); font-size: 10.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;" { (u) }
+                },
+                (None, None) => {
+                    em.ed-grid__mut { (crate::i18n::tr(lang, "no subscription URL yet — mint a sub-token below", "URL подписки нет — сгенерируй sub-token ниже")) }
+                },
+            }
+            a.ed-grid__open href=(format!("/admin/users/{}", path_segment_encode(&user.id.0))) {
+                (crate::i18n::tr(lang, "QR on Overview →", "QR на Обзоре →"))
+            }
+            span.ed-tip title=(crate::i18n::tr(
+                lang,
+                "The mobile app polls this URL on a fixed schedule; rotating the sub-token below invalidates the old URL immediately.",
+                "Приложение опрашивает этот URL по расписанию; ротация sub-token ниже мгновенно гасит старый URL.",
+            )) { "ⓘ" }
+            @if let Some(t) = &sub_token {
+                span.ed-grid__mut style="margin-left: auto; font-family: var(--mono); font-size: 10.5px;" {
+                    (crate::i18n::tr(lang, "legacy /sub/", "легаси /sub/"))
+                    (mask_secret(t))
+                    " · " (crate::i18n::tr(lang, "LAN-only fallback", "LAN-only fallback"))
+                }
+            }
+        }
             div.ed-rule {}
             div.ed-art-eyebrow { (crate::i18n::tr(lang, "WireGuard keypair", "WireGuard-пара ключей")) }
             @match (&user.wireguard_pubkey, &user.wireguard_private) {
@@ -4863,6 +4942,136 @@ async fn user_detail_render(
             // operator sees the post-mutation state immediately.
     }
     @if tab == UserTab::Access {
+        // v2 4b — per-server grant/key-state table above the existing
+        // per-protocol delivery grid.
+        div.ed-art-eyebrow style="margin-top: 12px;" {
+            (crate::i18n::tr(lang, "Grants · per-server key state", "Гранты · состояние ключей по серверам")) " "
+            span.ed-tip title=(crate::i18n::tr(
+                lang,
+                "Keys are minted at grant time; «on node» means the deployed config actually contains them. Grant + forget-to-deploy is the #1 silent failure — the banner above tracks it.",
+                "Ключи чеканятся при гранте; «на ноде» значит, что задеплоенный конфиг реально их содержит. Грант без деплоя — тихий сбой №1, баннер выше его отслеживает.",
+            )) { "ⓘ" }
+        }
+        @let keys_str = {
+            let mut parts = vec!["uuid ✓"];
+            if user.tuic_password.is_some() { parts.push("tuic ✓"); }
+            if user.wireguard_pubkey.is_some() { parts.push("wg ✓"); }
+            parts.join(" · ")
+        };
+        table.ed-grid style="margin-top: 8px;" {
+            thead {
+                tr {
+                    th style="width: 70px;" { (crate::i18n::tr(lang, "server", "сервер")) }
+                    th { (crate::i18n::tr(lang, "granted", "выдан")) }
+                    th { (crate::i18n::tr(lang, "keys minted", "ключи")) }
+                    th { (crate::i18n::tr(lang, "on node", "на ноде")) }
+                    th { (crate::i18n::tr(lang, "protocols available", "доступные протоколы")) }
+                    th.num style="width: 110px;" {}
+                }
+            }
+            tbody {
+                @for srv in &all_servers {
+                    @let is_granted = granted_ids.contains(&srv.id);
+                    @let is_pending = pending_deploy_servers.contains(&srv.id);
+                    @let sid_enc = path_segment_encode(&srv.id.0);
+                    @let uid_enc = path_segment_encode(&user.id.0);
+                    tr class=(if is_granted && is_pending { "on-warn" } else { "" }) {
+                        td { b { (srv.id.0) } }
+                        td.ed-grid__sm {
+                            @if is_granted {
+                                span style="color: var(--green);" { "✓ " }
+                                span.ed-grid__mut {
+                                    @match user_grant_dates.get(&srv.id).copied().flatten() {
+                                        Some(ts) => (format_msk_iso(ts)),
+                                        None => "—",
+                                    }
+                                }
+                            } @else {
+                                span.ed-grid__mut { "— " (crate::i18n::tr(lang, "not granted", "не выдан")) }
+                            }
+                        }
+                        td.ed-grid__sm {
+                            @if is_granted { (keys_str) }
+                            @else { span.ed-grid__mut { "—" } }
+                        }
+                        td.ed-grid__sm {
+                            @if !is_granted { span.ed-grid__mut { "—" } }
+                            @else if is_pending {
+                                span.ed-grid__flag { "⚠ " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
+                            } @else {
+                                span style="color: var(--green);" { "✓" }
+                            }
+                        }
+                        td.ed-grid__mut.ed-grid__sm {
+                            @match access_protos.get(&srv.id) {
+                                Some(v) if !v.is_empty() => (v.join(" · ")),
+                                _ => "—",
+                            }
+                        }
+                        td.num {
+                            @if is_granted {
+                                form method="post"
+                                     action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/revoke"))
+                                     style="margin: 0; padding: 0; display: inline;" {
+                                    button type="submit" class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                                        (crate::i18n::tr(lang, "revoke →", "отозвать →"))
+                                    }
+                                }
+                            } @else {
+                                form method="post"
+                                     action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}"))
+                                     style="margin: 0; padding: 0; display: inline;" {
+                                    button type="submit" class="ed-abtn ed-abtn--sm" {
+                                        (crate::i18n::tr(lang, "grant →", "выдать →"))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // v2 4b — per-protocol identities, masked (secrets never leave
+        // the server unmasked; length hint only — mock's reveal button
+        // deliberately not implemented).
+        div.ed-art-eyebrow style="margin-top: 16px;" {
+            (crate::i18n::tr(lang, "Per-protocol identities", "Идентичности по протоколам"))
+        }
+        table.ed-feed style="margin: 8px 0 16px;" {
+            tbody {
+                tr {
+                    td.ed-grid__mut style="width: 150px;" { "uuid (vless/tuic)" }
+                    td { (user.uuid) }
+                }
+                tr {
+                    td.ed-grid__mut { "tuic password" }
+                    td.ed-grid__mut {
+                        @match &user.tuic_password {
+                            Some(p) => { (mask_secret(p)) " · " (p.chars().count()) "ch" },
+                            None => "—",
+                        }
+                    }
+                }
+                tr {
+                    td.ed-grid__mut { "wg pubkey" }
+                    td.ed-grid__mut {
+                        @match &user.wireguard_pubkey {
+                            Some(k) => { (mask_secret(k)) " · " (k.chars().count()) "ch" },
+                            None => "—",
+                        }
+                    }
+                }
+                tr {
+                    td.ed-grid__mut { "sub-token" }
+                    td.ed-grid__mut {
+                        @match &user.sub_token {
+                            Some(t) => { (mask_secret(t)) " · " (t.chars().count()) "ch" },
+                            None => "—",
+                        }
+                    }
+                }
+            }
+        }
             div.ed-rule {}
             // NM-12 follow-up: the per-grant disable/enable buttons in
             // the per-protocol grid below redirect with the
@@ -5087,6 +5296,126 @@ async fn user_detail_render(
 
     }
     @if tab == UserTab::Activity {
+        // v2 4c — four fact tiles + the geo-resolved fetch log.
+        div.ed-status-strip style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 12px;" {
+            @let (verdict_txt, verdict_color, score_note) = match &sharing {
+                Some(sc) if sc.is_flagged() => (
+                    crate::i18n::tr(lang, "likely shared", "вероятно расшарен"),
+                    "var(--warm)",
+                    format!("{} {} 100", sc.score, crate::i18n::tr(lang, "of", "из")),
+                ),
+                Some(sc) => (
+                    crate::i18n::tr(lang, "single-user", "один пользователь"),
+                    "var(--green)",
+                    format!("{} {} 100", sc.score, crate::i18n::tr(lang, "of", "из")),
+                ),
+                None => (
+                    crate::i18n::tr(lang, "no data", "нет данных"),
+                    "var(--mute)",
+                    crate::i18n::tr(lang, "no fetches in 30d", "нет обращений за 30д").to_string(),
+                ),
+            };
+            div.ed-status-tile {
+                div.ed-status-tile__k {
+                    (crate::i18n::tr(lang, "sharing verdict", "вердикт шаринга")) " "
+                    span.ed-tip title=(crate::i18n::tr(
+                        lang,
+                        "Heuristic over the 30-day access window. Weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity.",
+                        "Эвристика по 30-дневному окну обращений. Одновременные клиентские IP + невозможные перемещения весят сильно больше простого разнообразия сетей.",
+                    )) { "ⓘ" }
+                }
+                div.ed-status-tile__v style=(format!("color: {verdict_color}; font-size: 15px;")) { (verdict_txt) }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" { (score_note) }
+            }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (crate::i18n::tr(lang, "distinct IPs · 30d", "уникальных IP · 30д")) }
+                div.ed-status-tile__v { (access_aggregates.distinct_ips) }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                    (access_aggregates.distinct_asns) " ASN · " (access_aggregates.distinct_countries) " " (crate::i18n::tr(lang, "countries", "стран"))
+                }
+            }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (crate::i18n::tr(lang, "sub fetches · 30d", "обращений · 30д")) }
+                div.ed-status-tile__v { (access_aggregates.total_rows) }
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                    "+" (access_aggregates.egress_rows) " " (crate::i18n::tr(lang, "via VPN egress", "через VPN-egress"))
+                }
+            }
+            div.ed-status-tile {
+                div.ed-status-tile__k { (crate::i18n::tr(lang, "last fetch", "последнее обращение")) }
+                div.ed-status-tile__v style="font-size: 15px;" {
+                    @match access_aggregates.last_seen {
+                        Some(ts) => (format_msk_iso(ts)),
+                        None => (crate::i18n::tr(lang, "never", "никогда")),
+                    }
+                }
+            }
+        }
+        div.ed-art-eyebrow style="margin-top: 14px;" {
+            (crate::i18n::tr(lang, "Sub-access log · GeoIP-resolved", "Лог обращений · GeoIP")) " "
+            span.ed-tip title=(crate::i18n::tr(
+                lang,
+                "Every fetch of the config URL, resolved against the GeoIP DBs at request time. A local/VPN-range source usually means the client refreshed over its own tunnel.",
+                "Каждое обращение к config-URL, обогащённое GeoIP на момент запроса. Локальный/VPN-диапазон обычно значит, что клиент обновлялся через собственный туннель.",
+            )) { "ⓘ" }
+        }
+        @if recent_log.is_empty() {
+            p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
+                (crate::i18n::tr(lang, "No fetches recorded yet.", "Обращений ещё не записано."))
+            }
+        } @else {
+            table.ed-grid style="margin-top: 8px;" {
+                thead {
+                    tr {
+                        th style="width: 130px;" { (crate::i18n::tr(lang, "time", "время")) }
+                        th style="width: 130px;" { "ip" }
+                        th style="width: 90px;" { "geo" }
+                        th { "asn" }
+                        th { "user-agent" }
+                        th.num style="width: 60px;" { (crate::i18n::tr(lang, "result", "код")) }
+                    }
+                }
+                tbody {
+                    @for e in &recent_log {
+                        tr {
+                            td.ed-grid__mut.ed-grid__sm { (format_msk_iso(e.ts)) }
+                            td.ed-grid__sm {
+                                (e.ip)
+                                @if e.is_vpn_egress {
+                                    " " span.ed-grid__flag title=(crate::i18n::tr(
+                                        lang,
+                                        "VPN-egress / local-range source — the fetch came through a tunnel",
+                                        "VPN-egress / локальный диапазон — обращение пришло через туннель",
+                                    )) { "⚠" }
+                                }
+                            }
+                            td.ed-grid__sm {
+                                @match e.geo_country.as_deref() {
+                                    Some(c) => (c),
+                                    None => span.ed-grid__mut { "—" },
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm {
+                                @match e.geo_asn.as_deref() {
+                                    Some(a) => (a),
+                                    None => "—",
+                                }
+                            }
+                            td.ed-grid__mut.ed-grid__sm {
+                                @match e.ua.as_deref() {
+                                    Some(ua) => (ua),
+                                    None => "—",
+                                }
+                            }
+                            td.num {
+                                @if e.status < 400 { span style="color: var(--green);" { (e.status) } }
+                                @else { span style="color: var(--red);" { (e.status) } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
             div.ed-rule {}
             div.ed-art-eyebrow {
                 (crate::i18n::tr(lang, "Subscription access", "Обращения к подписке"))
