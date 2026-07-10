@@ -223,4 +223,59 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn many_users_share_one_subscriber() {
+        // BB-4: one person's several devices are distinct users linked to
+        // ONE subscriber. They all follow that subscriber's active state.
+        // Active → every disabled one re-enables; the already-enabled one
+        // is a no-op; no NewSubscriber (the subscriber is linked).
+        let mut actions = reconcile(
+            &[sub(11297041, true)],
+            &[
+                link("demonnot-1", 11297041, true),  // disabled → enable
+                link("demonnot-2", 11297041, true),  // disabled → enable
+                link("demonnot-3", 11297041, false), // already on → noop
+            ],
+        );
+        actions.sort_by_key(|a| match a {
+            Action::Enable { user_id } => user_id.clone(),
+            _ => String::from("~"),
+        });
+        assert_eq!(
+            actions,
+            vec![
+                Action::Enable {
+                    user_id: "demonnot-1".into()
+                },
+                Action::Enable {
+                    user_id: "demonnot-2".into()
+                },
+            ]
+        );
+
+        // Lapsed → every enabled device disables together.
+        let mut lapsed = reconcile(
+            &[sub(11297041, false)],
+            &[
+                link("demonnot-1", 11297041, false),
+                link("demonnot-2", 11297041, false),
+            ],
+        );
+        lapsed.sort_by_key(|a| match a {
+            Action::Disable { user_id } => user_id.clone(),
+            _ => String::from("~"),
+        });
+        assert_eq!(
+            lapsed,
+            vec![
+                Action::Disable {
+                    user_id: "demonnot-1".into()
+                },
+                Action::Disable {
+                    user_id: "demonnot-2".into()
+                },
+            ]
+        );
+    }
 }

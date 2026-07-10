@@ -2076,40 +2076,42 @@ impl SqliteInventory {
             .collect())
     }
 
-    /// Link a vpnctl user to a Boosty subscriber id. Errors if the user
-    /// doesn't exist or the subscriber is already linked to a different
-    /// user. Returns whether anything changed (`false` = the exact same
-    /// pair was already linked) so callers audit only actual mutations.
+    /// Link a vpnctl user to a Boosty subscriber id. Errors only if the user
+    /// doesn't exist. Returns whether anything changed (`false` = this user
+    /// already carried this exact subscriber id) so callers audit only actual
+    /// mutations.
+    ///
+    /// **Many-to-one is allowed** (migration 0041): one Boosty subscriber can
+    /// gate SEVERAL users — one paying person's multiple devices
+    /// (`demonnot-1..5`). The reconciler evaluates each link independently, so
+    /// they all follow that subscriber's active state.
     pub async fn link_boosty_subscriber(&self, user: &UserId, subscriber_id: i64) -> Result<bool> {
-        // Reject linking one subscriber to two users up front (clearer than
-        // a raw UNIQUE-violation error).
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM users WHERE boosty_subscriber_id = ?1")
-                .bind(subscriber_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        if let Some(other) = existing {
-            if other == user.0 {
-                // Same pair — idempotent no-op.
-                return Ok(false);
-            }
-            return Err(SqliteInventoryError::Invalid(format!(
-                "Boosty subscriber {subscriber_id} already linked to user {other}"
-            )));
+        // `IS NOT ?1` (NULL-safe) makes a same-value re-link match 0 rows →
+        // reported as an idempotent no-op below (audit-on-actual-mutation).
+        let res = sqlx::query(
+            "UPDATE users SET boosty_subscriber_id = ?1
+              WHERE id = ?2 AND boosty_subscriber_id IS NOT ?1",
+        )
+        .bind(subscriber_id)
+        .bind(&user.0)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() > 0 {
+            return Ok(true);
         }
-
-        let res = sqlx::query("UPDATE users SET boosty_subscriber_id = ?1 WHERE id = ?2")
-            .bind(subscriber_id)
+        // 0 rows: either the user doesn't exist, or it already holds this
+        // exact subscriber id. Disambiguate with a presence check.
+        let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = ?1")
             .bind(&user.0)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
-        if res.rows_affected() == 0 {
+        if exists.0 == 0 {
             return Err(SqliteInventoryError::Invalid(format!(
                 "no such user: {}",
                 user.0
             )));
         }
-        Ok(true)
+        Ok(false)
     }
 
     /// Remove a user's Boosty link. Idempotent; returns whether a link was
