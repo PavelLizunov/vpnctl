@@ -27,6 +27,8 @@ vpnctl-crypto = { path = "../crates/crypto" }
 # admin handler + cli set-fingerprint) that had drifted on the `--`
 # flag-injection defense and on the validator alphabet.
 vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
+# Boosty → VPN subscription bridge (reconcile + sync).
+vpnctl-boosty-bridge = { path = "../crates/boosty-bridge" }
 # Track-3 chunk 1: clash-api client uses the SshTransport trait.
 async-trait = "0.1"
 thiserror = { workspace = true }

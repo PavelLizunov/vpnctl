@@ -1,0 +1,120 @@
+//! Contract tests for the Boosty-bridge inventory methods
+//! (migration 0036): user↔subscriber links + singleton settings.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use tempfile::TempDir;
+use vpnctl_core::{User, UserId};
+use vpnctl_inventory::{BoostySettings, SqliteInventory};
+
+async fn open(dir: &TempDir) -> SqliteInventory {
+    SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap()
+}
+
+fn user(id: &str) -> User {
+    User {
+        id: UserId(id.into()),
+        uuid: format!("uuid-{id}"),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    }
+}
+
+#[tokio::test]
+async fn link_then_list_and_unlink() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    assert!(inv.list_boosty_links().await.unwrap().is_empty());
+
+    inv.link_boosty_subscriber(&UserId("alice".into()), 12345)
+        .await
+        .unwrap();
+    let links = inv.list_boosty_links().await.unwrap();
+    assert_eq!(links, vec![(UserId("alice".into()), 12345)]);
+
+    inv.unlink_boosty_subscriber(&UserId("alice".into()))
+        .await
+        .unwrap();
+    assert!(inv.list_boosty_links().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn one_subscriber_cannot_link_two_users() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    inv.link_boosty_subscriber(&UserId("alice".into()), 999)
+        .await
+        .unwrap();
+    // Same subscriber → different user must be rejected.
+    let err = inv
+        .link_boosty_subscriber(&UserId("bob".into()), 999)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already linked"), "{err}");
+
+    // Re-linking the SAME user to the SAME subscriber is a no-op success.
+    inv.link_boosty_subscriber(&UserId("alice".into()), 999)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn link_unknown_user_errors() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let err = inv
+        .link_boosty_subscriber(&UserId("ghost".into()), 1)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no such user"), "{err}");
+}
+
+#[tokio::test]
+async fn settings_round_trip_and_refresh_rotation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    // Seeded default row: disabled, no creds.
+    let d = inv.get_boosty_settings().await.unwrap();
+    assert!(!d.enabled);
+    assert_eq!(d.blog_url, None);
+
+    let s = BoostySettings {
+        enabled: true,
+        blog_url: Some("ninitux".into()),
+        access_token: Some("acc".into()),
+        refresh_token: Some("ref1".into()),
+        device_id: Some("dev".into()),
+        poll_interval_secs: 1800,
+        auto_disable_lapsed: true,
+    };
+    inv.set_boosty_settings(&s).await.unwrap();
+
+    let got = inv.get_boosty_settings().await.unwrap();
+    assert!(got.enabled);
+    assert_eq!(got.blog_url.as_deref(), Some("ninitux"));
+    assert_eq!(got.access_token.as_deref(), Some("acc"));
+    assert_eq!(got.poll_interval_secs, 1800);
+    assert!(got.auto_disable_lapsed);
+
+    // Rotation persists only the refresh token.
+    inv.set_boosty_refresh_token("ref2").await.unwrap();
+    let after = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(after.refresh_token.as_deref(), Some("ref2"));
+    assert_eq!(
+        after.access_token.as_deref(),
+        Some("acc"),
+        "other fields untouched"
+    );
+}

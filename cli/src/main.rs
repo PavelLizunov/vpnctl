@@ -45,6 +45,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: cmd::user::UserCmd,
     },
+    /// Manage the Boosty → VPN subscription bridge.
+    Boosty {
+        #[command(subcommand)]
+        cmd: cmd::boosty::BoostyCmd,
+    },
     /// Grant a user access to a server.
     Grant { user: String, server: String },
     /// Revoke a user's access to a server.
@@ -212,6 +217,7 @@ async fn main() -> std::process::ExitCode {
         Cmd::Registry => cmd::registry_cmd::run(cli.output),
         Cmd::Server { cmd } => cmd::server::run(cmd, cli.db, cli.output).await,
         Cmd::User { cmd } => cmd::user::run(cmd, cli.db, cli.output).await,
+        Cmd::Boosty { cmd } => cmd::boosty::run(cmd, cli.db).await,
         Cmd::Grant { user, server } => cmd::grant::run_grant(&user, &server, cli.db).await,
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,

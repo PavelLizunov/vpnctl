@@ -86,6 +86,11 @@ const NAV: &[NavItem] = &[
         key: "settings",
         label_key: crate::i18n::K::NavSettings,
     },
+    NavItem {
+        key: "boosty",
+        label_key: crate::i18n::K::NavBoosty,
+        count: None,
+    },
 ];
 
 /// URL for a nav item. Dashboard lives at `/admin/` (canonical home),
@@ -8408,6 +8413,382 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
     // section (where the operator pressed «snapshot now») instead
     // of jumping to the top of /admin/settings.
     Redirect::to("/admin/settings/backups#backups-section").into_response()
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Boosty subscription bridge (/admin/boosty)
+//
+// Links Boosty subscribers to vpnctl users and reconciles VPN access with
+// subscription state (see `vpnctl-boosty-bridge`). The poller auto-enables
+// active subscribers; lapses are surfaced here for the operator to disable
+// with a button (or auto-disabled when `auto_disable_lapsed` is on).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Mask a credential to `••••<last4>` — never render secrets verbatim.
+fn boosty_mask_secret(secret: Option<&str>) -> String {
+    match secret {
+        None => "(unset)".to_string(),
+        Some(v) if v.chars().count() <= 4 => "••••".to_string(),
+        Some(v) => {
+            let last4: String = {
+                let mut c: Vec<char> = v.chars().rev().take(4).collect();
+                c.reverse();
+                c.into_iter().collect()
+            };
+            format!("••••{last4}")
+        }
+    }
+}
+
+/// `GET /admin/boosty` — bridge status, settings form, and the actionable
+/// link/disable surfaces. When the bridge is enabled it does one live
+/// dry-run reconcile to surface new + lapsed subscribers (best-effort;
+/// a Boosty outage degrades to stored state + a banner).
+pub(crate) async fn boosty_page(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Markup, Response> {
+    use vpnctl_boosty_bridge::ApplyMode;
+
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+
+    let settings = state
+        .inv
+        .get_boosty_settings()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let links = state
+        .inv
+        .list_boosty_links()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let users = state
+        .inv
+        .list_users()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    // Users not yet linked → candidates for the link dropdown.
+    let linked_ids: std::collections::HashSet<&str> =
+        links.iter().map(|(u, _)| u.0.as_str()).collect();
+    let unlinked_users: Vec<&str> = users
+        .iter()
+        .map(|u| u.id.0.as_str())
+        .filter(|id| !linked_ids.contains(id))
+        .collect();
+
+    // Live dry-run (only when configured) to surface new + lapsed.
+    let (report, sync_err) = if settings.enabled {
+        match vpnctl_boosty_bridge::sync_from_settings(&state.inv, &settings, ApplyMode::DryRun)
+            .await
+        {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    } else {
+        (None, None)
+    };
+
+    let body = html! {
+        header.ed-head {
+            h1.ed-title { "Boosty" }
+            p.ed-deck {
+                (crate::i18n::tr(lang,
+                    "Link Boosty subscribers to VPN users; access follows the subscription.",
+                    "Связь подписчиков Boosty с VPN-пользователями; доступ следует за подпиской."))
+            }
+        }
+
+        @if let Some(err) = &sync_err {
+            p style="color: var(--bad); font-family: var(--mono); font-size: 12px;" {
+                (crate::i18n::tr(lang, "Sync error: ", "Ошибка синхронизации: ")) (err)
+            }
+        }
+
+        // ── Status ──────────────────────────────────────────────
+        section style="margin: 16px 0;" {
+            p style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
+                (crate::i18n::tr(lang, "enabled: ", "включено: ")) b { (settings.enabled) } br;
+                (crate::i18n::tr(lang, "blog: ", "блог: "))
+                    b { (settings.blog_url.as_deref().unwrap_or("(unset)")) } br;
+                "access_token: " (boosty_mask_secret(settings.access_token.as_deref())) br;
+                "refresh_token: " (boosty_mask_secret(settings.refresh_token.as_deref())) br;
+                "device_id: " (boosty_mask_secret(settings.device_id.as_deref())) br;
+                (crate::i18n::tr(lang, "interval: ", "интервал: ")) (settings.poll_interval_secs) "s" br;
+                (crate::i18n::tr(lang, "auto-disable lapsed: ", "авто-отключение отвалившихся: "))
+                    b { (settings.auto_disable_lapsed) } br;
+                (crate::i18n::tr(lang, "linked users: ", "привязано пользователей: ")) b { (links.len()) }
+            }
+            form method="post" action="/admin/boosty/sync" style="margin-top: 8px;" {
+                button type="submit" { (crate::i18n::tr(lang, "sync now", "синхронизировать")) }
+            }
+        }
+
+        // ── New unlinked active subscribers ─────────────────────
+        @if let Some(r) = &report {
+            @if !r.new_subscribers.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow { (crate::i18n::tr(lang, "New subscribers", "Новые подписчики")) }
+                    @for sub in &r.new_subscribers {
+                        form method="post" action="/admin/boosty/link"
+                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                            span { (sub.subscriber_id) " — " (sub.name) }
+                            input type="hidden" name="subscriber_id" value=(sub.subscriber_id);
+                            select name="user" required {
+                                option value="" { (crate::i18n::tr(lang, "link to user…", "привязать к…")) }
+                                @for uid in &unlinked_users {
+                                    option value=(uid) { (uid) }
+                                }
+                            }
+                            button type="submit" { (crate::i18n::tr(lang, "link", "привязать")) }
+                        }
+                    }
+                }
+            }
+
+            // ── Lapsed, awaiting confirm to disable ─────────────
+            @if !r.disabled.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow {
+                        (crate::i18n::tr(lang, "Lapsed — confirm disable", "Отвалились — подтвердите отключение"))
+                    }
+                    @for uid in &r.disabled {
+                        form method="post" action=(format!("/admin/boosty/disable/{uid}"))
+                             style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                            span { (uid) }
+                            button type="submit" { (crate::i18n::tr(lang, "disable", "отключить")) }
+                        }
+                    }
+                }
+            }
+
+            @if !r.enabled.is_empty() {
+                section style="margin: 16px 0;" {
+                    h2.ed-eyebrow { (crate::i18n::tr(lang, "Will auto-enable", "Будут включены")) }
+                    p style="font-family: var(--mono); font-size:12px;" { (r.enabled.join(", ")) }
+                }
+            }
+        }
+
+        // ── Linked users ────────────────────────────────────────
+        section style="margin: 16px 0;" {
+            h2.ed-eyebrow { (crate::i18n::tr(lang, "Linked users", "Привязанные пользователи")) }
+            @if links.is_empty() {
+                p style="color: var(--dim); font-family: var(--mono); font-size:12px;" {
+                    (crate::i18n::tr(lang, "none yet", "пока нет"))
+                }
+            } @else {
+                @for (uid, sid) in &links {
+                    form method="post" action=(format!("/admin/boosty/unlink/{}", uid.0))
+                         style="display:flex; gap:8px; align-items:baseline; margin:4px 0; font-family: var(--mono); font-size:12px;" {
+                        span { (uid.0) " ↔ " (sid) }
+                        button type="submit" { (crate::i18n::tr(lang, "unlink", "отвязать")) }
+                    }
+                }
+            }
+        }
+
+        // ── Settings form ───────────────────────────────────────
+        section style="margin: 24px 0;" {
+            h2.ed-eyebrow { (crate::i18n::tr(lang, "Settings", "Настройки")) }
+            form method="post" action="/admin/boosty/settings"
+                 style="display:flex; flex-direction:column; gap:8px; max-width:520px; font-family: var(--mono); font-size:12px;" {
+                label { (crate::i18n::tr(lang, "Blog url/slug", "Блог (url/slug)"))
+                    input type="text" name="blog_url" value=(settings.blog_url.as_deref().unwrap_or("")); }
+                label { (crate::i18n::tr(lang, "Access token (leave blank to keep)", "Access token (пусто — не менять)"))
+                    input type="password" name="access_token" autocomplete="off"; }
+                label { (crate::i18n::tr(lang, "Refresh token (leave blank to keep)", "Refresh token (пусто — не менять)"))
+                    input type="password" name="refresh_token" autocomplete="off"; }
+                label { (crate::i18n::tr(lang, "Device id (leave blank to keep)", "Device id (пусто — не менять)"))
+                    input type="password" name="device_id" autocomplete="off"; }
+                label { (crate::i18n::tr(lang, "Poll interval (seconds)", "Интервал опроса (сек)"))
+                    input type="number" name="poll_interval_secs" min="60" value=(settings.poll_interval_secs); }
+                label { input type="checkbox" name="enabled" checked[settings.enabled];
+                    " " (crate::i18n::tr(lang, "enabled", "включено")) }
+                label { input type="checkbox" name="auto_disable_lapsed" checked[settings.auto_disable_lapsed];
+                    " " (crate::i18n::tr(lang, "auto-disable lapsed subscribers", "авто-отключать отвалившихся")) }
+                button type="submit" { (crate::i18n::tr(lang, "save", "сохранить")) }
+            }
+        }
+    };
+
+    Ok(shell("boosty", &theme, &accent, lang, body))
+}
+
+/// `POST /admin/boosty/settings` — save bridge config. Blank secret inputs
+/// leave the stored value untouched (so the masked display never wipes a
+/// credential). Audited WITHOUT secret values.
+pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
+    let mut s = match state.inv.get_boosty_settings().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    if let Some(b) = form_field(&body, "blog_url") {
+        let b = b.trim();
+        s.blog_url = if b.is_empty() {
+            None
+        } else {
+            Some(b.to_string())
+        };
+    }
+    // Secrets: only overwrite when a non-blank value is supplied (a blank
+    // input keeps the stored value, so the masked display can't wipe it).
+    if let Some(t) = form_field(&body, "access_token")
+        && !t.trim().is_empty()
+    {
+        s.access_token = Some(t.trim().to_string());
+    }
+    if let Some(t) = form_field(&body, "refresh_token")
+        && !t.trim().is_empty()
+    {
+        s.refresh_token = Some(t.trim().to_string());
+    }
+    if let Some(d) = form_field(&body, "device_id")
+        && !d.trim().is_empty()
+    {
+        s.device_id = Some(d.trim().to_string());
+    }
+    if let Some(i) = form_field(&body, "poll_interval_secs").and_then(|v| v.parse::<u64>().ok())
+        && i > 0
+    {
+        s.poll_interval_secs = i;
+    }
+    // Checkboxes: present only when checked.
+    s.enabled = form_field(&body, "enabled").is_some();
+    s.auto_disable_lapsed = form_field(&body, "auto_disable_lapsed").is_some();
+
+    if let Err(e) = state.inv.set_boosty_settings(&s).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "boosty.configure",
+            None,
+            Some(&serde_json::json!({
+                "enabled": s.enabled,
+                "blog_url": s.blog_url,
+                "poll_interval_secs": s.poll_interval_secs,
+                "auto_disable_lapsed": s.auto_disable_lapsed,
+            })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.configure failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/sync` — run one reconcile now (auto-enable active,
+/// surface lapses). Redirects back; the report is logged.
+pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
+    use vpnctl_boosty_bridge::ApplyMode;
+
+    let settings = match state.inv.get_boosty_settings().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let mode = if settings.auto_disable_lapsed {
+        ApplyMode::Full
+    } else {
+        ApplyMode::EnableOnly
+    };
+    match vpnctl_boosty_bridge::sync_from_settings(&state.inv, &settings, mode).await {
+        Ok(report) => tracing::info!(
+            target = "vpnctld::boosty",
+            enabled = report.enabled.len(),
+            disabled = report.disabled.len(),
+            "manual boosty sync"
+        ),
+        Err(e) => return bad_request(&format!("boosty sync failed: {e}")),
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/link` — link a subscriber to a user.
+pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> Response {
+    let user = form_field(&body, "user").unwrap_or_default();
+    if user.is_empty() {
+        return bad_request("missing `user` field");
+    }
+    let subscriber_id = match form_field(&body, "subscriber_id").and_then(|v| v.parse::<i64>().ok())
+    {
+        Some(id) => id,
+        None => return bad_request("missing or invalid `subscriber_id`"),
+    };
+
+    let uid = vpnctl_core::UserId(user.clone());
+    match state.inv.get_user(&uid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return user_not_found(&user),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    if let Err(e) = state.inv.link_boosty_subscriber(&uid, subscriber_id).await {
+        return bad_request(&e.to_string());
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "boosty.link",
+            Some(&user),
+            Some(&serde_json::json!({ "subscriber_id": subscriber_id })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.link failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/unlink/{user}` — remove a user's Boosty link.
+pub(crate) async fn boosty_unlink(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+) -> Response {
+    if let Err(e) = state
+        .inv
+        .unlink_boosty_subscriber(&vpnctl_core::UserId(user.clone()))
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    if let Err(e) = state
+        .inv
+        .audit("admin", "boosty.unlink", Some(&user), None)
+        .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.unlink failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
+}
+
+/// `POST /admin/boosty/disable/{user}` — disable a lapsed subscriber's
+/// user (soft-mute; the "confirm disable" button).
+pub(crate) async fn boosty_disable(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+) -> Response {
+    let uid = vpnctl_core::UserId(user.clone());
+    match state.inv.set_user_disabled(&uid, true).await {
+        Ok(_) => {}
+        Err(e) => return bad_request(&e.to_string()),
+    }
+    if let Err(e) = state
+        .inv
+        .audit(
+            "admin",
+            "boosty.disable",
+            Some(&user),
+            Some(&serde_json::json!({ "reason": "operator-confirmed lapse" })),
+        )
+        .await
+    {
+        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.disable failed");
+    }
+    Redirect::to("/admin/boosty").into_response()
 }
 
 /// `GET /admin/backup/download/{name}` — stream a snapshot file with

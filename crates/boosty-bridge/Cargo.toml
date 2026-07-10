@@ -1,0 +1,32 @@
+[package]
+name = "vpnctl-boosty-bridge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+vpnctl-core = { path = "../core" }
+vpnctl-inventory = { path = "../inventory" }
+# The Boosty API client (rustls; no native-tls, matches deny.toml). Pinned to
+# a commit on the operator's fork so CI is reproducible.
+boosty_api = { git = "https://github.com/PavelLizunov/boosty_api_rs", rev = "581827e" }
+# Only to construct the reqwest::Client that ApiClient::new wants; rustls
+# (features unify with boosty_api's json/multipart/form across the graph).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+mockito = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

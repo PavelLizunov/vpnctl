@@ -3,6 +3,7 @@
 
 pub(crate) mod admin;
 pub(crate) mod backup;
+pub(crate) mod boosty;
 pub(crate) mod bootstrap;
 pub(crate) mod deploy;
 pub(crate) mod geoip;
