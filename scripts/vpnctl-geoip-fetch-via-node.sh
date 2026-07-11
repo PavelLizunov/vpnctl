@@ -37,6 +37,19 @@ set -euo pipefail
 DIR="${VPNCTLD_GEOIP_DIR:-/var/lib/vpnctl/geoip}"
 KEY="${VPNCTLD_DEPLOY_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}"
 DB="${VPNCTLD_INV_DB:-/var/lib/vpnctl/inv.db}"
+# Verify node host keys against the daemon's persistent, already-pinned
+# known_hosts (every deploy pins the nodes there) — restores the TOFU
+# posture the rest of vpnctld uses instead of blindly re-accepting keys
+# via /dev/null. Read-only under the sandbox: accept-new only needs to
+# write for an UNSEEN host, and all our nodes are already pinned, so it
+# just verifies; a write-blocked warning goes to stderr (suppressed at
+# the call site) and the connection still proceeds.
+KNOWN_HOSTS="${VPNCTLD_KNOWN_HOSTS:-/var/lib/vpnctl/.ssh/known_hosts}"
+# Total wall-clock budget for all fetch attempts. `$SECONDS` counts from
+# script start; when exhausted (db-ip stalling on every node in a wider
+# outage) we stop so the script exits with its own rc=1 BEFORE systemd's
+# TimeoutStartSec=600 SIGTERMs it — a cleaner journal signal than a kill.
+DEADLINE_SECS="${VPNCTLD_GEOIP_DEADLINE_SECS:-480}"
 
 this_month=$(date -u +%Y-%m)
 # Anchor the fallback to day 1, else `date -d '1 month ago'` on days
@@ -65,7 +78,7 @@ ssh_node() { # user host port cmd...
   local u=$1 h=$2 p=$3
   shift 3
   ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=8 \
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
     -p "$p" "${u}@${h}" "$@"
 }
 
@@ -79,6 +92,10 @@ fetch() {
     url="https://download.db-ip.com/free/dbip-${seg}-lite-${mon}.mmdb.gz"
     while read -r u h p; do
       [ -n "${u:-}" ] || continue
+      if [ "$SECONDS" -ge "$DEADLINE_SECS" ]; then
+        log "  ${name}: time budget (${DEADLINE_SECS}s) exhausted — giving up" >&2
+        return 1
+      fi
       log "  ${name}: trying ${h} (${mon})"
       rm -f "$gz" "$mmdb"
       if ssh_node "$u" "$h" "$p" "curl -fsSL --max-time 180 '$url'" >"$gz" 2>/dev/null &&

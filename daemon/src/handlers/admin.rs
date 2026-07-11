@@ -5428,7 +5428,7 @@ async fn user_detail_render(
                     title=(crate::i18n::tr(
                         lang,
                         "Distinct REAL client source IPs of sub-fetches over 30 days — private/reserved/proxy addresses excluded, the same real-client basis the «Subscription origins» section below uses. Proxy-masked fetches still count toward «sub fetches» but don't add a distinct client here. This is fetch-side diversity, not the sharing verdict.",
-                        "Уникальные РЕАЛЬНЫЕ клиентские source-IP обращений за 30 дней — приватные/зарезервированные/прокси-адреса исключены, та же основа реальных клиентов, что в разделе «Источники подписки» ниже. Proxy-masked обращения считаются в «обращениях», но не добавляют уникального клиента здесь. Это разнообразие со стороны обращений, а не вердикт шаринга.",
+                        "Уникальные РЕАЛЬНЫЕ клиентские source-IP обращений за 30 дней — приватные/зарезервированные/прокси-адреса исключены, та же основа реальных клиентов, что в разделе «Источники подписки» ниже. Proxy-masked обращения считаются в плитке «обращений · 30д», но не добавляют уникального клиента здесь. Это разнообразие со стороны обращений, а не вердикт шаринга.",
                     )) { (crate::i18n::tr(lang, "client IPs · 30d", "клиентских IP · 30д")) }
                 div.ed-status-tile__v { (access_aggregates.distinct_ips) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {

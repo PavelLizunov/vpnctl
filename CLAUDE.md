@@ -884,6 +884,19 @@ intelligence (geolocation, abuse-detection, /16-clustering) ломается.
 ssh user@<host> 'sudo grep VPNCTLD_TRUSTED_PROXIES /etc/vpnctl/vpnctld.env'
 ```
 
+**ИНВАРИАНТ доверенного прокси (X-Real-IP) — post-2026-07-11 TT-0 review.**
+Как только IP прокси попал в `VPNCTLD_TRUSTED_PROXIES`, `resolve_peer_real_ip`
+(rate-limit + egress-exemption keying) начинает ДОВЕРЯТЬ заголовку `X-Real-IP`
+от этого пира. Значит **каждый** `reverse_proxy`-блок на этом прокси, который
+ходит на `vpnctld:18402`, ОБЯЗАН authoritatively выставлять
+`header_up X-Real-IP {http.request.remote.host}` — иначе клиент подделает
+`X-Real-IP: <ip-ноды>` и обойдёт per-IP лимит / заявит egress-exemption.
+Defense-in-depth на `.210`: в начале `route {}` стоит `request_header -X-Real-IP`
+(срезает клиентский заголовок ДО роутинга; только наши `header_up`-строки могут
+его выставить), так что забытый `header_up` в будущем блоке не вернёт spoofing.
+При добавлении нового прокси перед `vpnctld` — повторить оба: `header_up
+X-Real-IP` на каждом vpnctld-блоке + site-level `request_header -X-Real-IP`.
+
 ## Связанные репо и серверы
 
 - **Старый bash-проект `vpn-control`** — живёт пока только в локальном
