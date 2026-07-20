@@ -153,7 +153,7 @@ scripting / disaster recovery.
 | Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
 | Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
 | Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
-| Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (add global `--output json` for automation) |
+| Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (global `--output json` for automation) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
 
