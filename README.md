@@ -153,8 +153,26 @@ scripting / disaster recovery.
 | Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
 | Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
 | Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
+| Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (global `--output json` for automation) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+
+### Boosty status JSON
+
+`vpnctl boosty status` keeps its human-readable text output by default. For
+automation, the global output flag emits a stable, single-line JSON object:
+
+```bash
+vpnctl --output json boosty status
+```
+
+```json
+{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":3600,"auto_disable_lapsed":false,"linked_users":12}
+```
+
+`access_token`, `refresh_token`, and `device_id` are always masked as
+`••••<last4>`; unset credentials are reported as `(unset)`. The command reads
+the configured bridge state from the inventory and does not contact Boosty.
 
 ### Binary provisioning
 

@@ -4,12 +4,13 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use serde::Serialize;
 use serde_json::json;
 use vpnctl_boosty_bridge::{ApplyMode, SyncReport, sync_from_settings};
 use vpnctl_core::UserId;
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
-use crate::ui;
+use crate::{OutputFormat, ui};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum BoostyCmd {
@@ -50,7 +51,11 @@ pub(crate) enum BoostyCmd {
     },
 }
 
-pub(crate) async fn run(cmd: BoostyCmd, db_flag: Option<PathBuf>) -> anyhow::Result<()> {
+pub(crate) async fn run(
+    cmd: BoostyCmd,
+    db_flag: Option<PathBuf>,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
     let db_path = ui::resolve_db_path(db_flag)?;
     let inv = SqliteInventory::open(&db_path).await?;
 
@@ -64,7 +69,7 @@ pub(crate) async fn run(cmd: BoostyCmd, db_flag: Option<PathBuf>) -> anyhow::Res
             subscriber_id,
         } => run_link(&inv, &user, subscriber_id).await,
         BoostyCmd::Unlink { user } => run_unlink(&inv, &user).await,
-        BoostyCmd::Status => run_status(&inv).await,
+        BoostyCmd::Status => run_status(&inv, output).await,
         BoostyCmd::Configure {
             blog,
             access_token,
@@ -232,21 +237,62 @@ async fn run_unlink(inv: &SqliteInventory, user: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_status(inv: &SqliteInventory) -> anyhow::Result<()> {
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct BoostyStatus {
+    enabled: bool,
+    blog: Option<String>,
+    access_token: String,
+    refresh_token: String,
+    device_id: String,
+    poll_interval_secs: u64,
+    auto_disable_lapsed: bool,
+    linked_users: usize,
+}
+
+impl BoostyStatus {
+    fn from_settings(settings: &BoostySettings, linked_users: usize) -> Self {
+        Self {
+            enabled: settings.enabled,
+            blog: settings.blog_url.clone(),
+            access_token: mask(settings.access_token.as_deref()),
+            refresh_token: mask(settings.refresh_token.as_deref()),
+            device_id: mask(settings.device_id.as_deref()),
+            poll_interval_secs: settings.poll_interval_secs,
+            auto_disable_lapsed: settings.auto_disable_lapsed,
+            linked_users,
+        }
+    }
+}
+
+async fn run_status(inv: &SqliteInventory, output: OutputFormat) -> anyhow::Result<()> {
     let s = inv.get_boosty_settings().await?;
     let links = inv.list_boosty_links().await?;
-    println!("enabled:             {}", s.enabled);
-    println!(
-        "blog:                {}",
-        s.blog_url.as_deref().unwrap_or("(unset)")
-    );
-    println!("access_token:        {}", mask(s.access_token.as_deref()));
-    println!("refresh_token:       {}", mask(s.refresh_token.as_deref()));
-    println!("device_id:           {}", mask(s.device_id.as_deref()));
-    println!("poll_interval_secs:  {}", s.poll_interval_secs);
-    println!("auto_disable_lapsed: {}", s.auto_disable_lapsed);
-    println!("linked users:        {}", links.len());
-    Ok(())
+    let status = BoostyStatus::from_settings(&s, links.len());
+    ui::print(output, &status, |status| {
+        print!("{}", status_text(status));
+        Ok(())
+    })
+}
+
+fn status_text(status: &BoostyStatus) -> String {
+    format!(
+        "enabled:             {}\n\
+         blog:                {}\n\
+         access_token:        {}\n\
+         refresh_token:       {}\n\
+         device_id:           {}\n\
+         poll_interval_secs:  {}\n\
+         auto_disable_lapsed: {}\n\
+         linked users:        {}\n",
+        status.enabled,
+        status.blog.as_deref().unwrap_or("(unset)"),
+        status.access_token,
+        status.refresh_token,
+        status.device_id,
+        status.poll_interval_secs,
+        status.auto_disable_lapsed,
+        status.linked_users,
+    )
 }
 
 /// Mask a secret to `••••<last4>` — never print full credential values.
@@ -326,7 +372,7 @@ async fn run_configure(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::deploy_hint;
+    use super::*;
 
     #[test]
     fn deploy_hint_lists_each_server_and_the_command() {
@@ -339,5 +385,62 @@ mod tests {
     #[test]
     fn deploy_hint_is_empty_for_no_servers() {
         assert_eq!(deploy_hint(&[]), "");
+    }
+
+    fn settings_with_secrets() -> BoostySettings {
+        BoostySettings {
+            enabled: true,
+            blog_url: Some("creator".into()),
+            access_token: Some("access-abcdef".into()),
+            refresh_token: Some("refresh-123456".into()),
+            device_id: Some("device-wxyz".into()),
+            poll_interval_secs: 1800,
+            auto_disable_lapsed: true,
+        }
+    }
+
+    #[test]
+    fn status_json_contract_is_stable_and_masks_secrets() {
+        let status = BoostyStatus::from_settings(&settings_with_secrets(), 3);
+        let json = serde_json::to_string(&status).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":1800,"auto_disable_lapsed":true,"linked_users":3}"#
+        );
+        assert!(!json.contains("access-abcdef"));
+        assert!(!json.contains("refresh-123456"));
+        assert!(!json.contains("device-wxyz"));
+    }
+
+    #[test]
+    fn status_text_preserves_existing_output() {
+        let status = BoostyStatus::from_settings(&settings_with_secrets(), 3);
+
+        assert_eq!(
+            status_text(&status),
+            "enabled:             true\n\
+             blog:                creator\n\
+             access_token:        ••••cdef\n\
+             refresh_token:       ••••3456\n\
+             device_id:           ••••wxyz\n\
+             poll_interval_secs:  1800\n\
+             auto_disable_lapsed: true\n\
+             linked users:        3\n"
+        );
+    }
+
+    #[test]
+    fn status_marks_unset_and_short_secrets_without_leaking_them() {
+        let settings = BoostySettings {
+            access_token: Some("tiny".into()),
+            ..BoostySettings::default()
+        };
+        let status = BoostyStatus::from_settings(&settings, 0);
+
+        assert_eq!(status.access_token, "••••");
+        assert_eq!(status.refresh_token, "(unset)");
+        assert_eq!(status.device_id, "(unset)");
+        assert_eq!(status.blog, None);
     }
 }
