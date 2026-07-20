@@ -217,7 +217,7 @@ async fn main() -> std::process::ExitCode {
         Cmd::Registry => cmd::registry_cmd::run(cli.output),
         Cmd::Server { cmd } => cmd::server::run(cmd, cli.db, cli.output).await,
         Cmd::User { cmd } => cmd::user::run(cmd, cli.db, cli.output).await,
-        Cmd::Boosty { cmd } => cmd::boosty::run(cmd, cli.db).await,
+        Cmd::Boosty { cmd } => cmd::boosty::run(cmd, cli.db, cli.output).await,
         Cmd::Grant { user, server } => cmd::grant::run_grant(&user, &server, cli.db).await,
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
@@ -357,6 +357,19 @@ mod tests {
             } => assert_eq!(password.as_deref(), Some("-secretpw")),
             other => panic!("expected `admin hash-password`, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn boosty_status_accepts_global_json_output_after_subcommand() {
+        let cli = Cli::try_parse_from(["vpnctl", "boosty", "status", "--output", "json"])
+            .expect("global --output must parse after `boosty status`");
+        assert!(matches!(cli.output, OutputFormat::Json));
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Boosty {
+                cmd: cmd::boosty::BoostyCmd::Status
+            }
+        ));
     }
 
     #[test]
