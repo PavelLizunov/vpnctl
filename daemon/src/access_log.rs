@@ -312,8 +312,10 @@ fn is_allowlisted_service_ip_with(ip_str: &str, allowlist: &[std::net::IpAddr]) 
 }
 
 /// Fire (or no-op-dedup against an existing unacked) the
-/// `sub_access.suspicious_local_ip:<user_id>` alert. The
-/// `:<user_id>` suffix gives each user its own dedup bucket via
+/// `sub_access.suspicious_local_ip:<user_id>` alert. A fresh alert is
+/// also mirrored to the audit timeline and the configured notification
+/// transport; a deduplicated repeat stays quiet on all three surfaces.
+/// The `:<user_id>` suffix gives each user its own dedup bucket via
 /// the partial UNIQUE index on `(kind, COALESCE(server_id,
 /// '__GLOBAL__')) WHERE acked_at IS NULL`. Severity is `warning`
 /// — this is a discrepancy worth investigating, not an outage.
@@ -347,8 +349,50 @@ async fn fire_suspicious_local_ip_alert(
         "http_version": rec.http_version,
     });
     let payload_str = payload.to_string();
-    inv.insert_alert_if_no_unacked(&kind_str, None, "warning", &summary, Some(&payload_str))
-        .await?;
+    if let Some(alert_id) = inv
+        .insert_alert_if_no_unacked(&kind_str, None, "warning", &summary, Some(&payload_str))
+        .await?
+    {
+        // Every newly-created operator alert is reflected in the
+        // unified audit timeline. This writer originally inserted only
+        // the alert row, which made this security-relevant condition
+        // invisible from /admin/audit.
+        if let Err(e) = inv
+            .audit(
+                "vpnctld",
+                "alert.fire",
+                Some(&rec.user_id.0),
+                Some(&serde_json::json!({
+                    "alert_id": alert_id,
+                    "kind": kind_str,
+                    "severity": "warning",
+                    "summary": summary,
+                })),
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::access_log_writer",
+                alert_id,
+                user = %rec.user_id,
+                error = %e,
+                "alert.fire audit row failed; suspicious-IP alert remains open"
+            );
+        }
+
+        // Reuse the common localized delivery path. It is best-effort:
+        // a missing or failing transport never hides the durable alert
+        // row above.
+        crate::node_probe_poller::push_alert(
+            inv,
+            &kind_str,
+            "warning",
+            &rec.user_id.0,
+            &payload,
+            Some(alert_id),
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -432,5 +476,48 @@ mod tests {
         assert!(!is_trusted_reverse_proxy("192.168.0.207"));
         assert!(!is_trusted_reverse_proxy("10.0.0.1"));
         assert!(!is_trusted_reverse_proxy("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn suspicious_local_ip_alert_is_audited_once_per_open_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let rec = AccessLogRecord {
+            user_id: UserId("alice".into()),
+            ip: "192.168.1.23".into(),
+            ua: Some("Hiddify".into()),
+            status: 200,
+            bytes: 128,
+            accept_language: None,
+            http_version: None,
+            device_class: Some("Hiddify".into()),
+            geo_country: None,
+            geo_asn: None,
+            tls_ja3: None,
+            tls_ja4: None,
+        };
+
+        fire_suspicious_local_ip_alert(&inv, &rec, crate::ip_kind::IpKind::LanRfc1918)
+            .await
+            .unwrap();
+        // The alert is still open, so a repeat must remain a complete
+        // no-op: no duplicate feed row and no duplicate audit event.
+        fire_suspicious_local_ip_alert(&inv, &rec, crate::ip_kind::IpKind::LanRfc1918)
+            .await
+            .unwrap();
+
+        let alerts = inv.recent_alerts(10, false).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, "sub_access.suspicious_local_ip:alice");
+
+        let audit = inv.recent_audit(10).await.unwrap();
+        let fires: Vec<_> = audit
+            .iter()
+            .filter(|entry| entry.action == "alert.fire")
+            .collect();
+        assert_eq!(fires.len(), 1, "fresh alert must have one audit event");
+        assert_eq!(fires[0].target.as_deref(), Some("alice"));
     }
 }
