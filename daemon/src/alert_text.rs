@@ -588,6 +588,15 @@ pub fn render_digest_html(
     time_local: &str,
 ) -> String {
     let mut m = String::with_capacity(256);
+    let servers_noun = crate::i18n::noun_for(
+        loc,
+        servers as u64,
+        "server",
+        "servers",
+        "сервер",
+        "сервера",
+        "серверов",
+    );
     if open_titles.is_empty() {
         m.push_str(match loc {
             Locale::En => "🟢 <b>vpnctl digest — all clear</b>",
@@ -596,15 +605,24 @@ pub fn render_digest_html(
         m.push_str("\n\n");
         m.push_str(&pick(
             loc,
-            format!("{servers} servers monitored · no open alerts."),
-            format!("{servers} серверов под наблюдением · открытых алертов нет."),
+            format!("{servers} {servers_noun} monitored · no open alerts."),
+            format!("{servers} {servers_noun} под наблюдением · открытых алертов нет."),
         ));
     } else {
         let n = open_titles.len();
+        let problems = crate::i18n::noun_for(
+            loc,
+            n as u64,
+            "open",
+            "open",
+            "открытая проблема",
+            "открытые проблемы",
+            "открытых проблем",
+        );
         m.push_str(&pick(
             loc,
-            format!("🔴 <b>vpnctl digest — {n} open</b>"),
-            format!("🔴 <b>Дайджест vpnctl — {n} открытых проблем</b>"),
+            format!("🔴 <b>vpnctl digest — {n} {problems}</b>"),
+            format!("🔴 <b>Дайджест vpnctl — {n} {problems}</b>"),
         ));
         m.push_str("\n\n");
         for line in open_titles {
@@ -614,8 +632,8 @@ pub fn render_digest_html(
         }
         m.push_str(&pick(
             loc,
-            format!("\n{servers} servers monitored."),
-            format!("\n{servers} серверов под наблюдением."),
+            format!("\n{servers} {servers_noun} monitored."),
+            format!("\n{servers} {servers_noun} под наблюдением."),
         ));
     }
     m.push_str("\n\n🕐 ");
@@ -948,7 +966,7 @@ mod tests {
         // All-clear: 🟢 + the fleet size, no bullet list.
         let clear = render_digest_html(Locale::Ru, 4, &[], "27.06 10:00 MSK");
         assert!(clear.starts_with("🟢 <b>Дайджест vpnctl — всё спокойно</b>"));
-        assert!(clear.contains("4 серверов"));
+        assert!(clear.contains("4 сервера под наблюдением"));
         assert!(!clear.contains("• "));
         assert!(clear.contains("🕐 27.06 10:00 MSK"));
         // Problems: 🔴 + count + one bullet per title.
@@ -961,11 +979,39 @@ mod tests {
             ],
             "27.06 10:00 MSK",
         );
-        assert!(probs.contains("2 открытых проблем"));
+        assert!(probs.contains("2 открытые проблемы"));
         assert!(probs.contains("• 🔴 <b>sing-box упал — de</b>"));
         assert_eq!(probs.matches("• ").count(), 2);
         // EN side.
         let en = render_digest_html(Locale::En, 3, &[], "27.06 10:00 MSK");
         assert!(en.contains("all clear") && en.contains("3 servers"));
+    }
+
+    #[test]
+    fn digest_ru_declines_problem_and_server_counts() {
+        let title = "🟠 <b>test</b>".to_string();
+        for (n, expected) in [
+            (1, "1 открытая проблема"),
+            (2, "2 открытые проблемы"),
+            (5, "5 открытых проблем"),
+            (11, "11 открытых проблем"),
+            (14, "14 открытых проблем"),
+            (21, "21 открытая проблема"),
+        ] {
+            let html = render_digest_html(Locale::Ru, 4, &vec![title.clone(); n], "now");
+            assert!(html.contains(expected), "n={n}: {html}");
+        }
+
+        for (servers, expected) in [
+            (1, "1 сервер под наблюдением"),
+            (2, "2 сервера под наблюдением"),
+            (4, "4 сервера под наблюдением"),
+            (5, "5 серверов под наблюдением"),
+            (11, "11 серверов под наблюдением"),
+            (21, "21 сервер под наблюдением"),
+        ] {
+            let html = render_digest_html(Locale::Ru, servers, &[], "now");
+            assert!(html.contains(expected), "servers={servers}: {html}");
+        }
     }
 }
