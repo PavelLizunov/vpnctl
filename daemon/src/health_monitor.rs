@@ -360,11 +360,41 @@ pub async fn scan_once(
             // the original open-insert path.
             let should_insert = if let Some(resolved_kind) = ev.resolves {
                 match inv.ack_open_alerts(resolved_kind, Some(&server.id)).await {
-                    // A hysteresis-boundary crossing can happen without
-                    // the trigger ever having fired (for example disk
-                    // 88% → 84% after daemon startup). Do not create an
-                    // orphan green recovery row or Telegram message.
-                    Ok(0) => false,
+                    // A zero-row ack is ambiguous: the condition may
+                    // never have fired, OR its warning was already
+                    // acknowledged manually. Preserve the latter's
+                    // recovery history and edit-on-recover Telegram
+                    // path, while still dropping a true orphan boundary.
+                    Ok(0) => match inv
+                        .has_condition_since_recovery(resolved_kind, ev.kind, Some(&server.id))
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(
+                                target = "vpnctld::health_monitor",
+                                server = %server.id.0,
+                                resolved_kind,
+                                "recording recovery for an already-acknowledged paired condition"
+                            );
+                            true
+                        }
+                        // A hysteresis-boundary crossing can happen
+                        // without the trigger ever having fired (for
+                        // example disk 88% → 84% after daemon startup).
+                        // Do not create an orphan green recovery row or
+                        // Telegram message.
+                        Ok(false) => false,
+                        Err(e) => {
+                            tracing::warn!(
+                                target = "vpnctld::health_monitor",
+                                server = %server.id.0,
+                                resolved_kind,
+                                error = %e,
+                                "could not determine whether the paired condition needs recovery"
+                            );
+                            false
+                        }
+                    },
                     Ok(n) => {
                         tracing::info!(
                             target = "vpnctld::health_monitor",
@@ -1598,7 +1628,7 @@ mod tests {
     // Uses a real SqliteInventory in tempdir to round-trip the
     // partial-UNIQUE dedup index.
     use tempfile::TempDir;
-    use vpnctl_core::{User, UserId};
+    use vpnctl_core::{Server, User, UserId};
     use vpnctl_inventory::SqliteInventory;
 
     async fn fresh_inv() -> (TempDir, SqliteInventory) {
@@ -1620,6 +1650,113 @@ mod tests {
             vpn_router_device_id: None,
             disabled: false,
         }
+    }
+
+    fn probeable_server(id: &str) -> Server {
+        Server {
+            id: ServerId(id.into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    async fn record_singbox_health(inv: &SqliteInventory, server_id: &ServerId, active: bool) {
+        inv.record_node_health(
+            server_id,
+            Some(active),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // `node_health` orders rows by a millisecond timestamp. Keep
+        // consecutive test samples observably ordered on every SQLite
+        // build, rather than relying on insertion order for equal stamps.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn scan_once_records_recovery_after_condition_is_manually_acknowledged() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("srv");
+        inv.add_server(&server).await.unwrap();
+
+        // Fire the condition, then model the operator using the alert
+        // page's individual-ack action before the next healthy probe.
+        record_singbox_health(&inv, &server.id, true).await;
+        record_singbox_health(&inv, &server.id, false).await;
+        scan_once(&inv).await.unwrap();
+        let down = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|alert| alert.kind == "server.singbox.down")
+            .unwrap();
+        assert!(
+            inv.ack_alert(down.id).await.unwrap(),
+            "manual ack must change state"
+        );
+
+        // Recovery must still be written to history and reach the
+        // edit-on-recover dispatch path, even though no condition row is
+        // open for `ack_open_alerts` to update.
+        record_singbox_health(&inv, &server.id, true).await;
+        scan_once(&inv).await.unwrap();
+        let history = inv.recent_alerts(10, true).await.unwrap();
+        let recovery = history
+            .iter()
+            .find(|alert| alert.kind == "server.singbox.up")
+            .unwrap_or_else(|| panic!("manual ack must not suppress recovery: {history:?}"));
+        assert!(
+            recovery.acked_at.is_some(),
+            "recovery rows are historical only"
+        );
+        assert_eq!(history.len(), 2, "one condition and one recovery expected");
+
+        // The same latest two probes can be scanned again without adding
+        // another recovery history row.
+        scan_once(&inv).await.unwrap();
+        assert_eq!(
+            inv.recent_alerts(10, true).await.unwrap().len(),
+            2,
+            "a handled recovery must not repeat on a later scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_once_skips_orphan_recovery_boundary_without_condition_history() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("orphan");
+        inv.add_server(&server).await.unwrap();
+
+        // A daemon can first observe the tail of a false -> true state
+        // change after startup. Without a prior down alert, that boundary
+        // must not create a green history row or Telegram notification.
+        record_singbox_health(&inv, &server.id, false).await;
+        record_singbox_health(&inv, &server.id, true).await;
+        scan_once(&inv).await.unwrap();
+        assert!(
+            inv.recent_alerts(10, true).await.unwrap().is_empty(),
+            "an orphan recovery boundary must remain quiet"
+        );
     }
 
     #[tokio::test]

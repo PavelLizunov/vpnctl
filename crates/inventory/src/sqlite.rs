@@ -6555,6 +6555,42 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
+    /// Whether a condition alert was recorded after the latest recovery
+    /// alert for the same scope, regardless of whether an operator already
+    /// acknowledged that condition. Health-monitor recovery dispatch uses
+    /// this after [`ack_open_alerts`]: a zero-row ack can mean either an
+    /// orphan recovery boundary or a manually acknowledged condition.
+    pub async fn has_condition_since_recovery(
+        &self,
+        condition_kind: &str,
+        recovery_kind: &str,
+        server_id: Option<&ServerId>,
+    ) -> Result<bool> {
+        let server_id_str = server_id.map(|s| s.0.as_str());
+        let row: (i64,) = sqlx::query_as(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM admin_alerts AS condition_alert
+                 WHERE condition_alert.kind = ?1
+                   AND ((?3 IS NULL AND condition_alert.server_id IS NULL)
+                        OR condition_alert.server_id = ?3)
+                   AND condition_alert.id > COALESCE((
+                       SELECT MAX(recovery_alert.id)
+                       FROM admin_alerts AS recovery_alert
+                       WHERE recovery_alert.kind = ?2
+                         AND ((?3 IS NULL AND recovery_alert.server_id IS NULL)
+                              OR recovery_alert.server_id = ?3)
+                   ), 0)
+             )",
+        )
+        .bind(condition_kind)
+        .bind(recovery_kind)
+        .bind(server_id_str)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 != 0)
+    }
+
     // ── Display settings (migration 0027) ──────────────────────────
 
     /// Read the operator-configured display timezone (IANA name like
