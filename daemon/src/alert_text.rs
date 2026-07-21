@@ -362,6 +362,24 @@ pub fn render_alert(
                 )),
             )
         }
+        "server.singbox.log.recovered" => {
+            let mib = u(payload, "current_bytes")
+                .map(|b| b / 1_048_576)
+                .unwrap_or(0);
+            (
+                pick(
+                    loc,
+                    format!("sing-box log recovered — {subj}"),
+                    format!("Лог sing-box снова в норме — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!("The sing-box log on {subj} is back under 500 MiB (≈{mib} MiB)."),
+                    format!("Лог sing-box на ноде {subj} снова меньше 500 МиБ (≈{mib} МиБ)."),
+                ),
+                None,
+            )
+        }
         "server.fingerprint.drift" => {
             let ip = ps(payload, "ip").map(code).unwrap_or_default();
             (
@@ -456,9 +474,9 @@ pub fn render_alert(
             (
                 pick(loc, format!("Suspicious sub-fetch IP — {subj}"), format!("Подозрительный IP фетча подписки — {subj}")),
                 pick(loc,
-                    format!("User <b>{subj}</b>'s subscription was fetched from a local/proxy IP {ip} while the trusted-proxy list is empty — the logged client IP will be wrong."),
-                    format!("Подписка <b>{subj}</b> запрошена с локального/прокси-IP {ip} при пустом списке доверенных прокси — IP в логах будет неверным.")),
-                Some(pick(loc, "Check VPNCTLD_TRUSTED_PROXIES is set. (Often a false alarm from your own test fetch.)".into(), "Проверь, что VPNCTLD_TRUSTED_PROXIES выставлен. (Часто ложная — свой же тестовый фетч.)".into())),
+                    format!("User <b>{subj}</b>'s subscription was fetched from local or loopback IP {ip}. This address is not configured as a trusted reverse proxy."),
+                    format!("Подписка <b>{subj}</b> запрошена с локального или loopback-IP {ip}. Этот адрес не настроен как доверенный reverse proxy.")),
+                Some(pick(loc, "Check whether this fetch was expected. Only if it should have passed through a reverse proxy, verify that proxy is in VPNCTLD_TRUSTED_PROXIES and forwards the client IP.".into(), "Проверь, ожидаем ли этот фетч. Только если он должен был идти через reverse proxy, проверь IP прокси в VPNCTLD_TRUSTED_PROXIES и передачу IP клиента.".into())),
             )
         }
 
@@ -625,6 +643,7 @@ mod tests {
         ("server.mem.pressure", "warning"),
         ("server.mem.recovered", "info"),
         ("server.singbox.log.too_big", "warning"),
+        ("server.singbox.log.recovered", "info"),
         ("server.fingerprint.drift", "warning"),
         ("user.traffic_limit", "warning"),
         ("server.attribution.stalled", "warning"),
@@ -698,6 +717,7 @@ mod tests {
             "server.fail2ban.up",
             "server.disk.recovered",
             "server.mem.recovered",
+            "server.singbox.log.recovered",
         ] {
             let r = render_alert(kind, "info", "де", &json!({"current_pct": 40}), Locale::Ru);
             assert_eq!(r.icon, "🟢", "{kind} should be green");
@@ -740,6 +760,46 @@ mod tests {
             )
             .icon,
             "🟠"
+        );
+    }
+
+    #[test]
+    fn suspicious_local_ip_text_does_not_assume_proxy_misconfiguration() {
+        let payload = json!({"ip": "192.168.1.23"});
+        let en = render_alert(
+            "sub_access.suspicious_local_ip:alice",
+            "warning",
+            "alice",
+            &payload,
+            Locale::En,
+        );
+        assert!(en.body.contains("local or loopback IP"), "got: {}", en.body);
+        assert!(
+            !en.body.contains("trusted-proxy list is empty")
+                && !en.body.contains("logged client IP will be wrong"),
+            "the detector does not establish either claim: {}",
+            en.body
+        );
+        assert!(
+            en.action
+                .as_deref()
+                .is_some_and(|action| action
+                    .contains("Only if it should have passed through a reverse proxy")),
+            "proxy remediation must remain conditional: {en:?}"
+        );
+
+        let ru = render_alert(
+            "sub_access.suspicious_local_ip:alice",
+            "warning",
+            "alice",
+            &payload,
+            Locale::Ru,
+        );
+        assert!(
+            !ru.body.contains("пустом списке доверенных прокси")
+                && !ru.body.contains("IP в логах будет неверным"),
+            "the detector does not establish either claim: {}",
+            ru.body
         );
     }
 

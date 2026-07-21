@@ -42,6 +42,7 @@
 //! | mem_used_pct crossed 95 going up | warning | `server.mem.pressure` |
 //! | mem_used_pct dropped below 90 (hysteresis) | info | `server.mem.recovered` |
 //! | sing_box_log_bytes crossed 500 MiB going up | warning | `server.singbox.log.too_big` |
+//! | sing_box_log_bytes dropped below 500 MiB | info | `server.singbox.log.recovered` |
 //!
 //! Hysteresis on the disk/mem thresholds (90 vs 85, 95 vs 90) prevents
 //! flapping: a node hovering exactly at 90.0% disk would otherwise
@@ -134,12 +135,10 @@ fn disk_pct(row: &NodeHealthRow) -> Option<u8> {
 /// Pure diff: given the previous probe row and the current one,
 /// return every state-change alert the operator should see.
 ///
-/// Stateless — same input always produces the same output. Caller
-/// is responsible for "did we already emit this same alert in the
-/// last few ticks" dedup (the table-level WHERE-not-acked on the
-/// dashboard handles user-visible duplication; firing the same
-/// `*.pressure` repeatedly is intentional so the operator sees the
-/// condition has not been resolved).
+/// Stateless — same input always produces the same output. The caller
+/// uses the inventory's atomic `insert_alert_if_no_unacked` path for
+/// condition events, so re-reading the same pair is a quiet no-op while
+/// its alert remains open.
 pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
     let mut out: Vec<AlertEvent> = Vec::new();
 
@@ -195,7 +194,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                     "prior_pct": p, "current_pct": c, "threshold": DISK_PRESSURE_TRIGGER_PCT
                 }),
             });
-        } else if p >= DISK_PRESSURE_TRIGGER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
+        } else if p >= DISK_PRESSURE_RECOVER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.disk.recovered",
                 resolves: Some("server.disk.pressure"),
@@ -222,7 +221,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                     "prior_pct": p, "current_pct": c, "threshold": MEM_PRESSURE_TRIGGER_PCT
                 }),
             });
-        } else if p >= MEM_PRESSURE_TRIGGER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
+        } else if p >= MEM_PRESSURE_RECOVER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.mem.recovered",
                 resolves: Some("server.mem.pressure"),
@@ -248,6 +247,20 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                 payload: serde_json::json!({
                     "prior_bytes": p, "current_bytes": c,
                     "threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
+                }),
+            });
+        } else if p >= SINGBOX_LOG_TRIGGER_BYTES && c < SINGBOX_LOG_TRIGGER_BYTES {
+            out.push(AlertEvent {
+                kind: "server.singbox.log.recovered",
+                resolves: Some("server.singbox.log.too_big"),
+                severity: "info",
+                summary: format!(
+                    "sing-box log size dropped back under 500 MiB ({} → {} bytes)",
+                    p, c
+                ),
+                payload: serde_json::json!({
+                    "prior_bytes": p, "current_bytes": c,
+                    "recover_threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
                 }),
             });
         }
@@ -345,9 +358,43 @@ pub async fn scan_once(
             // good news belongs in history (`?show=all`), not in the
             // open feed demanding a manual ack. Condition alerts keep
             // the original open-insert path.
-            if let Some(resolved_kind) = ev.resolves {
+            let should_insert = if let Some(resolved_kind) = ev.resolves {
                 match inv.ack_open_alerts(resolved_kind, Some(&server.id)).await {
-                    Ok(0) => {} // paired alert was never open (or already acked)
+                    // A zero-row ack is ambiguous: the condition may
+                    // never have fired, OR its warning was already
+                    // acknowledged manually. Preserve the latter's
+                    // recovery history and edit-on-recover Telegram
+                    // path, while still dropping a true orphan boundary.
+                    Ok(0) => match inv
+                        .has_condition_since_recovery(resolved_kind, ev.kind, Some(&server.id))
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(
+                                target = "vpnctld::health_monitor",
+                                server = %server.id.0,
+                                resolved_kind,
+                                "recording recovery for an already-acknowledged paired condition"
+                            );
+                            true
+                        }
+                        // A hysteresis-boundary crossing can happen
+                        // without the trigger ever having fired (for
+                        // example disk 88% → 84% after daemon startup).
+                        // Do not create an orphan green recovery row or
+                        // Telegram message.
+                        Ok(false) => false,
+                        Err(e) => {
+                            tracing::warn!(
+                                target = "vpnctld::health_monitor",
+                                server = %server.id.0,
+                                resolved_kind,
+                                error = %e,
+                                "could not determine whether the paired condition needs recovery"
+                            );
+                            false
+                        }
+                    },
                     Ok(n) => {
                         tracing::info!(
                             target = "vpnctld::health_monitor",
@@ -381,6 +428,7 @@ pub async fn scan_once(
                                 "alert.auto_ack audit row failed; ack already committed"
                             );
                         }
+                        true
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -390,8 +438,14 @@ pub async fn scan_once(
                             error = %e,
                             "auto-resolve ack failed; stale condition alert stays open"
                         );
+                        false
                     }
                 }
+            } else {
+                true
+            };
+            if !should_insert {
+                continue;
             }
             let insert_res = if ev.resolves.is_some() {
                 inv.insert_alert_acked(
@@ -402,8 +456,9 @@ pub async fn scan_once(
                     payload_str.as_deref(),
                 )
                 .await
+                .map(Some)
             } else {
-                inv.insert_alert(
+                inv.insert_alert_if_no_unacked(
                     ev.kind,
                     Some(&server.id),
                     ev.severity,
@@ -413,7 +468,7 @@ pub async fn scan_once(
                 .await
             };
             match insert_res {
-                Ok(alert_id) => {
+                Ok(Some(alert_id)) => {
                     tracing::info!(
                         target = "vpnctld::health_monitor",
                         alert_id,
@@ -484,6 +539,7 @@ pub async fn scan_once(
                         .await;
                     }
                 }
+                Ok(None) => {} // condition is already open; quiet idempotent no-op
                 Err(e) => {
                     tracing::warn!(
                         target = "vpnctld::health_monitor",
@@ -1440,6 +1496,20 @@ mod tests {
     }
 
     #[test]
+    fn diff_rows_disk_gradual_recovery_crosses_85_fires_info() {
+        // The alert fired on an earlier >=90% sample, then disk usage
+        // moved through the hysteresis band before crossing the 85%
+        // recovery boundary: 91 → 88 → 84. Looking only for a direct
+        // >=90 → <85 jump misses this normal gradual recovery forever.
+        let prev = row(10, None, None, Some(88), Some(100), None, None, None);
+        let cur = row(0, None, None, Some(84), Some(100), None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.disk.recovered");
+        assert_eq!(evs[0].resolves, Some("server.disk.pressure"));
+    }
+
+    #[test]
     fn diff_rows_mem_pressure_crosses_95_fires() {
         // mem_avail 6 / total 100 → mem_used 94%
         let prev = row(10, None, None, None, None, Some(6), Some(100), None);
@@ -1448,6 +1518,19 @@ mod tests {
         let evs = diff_rows(&prev, &cur);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "server.mem.pressure");
+    }
+
+    #[test]
+    fn diff_rows_mem_gradual_recovery_crosses_90_fires_info() {
+        // Same hysteresis path as disk: an earlier 96% pressure sample
+        // fell to 92%, then to 89%. The recovery boundary crossing is
+        // 92 → 89 even though the trigger boundary was crossed earlier.
+        let prev = row(10, None, None, None, None, Some(8), Some(100), None);
+        let cur = row(0, None, None, None, None, Some(11), Some(100), None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.mem.recovered");
+        assert_eq!(evs[0].resolves, Some("server.mem.pressure"));
     }
 
     #[test]
@@ -1475,6 +1558,38 @@ mod tests {
         let evs = diff_rows(&prev, &cur);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "server.singbox.log.too_big");
+    }
+
+    #[test]
+    fn diff_rows_singbox_log_rotation_fires_recovery() {
+        let prev = row(
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(600 * 1024 * 1024),
+        );
+        let cur = row(
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(20 * 1024 * 1024),
+        );
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.log.recovered");
+        assert_eq!(
+            evs[0].resolves,
+            Some("server.singbox.log.too_big"),
+            "log rotation must close the open too-big alert"
+        );
     }
 
     #[test]
@@ -1513,7 +1628,7 @@ mod tests {
     // Uses a real SqliteInventory in tempdir to round-trip the
     // partial-UNIQUE dedup index.
     use tempfile::TempDir;
-    use vpnctl_core::{User, UserId};
+    use vpnctl_core::{Server, User, UserId};
     use vpnctl_inventory::SqliteInventory;
 
     async fn fresh_inv() -> (TempDir, SqliteInventory) {
@@ -1535,6 +1650,113 @@ mod tests {
             vpn_router_device_id: None,
             disabled: false,
         }
+    }
+
+    fn probeable_server(id: &str) -> Server {
+        Server {
+            id: ServerId(id.into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    async fn record_singbox_health(inv: &SqliteInventory, server_id: &ServerId, active: bool) {
+        inv.record_node_health(
+            server_id,
+            Some(active),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // `node_health` orders rows by a millisecond timestamp. Keep
+        // consecutive test samples observably ordered on every SQLite
+        // build, rather than relying on insertion order for equal stamps.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn scan_once_records_recovery_after_condition_is_manually_acknowledged() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("srv");
+        inv.add_server(&server).await.unwrap();
+
+        // Fire the condition, then model the operator using the alert
+        // page's individual-ack action before the next healthy probe.
+        record_singbox_health(&inv, &server.id, true).await;
+        record_singbox_health(&inv, &server.id, false).await;
+        scan_once(&inv).await.unwrap();
+        let down = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|alert| alert.kind == "server.singbox.down")
+            .unwrap();
+        assert!(
+            inv.ack_alert(down.id).await.unwrap(),
+            "manual ack must change state"
+        );
+
+        // Recovery must still be written to history and reach the
+        // edit-on-recover dispatch path, even though no condition row is
+        // open for `ack_open_alerts` to update.
+        record_singbox_health(&inv, &server.id, true).await;
+        scan_once(&inv).await.unwrap();
+        let history = inv.recent_alerts(10, true).await.unwrap();
+        let recovery = history
+            .iter()
+            .find(|alert| alert.kind == "server.singbox.up")
+            .unwrap_or_else(|| panic!("manual ack must not suppress recovery: {history:?}"));
+        assert!(
+            recovery.acked_at.is_some(),
+            "recovery rows are historical only"
+        );
+        assert_eq!(history.len(), 2, "one condition and one recovery expected");
+
+        // The same latest two probes can be scanned again without adding
+        // another recovery history row.
+        scan_once(&inv).await.unwrap();
+        assert_eq!(
+            inv.recent_alerts(10, true).await.unwrap().len(),
+            2,
+            "a handled recovery must not repeat on a later scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_once_skips_orphan_recovery_boundary_without_condition_history() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("orphan");
+        inv.add_server(&server).await.unwrap();
+
+        // A daemon can first observe the tail of a false -> true state
+        // change after startup. Without a prior down alert, that boundary
+        // must not create a green history row or Telegram notification.
+        record_singbox_health(&inv, &server.id, false).await;
+        record_singbox_health(&inv, &server.id, true).await;
+        scan_once(&inv).await.unwrap();
+        assert!(
+            inv.recent_alerts(10, true).await.unwrap().is_empty(),
+            "an orphan recovery boundary must remain quiet"
+        );
     }
 
     #[tokio::test]

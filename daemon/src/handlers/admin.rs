@@ -11895,7 +11895,7 @@ pub(crate) async fn alerts(
             tr(lang, "on drop < 90%", "при спаде < 90%")
         } else if kind.starts_with("server.disk.pressure") {
             tr(lang, "on drop < 85%", "при спаде < 85%")
-        } else if kind.starts_with("server.singbox.log") {
+        } else if kind == "server.singbox.log.too_big" {
             tr(lang, "on rotate", "после ротации")
         } else if kind.starts_with("server.unreachable") {
             tr(lang, "on next ok probe", "при следующей ok-пробе")
