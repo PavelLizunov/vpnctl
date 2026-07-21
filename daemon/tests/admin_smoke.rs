@@ -14452,6 +14452,109 @@ async fn scan_once_auto_resolves_paired_alert_on_recovery() {
     );
 }
 
+/// The alerts page labels an oversized sing-box log as auto-resolving
+/// "on rotate". Pin that promise through the real scan/DB dispatch path:
+/// a size drop below 500 MiB must close the warning and leave a born-acked
+/// recovery event in history.
+#[tokio::test]
+async fn scan_once_auto_resolves_singbox_log_alert_after_rotation() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+    st.inv
+        .insert_alert(
+            "server.singbox.log.too_big",
+            Some(&sid),
+            "warning",
+            "sing-box log size crossed 500 MiB",
+            None,
+        )
+        .await
+        .unwrap();
+
+    for bytes in [600 * 1024 * 1024, 20 * 1024 * 1024] {
+        st.inv
+            .record_node_health(
+                &sid,
+                Some(true),
+                Some(true),
+                Some(1000),
+                Some(20480),
+                Some(500),
+                Some(960),
+                Some(1),
+                None,
+                Some(bytes),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    vpnctld::health_monitor::scan_once(&st.inv).await.unwrap();
+
+    assert_eq!(
+        st.inv.unacked_alert_count().await.unwrap(),
+        0,
+        "log rotation must close the open too-big alert"
+    );
+    let all = st.inv.recent_alerts(20, true).await.unwrap();
+    let recovered = all
+        .iter()
+        .find(|a| a.kind == "server.singbox.log.recovered")
+        .expect("log recovery row must be recorded");
+    assert!(
+        recovered.acked_at.is_some(),
+        "log recovery row must be born-acked"
+    );
+}
+
+/// Crossing only the recovery boundary must not invent a green event when
+/// no pressure alert was open. This is the normal startup case for a node
+/// whose disk moves 88% → 84% without ever reaching the 90% trigger.
+#[tokio::test]
+async fn scan_once_does_not_record_orphan_hysteresis_recovery() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+
+    for disk_used_mib in [88, 84] {
+        st.inv
+            .record_node_health(
+                &sid,
+                Some(true),
+                Some(true),
+                Some(disk_used_mib),
+                Some(100),
+                Some(50),
+                Some(100),
+                Some(1),
+                None,
+                Some(1024),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    vpnctld::health_monitor::scan_once(&st.inv).await.unwrap();
+
+    assert!(
+        st.inv.recent_alerts(20, true).await.unwrap().is_empty(),
+        "a recovery boundary without an open condition must stay quiet"
+    );
+}
+
 /// Alerts-cleanup 2026-06-10: `insert_alert_acked` rows are history-
 /// only — they must not raise the unacked count and must not be
 /// blocked by the partial UNIQUE open-dedup index.

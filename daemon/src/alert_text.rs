@@ -362,6 +362,24 @@ pub fn render_alert(
                 )),
             )
         }
+        "server.singbox.log.recovered" => {
+            let mib = u(payload, "current_bytes")
+                .map(|b| b / 1_048_576)
+                .unwrap_or(0);
+            (
+                pick(
+                    loc,
+                    format!("sing-box log recovered — {subj}"),
+                    format!("Лог sing-box снова в норме — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!("The sing-box log on {subj} is back under 500 MiB (≈{mib} MiB)."),
+                    format!("Лог sing-box на ноде {subj} снова меньше 500 МиБ (≈{mib} МиБ)."),
+                ),
+                None,
+            )
+        }
         "server.fingerprint.drift" => {
             let ip = ps(payload, "ip").map(code).unwrap_or_default();
             (
@@ -625,6 +643,7 @@ mod tests {
         ("server.mem.pressure", "warning"),
         ("server.mem.recovered", "info"),
         ("server.singbox.log.too_big", "warning"),
+        ("server.singbox.log.recovered", "info"),
         ("server.fingerprint.drift", "warning"),
         ("user.traffic_limit", "warning"),
         ("server.attribution.stalled", "warning"),
@@ -698,6 +717,7 @@ mod tests {
             "server.fail2ban.up",
             "server.disk.recovered",
             "server.mem.recovered",
+            "server.singbox.log.recovered",
         ] {
             let r = render_alert(kind, "info", "де", &json!({"current_pct": 40}), Locale::Ru);
             assert_eq!(r.icon, "🟢", "{kind} should be green");

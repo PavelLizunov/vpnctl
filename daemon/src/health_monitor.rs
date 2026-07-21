@@ -42,6 +42,7 @@
 //! | mem_used_pct crossed 95 going up | warning | `server.mem.pressure` |
 //! | mem_used_pct dropped below 90 (hysteresis) | info | `server.mem.recovered` |
 //! | sing_box_log_bytes crossed 500 MiB going up | warning | `server.singbox.log.too_big` |
+//! | sing_box_log_bytes dropped below 500 MiB | info | `server.singbox.log.recovered` |
 //!
 //! Hysteresis on the disk/mem thresholds (90 vs 85, 95 vs 90) prevents
 //! flapping: a node hovering exactly at 90.0% disk would otherwise
@@ -134,12 +135,10 @@ fn disk_pct(row: &NodeHealthRow) -> Option<u8> {
 /// Pure diff: given the previous probe row and the current one,
 /// return every state-change alert the operator should see.
 ///
-/// Stateless — same input always produces the same output. Caller
-/// is responsible for "did we already emit this same alert in the
-/// last few ticks" dedup (the table-level WHERE-not-acked on the
-/// dashboard handles user-visible duplication; firing the same
-/// `*.pressure` repeatedly is intentional so the operator sees the
-/// condition has not been resolved).
+/// Stateless — same input always produces the same output. The caller
+/// uses the inventory's atomic `insert_alert_if_no_unacked` path for
+/// condition events, so re-reading the same pair is a quiet no-op while
+/// its alert remains open.
 pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
     let mut out: Vec<AlertEvent> = Vec::new();
 
@@ -195,7 +194,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                     "prior_pct": p, "current_pct": c, "threshold": DISK_PRESSURE_TRIGGER_PCT
                 }),
             });
-        } else if p >= DISK_PRESSURE_TRIGGER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
+        } else if p >= DISK_PRESSURE_RECOVER_PCT && c < DISK_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.disk.recovered",
                 resolves: Some("server.disk.pressure"),
@@ -222,7 +221,7 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                     "prior_pct": p, "current_pct": c, "threshold": MEM_PRESSURE_TRIGGER_PCT
                 }),
             });
-        } else if p >= MEM_PRESSURE_TRIGGER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
+        } else if p >= MEM_PRESSURE_RECOVER_PCT && c < MEM_PRESSURE_RECOVER_PCT {
             out.push(AlertEvent {
                 kind: "server.mem.recovered",
                 resolves: Some("server.mem.pressure"),
@@ -248,6 +247,20 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                 payload: serde_json::json!({
                     "prior_bytes": p, "current_bytes": c,
                     "threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
+                }),
+            });
+        } else if p >= SINGBOX_LOG_TRIGGER_BYTES && c < SINGBOX_LOG_TRIGGER_BYTES {
+            out.push(AlertEvent {
+                kind: "server.singbox.log.recovered",
+                resolves: Some("server.singbox.log.too_big"),
+                severity: "info",
+                summary: format!(
+                    "sing-box log size dropped back under 500 MiB ({} → {} bytes)",
+                    p, c
+                ),
+                payload: serde_json::json!({
+                    "prior_bytes": p, "current_bytes": c,
+                    "recover_threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
                 }),
             });
         }
@@ -345,9 +358,13 @@ pub async fn scan_once(
             // good news belongs in history (`?show=all`), not in the
             // open feed demanding a manual ack. Condition alerts keep
             // the original open-insert path.
-            if let Some(resolved_kind) = ev.resolves {
+            let should_insert = if let Some(resolved_kind) = ev.resolves {
                 match inv.ack_open_alerts(resolved_kind, Some(&server.id)).await {
-                    Ok(0) => {} // paired alert was never open (or already acked)
+                    // A hysteresis-boundary crossing can happen without
+                    // the trigger ever having fired (for example disk
+                    // 88% → 84% after daemon startup). Do not create an
+                    // orphan green recovery row or Telegram message.
+                    Ok(0) => false,
                     Ok(n) => {
                         tracing::info!(
                             target = "vpnctld::health_monitor",
@@ -381,6 +398,7 @@ pub async fn scan_once(
                                 "alert.auto_ack audit row failed; ack already committed"
                             );
                         }
+                        true
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -390,8 +408,14 @@ pub async fn scan_once(
                             error = %e,
                             "auto-resolve ack failed; stale condition alert stays open"
                         );
+                        false
                     }
                 }
+            } else {
+                true
+            };
+            if !should_insert {
+                continue;
             }
             let insert_res = if ev.resolves.is_some() {
                 inv.insert_alert_acked(
@@ -402,8 +426,9 @@ pub async fn scan_once(
                     payload_str.as_deref(),
                 )
                 .await
+                .map(Some)
             } else {
-                inv.insert_alert(
+                inv.insert_alert_if_no_unacked(
                     ev.kind,
                     Some(&server.id),
                     ev.severity,
@@ -413,7 +438,7 @@ pub async fn scan_once(
                 .await
             };
             match insert_res {
-                Ok(alert_id) => {
+                Ok(Some(alert_id)) => {
                     tracing::info!(
                         target = "vpnctld::health_monitor",
                         alert_id,
@@ -484,6 +509,7 @@ pub async fn scan_once(
                         .await;
                     }
                 }
+                Ok(None) => {} // condition is already open; quiet idempotent no-op
                 Err(e) => {
                     tracing::warn!(
                         target = "vpnctld::health_monitor",
@@ -1440,6 +1466,20 @@ mod tests {
     }
 
     #[test]
+    fn diff_rows_disk_gradual_recovery_crosses_85_fires_info() {
+        // The alert fired on an earlier >=90% sample, then disk usage
+        // moved through the hysteresis band before crossing the 85%
+        // recovery boundary: 91 → 88 → 84. Looking only for a direct
+        // >=90 → <85 jump misses this normal gradual recovery forever.
+        let prev = row(10, None, None, Some(88), Some(100), None, None, None);
+        let cur = row(0, None, None, Some(84), Some(100), None, None, None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.disk.recovered");
+        assert_eq!(evs[0].resolves, Some("server.disk.pressure"));
+    }
+
+    #[test]
     fn diff_rows_mem_pressure_crosses_95_fires() {
         // mem_avail 6 / total 100 → mem_used 94%
         let prev = row(10, None, None, None, None, Some(6), Some(100), None);
@@ -1448,6 +1488,19 @@ mod tests {
         let evs = diff_rows(&prev, &cur);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "server.mem.pressure");
+    }
+
+    #[test]
+    fn diff_rows_mem_gradual_recovery_crosses_90_fires_info() {
+        // Same hysteresis path as disk: an earlier 96% pressure sample
+        // fell to 92%, then to 89%. The recovery boundary crossing is
+        // 92 → 89 even though the trigger boundary was crossed earlier.
+        let prev = row(10, None, None, None, None, Some(8), Some(100), None);
+        let cur = row(0, None, None, None, None, Some(11), Some(100), None);
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.mem.recovered");
+        assert_eq!(evs[0].resolves, Some("server.mem.pressure"));
     }
 
     #[test]
@@ -1475,6 +1528,38 @@ mod tests {
         let evs = diff_rows(&prev, &cur);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "server.singbox.log.too_big");
+    }
+
+    #[test]
+    fn diff_rows_singbox_log_rotation_fires_recovery() {
+        let prev = row(
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(600 * 1024 * 1024),
+        );
+        let cur = row(
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(20 * 1024 * 1024),
+        );
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.log.recovered");
+        assert_eq!(
+            evs[0].resolves,
+            Some("server.singbox.log.too_big"),
+            "log rotation must close the open too-big alert"
+        );
     }
 
     #[test]
