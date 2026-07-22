@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -77,7 +77,7 @@ async fn seed(dir: &TempDir) -> (AppState, String) {
 }
 
 #[tokio::test]
-async fn health_returns_200_ok() {
+async fn health_returns_stable_runtime_contract() {
     let dir = TempDir::new().unwrap();
     let (state, _) = seed(&dir).await;
     let app = router(state);
@@ -92,10 +92,16 @@ async fn health_returns_200_ok() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["status"], "ok");
-    assert!(v["version"].is_string());
+    let expected = format!(
+        r#"{{"status":"ok","version":"{}"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(body.as_ref(), expected.as_bytes());
 }
 
 #[tokio::test]

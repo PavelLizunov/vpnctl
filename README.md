@@ -139,6 +139,27 @@ just run uuid          # generate a fresh UUID v4
 just run registry      # list registered kernels & protocols
 ```
 
+### Production health check
+
+`vpnctld` exposes an unauthenticated, read-only liveness endpoint. Check the
+daemon directly on its default listen address with:
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:18402/api/v1/health
+```
+
+The response is HTTP `200 OK` with a minimal JSON body containing the running
+binary's package version:
+
+```json
+{"status":"ok","version":"0.8.0"}
+```
+
+Use the deployment's public base URL instead of `127.0.0.1:18402` to verify
+the reverse-proxy path as well. This endpoint reports `vpnctld` process
+liveness only: it does not read or mutate inventory and does not probe VPN
+nodes.
+
 ## Operator flows (all web-driven)
 
 Every action below has both a CLI subcommand and a web button. The web
