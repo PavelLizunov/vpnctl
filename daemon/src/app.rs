@@ -936,14 +936,12 @@ pub fn router(state: AppState) -> Router {
 fn admin_router(state: AppState) -> Router {
     use crate::handlers::admin;
 
-    // Resolve assets dir relative to CARGO_MANIFEST_DIR for `cargo run`,
-    // falling back to ./daemon/assets for `vpnctld` invoked from the
-    // workspace root, falling back to ./assets for a binary distributed
-    // alongside its assets dir. We pick whichever exists.
+    // Prefer the runtime assets dir: the compile-time build directory may
+    // be deleted after a production deploy while the daemon keeps running.
     let assets_dir: PathBuf = [
+        PathBuf::from("assets"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         PathBuf::from("daemon/assets"),
-        PathBuf::from("assets"),
     ]
     .into_iter()
     .find(|p| p.exists())
