@@ -214,22 +214,42 @@ pub struct SharingSignals {
     pub impossible_travel_hops: u64,
 }
 
-/// Collapse an IP to its network key for sharing-detection counting
-/// (2026-06-17): IPv4 → its `/24` (`"91.79.36.72"` → `"91.79.36"`), IPv6 →
-/// the address verbatim. Mobile carriers rotate a single device across many
-/// IPs WITHIN one `/24`-ish pool, so counting distinct `/24`s instead of raw
-/// IPs stops one rotating phone from looking like a dozen shared clients
-/// (the multiviruss false positive: 16 raw IPs were ~5 `/24`s, mostly one
-/// carrier). A real shared sub spans DIFFERENT access networks → different
-/// `/24`s. Not perfect (a carrier can span two `/24`s) but kills the bulk of
-/// the rotation inflation with zero geoip dependency.
-pub fn ipv4_net24(ip: &str) -> String {
-    if ip.contains(':') {
-        return ip.to_string(); // IPv6 — no cheap /24 analogue; keep whole.
-    }
-    match ip.rsplit_once('.') {
-        Some((prefix, _last_octet)) => prefix.to_string(),
-        None => ip.to_string(),
+/// Collapse an IP to its access-network key for sharing-detection counting
+/// (2026-06-17; IPv6-corrected 2026-07-29). IPv4 → its `/24`
+/// (`"91.79.36.72"` → `"91.79.36"`); IPv6 → its `/64` prefix
+/// (`"2001:db8::1"` → `"2001:db8:0:0::/64"`). Mobile carriers rotate a
+/// single device across many addresses WITHIN one prefix pool, so counting
+/// distinct network keys instead of raw addresses stops one rotating phone
+/// from looking like a dozen shared clients (the multiviruss false positive:
+/// 16 raw IPs were ~5 `/24`s, mostly one carrier). A real shared sub spans
+/// DIFFERENT access networks → different keys. Not perfect (a carrier can
+/// span two prefixes) but kills the bulk of the rotation inflation with zero
+/// geoip dependency.
+///
+/// Parsed with std [`std::net::IpAddr`] so the IPv6 `/64` collapse is exact:
+/// the old string-prefix version returned every IPv6 privacy address verbatim,
+/// which made one phone's rotating temporary addresses look like many distinct
+/// networks (the strongest, rotation-immune concurrency signal — exactly the
+/// false positive this function exists to prevent). Malformed input parses to
+/// nothing and is returned verbatim so it stays a single safe bucket rather
+/// than panicking or silently merging unrelated garbage.
+pub fn network_key(ip: &str) -> String {
+    use std::net::IpAddr;
+    match ip.parse::<IpAddr>() {
+        // /24 — keep the first three octets (matches the pre-IpAddr shape).
+        Ok(IpAddr::V4(v4)) => {
+            let [a, b, c, _] = v4.octets();
+            format!("{a}.{b}.{c}")
+        }
+        // /64 — keep the first four hextets in a canonical fixed-width form
+        // so every address in one /64 collapses to the SAME key (privacy
+        // addresses only vary in the low 64 bits).
+        Ok(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        // Malformed — keep verbatim (one safe bucket, no panic).
+        Err(_) => ip.to_string(),
     }
 }
 
@@ -590,6 +610,10 @@ fn real_client_ip_predicate(col: &str) -> String {
          AND {col} NOT LIKE '192.168.%' AND {col} NOT LIKE '169.254.%' \
          AND {col} NOT GLOB '172.1[6-9].*' AND {col} NOT GLOB '172.2[0-9].*' \
          AND {col} NOT GLOB '172.3[0-1].*' \
+         AND {col} <> '0.0.0.0' AND {col} <> '::' AND {col} <> '::1' \
+         AND {col} NOT LIKE 'fc%' AND {col} NOT LIKE 'fd%' \
+         AND {col} NOT LIKE 'fe8%' AND {col} NOT LIKE 'fe9%' \
+         AND {col} NOT LIKE 'fea%' AND {col} NOT LIKE 'feb%' \
          AND {col} NOT IN (SELECT address FROM servers){control_clause}"
     )
 }
@@ -680,6 +704,13 @@ pub struct NodeHealthRow {
     pub nic_iface: Option<String>,
     pub nic_rx_bytes: Option<u64>,
     pub nic_tx_bytes: Option<u64>,
+    /// sing-box monotonic systemd `NRestarts` counter (migration 0042).
+    /// RAW cumulative value; the health monitor (`diff_rows`) diffs
+    /// consecutive rows and fires a dedicated infra alert on an increase
+    /// (sing-box crashed + auto-restarted between probes), guarding the
+    /// drop that follows a host reboot / `systemctl reset-failed`. `None`
+    /// for rows predating this or ticks where `systemctl show` failed.
+    pub sing_box_nrestarts: Option<u64>,
 }
 
 /// Traffic-accounting breakdown for one server over a window, produced
@@ -2879,6 +2910,8 @@ impl SqliteInventory {
                      OR action IN ('user.add',
                                    'user.set_vpn_router_device_id',
                                    'user.disable', 'user.enable',
+                                   'user.wireguard.regen',
+                                   'user.mint_tuic_password',
                                    'boosty.disable', 'boosty.enable')
                    )",
             )
@@ -2943,8 +2976,11 @@ impl SqliteInventory {
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
             "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE action IN ('user.grant', 'user.revoke')
-               AND json_extract(payload, '$.server') = ?1",
+             WHERE (action IN ('user.grant', 'user.revoke')
+                    AND json_extract(payload, '$.server') = ?1)
+                OR (action IN ('server.protocol.enable', 'server.protocol.disable',
+                               'server.kernel.enable', 'server.kernel.disable')
+                    AND target = ?1)",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)
@@ -3921,6 +3957,41 @@ impl SqliteInventory {
             .execute(&mut *tx)
             .await?;
         }
+        let rollup_up = deltas
+            .iter()
+            .fold(0u64, |sum, d| sum.saturating_add(d.upload_bytes));
+        let rollup_down = deltas
+            .iter()
+            .fold(0u64, |sum, d| sum.saturating_add(d.download_bytes));
+        let peak_connections = deltas
+            .iter()
+            .map(|d| d.active_connections)
+            .max()
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO vpn_server_hourly
+                (hour, server_id, upload_bytes, download_bytes,
+                 active_connections_peak, last_sample_ts)
+             VALUES (
+                strftime('%Y-%m-%dT%H:00:00.000Z', 'now'),
+                ?1, ?2, ?3, ?4,
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             )
+             ON CONFLICT(server_id, hour) DO UPDATE SET
+                upload_bytes = upload_bytes + excluded.upload_bytes,
+                download_bytes = download_bytes + excluded.download_bytes,
+                active_connections_peak = MAX(
+                    active_connections_peak,
+                    excluded.active_connections_peak
+                ),
+                last_sample_ts = excluded.last_sample_ts",
+        )
+        .bind(&server_id.0)
+        .bind(i64::try_from(rollup_up).unwrap_or(i64::MAX))
+        .bind(i64::try_from(rollup_down).unwrap_or(i64::MAX))
+        .bind(i64::from(peak_connections))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -4610,7 +4681,7 @@ impl SqliteInventory {
             per_day_nets
                 .entry((uid, date))
                 .or_default()
-                .insert(ipv4_net24(&ip));
+                .insert(network_key(&ip));
         }
         let mut max_nets: HashMap<String, u32> = HashMap::new();
         for ((uid, _date), nets) in per_day_nets {
@@ -4991,31 +5062,70 @@ impl SqliteInventory {
             .collect())
     }
 
-    /// **Fleet-wide raw stats** (2026-05-23 — backs the dashboard's
-    /// multi-window traffic chart). Same row shape as the per-
-    /// server/per-user variants but with no `WHERE` filter on the
-    /// subject — every server's every user's row in the window
-    /// returned, then the caller buckets / aggregates as it sees
-    /// fit.
+    /// Fleet-wide stats for the dashboard's multi-window traffic chart.
     ///
-    /// **Cardinality note:** at 5-min tick × N users × M servers,
-    /// the 30d window can pull ~864k rows for a 10-server, 100-user
-    /// fleet. Homelab scale (3 servers, 35 users) is comfortable
-    /// (~100k rows max at 30d, ~17 MB serialised) but a future
-    /// productisation should add a server-side bucket aggregate
-    /// helper. For now the chart aggregation runs Rust-side in
-    /// the daemon and the caller never paginates.
-    pub async fn recent_vpn_stats_fleet(&self, since_hours: u32) -> Result<Vec<VpnStatsRow>> {
+    /// Reads the ingest-time hourly rollup, then lets SQLite collapse
+    /// hours to the chart's selected bucket size.
+    pub async fn recent_vpn_stats_fleet(
+        &self,
+        since_hours: u32,
+        bucket_hours: u32,
+    ) -> Result<Vec<VpnStatsRow>> {
+        let bucket_seconds = i64::from(bucket_hours)
+            .checked_mul(3600)
+            .filter(|seconds| *seconds > 0)
+            .ok_or_else(|| SqliteInventoryError::Invalid("bucket_hours must be > 0".into()))?;
         let rows = sqlx::query(
-            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
-             FROM vpn_connection_stats
-             WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             ORDER BY ts DESC",
+            "SELECT
+                MAX(last_sample_ts) AS ts,
+                server_id,
+                NULL AS user_id,
+                COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
+                COALESCE(SUM(download_bytes), 0) AS download_bytes,
+                COALESCE(MAX(active_connections_peak), 0) AS active_connections
+             FROM vpn_server_hourly
+             WHERE hour >= strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1)
+             GROUP BY CAST(strftime('%s', hour) AS INTEGER) / ?2, server_id
+             ORDER BY ts DESC, server_id",
         )
         .bind(format!("-{since_hours} hours"))
+        .bind(bucket_seconds)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
+    /// Weighted totals over the last `since_hours` aligned hourly buckets,
+    /// one compact row per server.
+    pub async fn weighted_vpn_traffic_by_server(
+        &self,
+        since_hours: u32,
+    ) -> Result<Vec<(ServerId, u64)>> {
+        if since_hours == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT
+                stats.server_id AS server_id,
+                CAST(SUM(
+                    (stats.upload_bytes + stats.download_bytes)
+                    * COALESCE(servers.usage_coefficient, 1.0)
+                ) AS INTEGER) AS total_bytes
+             FROM vpn_server_hourly stats
+             JOIN servers ON servers.id = stats.server_id
+             WHERE stats.hour >= strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1)
+             GROUP BY stats.server_id",
+        )
+        .bind(format!("-{} hours", since_hours - 1))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let server_id: String = row.try_get("server_id")?;
+            let total_bytes: i64 = row.try_get("total_bytes")?;
+            out.push((ServerId(server_id), total_bytes.max(0) as u64));
+        }
+        Ok(out)
     }
 
     /// Phase 4b — single-query rollup of server-wide live activity
@@ -5326,8 +5436,8 @@ impl SqliteInventory {
         &self,
         days: u32,
         limit: u32,
-    ) -> Result<Vec<(UserId, u64)>> {
-        let cutoff = format!("-{days} days");
+    ) -> Result<Vec<HeavyUser>> {
+        let cutoff = format!("-{} days", days.saturating_sub(1));
         // Weight each daily row by its server's `usage_coefficient`
         // before the per-user sum, mirroring the raw-tick path so the
         // heavy-users ranking is consistent whichever table feeds it.
@@ -5335,16 +5445,16 @@ impl SqliteInventory {
         // is the identity.
         let rows = sqlx::query(
             "SELECT d.user_id AS user_id,
-                    CAST(
-                        COALESCE(SUM((d.upload_bytes + d.download_bytes)
-                                     * COALESCE(sv.usage_coefficient, 1.0)), 0)
-                        AS INTEGER
-                    ) AS total
+                    CAST(SUM(d.upload_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
+                    CAST(SUM(d.download_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
              FROM vpn_user_daily d
              JOIN servers sv ON sv.id = d.server_id
              WHERE d.date >= strftime('%Y-%m-%d', 'now', ?1)
              GROUP BY d.user_id
-             ORDER BY total DESC
+             ORDER BY SUM((d.upload_bytes + d.download_bytes)
+                          * COALESCE(sv.usage_coefficient, 1.0)) DESC
              LIMIT ?2",
         )
         .bind(&cutoff)
@@ -5354,8 +5464,14 @@ impl SqliteInventory {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let uid: String = r.try_get("user_id")?;
-            let total: i64 = r.try_get("total")?;
-            out.push((UserId(uid), total.max(0) as u64));
+            let up = r.try_get::<i64, _>("up_b")?.max(0) as u64;
+            let down = r.try_get::<i64, _>("down_b")?.max(0) as u64;
+            out.push(HeavyUser {
+                user_id: UserId(uid),
+                upload_bytes: up,
+                download_bytes: down,
+                total_bytes: up.saturating_add(down),
+            });
         }
         Ok(out)
     }
@@ -5977,6 +6093,7 @@ impl SqliteInventory {
         nic_iface: Option<&str>,
         nic_rx_bytes: Option<u64>,
         nic_tx_bytes: Option<u64>,
+        sing_box_nrestarts: Option<u64>,
     ) -> Result<()> {
         // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
@@ -5987,9 +6104,10 @@ impl SqliteInventory {
               disk_used_mib, disk_total_mib,
               mem_available_mib, mem_total_mib,
               load_1min_x100, listening_ports_json, sing_box_log_bytes,
-              kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes)
+              kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+              sing_box_nrestarts)
              VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .bind(&server_id.0)
         .bind(sb)
@@ -6005,6 +6123,7 @@ impl SqliteInventory {
         .bind(nic_iface)
         .bind(nic_rx_bytes.and_then(|n| i64::try_from(n).ok()))
         .bind(nic_tx_bytes.and_then(|n| i64::try_from(n).ok()))
+        .bind(sing_box_nrestarts.and_then(|n| i64::try_from(n).ok()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -6022,7 +6141,8 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                    sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
@@ -6045,7 +6165,8 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                    sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
              ORDER BY ts DESC, rowid DESC
@@ -6948,6 +7069,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let nic_iface: Option<String> = r.try_get("nic_iface")?;
     let nic_rx: Option<i64> = r.try_get("nic_rx_bytes")?;
     let nic_tx: Option<i64> = r.try_get("nic_tx_bytes")?;
+    let nrestarts: Option<i64> = r.try_get("sing_box_nrestarts")?;
     Ok(NodeHealthRow {
         ts,
         server_id: ServerId(server_id),
@@ -6964,6 +7086,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         nic_iface,
         nic_rx_bytes: nic_rx.and_then(|n| u64::try_from(n).ok()),
         nic_tx_bytes: nic_tx.and_then(|n| u64::try_from(n).ok()),
+        sing_box_nrestarts: nrestarts.and_then(|n| u64::try_from(n).ok()),
     })
 }
 
@@ -7193,6 +7316,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn network_key_ipv4_collapses_to_24() {
+        // Same /24 → identical key; a different /24 → distinct key.
+        assert_eq!(network_key("91.79.36.72"), "91.79.36");
+        assert_eq!(network_key("91.79.36.200"), "91.79.36");
+        assert_ne!(network_key("91.79.37.1"), "91.79.36");
+    }
+
+    #[test]
+    fn network_key_ipv6_privacy_addresses_in_one_64_collapse() {
+        // The 2026-07-29 fix: rotating IPv6 privacy addresses share their
+        // top 64 bits, so they MUST collapse to one key (the old verbatim
+        // behaviour made one phone look like many distinct networks).
+        let a = network_key("2001:db8:abcd:0012::1");
+        let b = network_key("2001:db8:abcd:0012:7334:1111:2222:3333");
+        let c = network_key("2001:db8:abcd:0012:9f00:aaaa:bbbb:cccc");
+        assert_eq!(a, b, "two privacy addrs in one /64 must share a key");
+        assert_eq!(b, c, "a third privacy addr in the same /64 too");
+        // A different /64 stays distinct.
+        assert_ne!(network_key("2001:db8:abcd:0013::1"), a);
+    }
+
+    #[test]
+    fn network_key_malformed_input_stays_safe() {
+        // Garbage neither panics nor merges with a real prefix — it stays
+        // its own single verbatim bucket.
+        assert_eq!(network_key("not-an-ip"), "not-an-ip");
+        assert_eq!(network_key(""), "");
+        assert_eq!(network_key("999.999.1.1"), "999.999.1.1");
+    }
+
     #[tokio::test]
     async fn migrations_apply_and_tables_exist() -> Result<()> {
         let inv = fresh().await;
@@ -7329,6 +7483,10 @@ mod tests {
             (UserId("u".into()), "172.20.5.5".into()),  // RFC1918 172.16-31
             (UserId("u".into()), "127.0.0.1".into()),   // loopback
             (UserId("u".into()), "169.254.9.9".into()), // link-local
+            (UserId("u".into()), "::1".into()),         // IPv6 loopback
+            (UserId("u".into()), "fe80::1".into()),     // IPv6 link-local
+            (UserId("u".into()), "fd12:3456::1".into()), // IPv6 ULA
+            (UserId("u".into()), "2001:db8::1".into()), // public IPv6 — KEEP
         ])
         .await?;
         let mut ips: Vec<String> = inv
@@ -7340,8 +7498,12 @@ mod tests {
         ips.sort();
         assert_eq!(
             ips,
-            vec!["172.32.5.5".to_string(), "203.0.113.9".to_string()],
-            "only the two real public clients survive; server/control/LAN/loopback/link-local all dropped"
+            vec![
+                "172.32.5.5".to_string(),
+                "2001:db8::1".to_string(),
+                "203.0.113.9".to_string(),
+            ],
+            "only public clients survive; server/control/LAN/loopback/link-local/ULA all dropped"
         );
         Ok(())
     }

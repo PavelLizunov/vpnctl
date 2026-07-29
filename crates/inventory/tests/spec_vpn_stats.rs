@@ -184,6 +184,64 @@ async fn recent_for_server_includes_both_user_and_server_wide_rows() {
     assert_eq!(server_wide_count, 1, "the NULL-user row must be present");
 }
 
+#[tokio::test]
+async fn recent_fleet_stats_collapse_users_per_chart_bucket_without_losing_bytes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+
+    let deltas: Vec<_> = (0..200)
+        .map(|i| ud(Some("user"), i + 1, 2, i as u32))
+        .collect();
+    inv.record_vpn_stats(&ServerId("s1".into()), &deltas)
+        .await
+        .unwrap();
+
+    let rows = inv.recent_vpn_stats_fleet(24, 24).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "dashboard cardinality must be poll minutes, not per-user rows"
+    );
+    assert_eq!(rows[0].server_id, ServerId("s1".into()));
+    assert_eq!(rows[0].user_id, None);
+    assert_eq!(rows[0].upload_bytes, 20_100);
+    assert_eq!(rows[0].download_bytes, 400);
+    assert_eq!(rows[0].active_connections, 199);
+
+    inv.record_vpn_stats(&ServerId("s1".into()), &[ud(None, 5, 6, 300)])
+        .await
+        .unwrap();
+    let rows = inv.recent_vpn_stats_fleet(24, 24).await.unwrap();
+    assert_eq!(rows.len(), 1, "same-hour ticks must UPSERT one bucket");
+    assert_eq!(rows[0].upload_bytes, 20_105);
+    assert_eq!(rows[0].download_bytes, 406);
+    assert_eq!(rows[0].active_connections, 300);
+    assert!(inv.recent_vpn_stats_fleet(24, 0).await.is_err());
+}
+
+#[tokio::test]
+async fn weighted_fleet_traffic_by_server_returns_one_scaled_total_per_server() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("s1", 2.0)).await.unwrap();
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(Some("user"), 10, 20, 1), ud(None, 4, 6, 1)],
+    )
+    .await
+    .unwrap();
+
+    let rows = inv.weighted_vpn_traffic_by_server(24).await.unwrap();
+    assert_eq!(rows, vec![(ServerId("s1".into()), 80)]);
+    assert!(
+        inv.weighted_vpn_traffic_by_server(0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 // 5. since_hours = 0 excludes everything (strict ts > now-0).
 #[tokio::test]
 async fn since_hours_zero_excludes_everything() {
@@ -681,9 +739,11 @@ async fn phase5a1_top_users_by_daily_traffic_orders_desc_and_respects_limit() {
 
     let top = inv.top_users_by_daily_traffic(1, 2).await.unwrap();
     assert_eq!(top.len(), 2, "limit=2 must cap");
-    assert_eq!(top[0].0.0, "bob", "bob (2000) is top");
-    assert_eq!(top[0].1, 2000);
-    assert_eq!(top[1].0.0, "charlie", "charlie (1000) is second");
+    assert_eq!(top[0].user_id.0, "bob", "bob (2000) is top");
+    assert_eq!(top[0].upload_bytes, 1000);
+    assert_eq!(top[0].download_bytes, 1000);
+    assert_eq!(top[0].total_bytes, 2000);
+    assert_eq!(top[1].user_id.0, "charlie", "charlie (1000) is second");
 }
 
 #[tokio::test]
@@ -1197,12 +1257,14 @@ async fn top_users_by_daily_traffic_ranks_by_weighted_bytes() {
     let top = inv.top_users_by_daily_traffic(1, 10).await.unwrap();
     assert_eq!(top.len(), 2);
     assert_eq!(
-        top[0].0.0, "alice",
+        top[0].user_id.0, "alice",
         "alice (×2 → 2M) outranks bob (×1 → 1M) on the daily-rollup path too"
     );
-    assert_eq!(top[0].1, 2_000_000);
-    assert_eq!(top[1].0.0, "bob");
-    assert_eq!(top[1].1, 1_000_000);
+    assert_eq!(top[0].upload_bytes, 1_000_000);
+    assert_eq!(top[0].download_bytes, 1_000_000);
+    assert_eq!(top[0].total_bytes, 2_000_000);
+    assert_eq!(top[1].user_id.0, "bob");
+    assert_eq!(top[1].total_bytes, 1_000_000);
 }
 
 // attribution_stall_servers: a server is "stalled" iff, within the

@@ -6,7 +6,10 @@
 //!
 //! # What it collects
 //!
-//! - **systemd:** `systemctl is-active sing-box`, `is-active fail2ban`
+//! - **systemd:** `systemctl is-active sing-box`, `is-active fail2ban`,
+//!   plus sing-box's monotonic `NRestarts` counter (`systemctl show`)
+//!   so the health monitor can detect a crash+auto-restart that happens
+//!   BETWEEN two probes (both samples read `active`)
 //! - **disk:** `df -BM /` (root filesystem usage; logs/db live here)
 //! - **memory:** `/proc/meminfo` MemTotal + MemAvailable
 //! - **load:** `/proc/loadavg` 1-min average
@@ -121,6 +124,19 @@ pub struct Probe {
     /// partial-success symmetry).
     pub nic_rx_bytes: Option<u64>,
     pub nic_tx_bytes: Option<u64>,
+
+    // ─── Restart detection — monotonic systemd counter ───────────
+    /// sing-box's monotonic systemd `NRestarts` counter
+    /// (`systemctl show -p NRestarts --value sing-box`). Counts how
+    /// many times systemd has restarted the unit since the counter
+    /// was last reset (host reboot / `systemctl reset-failed`). The
+    /// health monitor diffs consecutive readings: an INCREASE means
+    /// sing-box OOM/crashed and was auto-restarted BETWEEN two probes
+    /// even though both samples report `active` — the gap the plain
+    /// `sing_box_active` down/up detector can never see. `None` when
+    /// `systemctl show` was unreadable (non-systemd host, old systemd
+    /// without `NRestarts`, or a tick where the command failed).
+    pub sing_box_nrestarts: Option<u64>,
 }
 
 impl Probe {
@@ -187,6 +203,14 @@ for s in sing-box fail2ban; do
     state=$(systemctl is-active "$s" 2>/dev/null || true)
     echo "SVC $s ${state:-unknown}"
 done
+# sing-box monotonic restart counter. `is-active` only sees the state AT
+# each probe, so a sing-box that OOMs and is auto-restarted BETWEEN two
+# ten-minute probes shows `active` at both samples and the down detector
+# never fires. NRestarts (systemd ≥ v235) is monotonic since the last
+# host reboot / `systemctl reset-failed`; the daemon diffs consecutive
+# readings and alerts on an increase. Empty value (no systemd / no
+# NRestarts support) is swallowed → parser leaves the field NULL.
+echo "NRESTARTS $(systemctl show -p NRestarts --value sing-box 2>/dev/null || true)"
 # root filesystem usage in MiB (avoid -h since human suffix varies)
 df -BM / 2>/dev/null | awk 'NR==2 {gsub(/M/,"",$3); gsub(/M/,"",$2); print "DISK /  " $3 "  " $2}' || true
 # meminfo — MemTotal + MemAvailable in MiB (1 MiB = 1024 kB)
@@ -438,6 +462,19 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
                     any_parsed = true;
                 }
             }
+            "NRESTARTS" => {
+                // NRESTARTS <count> — monotonic systemd restart counter
+                // for sing-box. Empty value (systemctl failed / no
+                // NRestarts support) yields no token → leave the field
+                // None rather than treating it as zero (zero is a real,
+                // meaningful reading: "unit never restarted").
+                if let Some(n) = parts.next()
+                    && let Ok(count) = n.parse::<u64>()
+                {
+                    probe.sing_box_nrestarts = Some(count);
+                    any_parsed = true;
+                }
+            }
             _ => continue,
         }
     }
@@ -488,6 +525,7 @@ LOG_SB 308432
 VER sing-box 1.13.12
 VER caddy 2.8.4
 NIC ens18 123456789 987654321
+NRESTARTS 3
 PROBE_OK
 ";
 
@@ -524,6 +562,28 @@ PROBE_OK
         assert_eq!(p.nic_iface.as_deref(), Some("ens18"));
         assert_eq!(p.nic_rx_bytes, Some(123_456_789));
         assert_eq!(p.nic_tx_bytes, Some(987_654_321));
+        // Restart detection — NRESTARTS line parses into the monotonic
+        // systemd counter the health monitor diffs across samples.
+        assert_eq!(p.sing_box_nrestarts, Some(3));
+    }
+
+    #[test]
+    fn nrestarts_line_parses_and_handles_absent_or_empty() {
+        // A present counter parses (including zero — a real reading).
+        let zero = parse_probe_output("SVC sing-box active\nNRESTARTS 0\nPROBE_OK\n").unwrap();
+        assert_eq!(zero.sing_box_nrestarts, Some(0));
+        // No NRESTARTS line (non-systemd host / old systemd) → None, NOT
+        // zero — the monitor must distinguish "no signal" from "never
+        // restarted".
+        let absent = parse_probe_output("SVC sing-box active\nPROBE_OK\n").unwrap();
+        assert_eq!(absent.sing_box_nrestarts, None);
+        // Empty value (the script's `|| true` swallowed a failure) emits a
+        // bare tag with no token → None.
+        let empty = parse_probe_output("SVC sing-box active\nNRESTARTS\nPROBE_OK\n").unwrap();
+        assert_eq!(empty.sing_box_nrestarts, None);
+        // Non-numeric junk → None (parser rejects, field stays unset).
+        let junk = parse_probe_output("SVC sing-box active\nNRESTARTS abc\nPROBE_OK\n").unwrap();
+        assert_eq!(junk.sing_box_nrestarts, None);
     }
 
     #[test]

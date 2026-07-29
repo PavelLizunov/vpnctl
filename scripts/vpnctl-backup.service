@@ -10,9 +10,12 @@ After=vpnctld.service
 Type=oneshot
 User=user
 Group=user
-# The script is read-only on the production state (snap → archive → scp).
-# It needs write access to /tmp (mkdir staging) and read access to
-# /var/lib/vpnctl, /etc/vpnctl, /opt/vpnctl/assets.
+# The script is read-only on the production state EXCEPT the durable
+# backup dir: it snapshots → archives → age-encrypts → writes the final
+# .tar.zst.age to /var/lib/vpnctl/backups (BACKUP_DIR) → scp off-host.
+# So it needs write access to /tmp (scratch staging) AND the exact
+# backups dir, and read access to /var/lib/vpnctl, /etc/vpnctl,
+# /opt/vpnctl/assets.
 ExecStart=/usr/local/bin/vpnctl-backup.sh
 # Hardening: minimal capabilities. The script runs sqlite3 + tar + zstd
 # + age + scp; none need elevated privileges if the inv.db is readable
@@ -20,7 +23,14 @@ ExecStart=/usr/local/bin/vpnctl-backup.sh
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/tmp
+# /tmp = scratch staging (wiped by the script's EXIT trap).
+# /var/lib/vpnctl/backups = the DURABLE deliverable dir: the encrypted
+#   bundle is written HERE and must survive an scp failure for manual
+#   recovery. This more-specific path wins over ReadOnlyPaths=/var/lib/vpnctl
+#   below, so ONLY backups/ is writable — inv.db and the rest of
+#   /var/lib/vpnctl stay read-only. (The dir is created at install time;
+#   mkdir -p on an existing dir needs no write on the read-only parent.)
+ReadWritePaths=/tmp /var/lib/vpnctl/backups
 ReadOnlyPaths=/var/lib/vpnctl /etc/vpnctl /opt/vpnctl
 PrivateTmp=true
 # Surface failures to journalctl with a reasonable timeout.

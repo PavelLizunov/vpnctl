@@ -140,6 +140,13 @@ const BACKEND_SERVER_CIDR: &str = "10.7.0.1/24";
 /// packages; this kernel can't rely on that.
 const WGTURN_CORE_PINNED_SHA: &str = "af0f209f99f8381356fbae82d9b0f64d4af4bdcf";
 
+/// Pinned SHA-256 of the official Go toolchain tarball downloaded by
+/// `ensure_installed`. Source: `https://go.dev/dl/` — each release
+/// publishes a `.sha256` sidecar (fetched 2026-07-29 from
+/// `https://dl.google.com/go/go1.24.4.linux-amd64.tar.gz.sha256`).
+/// Bumping the Go version REQUIRES re-fetching the new digest.
+const GO_TARBALL_SHA256: &str = "77e5da33bb72aeaef1ba4418b6fe511bc4d041873cbf82e5aa6318740df98717";
+
 /// Multi-file bundle delimiter. `render_config` emits text in this
 /// format; `apply_config` parses it. Format:
 ///
@@ -258,6 +265,10 @@ impl Kernel for WgTurn {
                 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "${{GO_PINNED_VERSION}}"; then
                     cd /tmp
                     curl -fsSL -o "$GO_TARBALL" "https://go.dev/dl/$GO_TARBALL"
+                    # Verify the tarball digest BEFORE extraction. The
+                    # pinned SHA-256 comes from the official go.dev/dl
+                    # .sha256 sidecar (see GO_TARBALL_SHA256).
+                    echo "{go_sha256}  $GO_TARBALL" | sha256sum -c - >/dev/null
                     rm -rf /usr/local/go
                     tar -C /usr/local -xzf "$GO_TARBALL"
                     rm -f "$GO_TARBALL"
@@ -354,6 +365,7 @@ UNIT
             command -v wg-quick
         "#,
             iface = BACKEND_INTERFACE_NAME,
+            go_sha256 = GO_TARBALL_SHA256,
         );
         ssh.exec(&script).await?;
         Ok(())
@@ -694,7 +706,27 @@ fn wgturn_apply_script() -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use vpnctl_core::{Server, ServerId, UserId};
+    use std::sync::Mutex;
+    use vpnctl_core::{Server, ServerId, SshTransport, UserId};
+
+    #[derive(Debug, Default)]
+    struct CaptureSsh(Mutex<Option<String>>);
+
+    #[async_trait::async_trait]
+    impl SshTransport for CaptureSsh {
+        async fn exec(&self, cmd: &str) -> vpnctl_core::Result<String> {
+            *self.0.lock().unwrap() = Some(cmd.to_string());
+            Ok(String::new())
+        }
+
+        async fn upload(&self, _path: &str, _content: &[u8]) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &str) -> vpnctl_core::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
 
     /// Drop `#`-comment lines from a rendered shell script so a doc/inline
     /// comment that mentions a command token (e.g. "exit 1") can't be
@@ -956,6 +988,33 @@ mod tests {
                 .all(|c| c.is_ascii_hexdigit()),
             "pin must be all hex: {WGTURN_CORE_PINNED_SHA}"
         );
+    }
+
+    #[test]
+    fn ensure_installed_verifies_go_tarball_sha256_before_extraction() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let ssh = CaptureSsh::default();
+        let kernel = WgTurn::new();
+        let mut future = std::pin::pin!(kernel.ensure_installed(&ssh));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+        let script = ssh.0.lock().unwrap().clone().unwrap();
+
+        assert!(script.contains(GO_TARBALL_SHA256));
+        let verify = script
+            .find("sha256sum -c -")
+            .expect("sha256sum verification missing");
+        let extract = script
+            .find("tar -C /usr/local -xzf")
+            .expect("tar extraction missing");
+        assert!(
+            verify < extract,
+            "SHA-256 verification must happen BEFORE tar extraction"
+        );
+        assert_eq!(GO_TARBALL_SHA256.len(), 64);
+        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

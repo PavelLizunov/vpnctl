@@ -198,7 +198,7 @@ fn foot(lang: crate::i18n::Locale) -> Markup {
     html! {
         div.ed-foot {
             div.ed-foot__l {
-                span { "vpnctld " (env!("CARGO_PKG_VERSION")) }
+                span { "vpnctld " (vpnctl_core::build_version()) }
                 // The admin UI is server-rendered with maud; htmx was
                 // considered for the wizard but never landed (every
                 // mutation today is a plain POST + 303 redirect, no
@@ -500,7 +500,7 @@ fn dashboard_summary_bar(
             span.ed-sumbar__stat { b { (conns_now) } " " (tr(lang, "conns now", "подкл. сейчас")) }
             span.ed-sumbar__live {
                 span.ed-sumbar__dot {}
-                "vpnctld " b { (env!("CARGO_PKG_VERSION")) } " "
+                "vpnctld " b { (vpnctl_core::build_version()) } " "
                 em { (tr(lang, "live", "активен")) }
             }
         }
@@ -885,12 +885,8 @@ fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
 }
 
 /// PR-Dash dash#2 — real fleet traffic totals beside the activity
-/// chart. Sums upload + download bytes over the picked window
-/// (weighted by `usage_coefficient`) and the prior equal-length window,
-/// reporting the window total ↑↓ plus a Δ% vs the prior window. Reuses
-/// the already-loaded `recent_vpn_stats_fleet` rows — the caller passes
-/// rows for TWICE the window so this fn can split current vs prior
-/// Rust-side without a second query.
+/// chart. Uses the same aligned buckets as the chart so the bars and
+/// totals cannot disagree at a day boundary.
 ///
 /// `coeffs` maps each server to its `usage_coefficient`; unknown
 /// servers default to 1.0.
@@ -901,31 +897,38 @@ fn dashboard_fleet_traffic_totals(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    use chrono::Utc;
-    let window_hours = (window.cells * window.bucket_hours) as i64;
-    let now = Utc::now();
-    let cur_start = now - chrono::Duration::hours(window_hours);
-    let prior_start = now - chrono::Duration::hours(window_hours * 2);
+    use chrono::{DurationRound, TimeDelta, Utc};
+    let bucket_seconds = i64::from(window.bucket_hours) * 3600;
+    let Ok(now) = Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+        return html! {};
+    };
+    let cur_start =
+        now - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds);
+    let prior_start = cur_start - TimeDelta::seconds(i64::from(window.cells) * bucket_seconds);
 
-    // Only the server-wide rows (user_id IS NULL) carry the full
-    // node traffic — per-user rows are a SUBSET of the same bytes, so
-    // summing both would double-count. Match `vpn_traffic_chart`'s
-    // intent: server-wide totals.
+    // Sum ALL rows (per-user attributed + unattributed remainder).
+    // Since the NM-11 attribution fix the server-wide row holds only
+    // the unattributed remainder, so filtering to user_id IS NULL
+    // undercounts by the attributed share. Match `vpn_traffic_chart`
+    // which already sums every row.
     let weight = |sid: &vpnctl_core::ServerId| -> f64 { coeffs.get(sid).copied().unwrap_or(1.0) };
     let mut cur_up = 0f64;
     let mut cur_dn = 0f64;
     let mut prior_total = 0f64;
     for r in rows {
-        if r.user_id.is_some() {
+        let Ok(row_bucket) = r.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+            continue;
+        };
+        if row_bucket > now {
             continue;
         }
         let w = weight(&r.server_id);
         let up = r.upload_bytes as f64 * w;
         let dn = r.download_bytes as f64 * w;
-        if r.ts >= cur_start {
+        if row_bucket >= cur_start {
             cur_up += up;
             cur_dn += dn;
-        } else if r.ts >= prior_start {
+        } else if row_bucket >= prior_start {
             prior_total += up + dn;
         }
     }
@@ -1328,12 +1331,11 @@ async fn dashboard_render(
     let since_hours = window.cells * window.bucket_hours;
     // PR-Dash dash#2 — pull TWICE the window so the real-traffic card
     // can compute Δ% vs the prior equal-length window Rust-side (no
-    // second query). The chart below only buckets rows inside the
-    // visible window — older rows fall outside its `buckets_ago` range
-    // and are ignored — so the wider pull is free for the chart.
+    // second query). Inventory reads the ingest-time hourly rollup,
+    // not every user's raw poll row.
     let fleet_rows = state
         .inv
-        .recent_vpn_stats_fleet(since_hours.saturating_mul(2))
+        .recent_vpn_stats_fleet(since_hours.saturating_mul(2), window.bucket_hours)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
@@ -1344,24 +1346,18 @@ async fn dashboard_render(
         .await
         .map_err(internal_error)?;
 
-    // Heavy users — top-5 bandwidth consumers over the selected
-    // window (was hardcoded 24h pre-2026-05-23). Same data source
-    // as before; tile heading + caption reflect the chosen window.
-    let heavy_users = state
-        .inv
-        .top_users_by_traffic(since_hours, 5)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
-            Vec::new()
-        });
-
-    // Phase 4b — per-server live activity rollup for the dashboard
-    // «VPN activity» tile. ONE call returns one entry per known
-    // server (defaults to zeros for unpolled servers); we sum +
-    // pass the per-server breakdown to the renderer.
-    let live_activity = state.inv.all_servers_live_activity(since_hours).await.unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "all_servers_live_activity failed");
+    // Heavy users — raw ticks for 24h, existing daily rollups for
+    // longer windows. The tile heading follows the selected window.
+    let heavy_users = if window.bucket_hours >= 24 {
+        state
+            .inv
+            .top_users_by_daily_traffic(since_hours.div_ceil(24), 5)
+            .await
+    } else {
+        state.inv.top_users_by_traffic(since_hours, 5).await
+    }
+    .unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
         Vec::new()
     });
 
@@ -1422,17 +1418,25 @@ async fn dashboard_render(
 
     // PR-Dash dash#1 — "active conns now" per server, read from the
     // in-memory clash-api snapshot cache (no DB round-trip). `None`
-    // when the poller has never reached the server.
+    // when the poller has never reached the server OR the last snapshot
+    // went stale (polling stopped) — `get_live` gates on ~2 poll
+    // intervals so a frozen snapshot can't keep reporting a live count.
     let active_conns_now: Vec<(vpnctl_core::ServerId, Option<usize>)> = server_list_fleet
         .iter()
         .map(|s| {
             let n = state
                 .snapshot_cache
-                .get(&s.id)
+                .get_live(&s.id)
                 .map(|snap| snap.snapshot.connections.len());
             (s.id.clone(), n)
         })
         .collect();
+    let live_activity = dashboard_live_activity_from_rows(
+        &server_list_fleet,
+        &active_conns_now,
+        &fleet_rows,
+        window,
+    );
 
     // Dashboard 1b — health feed: newest 5 unacked alerts + the unacked
     // total for the eyebrow. Quiet-dashboard contract: empty ⇒ no card.
@@ -1476,28 +1480,18 @@ async fn dashboard_render(
         .map(|s| (s.id.clone(), s.usage_coefficient))
         .collect();
 
-    // PR-Dash dash#1 — fixed 24h server-wide traffic per server (the
-    // "traffic 24h" column is independent of the window picker).
-    // Summed Rust-side from the already-loaded `fleet_rows` (which span
-    // 2× the picked window ⊇ 24h for every window ≥ 24h; for narrower
-    // pulls we just sum whatever 24h subset is present), weighted by
-    // usage coefficient. Server-wide rows only (user_id IS NULL) so we
-    // don't double-count the per-user subset.
-    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = {
-        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-        let mut map: std::collections::HashMap<vpnctl_core::ServerId, u64> =
-            std::collections::HashMap::new();
-        for r in &fleet_rows {
-            if r.user_id.is_some() || r.ts < cutoff {
-                continue;
-            }
-            let w = coeffs.get(&r.server_id).copied().unwrap_or(1.0);
-            let bytes = (r.upload_bytes.saturating_add(r.download_bytes) as f64 * w) as u64;
-            let entry = map.entry(r.server_id.clone()).or_insert(0);
-            *entry = entry.saturating_add(bytes);
-        }
-        map
-    };
+    // Fixed 24h fleet-table column is independent of the selected chart
+    // bucket. Read the same compact hourly rollup as the chart.
+    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = state
+        .inv
+        .weighted_vpn_traffic_by_server(24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "weighted_vpn_traffic_by_server failed");
+            Vec::new()
+        })
+        .into_iter()
+        .collect();
 
     let conns_now: usize = active_conns_now.iter().filter_map(|(_, c)| *c).sum();
 
@@ -1530,6 +1524,22 @@ async fn dashboard_render(
             div.ed-dash-cols {
                 (dashboard_abuse_summary(&likely_shared, lang))
                 (dashboard_health_feed(&recent_alerts, unacked_total, lang))
+            }
+            // Issue 5 — the 24h / 7d / 30d / all traffic picker moved to
+            // the Activity tab in the dashboard split, which hid it from
+            // the Overview landing glance (Overview shows only a fixed 24h
+            // fleet table). Surface a clear pointer so the existing
+            // multi-window traffic history stays discoverable — a link, not
+            // a duplicated chart/query.
+            div style="margin-top: 14px;" {
+                a href="/admin/activity#vpn-traffic"
+                  style="display: inline-block; font-family: var(--mono); font-size: 12px; color: var(--mute); text-decoration: none; border: 1px solid var(--rule); border-radius: 3px; padding: 4px 10px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "Traffic history · 1 / 7 / 30 days →",
+                        "История трафика · 1 / 7 / 30 дней →",
+                    ))
+                }
             }
         }
 
@@ -1707,9 +1717,78 @@ fn dashboard_fleet_uptime(
     }
 }
 
-/// Phase 4b — dashboard «VPN activity» tile. Sums per-server
-/// server-wide totals from `all_servers_live_activity(24)` and
-/// shows: total bytes, active conns now, per-server breakdown.
+fn dashboard_live_activity_from_rows(
+    servers: &[vpnctl_core::Server],
+    active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    window: VpnSparklineWindow,
+) -> Vec<(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)> {
+    use chrono::{DurationRound, TimeDelta, Utc};
+
+    let bucket_seconds = i64::from(window.bucket_hours) * 3600;
+    let now = Utc::now()
+        .duration_trunc(TimeDelta::seconds(bucket_seconds))
+        .ok();
+    let oldest = now.map(|end| {
+        end - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds)
+    });
+
+    let mut by_server: std::collections::HashMap<
+        vpnctl_core::ServerId,
+        vpnctl_inventory::ServerLiveActivity,
+    > = servers
+        .iter()
+        .map(|server| {
+            (
+                server.id.clone(),
+                vpnctl_inventory::ServerLiveActivity::default(),
+            )
+        })
+        .collect();
+
+    if let (Some(oldest), Some(now)) = (oldest, now) {
+        for row in rows {
+            let Ok(row_bucket) = row.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+                continue;
+            };
+            if row_bucket < oldest || row_bucket > now {
+                continue;
+            }
+            let Some(activity) = by_server.get_mut(&row.server_id) else {
+                continue;
+            };
+            let is_latest = activity.last_sample_ts.is_none_or(|last| row.ts > last);
+            activity.bytes_up_window = activity.bytes_up_window.saturating_add(row.upload_bytes);
+            activity.bytes_dn_window = activity.bytes_dn_window.saturating_add(row.download_bytes);
+            if is_latest {
+                activity.last_sample_ts = Some(row.ts);
+                activity.active_now = row.active_connections;
+            }
+        }
+    }
+
+    // A fresh in-memory snapshot is more authoritative than the persisted
+    // aggregate. Missing/stale cache entries fall back to the latest row.
+    for (server_id, count) in active_conns {
+        if let (Some(activity), Some(count)) = (by_server.get_mut(server_id), count) {
+            activity.active_now = u32::try_from(*count).unwrap_or(u32::MAX);
+        }
+    }
+
+    servers
+        .iter()
+        .map(|server| {
+            (
+                server.id.clone(),
+                by_server.remove(&server.id).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Phase 4b — dashboard «VPN activity» tile. Sums the already-loaded
+/// chart buckets per server and shows total bytes, active conns now,
+/// and the per-server breakdown.
 /// Renders even when the poller has zero data so the operator
 /// sees the structure (instead of guessing whether the section
 /// would EVER appear). Empty-state copy points at the NM-11
@@ -1952,8 +2031,10 @@ fn internal_error(err: anyhow::Error) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         // Opaque body — see doc-comment. Pinned by
-        // `internal_error_body_does_not_leak_anyhow_chain`.
-        error_text("internal error — see journalctl -u vpnctld"),
+        // `internal_error_body_does_not_leak_anyhow_chain`. No terminal
+        // instruction here (operator-action policy): the full chain lives
+        // in the structured log, the operator just gets an honest retry.
+        error_text("internal error — please retry the action"),
     )
         .into_response()
 }
@@ -2116,8 +2197,8 @@ pub(crate) async fn monitoring(
             h1.ed-sumbar__h { (tr(lang, "Fleet ", "Здоровье ")) em { (tr(lang, "health", "флота")) } }
             span.ed-tip title=(tr(
                 lang,
-                "node_probe runs on a fixed tick over SSH: systemctl state per kernel, disk/mem/load, log sizes, listening ports. Unknown probes are excluded from uptime denominators.",
-                "node_probe ходит по SSH с фиксированным тиком: состояние systemctl по каждому ядру, диск/память/load, размеры логов, слушающие порты. Неопределённые пробы не входят в знаменатель uptime.",
+                "node_probe runs on a fixed tick over SSH: service state per kernel, disk/mem/load, log sizes, listening ports. Unknown probes are excluded from uptime denominators.",
+                "node_probe ходит по SSH с фиксированным тиком: состояние сервисов по каждому ядру, диск/память/load, размеры логов, слушающие порты. Неопределённые пробы не входят в знаменатель uptime.",
             )) { "ⓘ" }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (probeable_total) " " (tr(lang, "nodes", "нод"))
@@ -2197,8 +2278,8 @@ pub(crate) async fn monitoring(
                 (tr(lang, "Uptime · sing-box service", "Uptime · сервис sing-box")) " "
                 span.ed-tip title=(tr(
                     lang,
-                    "Rolling-window aggregate over sing_box_active from the node_probe poller. «up» = systemctl reports active at probe time; unknown probes are excluded from the denominator.",
-                    "Скользящие окна sing_box_active от node_probe-поллера. «up» = systemctl показал active в момент пробы; неопределённые пробы не входят в знаменатель.",
+                    "Rolling-window aggregate over sing_box_active from the node_probe poller. «up» = the service reports active at probe time; unknown probes are excluded from the denominator.",
+                    "Скользящие окна sing_box_active от node_probe-поллера. «up» = сервис показал active в момент пробы; неопределённые пробы не входят в знаменатель.",
                 )) { "ⓘ" }
             }
             table.ed-grid style="margin-top: 8px;" {
@@ -2749,8 +2830,8 @@ pub(crate) async fn servers(
             span.ed-tip
                 title=(crate::i18n::tr(
                     lang,
-                    "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest), or use `vpnctl bootstrap` then `vpnctl deploy` from the CLI.",
-                    "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон), либо `vpnctl bootstrap` затем `vpnctl deploy` в CLI.",
+                    "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest) — it bootstraps secrets and deploys the config automatically.",
+                    "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон) — он сам создаст секреты и задеплоит конфиг.",
                 )) { "ⓘ" }
             // Fleet actions live top-right of the header (densify 2a).
             // Both stream via admin.js [data-sse-url]; their log panes
@@ -2856,12 +2937,10 @@ pub(crate) async fn servers(
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No servers yet. Click ", "Серверов ещё нет. Кликни "))
                 span.ed-mono { (crate::i18n::tr(lang, "add server →", "добавить сервер →")) }
-                (crate::i18n::tr(lang, " above, or run ", " выше, или запусти "))
-                span.ed-mono { "vpnctl bootstrap <id> --address <addr> --root-password <pw>" }
                 (crate::i18n::tr(
                     lang,
-                    " on a fresh node and refresh.",
-                    " на свежей ноде и обнови страницу.",
+                    " above and the wizard will bootstrap a fresh node — then refresh.",
+                    " выше, и мастер подготовит свежую ноду — затем обнови страницу.",
                 ))
             }
         } @else {
@@ -3017,7 +3096,9 @@ pub(crate) async fn users(
     let mut live_conns_per_user: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     for server in &servers_list {
-        if let Some(snap) = state.snapshot_cache.get(&server.id) {
+        // `get_live`: a stale snapshot (polling stopped) must not keep
+        // painting users as connected on this fleet overview.
+        if let Some(snap) = state.snapshot_cache.get_live(&server.id) {
             for connection in &snap.snapshot.connections {
                 if let Some(user_id) = connection.metadata.user.as_deref() {
                     *live_conns_per_user.entry(user_id.to_string()).or_default() += 1;
@@ -3189,11 +3270,7 @@ pub(crate) async fn users(
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
                 span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
-                (crate::i18n::tr(lang, ", or use ", ", либо запусти "))
-                span.ed-mono { "vpnctl user create <id>" }
-                (crate::i18n::tr(lang, " from the CLI. Then grant server access via ", " в CLI. Затем выдай доступ к серверу через "))
-                span.ed-mono { "vpnctl grant <user> <server>" }
-                (crate::i18n::tr(lang, " (web UI lands in C-3.3).", " (web UI приедет в C-3.3)."))
+                (crate::i18n::tr(lang, ". Then grant server access with the per-server toggles on the user's page.", ". Затем выдай доступ к серверу переключателями на странице юзера."))
             }
         } @else if pairs.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
@@ -4649,11 +4726,9 @@ async fn user_detail_render(
                                                 span.ed-mono { "wireguard" }
                                                 (crate::i18n::tr(
                                                     lang,
-                                                    " protocol need to be enabled on a node first (CLI: ",
-                                                    " протокол должны быть сначала включены на ноде (CLI: ",
+                                                    " protocol need to be enabled on the server first — open its Settings page, add the protocol and kernel, then redeploy.",
+                                                    " протокол должны быть сначала включены на сервере — открой страницу настроек сервера, добавь протокол и ядро, затем задеплой.",
                                                 ))
-                                                span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
-                                                ")."
                                             }
                                         }
                                     } @else {
@@ -4677,9 +4752,7 @@ async fn user_detail_render(
                                             span.ed-mono { "wireguard.server_public_key" }
                                             " / "
                                             span.ed-mono { "wireguard.server_private_key" }
-                                            (crate::i18n::tr(lang, " server secret — check ", " серверного секрета — проверь "))
-                                            span.ed-mono { "journalctl -u vpnctld" }
-                                            "."
+                                            (crate::i18n::tr(lang, " server secret — open the server's Settings page to review its secrets.", " серверного секрета — открой страницу настроек сервера и проверь секреты."))
                                         }
                                     }
                                 } @else {
@@ -4770,11 +4843,9 @@ async fn user_detail_render(
                                             }
                                             (crate::i18n::tr(
                                                 lang,
-                                                " — but AmneziaVPN link rendering failed (check ",
-                                                " — но рендер AmneziaVPN-ссылки провалился (проверь ",
+                                                " — but AmneziaVPN link rendering failed (open the server's Settings page to review its secrets).",
+                                                " — но рендер AmneziaVPN-ссылки провалился (открой страницу настроек сервера и проверь секреты).",
                                             ))
-                                            span.ed-mono { "journalctl -u vpnctld" }
-                                            ")."
                                         }
                                     }
                                 } @else {
@@ -5132,11 +5203,9 @@ async fn user_detail_render(
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
                     (crate::i18n::tr(
                         lang,
-                        "No servers in the inventory yet. Run ",
-                        "Серверов в инвентаре ещё нет. Запусти ",
+                        "No servers in the inventory yet. Add one from the Servers page wizard (paste IP + root password).",
+                        "Серверов в инвентаре ещё нет. Добавь сервер через мастер на странице серверов (вставь IP + root-пароль).",
                     ))
-                    span.ed-mono { "vpnctl bootstrap <id> --address <ip> --root-password <pw>" }
-                    (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
                 }
             } @else {
                 ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
@@ -5328,11 +5397,9 @@ async fn user_detail_render(
                         p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
                             (crate::i18n::tr(
                                 lang,
-                                "No share-links could be rendered (missing secrets or unregistered protocols). Check ",
-                                "Не удалось отрендерить ни одной ссылки (нет секретов или протокол не зарегистрирован). Смотри ",
+                                "No share-links could be rendered (missing secrets or unregistered protocols). Open each server's Settings page to review its secrets.",
+                                "Не удалось отрендерить ни одной ссылки (нет секретов или протокол не зарегистрирован). Открой страницу настроек каждого сервера и проверь секреты.",
                             ))
-                            span.ed-mono { "journalctl -u vpnctld" }
-                            (crate::i18n::tr(lang, " for warnings.", " — там будут warnings."))
                         }
                     } @else {
                         ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--soft);" {
@@ -5724,7 +5791,9 @@ async fn user_online_badge(
     let mut unresolved: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for sid in server_ids {
-        let Some(snap) = state.snapshot_cache.get(sid) else {
+        // `get_live`: the 🟢 online badge must NOT light up from a
+        // snapshot the poller stopped refreshing (~2 intervals stale).
+        let Some(snap) = state.snapshot_cache.get_live(sid) else {
             continue;
         };
         for c in &snap.snapshot.connections {
@@ -6354,7 +6423,7 @@ async fn ua_clusters_section(
                 div.ed-rule {}
                 div.ed-art-eyebrow { (crate::i18n::tr(lang, "UA fingerprint", "Отпечаток User-Agent")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "(temporarily unavailable — see journalctl)"
+                    "(temporarily unavailable — please retry)"
                 }
             };
         }
@@ -7374,7 +7443,7 @@ async fn live_vpn_stats_section(
                 div.ed-rule {}
                 div.ed-art-eyebrow { (tr(lang, "Live VPN stats", "Живая статистика VPN")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    (tr(lang, "(temporarily unavailable — see journalctl)", "(временно недоступно — смотри journalctl)"))
+                    (tr(lang, "(temporarily unavailable — please retry)", "(временно недоступно — повтори попытку)"))
                 }
             };
         }
@@ -7887,6 +7956,24 @@ pub(crate) async fn user_mint_tuic_password(
                     "audit write failed for user.mint_tuic_password — mutation already committed"
                 );
             }
+            // Auto-deploy — the new password must land on every granted
+            // node so the protocol accepts it (same contract as
+            // grant/revoke auto-deploy).
+            let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %user_id_str,
+                    error = %e,
+                    "servers_for_user failed; tuic mint not auto-applied — use Deploy all"
+                );
+                Vec::new()
+            });
+            spawn_user_servers_redeploy(
+                &state,
+                servers,
+                user_id_str.clone(),
+                "user.mint_tuic_password",
+            );
         }
         // Already had a password — idempotent no-op, no audit spam.
         Ok(false) => {}
@@ -7955,6 +8042,20 @@ pub(crate) async fn user_regen_wireguard(
             "audit write failed for user.wireguard.regen — mutation already committed"
         );
     }
+
+    // Auto-deploy — the new pubkey must land on every granted node's
+    // [Peer] list; without this the old key stays active and the new
+    // config fails (same contract as grant/revoke auto-deploy).
+    let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "servers_for_user failed; wireguard regen not auto-applied — use Deploy all"
+        );
+        Vec::new()
+    });
+    spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), "user.wireguard.regen");
 
     Redirect::to(&format!(
         "/admin/users/{}/delivery",
@@ -9070,13 +9171,13 @@ pub(crate) async fn server_enable_protocol(
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
 
     // Existence check (404 if no server).
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     // Reject unregistered protocol id — persisting a typo would
     // silently no-op every render+deploy from now on.
     if state.registry.protocol(&pid).is_none() {
@@ -9100,8 +9201,8 @@ pub(crate) async fn server_enable_protocol(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `newly_added` flag inside is honest-but-buried.
-    if inserted == 1
-        && let Err(e) = state
+    if inserted == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9113,12 +9214,21 @@ pub(crate) async fn server_enable_protocol(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.protocol.enable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.protocol.enable"
+            );
+        }
+        // Auto-deploy — the protocol change must land on the node;
+        // without this the rendered config diverges from inventory.
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.protocol.enable",
         );
     }
 
@@ -9139,13 +9249,13 @@ pub(crate) async fn server_disable_protocol(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let removed = match state.inv.remove_server_protocol(&sid, &pid).await {
         Ok(n) => n,
@@ -9155,8 +9265,8 @@ pub(crate) async fn server_disable_protocol(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `was_present` flag inside is honest-but-buried.
-    if removed == 1
-        && let Err(e) = state
+    if removed == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9168,12 +9278,19 @@ pub(crate) async fn server_disable_protocol(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.protocol.disable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.protocol.disable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.protocol.disable",
         );
     }
 
@@ -9773,13 +9890,13 @@ pub(crate) async fn server_enable_kernel(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let kid = vpnctl_core::KernelId(kernel_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     // Reject unregistered kernel id — same posture as
     // server_enable_protocol: persisting a typo would silently no-op
     // every deploy.
@@ -9804,8 +9921,8 @@ pub(crate) async fn server_enable_kernel(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `newly_added` flag inside is honest-but-buried.
-    if inserted == 1
-        && let Err(e) = state
+    if inserted == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9817,12 +9934,19 @@ pub(crate) async fn server_enable_kernel(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.kernel.enable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.kernel.enable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.kernel.enable",
         );
     }
 
@@ -9842,13 +9966,13 @@ pub(crate) async fn server_disable_kernel(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let kid = vpnctl_core::KernelId(kernel_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let removed = match state.inv.remove_server_kernel(&sid, &kid).await {
         Ok(n) => n,
@@ -9858,8 +9982,8 @@ pub(crate) async fn server_disable_kernel(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `was_present` flag inside is honest-but-buried.
-    if removed == 1
-        && let Err(e) = state
+    if removed == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9871,12 +9995,19 @@ pub(crate) async fn server_disable_kernel(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.kernel.disable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.kernel.disable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.kernel.disable",
         );
     }
 
@@ -12652,7 +12783,7 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                     }
                     None => {
                         em style="color: var(--mute);" {
-                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                            (tr(lang, "(missing — use the «update now» button below)", "(отсутствует — нажми «обновить сейчас» ниже)"))
                         }
                     }
                 }
@@ -12670,7 +12801,7 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                     }
                     None => {
                         em style="color: var(--mute);" {
-                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                            (tr(lang, "(missing — use the «update now» button below)", "(отсутствует — нажми «обновить сейчас» ниже)"))
                         }
                     }
                 }
@@ -12680,21 +12811,21 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
             @if any_loaded {
                 (tr(
                     lang,
-                    "Update once a month with ",
-                    "Обновлять раз в месяц через ",
+                    "Update once a month with the ",
+                    "Обновлять раз в месяц кнопкой ",
                 ))
             } @else {
                 (tr(
                     lang,
-                    "Drop fresh MMDB files into the dir + restart the daemon, or run ",
-                    "Положи свежие MMDB-файлы в папку + перезапусти демон, либо запусти ",
+                    "Drop fresh MMDB files into the dir + restart the daemon, or use the ",
+                    "Положи свежие MMDB-файлы в папку + перезапусти демон, либо используй ",
                 ))
             }
-            span.ed-mono { "vpnctl geoip-update" }
+            span.ed-mono { (tr(lang, "update now", "обновить сейчас")) }
             (tr(
                 lang,
-                " on the daemon host. The command downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir. Restart vpnctld for the new DB to load.",
-                " на хосте демона. Команда скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Перезапусти vpnctld чтобы новая БД загрузилась.",
+                " button below. It downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir, then reloads the DB.",
+                " ниже. Она скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке, затем перезагружает БД.",
             ))
         }
         // ── «update now» button (Phase 3c, CSP-safe since 2026-06-10) ──
@@ -12720,8 +12851,8 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                    style="font-family: var(--mono); font-size: 12px; padding: 6px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); cursor: pointer;"
                    title=(tr(
                        lang,
-                       "Spawn the `vpnctl geoip-update` subprocess on the daemon host and stream its progress here. Same action the monthly systemd timer fires.",
-                       "Запустить `vpnctl geoip-update` на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный systemd timer.",
+                       "Spawn the geoip-update subprocess on the daemon host and stream its progress here. Same action the monthly timer fires.",
+                       "Запустить подпроцесс geoip-update на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный таймер.",
                    )) {
                 (tr(lang, "update now", "обновить сейчас"))
             }
@@ -13035,12 +13166,10 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     }
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    (crate::i18n::tr(lang, "Restore-in-place is a ", "Восстановление поверх живой БД — это команда "))
-                    span.ed-mono { "vpnctl restore <snapshot>" }
                     (crate::i18n::tr(
                         lang,
-                        " CLI command (daemon can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
-                        " в CLI (демон не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
+                        "Restore-in-place is a CLI command (the daemon's restore subcommand — it can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
+                        "Восстановление поверх живой БД — это CLI-команда (подкоманда restore демона — он не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
                     ))
                 }
             }
@@ -13144,11 +13273,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         ": " (e)
                         (crate::i18n::tr(
                             lang,
-                            ". Most likely the daemon user doesn't have access — check ",
-                            ". Скорее всего у пользователя демона нет доступа — проверь ",
+                            ". Most likely the daemon user doesn't have access — check the permissions on the daemon's data directory.",
+                            ". Скорее всего у пользователя демона нет доступа — проверь права на каталог данных демона.",
                         ))
-                        span.ed-mono { "ls -la /var/lib/vpnctl/" }
-                        "."
                     }
                 }
             }
@@ -13552,11 +13679,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         span.ed-mono { (crate::i18n::tr(lang, "«push deploy key»", "«push deploy key»")) }
                         (crate::i18n::tr(
                             lang,
-                            " button. The daemon handles the SSH dance for you — no manual ",
-                            " кнопка. Демон делает SSH-танец сам — без ручного ",
+                            " button. The daemon handles the SSH dance for you — no manual SSH login or ",
+                            " кнопка. Демон делает SSH-танец сам — без ручного SSH-логина или редактирования ",
                         ))
-                        span.ed-mono { "ssh root@…" }
-                        (crate::i18n::tr(lang, " or ", " или редактирования "))
                         span.ed-mono { "authorized_keys" }
                         (crate::i18n::tr(
                             lang,
@@ -13570,12 +13695,10 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         (crate::i18n::tr(lang, "Public key file unreadable: ", "Публичный ключ не читается: ")) (e)
                         (crate::i18n::tr(lang, ". Most common cause: ", ". Чаще всего: "))
                         span.ed-mono { "/var/lib/vpnctl/.ssh" }
-                        (crate::i18n::tr(lang, " not writable by the daemon. Check ", " недоступен на запись демону. Проверь "))
-                        span.ed-mono { "ls -la /var/lib/vpnctl/" }
                         (crate::i18n::tr(
                             lang,
-                            "; vpnctld writes there as the systemd-unit user (typically ",
-                            "; vpnctld пишет туда из-под пользователя systemd-юнита (обычно ",
+                            " not writable by the daemon. Check its directory permissions; vpnctld writes there as the systemd-unit user (typically ",
+                            " недоступен на запись демону. Проверь права на каталог; vpnctld пишет туда из-под пользователя systemd-юнита (обычно ",
                         ))
                         span.ed-mono { "user" } ")."
                     }
@@ -14721,7 +14844,7 @@ pub(crate) async fn wizard_step2_sse(
                 error = %e,
                 "wizard SSE event serialisation failed — emitting placeholder"
             );
-            format!("{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}")
+            format!("{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}")
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
     });
@@ -14807,7 +14930,7 @@ pub(crate) async fn server_deploy_sse(
                 "redeploy SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -14939,7 +15062,7 @@ fn deploy_servers_sse_response(state: &AppState, servers: Vec<vpnctl_core::Serve
                 "deploy-all SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15016,7 +15139,7 @@ pub(crate) async fn server_update_kernels_sse(
                 "update-kernels SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15080,7 +15203,7 @@ pub(crate) async fn servers_update_kernels_all_sse(
                 "update-kernels-all SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15169,7 +15292,7 @@ pub(crate) async fn settings_geoip_update_now_sse(
                 "geoip-update SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"stream\":\"stderr\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"stream\":\"stderr\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15392,9 +15515,11 @@ async fn server_detail_render(
     // Best-effort: a detector error renders no banner, not a 500.
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.unwrap_or(false);
 
-    // Design v2 3e — is the clash-api poller currently holding a
+    // Design v2 3e — is the clash-api poller currently holding a LIVE
     // snapshot for this node (checklist row «clash api reachable»).
-    let clash_ok = state.snapshot_cache.get(&sid).is_some();
+    // `get_live`: a stale snapshot (polling stopped) must read as
+    // NOT reachable, not keep a green «reachable» row from a frozen tick.
+    let clash_ok = state.snapshot_cache.get_live(&sid).is_some();
 
     // Design v2 3d — Grants-tab-only data: grant dates (migration
     // 0039), WHICH granted users still await a deploy, per-user live
@@ -15419,7 +15544,9 @@ async fn server_detail_render(
             .into_iter()
             .collect();
         let mut presence: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        if let Some(snap) = state.snapshot_cache.get(&sid) {
+        // `get_live`: per-user live conns on this node must drop out once
+        // the snapshot goes stale (polling stopped).
+        if let Some(snap) = state.snapshot_cache.get_live(&sid) {
             for c in &snap.snapshot.connections {
                 if let Some(uid) = c.metadata.user.as_deref() {
                     *presence.entry(uid.to_string()).or_default() += 1;
@@ -15509,8 +15636,10 @@ async fn server_detail_render(
     // Phase 4c+4d — last clash-api snapshot + log-derived
     // attribution for the «Live connections» drill-down. None
     // when the poller has never reached this server (fresh
-    // daemon start / no key / etc).
-    let last_server_snap = state.snapshot_cache.get(&sid);
+    // daemon start / no key / etc) OR the last snapshot went stale
+    // (`get_live`: polling stopped → the live connection tables must
+    // collapse to their empty state, not render a frozen tick as live).
+    let last_server_snap = state.snapshot_cache.get_live(&sid);
     // Phase 5a-2 — bulk-fetch cached PTR hostnames for unique
     // destination IPs in the snapshot. Used to enrich the «top
     // destinations» table — `35.217.1.178:50005` becomes
@@ -15637,17 +15766,21 @@ async fn server_detail_render(
             Vec::new()
         });
 
-    // server#4 — per-server traffic sparkline. Window slug picked from
-    // `?vpn_window=` (shared shape with dashboard + user-detail); rows
-    // are server-wide (`recent_vpn_stats_for_server`).
+    // server#4 — per-server traffic sparkline. Reuse the fleet's compact
+    // hourly rollup and retain only this server.
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
     let traffic_since_hours = traffic_window.cells * traffic_window.bucket_hours;
     let traffic_rows = state
         .inv
-        .recent_vpn_stats_for_server(&sid, traffic_since_hours)
+        .recent_vpn_stats_fleet(traffic_since_hours, traffic_window.bucket_hours)
         .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|row| row.server_id == sid)
+                .collect()
+        })
         .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "recent_vpn_stats_for_server failed");
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server traffic rollup query failed");
             Vec::new()
         });
 
@@ -16264,12 +16397,12 @@ async fn server_detail_render(
                     tr {
                         td { (ok(latest.as_ref().and_then(|h| h.sing_box_active) == Some(true))) }
                         td { b { "sing-box " (crate::i18n::tr(lang, "service active", "сервис активен")) } }
-                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                        td.num.ed-grid__mut.ed-grid__sm { "service active" }
                     }
                     tr {
                         td { (ok(latest.as_ref().and_then(|h| h.fail2ban_active) == Some(true))) }
                         td { b { "fail2ban " (crate::i18n::tr(lang, "active · sshd jail", "активен · sshd jail")) } }
-                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                        td.num.ed-grid__mut.ed-grid__sm { "service active" }
                     }
                     tr {
                         td { (ok(server.trusted_host_fingerprint.is_some())) }
@@ -16466,8 +16599,8 @@ fn server_detail_uptime_section(
                 " "
                 span.ed-tip title=(tr(
                     lang,
-                    "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means systemctl reported active at probe time; unknown probes are excluded from the denominator.",
-                    "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что systemctl показал active; неопределённые пробы не входят в знаменатель.",
+                    "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means the service reported active at probe time; unknown probes are excluded from the denominator.",
+                    "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что сервис показал active; неопределённые пробы не входят в знаменатель.",
                 )) { "ⓘ" }
             }
             table.ed-grid style="margin-top: 8px;" {
@@ -16499,8 +16632,8 @@ fn server_detail_uptime_section(
                         div style="color: #e6a23c;" {
                             (tr(
                                 lang,
-                                "Most recent probe is >20 min old — poller may be stalled. Check journalctl on 236.",
-                                "Последняя проба старше 20 минут — поллер может быть остановлен. Проверь journalctl на 236.",
+                                "Most recent probe is >20 min old — the poller may be stalled. Use the manual sweep button on this page to refresh.",
+                                "Последняя проба старше 20 минут — поллер может быть остановлен. Нажми кнопку ручного сканирования на этой странице, чтобы обновить.",
                             ))
                         }
                     }
@@ -17826,8 +17959,8 @@ fn server_detail_reserved_ports_section(
         div.ed-art-eyebrow
             title=(tr(
                 lang,
-                "Per-server allowlist of ports the daemon must NEVER bind via sing-box. Use when a co-tenant service (legacy 3x-ui Docker container, separate xray, another VPN stack) owns one of the standard ports — vpnctl deploys are refused fail-closed if any rendered inbound would collide.",
-                "Список портов на этом сервере, которые демону ЗАПРЕЩЕНО занимать через sing-box. Используется когда на хосте уже крутится сторонний сервис (legacy 3x-ui Docker, отдельный xray, другой VPN-стек) на стандартном порту — vpnctl deploy отказывается, если какой-то рендеренный inbound попытается их занять, fail-closed.",
+                "Per-server allowlist of ports the daemon must NEVER bind via sing-box. Use when a co-tenant service (legacy 3x-ui Docker container, separate xray, another VPN stack) owns one of the standard ports — deploys are refused fail-closed if any rendered inbound would collide.",
+                "Список портов на этом сервере, которые демону ЗАПРЕЩЕНО занимать через sing-box. Используется когда на хосте уже крутится сторонний сервис (legacy 3x-ui Docker, отдельный xray, другой VPN-стек) на стандартном порту — деплой отказывается, если какой-то рендеренный inbound попытается их занять, fail-closed.",
             )) {
                 (tr(lang, "RESERVED PORTS", "ЗАРЕЗЕРВИРОВАННЫЕ ПОРТЫ"))
             }

@@ -392,3 +392,8 @@ fn hysteria2_missing_password_is_error() {
         "expected Err when tuic_password is absent; got {res:?}",
     );
 }
+
+#[test]
+fn vless_reality_listen_ports_is_empty() {
+    assert!(VlessReality::new().listen_ports().is_empty());
+}

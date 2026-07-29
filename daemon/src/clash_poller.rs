@@ -198,6 +198,43 @@ fn delta(prior: u64, new: u64) -> u64 {
     if new < prior { new } else { new - prior }
 }
 
+/// True when `ip` is a REAL external client for the purposes of the
+/// per-snapshot sharing signal — the daemon-side mirror of the inventory's
+/// SQL `real_client_ip_predicate`, so every signal agrees on «what is a real
+/// client». Drops:
+///   * non-public space (RFC 1918 / loopback / link-local) via
+///     [`crate::ip_kind::classify_ip`],
+///   * the hardcoded control egress(es) in
+///     [`vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS`],
+///   * registered VPN server addresses (`known_server_addrs`) — a node hop or
+///     full-tunnel egress. Without this last clause a VPN-over-VPN hop (user
+///     on node A egressing through node B) shows node A's address as a second
+///     «network» and becomes the strongest, rotation-immune sharing signal for
+///     a single legitimate user. The SQL signals already exclude these via
+///     `NOT IN (SELECT address FROM servers)`; this keeps the concurrency term
+///     consistent with them.
+fn is_real_client_ip(ip: &str, known_server_addrs: &std::collections::HashSet<&str>) -> bool {
+    crate::ip_kind::classify_ip(ip) == crate::ip_kind::IpKind::Public
+        && !vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS.contains(&ip)
+        && !known_server_addrs.contains(ip)
+}
+
+/// Realistic homelab cadence: rapid enough that the UI feels live (5-min
+/// sparkline buckets), slow enough that an idle node + idle homelab pull
+/// ~12 polls/h × few hundred bytes. Configurable via env var
+/// `VPNCTLD_POLL_INTERVAL_SECS` — useful for tests (short) or quiet seasons
+/// (long). Module-level so the snapshot-cache staleness check can track
+/// whatever cadence the poller actually runs at.
+pub(crate) const DEFAULT_INTERVAL_SECS: u64 = 5 * 60;
+
+/// The configured clash-api poll interval in seconds (env
+/// `VPNCTLD_POLL_INTERVAL_SECS` or the 5-min default). Shared with the
+/// snapshot cache so «stale» means «no successful poll for ~2 of whatever
+/// interval the poller is on» rather than a hardcoded wall-clock guess.
+pub(crate) fn poll_interval_secs() -> u64 {
+    crate::config::parse_positive_secs("VPNCTLD_POLL_INTERVAL_SECS", DEFAULT_INTERVAL_SECS)
+}
+
 /// Phase Track-3 chunk 4 — daemon-side scheduler that pulls one
 /// clash-api snapshot from each server every `POLL_INTERVAL` and
 /// records the diff. The "engine" half (DiffEngine) lives above;
@@ -238,16 +275,11 @@ pub fn spawn_clash_poller(
     use std::time::Duration;
     use tokio::time::{MissedTickBehavior, interval};
 
-    /// Realistic homelab cadence: rapid enough that the UI feels
-    /// live (5-min sparkline buckets), slow enough that an idle
-    /// node + idle homelab pull ~12 polls/h × few hundred bytes.
-    /// Configurable via env var `VPNCTLD_POLL_INTERVAL_SECS` —
-    /// useful for tests (short) or quiet seasons (long).
-    const DEFAULT_INTERVAL_SECS: u64 = 5 * 60;
     // `> 0` guard + warn-on-bad lives in `config::parse_positive_secs`:
-    // `interval(Duration::from_secs(0))` panics → poller crash-loop.
-    let interval_secs =
-        crate::config::parse_positive_secs("VPNCTLD_POLL_INTERVAL_SECS", DEFAULT_INTERVAL_SECS);
+    // `interval(Duration::from_secs(0))` panics → poller crash-loop. The
+    // default + env knob live in `poll_interval_secs` (shared with the
+    // snapshot-cache staleness check).
+    let interval_secs = poll_interval_secs();
 
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(interval_secs));
@@ -292,20 +324,37 @@ pub fn spawn_clash_poller(
                 snapshot_cache.forget(&id);
             }
 
+            // Registered server addresses, so the per-snapshot sharing
+            // signal can drop VPN-over-VPN hops — the same `NOT IN
+            // (SELECT address FROM servers)` semantics the SQL-side
+            // `real_client_ip_predicate` applies to every other signal.
+            let known_server_addrs: std::collections::HashSet<&str> =
+                servers.iter().map(|s| s.address.as_str()).collect();
+
             for server in &servers {
-                poll_one_server(&inv, &mut engine, &snapshot_cache, server).await;
+                poll_one_server(
+                    &inv,
+                    &mut engine,
+                    &snapshot_cache,
+                    server,
+                    &known_server_addrs,
+                )
+                .await;
             }
         }
     })
 }
 
 /// One-server tick. Pure side-effect, never panics — every error
-/// is logged at warn-or-info and swallowed.
+/// is logged at warn-or-info and swallowed. `known_server_addrs` is the
+/// set of registered server addresses this tick, used to keep VPN-over-VPN
+/// hops out of the per-snapshot sharing signal (see [`is_real_client_ip`]).
 async fn poll_one_server(
     inv: &SqliteInventory,
     engine: &mut DiffEngine,
     snapshot_cache: &crate::snapshot_cache::SnapshotCache,
     server: &vpnctl_core::Server,
+    known_server_addrs: &std::collections::HashSet<&str>,
 ) {
     // Only sing-box nodes expose clash-api at 9090. AmneziaWG nodes are
     // skipped here — their per-user source IPs are collected separately by
@@ -453,19 +502,17 @@ async fn poll_one_server(
     // user's distinct-IP count right now. Infra / private / control IPs are
     // excluded (never a real concurrent client). Persist the DAILY PEAK.
     {
-        // Count distinct /24 NETWORKS, not raw IPs — a single mobile device
-        // rotates across many IPs within one carrier /24, so raw-IP counting
-        // would fake concurrency. Two distinct /24s in one snapshot ⇒ two
-        // separate access networks online together.
+        // Count distinct access NETWORKS, not raw IPs — a single mobile
+        // device rotates across many addresses within one carrier prefix, so
+        // raw-IP counting would fake concurrency. Two distinct networks in
+        // one snapshot ⇒ two separate access networks online together.
         let mut per_user_nets: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (u, ip) in &source_ip_pairs {
-            if crate::ip_kind::classify_ip(ip) == crate::ip_kind::IpKind::Public
-                && !vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS.contains(&ip.as_str())
-            {
+            if is_real_client_ip(ip, known_server_addrs) {
                 per_user_nets
                     .entry(u.0.clone())
                     .or_default()
-                    .insert(vpnctl_inventory::sqlite::ipv4_net24(ip));
+                    .insert(vpnctl_inventory::sqlite::network_key(ip));
             }
         }
         let peaks: Vec<(vpnctl_core::UserId, u32)> = per_user_nets
@@ -557,6 +604,36 @@ async fn poll_one_server(
 mod tests {
     use super::*;
     use crate::clash_api::{Connection, ConnectionMeta};
+
+    /// Issue 3 — the concurrency/sharing filter must drop registered server
+    /// addresses (a VPN-over-VPN hop) exactly like the SQL-side signals do,
+    /// alongside the control egress and non-public space. Otherwise a single
+    /// user egressing node A→B shows node A as a second «network» and trips
+    /// the dominant, rotation-immune sharing signal on their own.
+    #[test]
+    fn is_real_client_ip_excludes_known_server_hops_control_and_private() {
+        // Two registered VPN server addresses.
+        let known: std::collections::HashSet<&str> =
+            ["104.194.156.93", "51.15.42.10"].into_iter().collect();
+
+        // A genuine remote client passes.
+        assert!(is_real_client_ip("8.8.8.8", &known));
+
+        // A VPN-over-VPN hop (another registered node's address) is NOT a
+        // real client — this is the regression the fix targets.
+        assert!(
+            !is_real_client_ip("104.194.156.93", &known),
+            "a registered server address must not count as a concurrent client"
+        );
+        assert!(!is_real_client_ip("51.15.42.10", &known));
+
+        // The hardcoded control egress stays excluded.
+        assert!(!is_real_client_ip("83.97.108.34", &known));
+
+        // Non-public space stays excluded.
+        assert!(!is_real_client_ip("192.168.0.207", &known));
+        assert!(!is_real_client_ip("127.0.0.1", &known));
+    }
 
     fn conn(id: &str, user: &str, up: u64, dn: u64) -> Connection {
         Connection {

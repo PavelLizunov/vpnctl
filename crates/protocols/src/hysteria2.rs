@@ -89,19 +89,27 @@ impl Protocol for Hysteria2 {
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
-        // Our Hysteria2 inbound has NO `obfs:` parameter (see
-        // `server_inbound` below — bare TLS 1.3 QUIC handshake on a
-        // fixed UDP/8444). Without Salamander obfs the QUIC version
-        // tag + handshake pattern fingerprints Hy2 reliably; TSPU
-        // (RU) has been actively dropping Hy2 traffic since early
-        // 2026 based on community reports + my own probe data
-        // (see CLAUDE.md NM-11 / NM-12 discussion). GFW (CN) the
-        // same.
+        // The tier is a property of the WIRE FORMAT across the whole
+        // fleet, not a per-server config, so it can't inspect whether
+        // THIS server has the Salamander secret.
         //
-        // To upgrade to Moderate: configure `obfs.type = salamander`
-        // + `obfs.password = <secret>` in server_inbound + share-link
-        // so the demuxer scrambles the QUIC bytes before they hit
-        // the wire. Until that lands, Weak is the honest tier.
+        // `server_inbound` / `client_config` / `share_link` DO render
+        // `obfs.type = salamander` whenever `hysteria2.obfs.password`
+        // is present (see `obfs_password` below) — every server that
+        // passes through a deploy gets the secret minted
+        // (`bootstrap_server_secrets`). But minting is deploy-triggered
+        // and idempotent with NO fleet-wide backfill, so a legacy
+        // server enabled before the obfs spec existed and never
+        // re-deployed still renders bare TLS 1.3 QUIC on UDP/8444.
+        // Without Salamander the QUIC version tag + handshake pattern
+        // fingerprints Hy2 reliably; TSPU (RU) has actively dropped Hy2
+        // since early 2026 (CLAUDE.md NM-11 / NM-12), GFW (CN) the same.
+        //
+        // Because we can't guarantee every enabled server carries the
+        // secret, Weak stays the honest conservative tier. The tooltip
+        // (DpiRisk::Weak) spells out the conditional: legacy servers
+        // without the secret are the fingerprintable ones; re-deploy
+        // mints it.
         vpnctl_core::DpiRisk::Weak
     }
 

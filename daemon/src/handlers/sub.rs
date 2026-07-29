@@ -120,13 +120,40 @@ pub(crate) async fn get(
         }
     };
 
+    // Egress exemption (parity with the prod `/api/v1/app/config`
+    // endpoint, RL-1): a VPN-connected client's `/sub` refresh EGRESSES
+    // its node, so vpnctld sees the SERVER's IP. N users on one server
+    // collapse into ONE shared per-IP bucket — and worse, one user's
+    // retry-storm could escalate that shared egress IP into a 24h
+    // persistent ban, severing EVERY user on the node. Known server
+    // addresses are therefore exempt from the shared per-IP axis (both
+    // the ban check and the bucket / ban-escalation below); they remain
+    // protected by the per-TOKEN axis, which runs after resolve and is
+    // keyed per user. The decision uses the spoof-proof `sec_peer_ip`
+    // (X-Real-IP), so an attacker can't forge an egress IP to dodge the
+    // per-IP ban (CWE-345) — same resolver the prod endpoint trusts.
+    let is_egress = match sec_peer_ip {
+        Some(addr) if !addr.is_unspecified() => state
+            .inv
+            .is_known_server_address(&addr.to_string())
+            .await
+            .unwrap_or(false), // DB hiccup → treat as non-egress (fail toward throttling)
+        _ => false,
+    };
+    // Single source of truth for "which IP (if any) drives the per-IP
+    // axis" — shared with the prod endpoint (`ip_to_throttle`). `None`
+    // for egress nodes and for unknown/unspecified sources; both per-IP
+    // blocks below key off this so egress traffic neither consumes nor
+    // triggers the shared per-IP ban.
+    let per_ip_ip = crate::handlers::vpn_router::ip_to_throttle(sec_peer_ip, is_egress);
+
     // Phase Track-2 chunk 2: persistent ban check runs BEFORE the
     // bucket math — a banned IP is rejected without spending any
     // bucket tokens. The ban table is indexed on (kind, key,
     // until_ts) so the lookup is sub-millisecond. Keyed on the
     // spoof-proof `sec_peer_ip` (X-Real-IP) so a third party can't be
     // banned by prepending their IP to leftmost-XFF (CWE-345).
-    if let Some(addr) = sec_peer_ip {
+    if let Some(addr) = per_ip_ip {
         let ip_str = addr.to_string();
         match state.inv.is_banned("ip", &ip_str).await {
             Ok(Some(secs)) => return rate_limited(secs, "ip-ban"),
@@ -151,7 +178,10 @@ pub(crate) async fn get(
     // leftmost-XFF `real_peer_ip` — both the bucket key and the
     // escalated `add_ban` below must resist the leftmost-XFF
     // victim-ban attack (CWE-345). Parity with `vpn_router::get_config`.
-    if let Some(addr) = sec_peer_ip {
+    // `per_ip_ip` is `None` for egress nodes (exempted above), so a
+    // shared VPN-egress IP never consumes this bucket nor trips the
+    // `add_ban` escalation — those users ride the per-token axis only.
+    if let Some(addr) = per_ip_ip {
         if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr) {
             // Phase Track-2 chunk 2: escalate to a persistent ban EXACTLY
             // when the denial counter crosses K. Using `==` (not `>=`)

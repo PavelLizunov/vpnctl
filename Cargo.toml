@@ -14,6 +14,14 @@ members = [
 ]
 
 [workspace.package]
+# Single source of truth for the product version. Every member inherits
+# it via `version.workspace = true` so the daemon, CLI and library crates
+# can never drift apart (previously each hardcoded its own version).
+# Bump intentionally per the release rule in README §Production health;
+# per-build provenance is the git SHA baked in at compile time via
+# `vpnctl_core::build_version()` (VPNCTL_BUILD_SHA, exported by
+# scripts/deploy.sh before cargo build) — NOT a SemVer change.
+version = "0.9.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["slovn"]

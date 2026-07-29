@@ -266,6 +266,38 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
         }
     }
 
+    // ── sing-box restarts between probes (monotonic counter) ───────
+    // `sing_box_active` only sees the state AT each sample, so a sing-box
+    // that OOMs / crashes and is auto-restarted BETWEEN two probes reads
+    // `active` at both and the down detector never fires. systemd's
+    // monotonic `NRestarts` closes that gap: an INCREASE means one or more
+    // restarts happened in the interval.
+    //
+    // Guard rails:
+    //  * Both samples must carry a reading (`if let (Some, Some)`) — the
+    //    first observation of a counter has no baseline to diff, so it is
+    //    silent. This also means a pre-existing high counter on first pair
+    //    (e.g. 5 → 5) does NOT alert; only a genuine increase does.
+    //  * `c > p` only. A DECREASE (`c < p`) is a counter reset — host
+    //    reboot or `systemctl reset-failed` — NOT a negative restart count;
+    //    treat it as a no-op so a reboot doesn't fire a phantom alert.
+    if let (Some(p), Some(c)) = (prev.sing_box_nrestarts, cur.sing_box_nrestarts)
+        && c > p
+    {
+        out.push(AlertEvent {
+            kind: "server.singbox.restarted",
+            resolves: None,
+            severity: "warning",
+            summary: format!(
+                "sing-box was restarted {} time(s) between probes (NRestarts {p} → {c}) — likely an OOM/crash; systemd auto-restarted it",
+                c - p
+            ),
+            payload: serde_json::json!({
+                "prior": p, "current": c, "delta": c - p
+            }),
+        });
+    }
+
     out
 }
 
@@ -1352,7 +1384,16 @@ mod tests {
             nic_iface: None,
             nic_rx_bytes: None,
             nic_tx_bytes: None,
+            sing_box_nrestarts: None,
         }
+    }
+
+    /// `row(...)` with the sing-box `NRestarts` counter set — the restart
+    /// detector diffs this monotonic value across two samples.
+    fn row_nr(mins_ago: i64, nr: Option<u64>) -> NodeHealthRow {
+        let mut r = row(mins_ago, Some(true), None, None, None, None, None, None);
+        r.sing_box_nrestarts = nr;
+        r
     }
 
     #[test]
@@ -1379,6 +1420,79 @@ mod tests {
             Some("server.singbox.down"),
             "recovery must name the paired condition it closes"
         );
+    }
+
+    // ── sing-box restart detector (monotonic NRestarts counter) ──────
+    //
+    // Closes the gap where sing-box OOMs and is auto-restarted BETWEEN
+    // two probes: both samples read `active`, so the down detector is
+    // blind. Only an INCREASE fires; first observation, equal readings,
+    // and counter resets (host reboot) stay silent.
+
+    #[test]
+    fn diff_rows_nrestarts_increase_fires_warning() {
+        let prev = row_nr(10, Some(2));
+        let cur = row_nr(0, Some(5));
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1, "exactly one restart alert: {evs:?}");
+        assert_eq!(evs[0].kind, "server.singbox.restarted");
+        assert_eq!(evs[0].severity, "warning");
+        assert_eq!(
+            evs[0].resolves, None,
+            "a restart is a discrete event, not a condition"
+        );
+        assert!(
+            evs[0].summary.contains("3 time(s)"),
+            "summary must carry the delta: {}",
+            evs[0].summary
+        );
+        assert_eq!(evs[0].payload["prior"], 2);
+        assert_eq!(evs[0].payload["current"], 5);
+        assert_eq!(evs[0].payload["delta"], 3);
+    }
+
+    #[test]
+    fn diff_rows_nrestarts_first_observation_is_silent() {
+        // No baseline on the previous sample → cannot infer a restart.
+        // This is the "no alert on first observation" guarantee.
+        let prev = row_nr(10, None);
+        let cur = row_nr(0, Some(4));
+        assert!(
+            diff_rows(&prev, &cur).is_empty(),
+            "first observation of a counter must not alert"
+        );
+    }
+
+    #[test]
+    fn diff_rows_nrestarts_preexisting_high_counter_is_silent() {
+        // First PAIR already shows a high but STABLE counter (5 → 5):
+        // the restarts happened before we started watching, so no alert.
+        let prev = row_nr(10, Some(5));
+        let cur = row_nr(0, Some(5));
+        assert!(
+            diff_rows(&prev, &cur).is_empty(),
+            "equal readings (no increase) must not alert"
+        );
+    }
+
+    #[test]
+    fn diff_rows_nrestarts_reset_after_reboot_is_silent() {
+        // Counter DROPS (5 → 0): host reboot or `systemctl reset-failed`
+        // reset it. NOT a negative restart count — must not fire a
+        // phantom alert.
+        let prev = row_nr(10, Some(5));
+        let cur = row_nr(0, Some(0));
+        assert!(
+            diff_rows(&prev, &cur).is_empty(),
+            "a counter reset (decrease) must not alert"
+        );
+    }
+
+    #[test]
+    fn diff_rows_nrestarts_both_absent_is_silent() {
+        let prev = row_nr(10, None);
+        let cur = row_nr(0, None);
+        assert!(diff_rows(&prev, &cur).is_empty());
     }
 
     /// Alerts-cleanup 2026-06-10 pin: every recovery event resolves its
@@ -1671,6 +1785,7 @@ mod tests {
         inv.record_node_health(
             server_id,
             Some(active),
+            None,
             None,
             None,
             None,

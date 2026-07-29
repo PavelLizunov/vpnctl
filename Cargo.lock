@@ -5161,7 +5161,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpnctl"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5191,7 +5191,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-boosty-bridge"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "boosty_api",
  "mockito",
@@ -5208,7 +5208,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5218,7 +5218,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-crypto"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "hex",
@@ -5229,14 +5229,14 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-host-fingerprint"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "vpnctl-inventory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "serde",
@@ -5252,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-kernels"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5264,7 +5264,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-protocols"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "flate2",
@@ -5275,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctl-ssh"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "russh",
@@ -5289,7 +5289,7 @@ dependencies = [
 
 [[package]]
 name = "vpnctld"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "argon2",

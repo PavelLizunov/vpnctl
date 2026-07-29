@@ -58,6 +58,13 @@ use vpnctl_core::{
 /// Go the same way.)
 pub(crate) const GO_VERSION: &str = "go1.26.4";
 
+/// Pinned SHA-256 of the official Go toolchain tarball downloaded by
+/// the on-node build fallback. Source: `https://go.dev/dl/` — each
+/// release publishes a `.sha256` sidecar (fetched 2026-07-29 from
+/// `https://dl.google.com/go/go1.26.4.linux-amd64.tar.gz.sha256`).
+/// Bumping [`GO_VERSION`] REQUIRES re-fetching the new digest.
+const GO_TARBALL_SHA256: &str = "1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f";
+
 /// Pinned Caddy release the plugin is compiled against. xcaddy's
 /// `build <version>` keeps the binary reproducible across nodes.
 pub(crate) const CADDY_VERSION: &str = "v2.11.4";
@@ -262,6 +269,10 @@ fn caddy_build_script() -> String {
         fi
 
         curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/{go_version}.linux-amd64.tar.gz"
+        # Verify the tarball digest BEFORE extraction. The pinned
+        # SHA-256 comes from the official go.dev/dl .sha256 sidecar
+        # (see GO_TARBALL_SHA256).
+        echo "{go_sha256}  /tmp/go.tgz" | sha256sum -c - >/dev/null
         rm -rf /usr/local/go
         tar -C /usr/local -xzf /tmp/go.tgz
         rm -f /tmp/go.tgz
@@ -281,6 +292,7 @@ fn caddy_build_script() -> String {
         fi
         "#,
         go_version = GO_VERSION,
+        go_sha256 = GO_TARBALL_SHA256,
         caddy_version = CADDY_VERSION,
         fp_pin = FORWARDPROXY_PIN,
     )
@@ -607,6 +619,55 @@ fn vlessws_apply_script() -> String {
     )
 }
 
+/// Snapshot → validate → swap → restart → poll → restore/restart
+/// script for the single-Caddyfile (naive) apply path. Same rollback
+/// discipline as `vlessws_apply_script` and the sing-box/amnezia_wg
+/// apply scripts.
+fn naive_apply_script() -> &'static str {
+    r#"
+            set -eu
+            /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile.new
+
+            HAD_PREV=0
+            if [ -f /etc/caddy/Caddyfile ]; then
+                HAD_PREV=1
+                cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
+            fi
+
+            mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+            chown caddy:caddy /etc/caddy/Caddyfile
+            chmod 0644 /etc/caddy/Caddyfile
+
+            systemctl enable caddy >/dev/null 2>&1 || true
+            systemctl reload-or-restart caddy
+
+            for i in $(seq 1 10); do
+                state=$(systemctl is-active caddy || true)
+                if [ "$state" = "active" ]; then
+                    rm -f /etc/caddy/Caddyfile.bak
+                    exit 0
+                fi
+                sleep 3
+            done
+
+            echo "caddy did not become active. Last 20 log lines:" >&2
+            journalctl -u caddy --no-pager -n 20 >&2 || true
+            if [ "$HAD_PREV" = 1 ] && [ -f /etc/caddy/Caddyfile.bak ]; then
+                echo "rolling back to previous Caddyfile" >&2
+                mv /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile || true
+                chown caddy:caddy /etc/caddy/Caddyfile || true
+                chmod 0644 /etc/caddy/Caddyfile || true
+                systemctl reload-or-restart caddy || true
+            else
+                echo "no previous Caddyfile — removing failed deploy" >&2
+                systemctl stop caddy || true
+                systemctl disable caddy || true
+                rm -f /etc/caddy/Caddyfile
+            fi
+            exit 1
+    "#
+}
+
 #[async_trait]
 impl Kernel for Caddy {
     fn id(&self) -> KernelId {
@@ -823,33 +884,7 @@ impl Kernel for Caddy {
             return Ok(());
         }
         ssh.upload("/etc/caddy/Caddyfile.new", config).await?;
-        // Validate BEFORE swapping in (a bad Caddyfile must never take
-        // down a running proxy). Atomic rename, lock perms, reload.
-        // First start has to obtain the ACME cert, which can take
-        // ~10-20 s, so the active-poll window is wider than sing-box's
-        // 8 s (CLAUDE.md staging-deploy lesson #3 — never report
-        // "complete" on a crash-loop).
-        let cmd = r#"
-            set -eu
-            /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile.new
-            mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
-            chown caddy:caddy /etc/caddy/Caddyfile
-            chmod 0644 /etc/caddy/Caddyfile
-
-            systemctl enable caddy >/dev/null 2>&1 || true
-            systemctl reload-or-restart caddy
-
-            for i in $(seq 1 10); do
-                state=$(systemctl is-active caddy || true)
-                [ "$state" = "active" ] && exit 0
-                sleep 3
-            done
-
-            echo "caddy did not become active. Last 20 log lines:" >&2
-            journalctl -u caddy --no-pager -n 20 >&2 || true
-            exit 1
-        "#;
-        ssh.exec(cmd).await?;
+        ssh.exec(naive_apply_script()).await?;
         Ok(())
     }
 
@@ -951,6 +986,34 @@ mod tests {
             "missing forwardproxy pin: {s}"
         );
         assert!(s.ends_with("-amd64"), "must be arch-stamped: {s}");
+    }
+
+    #[test]
+    fn build_script_verifies_go_tarball_sha256_before_extraction() {
+        let s = caddy_build_script();
+        // The pinned SHA-256 is embedded.
+        assert!(
+            s.contains(GO_TARBALL_SHA256),
+            "Go tarball SHA-256 must be pinned in the build script: {s}"
+        );
+        // Verification uses sha256sum -c BEFORE tar extraction.
+        assert!(
+            s.contains("sha256sum -c -"),
+            "must verify the tarball digest via sha256sum -c: {s}"
+        );
+        let verify = s
+            .find("sha256sum -c -")
+            .expect("sha256sum verification missing");
+        let extract = s
+            .find("tar -C /usr/local -xzf")
+            .expect("tar extraction missing");
+        assert!(
+            verify < extract,
+            "SHA-256 verification must happen BEFORE tar extraction: {s}"
+        );
+        // The constant is a valid 64-char hex SHA-256.
+        assert_eq!(GO_TARBALL_SHA256.len(), 64);
+        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -1265,6 +1328,44 @@ mod tests {
         assert!(s.contains("exit 1"));
         // firewall opens the operator front port from the meta member
         assert!(s.contains("ufw allow \"${VLESSWS_FRONT_PORT}/tcp\""));
+    }
+
+    #[test]
+    fn naive_apply_script_validates_snapshots_and_rolls_back() {
+        let s = naive_apply_script();
+        let validate = s
+            .find("caddy validate --config /etc/caddy/Caddyfile.new")
+            .expect("validate present");
+        let snapshot = s
+            .find("cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak")
+            .expect("snapshot present");
+        let swap = s
+            .find("mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile")
+            .expect("swap present");
+        let restart = s
+            .find("systemctl reload-or-restart caddy")
+            .expect("restart present");
+        assert!(
+            validate < snapshot && snapshot < swap && swap < restart,
+            "ordering: validate → snapshot → swap → restart"
+        );
+        assert!(s.contains("HAD_PREV=0"), "must track previous config");
+        assert!(
+            s.contains("rolling back to previous Caddyfile"),
+            "must roll back on failure: {s}"
+        );
+        assert!(
+            s.contains("mv /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile"),
+            "rollback must restore the .bak: {s}"
+        );
+        assert!(
+            s.contains("no previous Caddyfile — removing failed deploy"),
+            "must handle first-deploy failure: {s}"
+        );
+        assert!(
+            s.contains("rm -f /etc/caddy/Caddyfile.bak"),
+            "success path must remove the transient .bak: {s}"
+        );
     }
 
     #[test]

@@ -314,6 +314,7 @@ async fn q4e_latest_json_per_server() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -333,6 +334,7 @@ async fn q4e_latest_json_per_server() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -340,6 +342,7 @@ async fn q4e_latest_json_per_server() {
     inv.record_node_health(
         &ServerId("s2".into()),
         Some(true),
+        None,
         None,
         None,
         None,
