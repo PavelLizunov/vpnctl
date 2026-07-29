@@ -52,9 +52,9 @@ Confirmed by Pavel 2026-05-14:
   auth, harden SSH, install fail2ban, install sing-box, render config,
   restart, prove it's live. Streaming UX (SSE) with per-step progress.
   This is Phase E and it's the most important phase.
-- **Production deployment.** LAN-only for now (homelab `192.168.0.236`).
-  External exposure with OAuth/2FA is a later concern; design today
-  must not make that *harder* but doesn't have to support it.
+- **Production deployment.** Private-only: LAN `192.168.0.236` plus
+  Tailscale tailnet access. No public exposure or Funnel; OAuth/2FA
+  remains a later concern.
 - **Mobile / responsive.** Not needed.
 - **Migration from bash `vpn-control`.** **Seamless preservation** of
   every existing client. Old phones holding `vless://` / `tuic://`
@@ -923,14 +923,15 @@ X-Real-IP` на каждом vpnctld-блоке + site-level `request_header -X-
 - **Production VPN серверы** — пока не трогаем, миграция на vpnctl будет
   только когда v0.2 пройдёт интеграционный тест на staging.
 
-## Live-deploy `vpnctld` на homelab (LAN)
+## Live-deploy `vpnctld` на homelab (LAN + Tailscale)
 
 `vpnctld` (admin UI + `/sub/<token>`) поднят на homelab-хосте
-**192.168.0.236** и доступен с ноута Pavel'а в локальной сети:
+**192.168.0.236** и доступен из LAN и приватного Tailscale tailnet:
 
 | | |
 |---|---|
 | URL | http://192.168.0.236:18402/admin/ |
+| Tailscale URL | http://vpnctld/admin/ (`tailscale serve --http=80`, tailnet only) |
 | Health | http://192.168.0.236:18402/api/v1/health |
 | Auth | basic-auth, user `slovn`, пароль в `/etc/vpnctl/vpnctld.env` (sudo cat) |
 | Бинарь | `/opt/vpnctl/vpnctld` (root:root 0755) |
@@ -939,6 +940,9 @@ X-Real-IP` на каждом vpnctld-блоке + site-level `request_header -X-
 | EnvFile | `/etc/vpnctl/vpnctld.env` (root:user 0640) |
 | Systemd unit | `/etc/systemd/system/vpnctld.service` |
 | Firewall | iptables INPUT: `192.168.0.0/24 → tcp/18402 ACCEPT`, persisted в `/etc/iptables/rules.v4` |
+
+Tailscale Serve проксирует `http://127.0.0.1:18402`, сохраняется после
+перезагрузки и доступен только участникам tailnet. Funnel выключен.
 
 Креды для локального доступа из контейнера: `inventory/vpnctld-192.168.0.236.env`
 (в проекте `vpn-control`, gitignored через `inventory/*.env`).
