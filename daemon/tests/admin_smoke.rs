@@ -14813,11 +14813,9 @@ async fn internal_error_body_does_not_leak_anyhow_chain() {
 // Operator-action policy: the admin UI is web-only, so no rendered page
 // may tell the operator to run a shell command. Every needle below is a
 // command shape that used to appear in error bodies, tooltips, SSE
-// payloads or the restore runbook; each was replaced with a web action
-// or neutral guidance. Internal log messages and code comments may still
-// name these tools — this guard only covers what the operator sees
-// rendered, and targets imperative command shapes (NOT the bare `vpnctl `
-// prefix that every error body carries by contract).
+// payloads; each was replaced with a web action or neutral guidance.
+// Disaster recovery is deliberately excluded: after the daemon host is
+// lost there is no Web UI, so its runbook must retain exact commands.
 #[tokio::test]
 async fn admin_pages_contain_no_shell_command_instructions() {
     let dir = TempDir::new().unwrap();
@@ -14836,7 +14834,9 @@ async fn admin_pages_contain_no_shell_command_instructions() {
         "/admin/users/u0",
         "/admin/monitoring",
         "/admin/activity",
-        "/admin/settings",
+        "/admin/settings/appearance",
+        "/admin/settings/notifications",
+        "/admin/settings/system",
         "/admin/alerts",
     ];
     let needles = [
@@ -14860,6 +14860,31 @@ async fn admin_pages_contain_no_shell_command_instructions() {
                 "rendered page {path} must not contain shell-command instruction «{needle}» — operator copy is web-only"
             );
         }
+    }
+
+    // Disaster recovery is the only terminal exception because the Web UI
+    // may be gone. Keep the rest of the Backups page under the same guard.
+    let backups = fetch_html(app, "/admin/settings/backups").await;
+    for command in [
+        "age -d -i /path/to/vpnctl-backup-key.age",
+        "vpnctl restore /path/to/inv.db",
+        "systemctl restart vpnctld",
+    ] {
+        assert_eq!(
+            backups.matches(command).count(),
+            1,
+            "the disaster-recovery runbook must contain exactly one {command:?}"
+        );
+    }
+    let backups_without_recovery_commands = backups
+        .replace("age -d -i /path/to/vpnctl-backup-key.age", "")
+        .replace("vpnctl restore /path/to/inv.db", "")
+        .replace("systemctl restart vpnctld", "");
+    for needle in needles {
+        assert!(
+            !backups_without_recovery_commands.contains(needle),
+            "settings/backups contains an unexpected shell instruction {needle:?}"
+        );
     }
 }
 

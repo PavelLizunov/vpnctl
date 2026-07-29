@@ -25,9 +25,7 @@ pub fn build_version() -> &'static str {
     use std::sync::OnceLock;
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION
-        .get_or_init(|| {
-            with_provenance(env!("CARGO_PKG_VERSION"), option_env!("VPNCTL_BUILD_SHA"))
-        })
+        .get_or_init(|| with_provenance(env!("CARGO_PKG_VERSION"), option_env!("VPNCTL_BUILD_SHA")))
         .as_str()
 }
 

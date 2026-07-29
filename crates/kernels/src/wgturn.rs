@@ -706,7 +706,27 @@ fn wgturn_apply_script() -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use vpnctl_core::{Server, ServerId, UserId};
+    use std::sync::Mutex;
+    use vpnctl_core::{Server, ServerId, SshTransport, UserId};
+
+    #[derive(Debug, Default)]
+    struct CaptureSsh(Mutex<Option<String>>);
+
+    #[async_trait::async_trait]
+    impl SshTransport for CaptureSsh {
+        async fn exec(&self, cmd: &str) -> vpnctl_core::Result<String> {
+            *self.0.lock().unwrap() = Some(cmd.to_string());
+            Ok(String::new())
+        }
+
+        async fn upload(&self, _path: &str, _content: &[u8]) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &str) -> vpnctl_core::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
 
     /// Drop `#`-comment lines from a rendered shell script so a doc/inline
     /// comment that mentions a command token (e.g. "exit 1") can't be
@@ -972,34 +992,29 @@ mod tests {
 
     #[test]
     fn ensure_installed_verifies_go_tarball_sha256_before_extraction() {
-        // The constant is a valid 64-char hex SHA-256.
-        assert_eq!(GO_TARBALL_SHA256.len(), 64);
-        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
-        // Build the script the same way ensure_installed does and
-        // verify the digest check precedes tar extraction.
-        let pinned_sha = WGTURN_CORE_PINNED_SHA;
-        let script_body = format!(
-            r#"
-            set -eu
-            PINNED_SHA="{pinned_sha}"
-            GO_PINNED_VERSION="go1.24.4"
-            GO_TARBALL="${{GO_PINNED_VERSION}}.linux-amd64.tar.gz"
-            curl -fsSL -o "$GO_TARBALL" "https://go.dev/dl/$GO_TARBALL"
-            echo "{go_sha256}  $GO_TARBALL" | sha256sum -c - >/dev/null
-            tar -C /usr/local -xzf "$GO_TARBALL"
-            "#,
-            go_sha256 = GO_TARBALL_SHA256,
-        );
-        let verify = script_body
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let ssh = CaptureSsh::default();
+        let kernel = WgTurn::new();
+        let mut future = std::pin::pin!(kernel.ensure_installed(&ssh));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+        let script = ssh.0.lock().unwrap().clone().unwrap();
+
+        assert!(script.contains(GO_TARBALL_SHA256));
+        let verify = script
             .find("sha256sum -c -")
             .expect("sha256sum verification missing");
-        let extract = script_body
+        let extract = script
             .find("tar -C /usr/local -xzf")
             .expect("tar extraction missing");
         assert!(
             verify < extract,
             "SHA-256 verification must happen BEFORE tar extraction"
         );
+        assert_eq!(GO_TARBALL_SHA256.len(), 64);
+        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

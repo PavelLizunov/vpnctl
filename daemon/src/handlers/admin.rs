@@ -12628,14 +12628,20 @@ fn settings_disaster_recovery_section(
             li {
                 b { (tr(lang, "On the new host: decrypt + extract", "На новом хосте: расшифруй + распакуй")) }
                 " — "
-                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (Iceland) with the backup age key. Extract the tar — you'll get the full ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (Iceland) backup-ключом age. Распакуй tar — получишь полный "))
+                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (Iceland) with ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (Iceland) через "))
+                span.ed-mono { "age -d -i /path/to/vpnctl-backup-key.age" }
+                (tr(lang, ". Extract the tar — you'll get the full ", ". Распакуй tar — получишь полный "))
                 span.ed-mono { "vpnctl-snap/" }
                 (tr(lang, " tree.", " дерево."))
             }
             li {
                 b { (tr(lang, "On the new host: restore inv.db + start the daemon", "На новом хосте: восстанови inv.db + запусти демон")) }
                 " — "
-                (tr(lang, "install the new vpnctld binary (built from git, glibc-2.36-compatible), then run its restore subcommand against the recovered inv.db. This is the one CLI-only exception even on a HEALTHY host (daemon can't replace its own open DB); on a recovery host the daemon doesn't even exist yet. Copy env + assets + deploy key into place, then restart the daemon service.", "поставь свежий vpnctld binary (собранный из git, glibc-2.36-совместимый), затем выполни его подкоманду restore для восстановленной inv.db. Это один CLI-only шаг даже на ЗДОРОВОМ хосте (демон не может заменить свою же открытую БД); на recovery-хосте демона ещё нет. Скопируй env + assets + deploy-ключ на места, затем перезапусти сервис демона."))
+                (tr(lang, "install the new vpnctld binary (built from git, glibc-2.36-compatible), then ", "поставь свежий vpnctld binary (собранный из git, glibc-2.36-совместимый), затем "))
+                span.ed-mono { "vpnctl restore /path/to/inv.db" }
+                (tr(lang, ". This is the one CLI-only exception even on a HEALTHY host (daemon can't replace its own open DB); on a recovery host the daemon doesn't even exist yet. Copy env + assets + deploy key into place; ", ". Это один CLI-only шаг даже на ЗДОРОВОМ хосте (демон не может заменить свою же открытую БД); на recovery-хосте демона ещё нет. Скопируй env + assets + deploy-ключ на места; "))
+                span.ed-mono { "systemctl restart vpnctld" }
+                "."
             }
             li {
                 b { (tr(lang, "Verify + push deploy key", "Проверь + push deploy-ключ")) }

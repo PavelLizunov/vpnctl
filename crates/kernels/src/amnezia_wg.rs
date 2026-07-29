@@ -259,8 +259,9 @@ fn awg_apply_script() -> String {
             #    exists — first deploy has none; -a preserves perms).
             HAD_PREV=0
             if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
-                HAD_PREV=1
-                cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak 2>/dev/null || true
+                if cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak 2>/dev/null; then
+                    HAD_PREV=1
+                fi
             fi
 
             mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf
