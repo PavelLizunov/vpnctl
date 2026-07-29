@@ -16272,8 +16272,8 @@ async fn seed_dashboard_signals(inv: &SqliteInventory) {
         .unwrap();
     }
 
-    // sharing v2 — flag u0 via the DOMINANT signal: peak 3 concurrent /24
-    // networks (`ConcurrentNets(3)` = 45 pts ≥ FLAG_THRESHOLD=35). The old
+    // sharing v2 — flag u0 via the DOMINANT signal: typical peak of 3
+    // concurrent networks (`TypicalConcurrentNets(3)` = 45 pts ≥ 35). The old
     // 3-ASN fetch-diversity above no longer scores (dropped in v2), so the
     // abuse-summary card only renders once a real-simultaneity signal lands.
     inv.record_user_ip_concurrency(&[(UserId("u0".into()), 3)])
@@ -16591,7 +16591,7 @@ async fn dashboard_abuse_summary_lists_shared_user() {
         html.contains("/admin/users/u0"),
         "abuse-summary must link the flagged user to their detail page"
     );
-    // Sharing v2: the dominant reason is ConcurrentNets(3) (seeded above),
+    // Sharing v2: the dominant reason is TypicalConcurrentNets(3) (seeded above),
     // rendered as "3 networks at once" — fetch-side ASN diversity no longer
     // scores or shows here.
     assert!(
@@ -16613,18 +16613,24 @@ async fn dashboard_abuse_summary_hidden_when_no_sharing() {
     );
 }
 
-/// abuse-origins — the dashboard likely-shared card links each flagged
-/// user to their `#origins` section (the new who-is-sharing breakdown).
+/// The sharing-risk card must link to the VPN source-IP evidence that
+/// actually feeds the score, not to unrelated subscription-fetch origins.
 #[tokio::test]
-async fn dashboard_abuse_summary_links_to_origins_anchor() {
+async fn dashboard_abuse_summary_links_to_source_ip_evidence() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     seed_dashboard_signals(&s.inv).await;
-    let html = fetch_html(router(s), "/admin/").await;
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/").await;
     assert!(
-        html.contains("/admin/users/u0/activity#origins"),
-        "abuse-summary user link must anchor to the #origins section"
+        html.contains("/admin/users/u0/activity#source-ips"),
+        "abuse-summary user link must anchor to the VPN source-IP evidence"
+    );
+    let detail = fetch_html(app, "/admin/users/u0/activity").await;
+    assert!(
+        detail.contains(r#"id="source-ips""#),
+        "the link target must exist on the user activity page"
     );
 }
 
@@ -16670,6 +16676,10 @@ async fn sharing_page_lists_all_flagged_users_and_filters() {
     let all = fetch_html(app.clone(), "/admin/sharing").await;
     assert!(all.contains("Sharing-risk review"), "{all}");
     assert!(
+        all.contains("heuristic, not a probability"),
+        "the score must not be presented as a probability: {all}"
+    );
+    assert!(
         all.contains(r#"id="fleet-at-a-glance""#)
             && all.contains(r#"ed-tab--on" href="/admin/sharing""#)
             && all.contains(r#"href="/admin/overview""#)
@@ -16678,22 +16688,28 @@ async fn sharing_page_lists_all_flagged_users_and_filters() {
     );
     for i in 0..7 {
         assert!(
-            all.contains(&format!("/admin/users/u{i}/activity#origins")),
+            all.contains(&format!("/admin/users/u{i}/activity#source-ips")),
             "u{i} missing from full sharing page"
         );
     }
 
     let high = fetch_html(app.clone(), "/admin/sharing?level=high").await;
-    assert!(high.contains("/admin/users/u0/activity#origins"), "{high}");
-    assert!(!high.contains("/admin/users/u1/activity#origins"), "{high}");
+    assert!(
+        high.contains("/admin/users/u0/activity#source-ips"),
+        "{high}"
+    );
+    assert!(
+        !high.contains("/admin/users/u1/activity#source-ips"),
+        "{high}"
+    );
 
     let search = fetch_html(app, "/admin/sharing?q=u3&min_score=40").await;
     assert!(
-        search.contains("/admin/users/u3/activity#origins"),
+        search.contains("/admin/users/u3/activity#source-ips"),
         "{search}"
     );
     assert!(
-        !search.contains("/admin/users/u2/activity#origins"),
+        !search.contains("/admin/users/u2/activity#source-ips"),
         "{search}"
     );
 }
@@ -16711,7 +16727,7 @@ async fn sharing_page_invalid_or_empty_filters_stay_readable() {
 
     let invalid = fetch_html(app.clone(), "/admin/sharing?level=wat&min_score=wat").await;
     assert!(
-        invalid.contains("/admin/users/u0/activity#origins"),
+        invalid.contains("/admin/users/u0/activity#source-ips"),
         "{invalid}"
     );
 
@@ -16776,7 +16792,7 @@ async fn dashboard_abuse_summary_omits_deleted_user_blank_row() {
     let html = fetch_html(router(s), "/admin/").await;
     // No nameless link to the user index (the blank-row symptom).
     assert!(
-        !html.contains(r#"href="/admin/users/#origins""#)
+        !html.contains(r#"href="/admin/users/#source-ips""#)
             && !html.contains(r#"href="/admin/users/""#),
         "abuse card must not render a blank-name (deleted-user) link"
     );
