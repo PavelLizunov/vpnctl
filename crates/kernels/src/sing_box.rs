@@ -159,10 +159,10 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     # the rename path that orphans sing-box's open fd (no SIGHUP
     # reopen) — the two models must not coexist. Keep 14 rotations
     # = ~14 days at most under idle load.
-    # NO `su sing-box sing-box`: with copytruncate logrotate must
-    # create the rotated copy in root-owned /var/log — running as
-    # the sing-box user fails with EACCES. Root can read the
-    # sing-box-owned log and truncate it without issue.
+    # Run as root explicitly. Ubuntu permits group `syslog` to write
+    # /var/log (0775), so logrotate refuses the directory unless a
+    # `su` directive is present. `su sing-box sing-box` is still wrong:
+    # that user cannot create the rotated copy in root-owned /var/log.
     apt-get install -y --no-install-recommends logrotate
     # Remove stale backup files that logrotate's `include /etc/logrotate.d`
     # would parse as duplicate configs (dpkg conffile backups, editor
@@ -182,6 +182,7 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     compress
     compressoptions -1
     copytruncate
+    su root root
 }
 LR
     # Verify the GLOBAL include graph parses — validating only the
@@ -960,18 +961,16 @@ mod tests {
         );
     }
 
-    /// The logrotate fragment must NOT carry `su sing-box sing-box`:
-    /// with `copytruncate`, logrotate creates the rotated copy in
-    /// root-owned `/var/log` — running as the unprivileged sing-box
-    /// user fails with EACCES on every node. Root can read the
-    /// sing-box-owned log and truncate it without issue.
+    /// The logrotate fragment must run explicitly as root: Ubuntu's
+    /// group-writable `/var/log` requires a `su` directive, while the
+    /// unprivileged sing-box user cannot create the rotated copy there.
     ///
     /// Additionally: the validation step must NOT suppress stderr
     /// (a parse failure must surface in the deploy log), and stale
     /// backup files must be cleaned from `/etc/logrotate.d/` so
     /// logrotate's `include` doesn't parse them as duplicate configs.
     #[test]
-    fn logrotate_fragment_no_su_and_visible_errors() {
+    fn logrotate_fragment_uses_root_su_and_visible_errors() {
         let s = SING_BOX_SETUP_SCRIPT.as_str();
         // Isolate the heredoc body.
         let start = s
@@ -983,8 +982,8 @@ mod tests {
             .expect("logrotate heredoc closing brace not found");
         let fragment = &fragment[..end];
         assert!(
-            !fragment.contains("su "),
-            "logrotate fragment must NOT carry `su` (root runs copytruncate): {fragment}"
+            fragment.contains("su root root") && !fragment.contains("su sing-box"),
+            "logrotate must satisfy group-writable /var/log without dropping privileges: {fragment}"
         );
         // Validation targets the GLOBAL include graph, not just the
         // single fragment, so duplicates cannot remain hidden.
