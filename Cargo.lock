@@ -5203,6 +5203,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vpnctl-core",
+ "vpnctl-crypto",
  "vpnctl-inventory",
 ]
 

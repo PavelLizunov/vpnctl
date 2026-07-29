@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
-use vpnctl_core::{User, UserId};
+use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
 use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
 async fn open(dir: &TempDir) -> SqliteInventory {
@@ -26,6 +26,21 @@ fn user(id: &str) -> User {
     }
 }
 
+fn server(id: &str) -> Server {
+    Server {
+        id: ServerId(id.into()),
+        address: format!("{id}.example.com"),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
 #[tokio::test]
 async fn link_then_list_and_unlink() {
     let dir = TempDir::new().unwrap();
@@ -41,6 +56,26 @@ async fn link_then_list_and_unlink() {
     assert!(changed, "first link is a mutation");
     let links = inv.list_boosty_links().await.unwrap();
     assert_eq!(links, vec![(UserId("alice".into()), 12345)]);
+    assert_eq!(
+        inv.observe_boosty_lapse(&UserId("alice".into()), Some(200))
+            .await
+            .unwrap(),
+        Some(200)
+    );
+    assert_eq!(
+        inv.observe_boosty_lapse(&UserId("alice".into()), Some(300))
+            .await
+            .unwrap(),
+        Some(200),
+        "the earliest lapse observation is retained"
+    );
+    assert_eq!(
+        inv.observe_boosty_lapse(&UserId("alice".into()), None)
+            .await
+            .unwrap(),
+        None,
+        "a paid recovery clears the lapse spell"
+    );
 
     let changed = inv
         .unlink_boosty_subscriber(&UserId("alice".into()))
@@ -148,6 +183,8 @@ async fn settings_round_trip_and_refresh_rotation() {
         device_id: Some("dev".into()),
         poll_interval_secs: 1800,
         auto_disable_lapsed: true,
+        grace_days: 21,
+        auto_create_users: true,
     };
     inv.set_boosty_settings(&s).await.unwrap();
 
@@ -157,6 +194,8 @@ async fn settings_round_trip_and_refresh_rotation() {
     assert_eq!(got.access_token.as_deref(), Some("acc"));
     assert_eq!(got.poll_interval_secs, 1800);
     assert!(got.auto_disable_lapsed);
+    assert_eq!(got.grace_days, 21);
+    assert!(got.auto_create_users);
 
     // Rotation persists only the refresh token.
     inv.set_boosty_refresh_token("ref2").await.unwrap();
@@ -166,5 +205,45 @@ async fn settings_round_trip_and_refresh_rotation() {
         after.access_token.as_deref(),
         Some("acc"),
         "other fields untouched"
+    );
+}
+
+#[tokio::test]
+async fn boosty_user_and_all_server_grants_are_created_atomically() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("de")).await.unwrap();
+    inv.add_server(&server("fi")).await.unwrap();
+
+    let mut created = user("boosty-123");
+    created.tuic_password = Some("tuic-secret".into());
+    created.wireguard_pubkey = Some("wg-public".into());
+    created.wireguard_private = Some("wg-private".into());
+    created.vpn_router_device_id = Some("0123456789abcdef0123456789abcdef".into());
+    let grants = inv.add_boosty_user(&created, 123).await.unwrap();
+
+    assert_eq!(grants, 2);
+    assert_eq!(
+        inv.list_boosty_links().await.unwrap(),
+        vec![(UserId("boosty-123".into()), 123)]
+    );
+    assert_eq!(
+        inv.servers_for_user(&UserId("boosty-123".into()))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let stored = inv
+        .get_user(&UserId("boosty-123".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.sub_token.is_some());
+    assert_eq!(stored.wireguard_private.as_deref(), Some("wg-private"));
+
+    assert!(
+        inv.add_boosty_user(&created, 123).await.is_err(),
+        "a duplicate cannot add partial grants"
     );
 }

@@ -69,7 +69,7 @@ pub type Result<T> = std::result::Result<T, SqliteInventoryError>;
 
 /// Raw column tuple for the `boosty_settings` singleton row.
 /// (enabled, blog_url, access_token, refresh_token, device_id,
-/// poll_interval_secs, auto_disable_lapsed)
+/// poll_interval_secs, auto_disable_lapsed, grace_days, auto_create_users)
 type BoostySettingsRow = (
     i64,
     Option<String>,
@@ -78,13 +78,15 @@ type BoostySettingsRow = (
     Option<String>,
     i64,
     i64,
+    i64,
+    i64,
 );
 
 /// Bridge configuration (migration `0040_boosty_bridge.sql`, singleton row).
 ///
 /// The three credential fields are SECRETS — never audit-log them, never
 /// render them verbatim in admin HTML (mask to `••••<last4>`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BoostySettings {
     /// Whether the sync poller is active.
     pub enabled: bool,
@@ -101,6 +103,28 @@ pub struct BoostySettings {
     /// When true, lapsed subscribers are auto-disabled; when false, they
     /// are only surfaced for the operator to confirm.
     pub auto_disable_lapsed: bool,
+    /// Days after the first observed lapse (or Boosty's `off_time`) before
+    /// an automatic disable may be applied.
+    pub grace_days: u16,
+    /// Create a complete vpnctl user and grant every server for a new paid
+    /// subscriber.
+    pub auto_create_users: bool,
+}
+
+impl Default for BoostySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            blog_url: None,
+            access_token: None,
+            refresh_token: None,
+            device_id: None,
+            poll_interval_secs: 3600,
+            auto_disable_lapsed: false,
+            grace_days: 14,
+            auto_create_users: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2122,6 +2146,21 @@ impl SqliteInventory {
             .collect())
     }
 
+    /// Boosty links with the persisted start of the current lapse spell.
+    pub async fn list_boosty_links_with_lapse(&self) -> Result<Vec<(UserId, i64, Option<i64>)>> {
+        let rows: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT id, boosty_subscriber_id, boosty_lapsed_since FROM users
+              WHERE boosty_subscriber_id IS NOT NULL
+              ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, sid, since)| (UserId(id), sid, since))
+            .collect())
+    }
+
     /// Link a vpnctl user to a Boosty subscriber id. Errors only if the user
     /// doesn't exist. Returns whether anything changed (`false` = this user
     /// already carried this exact subscriber id) so callers audit only actual
@@ -2135,7 +2174,8 @@ impl SqliteInventory {
         // `IS NOT ?1` (NULL-safe) makes a same-value re-link match 0 rows →
         // reported as an idempotent no-op below (audit-on-actual-mutation).
         let res = sqlx::query(
-            "UPDATE users SET boosty_subscriber_id = ?1
+            "UPDATE users
+                SET boosty_subscriber_id = ?1, boosty_lapsed_since = NULL
               WHERE id = ?2 AND boosty_subscriber_id IS NOT ?1",
         )
         .bind(subscriber_id)
@@ -2164,7 +2204,8 @@ impl SqliteInventory {
     /// actually removed so callers audit only actual mutations.
     pub async fn unlink_boosty_subscriber(&self, user: &UserId) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE users SET boosty_subscriber_id = NULL
+            "UPDATE users
+                SET boosty_subscriber_id = NULL, boosty_lapsed_since = NULL
               WHERE id = ?1 AND boosty_subscriber_id IS NOT NULL",
         )
         .bind(&user.0)
@@ -2173,11 +2214,94 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Record the start of a lapse spell, keeping the earliest observation.
+    /// Passing `None` clears the marker after a paid subscription recovers.
+    pub async fn observe_boosty_lapse(
+        &self,
+        user: &UserId,
+        since: Option<i64>,
+    ) -> Result<Option<i64>> {
+        match since {
+            Some(since) => {
+                sqlx::query(
+                    "UPDATE users
+                        SET boosty_lapsed_since =
+                            CASE
+                                WHEN boosty_lapsed_since IS NULL
+                                  OR boosty_lapsed_since > ?1 THEN ?1
+                                ELSE boosty_lapsed_since
+                            END
+                      WHERE id = ?2 AND boosty_subscriber_id IS NOT NULL",
+                )
+                .bind(since)
+                .bind(&user.0)
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE users SET boosty_lapsed_since = NULL
+                      WHERE id = ?1 AND boosty_subscriber_id IS NOT NULL",
+                )
+                .bind(&user.0)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT boosty_lapsed_since FROM users WHERE id = ?1")
+                .bind(&user.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|r| r.0).ok_or_else(|| {
+            SqliteInventoryError::Invalid(format!("no such linked user: {}", user.0))
+        })
+    }
+
+    /// Atomically create a Boosty-owned user and grant every current server.
+    pub async fn add_boosty_user(&self, user: &User, subscriber_id: i64) -> Result<u64> {
+        let token = match user.sub_token.as_deref() {
+            Some(token) if !token.is_empty() => token.to_string(),
+            _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
+        };
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO users (
+                id, uuid, tuic_password, wireguard_pubkey, wireguard_private,
+                sub_token, vpn_router_device_id, disabled, boosty_subscriber_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&user.id.0)
+        .bind(&user.uuid)
+        .bind(&user.tuic_password)
+        .bind(&user.wireguard_pubkey)
+        .bind(&user.wireguard_private)
+        .bind(token)
+        .bind(&user.vpn_router_device_id)
+        .bind(i64::from(user.disabled))
+        .bind(subscriber_id)
+        .execute(&mut *tx)
+        .await;
+        map_unique(inserted, format!("user {}", user.id.0))?;
+
+        let grants = sqlx::query(
+            "INSERT INTO grants (user_id, server_id, granted_at)
+             SELECT ?1, id, datetime('now') FROM servers",
+        )
+        .bind(&user.id.0)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(grants)
+    }
+
     /// Read the singleton bridge settings row.
     pub async fn get_boosty_settings(&self) -> Result<BoostySettings> {
         let row: Option<BoostySettingsRow> = sqlx::query_as(
             "SELECT enabled, blog_url, access_token, refresh_token, device_id,
-                        poll_interval_secs, auto_disable_lapsed
+                        poll_interval_secs, auto_disable_lapsed,
+                        grace_days, auto_create_users
                    FROM boosty_settings WHERE id = 1",
         )
         .fetch_optional(&self.pool)
@@ -2192,6 +2316,8 @@ impl SqliteInventory {
                 device_id,
                 interval,
                 auto_disable,
+                grace_days,
+                auto_create_users,
             )) => BoostySettings {
                 enabled: enabled != 0,
                 blog_url,
@@ -2200,6 +2326,8 @@ impl SqliteInventory {
                 device_id,
                 poll_interval_secs: u64::try_from(interval).unwrap_or(3600),
                 auto_disable_lapsed: auto_disable != 0,
+                grace_days: u16::try_from(grace_days).unwrap_or(14),
+                auto_create_users: auto_create_users != 0,
             },
             None => BoostySettings::default(),
         })
@@ -2212,6 +2340,7 @@ impl SqliteInventory {
                 SET enabled = ?1, blog_url = ?2, access_token = ?3,
                     refresh_token = ?4, device_id = ?5, poll_interval_secs = ?6,
                     auto_disable_lapsed = ?7,
+                    grace_days = ?8, auto_create_users = ?9,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               WHERE id = 1",
         )
@@ -2222,6 +2351,8 @@ impl SqliteInventory {
         .bind(&s.device_id)
         .bind(i64::try_from(s.poll_interval_secs).unwrap_or(3600))
         .bind(i64::from(s.auto_disable_lapsed))
+        .bind(i64::from(s.grace_days))
+        .bind(i64::from(s.auto_create_users))
         .execute(&self.pool)
         .await?;
         Ok(())

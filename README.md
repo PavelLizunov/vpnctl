@@ -51,10 +51,10 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
 | Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
-| Boosty subscription bridge — links subscribers to users, reconciles access (auto-enable active, disable-on-button for lapses) | ✅ |
+| Boosty subscription bridge — auto-creates complete users for new paid subscribers, grants every server, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY/wgturn Strong; tuic/anytls Moderate; rest Weak) | ✅ |
-| Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + per-user UA fingerprint heuristic | ✅ |
+| Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
 | Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
 | **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
@@ -198,7 +198,7 @@ vpnctl --output json boosty status
 ```
 
 ```json
-{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":3600,"auto_disable_lapsed":false,"linked_users":12}
+{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":3600,"auto_disable_lapsed":false,"grace_days":14,"auto_create_users":true,"linked_users":12}
 ```
 
 `access_token`, `refresh_token`, and `device_id` are always masked as

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 vpnctl-core = { path = "../core" }
+vpnctl-crypto = { path = "../crypto" }
 vpnctl-inventory = { path = "../inventory" }
 # The Boosty API client (rustls; no native-tls, matches deny.toml). Pinned to
 # a commit on the operator's fork so CI is reproducible. ee204ec = security

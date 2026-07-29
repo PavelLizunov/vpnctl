@@ -1065,6 +1065,64 @@ fn sharing_reason_label(
     }
 }
 
+const SHARING_WINDOW_DAYS: u32 = 30;
+const IMPOSSIBLE_TRAVEL_HOURS: f64 = 2.0;
+
+async fn load_likely_shared(
+    inv: &vpnctl_inventory::SqliteInventory,
+) -> Vec<(vpnctl_core::UserId, crate::sharing_score::SharingScore)> {
+    let mut rows: Vec<_> = inv
+        .sharing_signals_all_users(SHARING_WINDOW_DAYS, IMPOSSIBLE_TRAVEL_HOURS)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "sharing_signals_all_users failed");
+            Vec::new()
+        })
+        .into_iter()
+        .filter(|s| !s.user_id.0.is_empty())
+        .map(|s| {
+            let sc = crate::sharing_score::score(&s);
+            (s.user_id, sc)
+        })
+        .filter(|(_, sc)| sc.is_flagged())
+        .collect();
+    rows.sort_by_key(|b| std::cmp::Reverse(b.1.score));
+    rows
+}
+
+fn sharing_rows(
+    rows: &[&(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::sharing_score::SharingLevel;
+    html! {
+        @for (uid, sc) in rows {
+            @let tone = if sc.level == SharingLevel::High { "var(--red)" } else { "var(--warm)" };
+            tr {
+                td.num style="width: 34px;" {
+                    b style=(format!("color: {tone};")) { (sc.score) }
+                }
+                td style="width: 96px;" {
+                    div.ed-scorebar {
+                        div style=(format!("width: {}%; background: {tone};", sc.score)) {}
+                    }
+                }
+                td {
+                    a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
+                        (uid.0)
+                    }
+                }
+                td.num.ed-grid__mut {
+                    @for (i, reason) in sc.reasons.iter().take(2).enumerate() {
+                        @if i > 0 { " · " }
+                        (sharing_reason_label(*reason, lang))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// PR-Dash dash#5 — account-sharing risk summary (redesigned 2026-06-17 to
 /// a composite, explainable score; replaces the bare `distinct_asns >= 3`).
 /// Each row shows the user, a 0-100 risk score (red=High, amber=Medium) and
@@ -1076,7 +1134,6 @@ fn dashboard_abuse_summary(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    use crate::sharing_score::SharingLevel;
     // Defensive: skip any empty id so this render can NEVER emit a nameless
     // link to `/admin/users/`.
     let rows: Vec<&(vpnctl_core::UserId, crate::sharing_score::SharingScore)> = likely_shared
@@ -1100,47 +1157,14 @@ fn dashboard_abuse_summary(
             }
             table.ed-feed style="margin-top: 8px;" {
                 tbody {
-                    @for (uid, sc) in rows.iter().take(6) {
-                        @let tone = if sc.level == SharingLevel::High { "var(--red)" } else { "var(--warm)" };
-                        tr {
-                            td.num style="width: 34px;" {
-                                b style=(format!("color: {tone};")) { (sc.score) }
-                            }
-                            td style="width: 96px;" {
-                                div.ed-scorebar {
-                                    div style=(format!("width: {}%; background: {tone};", sc.score)) {}
-                                }
-                            }
-                            td {
-                                // Deep-link to the user's "Subscription
-                                // origins" evidence section.
-                                a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
-                                    (uid.0)
-                                }
-                            }
-                            td.num.ed-grid__mut {
-                                @for (i, reason) in sc.reasons.iter().take(2).enumerate() {
-                                    @if i > 0 { " · " }
-                                    (sharing_reason_label(*reason, lang))
-                                }
-                            }
-                        }
-                    }
+                    (sharing_rows(&rows.iter().take(6).copied().collect::<Vec<_>>(), lang))
                 }
             }
             @if n > 6 {
-                details style="margin-top: 6px;" {
-                    summary.ed-grid__mut style="font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                        "+" (n - 6) " " (tr(lang, "more flagged", "ещё под флагом"))
-                    }
-                    ul style="margin: 8px 0 0 18px;" {
-                        @for (uid, _) in rows.iter().skip(6) {
-                            li {
-                                a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
-                                    (uid.0)
-                                }
-                            }
-                        }
+                div style="margin-top: 8px;" {
+                    a href="/admin/sharing"
+                      style="font-family: var(--mono); font-size: 10px; color: var(--acc); text-decoration: none;" {
+                        "+" (n - 6) " " (tr(lang, "more flagged · open full list →", "ещё под флагом · открыть весь список →"))
                     }
                 }
             }
@@ -1324,6 +1348,94 @@ pub(crate) async fn dashboard_activity(
     dashboard_render(headers, state, query, DashboardTab::Activity).await
 }
 
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct SharingQuery {
+    pub q: Option<String>,
+    pub level: Option<String>,
+    pub min_score: Option<String>,
+}
+
+pub(crate) async fn sharing(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SharingQuery>,
+) -> Markup {
+    use crate::i18n::tr;
+    use crate::sharing_score::SharingLevel;
+
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+    let all = load_likely_shared(&state.inv).await;
+    let q = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let level = match query.level.as_deref() {
+        Some("high") => Some(SharingLevel::High),
+        Some("medium") => Some(SharingLevel::Medium),
+        _ => None,
+    };
+    let min_score = query
+        .min_score
+        .as_deref()
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v.min(100));
+    let rows: Vec<_> = all
+        .iter()
+        .filter(|(uid, sc)| {
+            (q.is_empty() || uid.0.to_ascii_lowercase().contains(&q))
+                && level.is_none_or(|wanted| sc.level == wanted)
+                && min_score.is_none_or(|min| sc.score >= min)
+        })
+        .collect();
+
+    let body = html! {
+        div.ed-art-eyebrow {
+            (tr(lang, "Likely-shared subscriptions", "Похожие на расшаренные подписки"))
+            " · " (rows.len()) "/" (all.len())
+        }
+        h1 { (tr(lang, "Sharing-risk review", "Проверка риска расшаривания")) }
+        p.ed-deck {
+            (tr(
+                lang,
+                "Thirty-day account-sharing signals, strongest first. Open a user to inspect source networks and rotate access if needed.",
+                "Сигналы расшаривания за 30 дней, сначала самые сильные. Открой пользователя, чтобы проверить исходные сети и при необходимости сменить доступ.",
+            ))
+        }
+        form method="get" action="/admin/sharing" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 16px 0;" {
+            label for="sharing-q" style="display: grid; gap: 4px; font-family: var(--mono); font-size: 11px;" {
+                (tr(lang, "User", "Пользователь"))
+                input id="sharing-q" type="search" name="q" value=(query.q.as_deref().unwrap_or("")) placeholder="ninitux";
+            }
+            label for="sharing-level" style="display: grid; gap: 4px; font-family: var(--mono); font-size: 11px;" {
+                (tr(lang, "Risk level", "Уровень риска"))
+                select id="sharing-level" name="level" {
+                    option value="" selected[level.is_none()] { (tr(lang, "any", "любой")) }
+                    option value="high" selected[level == Some(SharingLevel::High)] { (tr(lang, "high", "высокий")) }
+                    option value="medium" selected[level == Some(SharingLevel::Medium)] { (tr(lang, "medium", "средний")) }
+                }
+            }
+            label for="sharing-min-score" style="display: grid; gap: 4px; font-family: var(--mono); font-size: 11px;" {
+                (tr(lang, "Minimum score", "Минимальный балл"))
+                input id="sharing-min-score" type="number" name="min_score" min="0" max="100"
+                      value=(min_score.map(|v| v.to_string()).unwrap_or_default());
+            }
+            button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
+            }
+            a href="/admin/sharing" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                (crate::i18n::t(lang, crate::i18n::K::BtnReset))
+            }
+        }
+        @if rows.is_empty() {
+            p.ed-empty {
+                (tr(lang, "No flagged users match these filters.", "Нет отмеченных пользователей, подходящих под эти фильтры."))
+            }
+        } @else {
+            table.ed-feed {
+                tbody { (sharing_rows(&rows, lang)) }
+            }
+        }
+    };
+    render_page(&state, "dashboard", &theme, &accent, lang, body).await
+}
+
 async fn dashboard_render(
     headers: HeaderMap,
     state: AppState,
@@ -1462,24 +1574,7 @@ async fn dashboard_render(
     // risk. Gather raw signals fleet-wide over the retention window, score
     // each (simultaneity-weighted), keep only flagged users, strongest
     // first. Empty ⇒ card hidden.
-    const SHARING_WINDOW_DAYS: u32 = 30;
-    const IMPOSSIBLE_TRAVEL_HOURS: f64 = 2.0;
-    let mut likely_shared: Vec<(vpnctl_core::UserId, crate::sharing_score::SharingScore)> = state
-        .inv
-        .sharing_signals_all_users(SHARING_WINDOW_DAYS, IMPOSSIBLE_TRAVEL_HOURS)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "sharing_signals_all_users failed");
-            Vec::new()
-        })
-        .into_iter()
-        .map(|s| {
-            let sc = crate::sharing_score::score(&s);
-            (s.user_id, sc)
-        })
-        .filter(|(_, sc)| sc.is_flagged())
-        .collect();
-    likely_shared.sort_by_key(|b| std::cmp::Reverse(b.1.score));
+    let likely_shared = load_likely_shared(&state.inv).await;
 
     // PR-Dash — per-server usage coefficients (for the weighted traffic
     // sums in dash#1 + dash#2). Built from the already-loaded server
@@ -8496,6 +8591,27 @@ pub(crate) async fn boosty_page(
                 }
             }
 
+            @if !r.grace_pending.is_empty() {
+                div.ed-rule {}
+                div.ed-art-eyebrow {
+                    (tr(lang, "Inside grace period", "Внутри отсрочки")) " · " (r.grace_pending.len())
+                }
+                p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 8px 0 0;" {
+                    (r.grace_pending.join(", ")) " · "
+                    (tr(lang, "access remains enabled", "доступ пока включён"))
+                }
+            }
+
+            @if !r.provisioned.is_empty() {
+                div.ed-rule {}
+                div.ed-art-eyebrow {
+                    (tr(lang, "Created automatically", "Созданы автоматически")) " · " (r.provisioned.len())
+                }
+                p style="font-family: var(--mono); font-size: 11px; color: var(--green); margin: 8px 0 0;" {
+                    (r.provisioned.join(", "))
+                }
+            }
+
             @if !r.enabled.is_empty() || !r.disabled.is_empty() {
                 div.ed-rule {}
                 div style="display: flex; flex-wrap: wrap; gap: 28px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
@@ -8602,6 +8718,13 @@ pub(crate) async fn boosty_page(
                 input id="boosty_interval" type="number" name="poll_interval_secs" min="60"
                       title=(tr(lang, "Minimum 60 seconds. Applies after a daemon restart.", "Минимум 60 секунд. Применяется после рестарта демона."))
                       value=(settings.poll_interval_secs);
+
+                label for="boosty_grace_days" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "disable grace (days)", "отсрочка отключения (дни)"))
+                }
+                input id="boosty_grace_days" type="number" name="grace_days" min="0" max="365"
+                      title=(tr(lang, "Automatic disable waits this many days after Boosty off_time or the first observed lapse.", "Авто-отключение ждёт столько дней после Boosty off_time или первого обнаружения просрочки."))
+                      value=(settings.grace_days);
             }
             div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0;" {
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
@@ -8611,6 +8734,10 @@ pub(crate) async fn boosty_page(
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
                     input type="checkbox" name="auto_disable_lapsed" checked[settings.auto_disable_lapsed];
                     (tr(lang, "auto-disable lapsed subscribers", "авто-отключать отвалившихся"))
+                }
+                label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
+                    input type="checkbox" name="auto_create_users" checked[settings.auto_create_users];
+                    (tr(lang, "auto-create users for new paid subscribers", "авто-создавать пользователей для новых платных подписчиков"))
                 }
             }
             button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
@@ -8663,9 +8790,13 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
         // hand-crafted POST can't turn the poller into a tight loop.
         s.poll_interval_secs = i.max(60);
     }
+    if let Some(days) = form_field(&body, "grace_days").and_then(|v| v.parse::<u16>().ok()) {
+        s.grace_days = days.min(365);
+    }
     // Checkboxes: present only when checked.
     s.enabled = form_field(&body, "enabled").is_some();
     s.auto_disable_lapsed = form_field(&body, "auto_disable_lapsed").is_some();
+    s.auto_create_users = form_field(&body, "auto_create_users").is_some();
 
     if let Err(e) = state.inv.set_boosty_settings(&s).await {
         return internal_error(anyhow::Error::new(e));
@@ -8681,6 +8812,8 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
                 "blog_url": s.blog_url,
                 "poll_interval_secs": s.poll_interval_secs,
                 "auto_disable_lapsed": s.auto_disable_lapsed,
+                "grace_days": s.grace_days,
+                "auto_create_users": s.auto_create_users,
             })),
         )
         .await
@@ -8723,6 +8856,7 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
                 .enabled
                 .iter()
                 .chain(report.disabled.iter())
+                .chain(report.provisioned.iter())
                 .cloned()
                 .collect();
             if !flipped.is_empty() {
