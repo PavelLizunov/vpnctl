@@ -1048,11 +1048,11 @@ fn sharing_reason_label(
     let network =
         |n: u64| crate::i18n::noun_for(lang, n, "network", "networks", "сеть", "сети", "сетей");
     match r {
-        R::ConcurrentNets(n) => {
+        R::TypicalConcurrentNets(n) => {
             format!(
                 "{n} {} {}",
                 network(n as u64),
-                tr(lang, "at once", "одновременно")
+                tr(lang, "at once (typical)", "обычно одновременно")
             )
         }
         R::DailyNets(n) => format!("{n} {}/{}", network(n as u64), tr(lang, "day", "день")),
@@ -1108,7 +1108,7 @@ fn sharing_rows(
                     }
                 }
                 td {
-                    a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
+                    a href=(format!("/admin/users/{}/activity#source-ips", path_segment_encode(&uid.0))) {
                         (uid.0)
                     }
                 }
@@ -1151,8 +1151,8 @@ fn dashboard_abuse_summary(
                 " · " (n) " "
                 span.ed-tip title=(tr(
                     lang,
-                    "Risk score weights SIMULTANEOUS client IPs + impossible travel far above mere network diversity (a traveller's home + mobile + work no longer trips it). Open a row to rotate the token.",
-                    "Риск-скор взвешивает ОДНОВРЕМЕННЫЕ клиентские IP + невозможные перемещения намного выше простого разнообразия сетей (дом + мобильный + работа путешественника больше не срабатывают). Открой строку, чтобы сменить токен.",
+                    "Risk score weights the TYPICAL simultaneous ISP-scale network count + impossible travel far above mere network diversity. One-off peaks and adjacent mobile-carrier subnets no longer trip it. Open a row to inspect the exact VPN source IPs.",
+                    "Риск-скор сильнее всего учитывает ТИПИЧНОЕ число одновременных сетей масштаба ISP и невозможные перемещения. Разовые пики и соседние подсети мобильного оператора больше не срабатывают. Открой строку, чтобы увидеть реальные source IP VPN.",
                 )) { "ⓘ" }
             }
             table.ed-feed style="margin-top: 8px;" {
@@ -1398,8 +1398,8 @@ fn sharing_review(
         p.ed-deck {
             (tr(
                 lang,
-                "Thirty-day account-sharing signals, strongest first. Open a user to inspect source networks and rotate access if needed.",
-                "Сигналы расшаривания за 30 дней, сначала самые сильные. Открой пользователя, чтобы проверить исходные сети и при необходимости сменить доступ.",
+                "Thirty-day account-sharing signals, strongest first. The score is a heuristic, not a probability. Open a user to inspect the VPN source networks and rotate access if needed.",
+                "Сигналы расшаривания за 30 дней, сначала самые сильные. Балл — эвристика, а не вероятность. Открой пользователя, чтобы проверить исходные сети VPN и при необходимости сменить доступ.",
             ))
         }
         form method="get" action="/admin/sharing" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 16px 0;" {
@@ -4182,11 +4182,11 @@ async fn user_detail_render(
             vpnctl_inventory::SubDeviceFp::default()
         });
     // «Source IPs» (2026-06-14) — per-(user, source_ip) activity over
-    // the last 7 days from the persisted `vpn_user_source_ips` counter,
+    // the last 30 days from the persisted `vpn_user_source_ips` counter,
     // then a best-effort GeoIP label lookup for exactly those IPs (geo
     // is an IP attribute, so the lookup is user-independent). Both
     // degrade to an empty table on failure — the page still renders.
-    const SOURCE_IPS_WINDOW_DAYS: u32 = 7;
+    const SOURCE_IPS_WINDOW_DAYS: u32 = 30;
     const SOURCE_IPS_LIMIT: u32 = 20;
     let source_ips = state
         .inv
@@ -6413,7 +6413,7 @@ fn user_subscription_origins_section(
 }
 
 /// «Source IPs» — the source-IP counterpart to «Top destinations».
-/// Per-(user, source_ip) activity over the last 7 days from the
+/// Per-(user, source_ip) activity over the last 30 days from the
 /// persisted `vpn_user_source_ips` hit-counter (one hit per 5-min
 /// clash tick the user had a live connection from that IP), GeoIP-
 /// enriched (`geo`: ip → (country, asn)) and reserved-range-classified
@@ -6443,7 +6443,9 @@ fn user_source_ips_section(
         .count();
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "Source IPs · last 7 days", "Source IP · 7 дней")) }
+        div.ed-art-eyebrow id="source-ips" {
+            (tr(lang, "Source IPs · last 30 days", "Source IP · 30 дней"))
+        }
         @if rows.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
                 (tr(
@@ -6456,13 +6458,13 @@ fn user_source_ips_section(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (tr(
                     lang,
-                    "Which client IPs this user actually connected FROM (real VPN connections, not /sub fetches), over the last 7 days. Activity-weighted: hits = 5-min ticks the IP was live, not bytes. Private / LAN / CGNAT addresses are labelled rather than left as «(unknown)». Many distinct public IPs or countries = the strongest grounded sharing signal.",
-                    "С каких клиентских IP юзер реально подключался (реальные VPN-соединения, не обращения к /sub) за 7 дней. Взвешено активностью: hits = 5-мин тики, в которых IP был живой, не байты. Приватные / LAN / CGNAT адреса подписаны, а не оставлены как «(неизвестно)». Много разных публичных IP или стран = самый достоверный сигнал расшаривания.",
+                    "Which client IPs this user actually connected FROM (real VPN connections, not /sub fetches), over the last 30 days. Activity-weighted: hits = 5-min ticks the IP was live, not bytes. Private / LAN / CGNAT addresses are labelled rather than left as «(unknown)». Many distinct public IPs or countries = the strongest grounded sharing signal.",
+                    "С каких клиентских IP юзер реально подключался (реальные VPN-соединения, не обращения к /sub) за 30 дней. Взвешено активностью: hits = 5-мин тики, в которых IP был живой, не байты. Приватные / LAN / CGNAT адреса подписаны, а не оставлены как «(неизвестно)». Много разных публичных IP или стран = самый достоверный сигнал расшаривания.",
                 ))
             }
             p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 14px;" {
                 "≈ " b { (distinct_public) } " "
-                (tr(lang, "distinct public IPs · 7d", "уник. публичных IP · 7д"))
+                (tr(lang, "distinct public IPs · 30d", "уник. публичных IP · 30д"))
             }
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                 thead {
@@ -6471,7 +6473,7 @@ fn user_source_ips_section(
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "country / ISP", "страна / ISP")) }
                         th style=(format!("text-align: right; {ORIGINS_TH}"))
                            title=(tr(lang, "Number of 5-min clash ticks where this user had a live connection from this IP. Not bytes, not connection count — activity time.", "Число 5-мин тиков clash, в которых у юзера было живое соединение с этого IP. Не байты и не число соединений — время активности.")) {
-                            (tr(lang, "hits · 7d", "hits · 7д"))
+                            (tr(lang, "hits · 30d", "hits · 30д"))
                         }
                         th style=(format!("text-align: left; {ORIGINS_TH}")) { (tr(lang, "last seen", "последний раз")) }
                     }

@@ -502,10 +502,10 @@ async fn poll_one_server(
     // user's distinct-IP count right now. Infra / private / control IPs are
     // excluded (never a real concurrent client). Persist the DAILY PEAK.
     {
-        // Count distinct access NETWORKS, not raw IPs — a single mobile
-        // device rotates across many addresses within one carrier prefix, so
-        // raw-IP counting would fake concurrency. Two distinct networks in
-        // one snapshot ⇒ two separate access networks online together.
+        // Count distinct ISP-scale access NETWORKS, not raw IPs — a single
+        // mobile device rotates across adjacent carrier subnets, so raw-IP
+        // or /24 counting would fake concurrency. `network_key` uses /16 for
+        // IPv4 and /64 for IPv6.
         let mut per_user_nets: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (u, ip) in &source_ip_pairs {
             if is_real_client_ip(ip, known_server_addrs) {

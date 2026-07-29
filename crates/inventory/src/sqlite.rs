@@ -210,11 +210,11 @@ pub struct HeavyUser {
 /// sub_access-derived counts; the concurrency/source-IP tables only ever
 /// hold public client IPs). Each field is an independent signal:
 ///
-/// - `peak_concurrent_ips` — STRONGEST: most distinct client IPs in ONE
-///   clash snapshot (true simultaneity).
+/// - `typical_concurrent_nets` — STRONGEST: P75 of daily peak simultaneous
+///   ISP-scale networks (true concurrency without one-off outliers).
 /// - `impossible_travel_hops` — country changes between consecutive `/sub`
 ///   fetches < the impossible-travel window.
-/// - `max_daily_source_ips` — most distinct connect-from IPs in any one day.
+/// - `max_daily_nets` — most distinct ISP-scale networks in any one day.
 /// - `distinct_device_classes`/`distinct_asns`/`distinct_countries`/`distinct_ips`
 ///   — cumulative diversity of `/sub` fetches (weaker).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,10 +227,11 @@ pub struct SharingSignals {
     pub distinct_asns: u64,
     pub distinct_countries: u64,
     pub distinct_device_classes: u64,
-    /// Peak distinct `/24` networks for this user in ONE clash snapshot
-    /// (rotation-immune simultaneity). The dominant scoring signal.
-    pub peak_concurrent_nets: u32,
-    /// Most distinct `/24` networks the user connected from in any single
+    /// 75th percentile of the user's daily peak simultaneous access-network
+    /// counts. A one-off stale connection or carrier hand-over cannot own the
+    /// score for 30 days; sustained concurrency still does.
+    pub typical_concurrent_nets: u32,
+    /// Most distinct ISP-scale networks the user connected from in any single
     /// day (secondary signal).
     pub max_daily_nets: u32,
     /// `/sub` country changes faster than `impossible_travel_hours` (weak —
@@ -239,16 +240,15 @@ pub struct SharingSignals {
 }
 
 /// Collapse an IP to its access-network key for sharing-detection counting
-/// (2026-06-17; IPv6-corrected 2026-07-29). IPv4 → its `/24`
-/// (`"91.79.36.72"` → `"91.79.36"`); IPv6 → its `/64` prefix
+/// (2026-06-17; IPv6-corrected 2026-07-29; IPv4 carrier-pool corrected
+/// 2026-07-30). IPv4 → its ISP-scale `/16`
+/// (`"91.79.36.72"` → `"91.79"`); IPv6 → its `/64` prefix
 /// (`"2001:db8::1"` → `"2001:db8:0:0::/64"`). Mobile carriers rotate a
-/// single device across many addresses WITHIN one prefix pool, so counting
-/// distinct network keys instead of raw addresses stops one rotating phone
-/// from looking like a dozen shared clients (the multiviruss false positive:
-/// 16 raw IPs were ~5 `/24`s, mostly one carrier). A real shared sub spans
-/// DIFFERENT access networks → different keys. Not perfect (a carrier can
-/// span two prefixes) but kills the bulk of the rotation inflation with zero
-/// geoip dependency.
+/// single device across many adjacent `/24`s, so `/16` matches the existing
+/// UA-sharing heuristic and avoids counting one carrier pool as several
+/// people. A real shared sub spanning different providers usually still
+/// crosses `/16`s. This is intentionally conservative: false negatives are
+/// cheaper than accusing a normal mobile user.
 ///
 /// Parsed with std [`std::net::IpAddr`] so the IPv6 `/64` collapse is exact:
 /// the old string-prefix version returned every IPv6 privacy address verbatim,
@@ -260,10 +260,10 @@ pub struct SharingSignals {
 pub fn network_key(ip: &str) -> String {
     use std::net::IpAddr;
     match ip.parse::<IpAddr>() {
-        // /24 — keep the first three octets (matches the pre-IpAddr shape).
+        // /16 — one ISP-scale bucket, matching `ip_slash16`.
         Ok(IpAddr::V4(v4)) => {
-            let [a, b, c, _] = v4.octets();
-            format!("{a}.{b}.{c}")
+            let [a, b, _, _] = v4.octets();
+            format!("{a}.{b}")
         }
         // /64 — keep the first four hextets in a canonical fixed-width form
         // so every address in one /64 collapses to the SAME key (privacy
@@ -287,7 +287,7 @@ fn blank_sharing_signals(user_id: &str) -> SharingSignals {
         distinct_asns: 0,
         distinct_countries: 0,
         distinct_device_classes: 0,
-        peak_concurrent_nets: 0,
+        typical_concurrent_nets: 0,
         max_daily_nets: 0,
         impossible_travel_hops: 0,
     }
@@ -4776,13 +4776,25 @@ impl SqliteInventory {
                 .impossible_travel_hops = r.try_get::<i64, _>("hops")?.max(0) as u64;
         }
 
-        // 3 — peak concurrent /24 networks (the poller stores the per-
-        // snapshot distinct-/24 count in `peak_concurrent_ips`).
+        // 3 — typical simultaneous network count: the 75th percentile of
+        // each user's DAILY peaks. The old absolute MAX let one stale
+        // connection / carrier hand-over own the score for the full 30-day
+        // window. P75 keeps sustained concurrency strong while ignoring a
+        // small number of outlier days. SQLite 3.40 has the window functions
+        // used here; `(3*n+3)/4` is ceil(0.75*n) with integer arithmetic.
         for r in sqlx::query(
-            "SELECT user_id, MAX(peak_concurrent_ips) AS peak
-             FROM vpn_user_ip_concurrency
-             WHERE date >= strftime('%Y-%m-%d', 'now', ?1)
-             GROUP BY user_id",
+            "WITH ranked AS (
+                 SELECT user_id, peak_concurrent_ips,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY user_id ORDER BY peak_concurrent_ips
+                        ) AS rn,
+                        COUNT(*) OVER (PARTITION BY user_id) AS samples
+                 FROM vpn_user_ip_concurrency
+                 WHERE date >= strftime('%Y-%m-%d', 'now', ?1)
+             )
+             SELECT user_id, peak_concurrent_ips AS typical
+             FROM ranked
+             WHERE rn = (3 * samples + 3) / 4",
         )
         .bind(&ts_cut)
         .fetch_all(&self.pool)
@@ -4791,13 +4803,11 @@ impl SqliteInventory {
             let uid: String = r.try_get("user_id")?;
             acc.entry(uid.clone())
                 .or_insert_with(|| blank_sharing_signals(&uid))
-                .peak_concurrent_nets = r.try_get::<i64, _>("peak")?.max(0) as u32;
+                .typical_concurrent_nets = r.try_get::<i64, _>("typical")?.max(0) as u32;
         }
 
-        // 4 — max distinct /24 NETWORKS connected from in any single day.
-        // Raw (user, date, ip) rows are folded to distinct /24 per day in
-        // Rust (a carrier's rotating IPs collapse to a handful of /24s), then
-        // MAX'd over the window.
+        // 4 — max distinct ISP-scale NETWORKS connected from in one day.
+        // Raw (user, date, ip) rows are folded with `network_key`, then MAX'd.
         let q4 = format!(
             "SELECT user_id, date, source_ip
              FROM vpn_user_source_ips
@@ -5925,12 +5935,12 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Record, per user, the number of DISTINCT source IPs seen in ONE
-    /// clash snapshot (the per-tick "concurrent clients" count). UPSERTs
+    /// Record, per user, the number of DISTINCT ISP-scale networks seen in
+    /// ONE clash snapshot (the per-tick concurrent-network count). UPSERTs
     /// `peak_concurrent_ips = MAX(existing, n)` for TODAY's UTC date, so the
-    /// stored value is the day's high-water mark of simultaneous client IPs.
+    /// stored value is the day's high-water mark of simultaneous networks.
     /// Same `WHERE EXISTS (users)` deleted-user guard as the source-IP
-    /// writer. The caller passes one (user, distinct_ip_count) pair per user
+    /// writer. The caller passes one (user, distinct_network_count) pair per user
     /// present in this snapshot; `n == 0` rows are skipped.
     pub async fn record_user_ip_concurrency(&self, peaks: &[(UserId, u32)]) -> Result<()> {
         if peaks.is_empty() {
@@ -5963,8 +5973,8 @@ impl SqliteInventory {
 
     /// Peak concurrent distinct source IPs for one user over the last
     /// `days` days (the day-level high-water marks, MAX'd across the
-    /// window). `0` if the user never had a recorded snapshot. Feeds the
-    /// composite sharing-risk score.
+    /// window). `0` if the user never had a recorded snapshot. Kept for the
+    /// per-user diagnostic API; the fleet scorer uses the robust P75 query.
     pub async fn ip_concurrency_peak_for_user(&self, user_id: &UserId, days: u32) -> Result<u32> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT COALESCE(MAX(peak_concurrent_ips), 0)
@@ -7448,11 +7458,16 @@ mod tests {
     }
 
     #[test]
-    fn network_key_ipv4_collapses_to_24() {
-        // Same /24 → identical key; a different /24 → distinct key.
-        assert_eq!(network_key("91.79.36.72"), "91.79.36");
-        assert_eq!(network_key("91.79.36.200"), "91.79.36");
-        assert_ne!(network_key("91.79.37.1"), "91.79.36");
+    fn network_key_ipv4_collapses_to_16() {
+        // Adjacent /24 carrier pools collapse into one ISP-scale /16.
+        assert_eq!(network_key("91.79.36.72"), "91.79");
+        assert_eq!(network_key("91.79.37.1"), "91.79");
+        assert_ne!(network_key("91.80.1.1"), "91.79");
+        assert_eq!(
+            network_key("193.143.64.226"),
+            network_key("193.143.65.192"),
+            "adjacent TBANK mobile pools are one ISP-scale network"
+        );
     }
 
     #[test]
@@ -7712,7 +7727,10 @@ mod tests {
         let sharer = find("sharer").expect("sharer present");
         let solo = find("solo").expect("solo present");
 
-        assert_eq!(sharer.peak_concurrent_nets, 3, "sharer concurrency peak");
+        assert_eq!(
+            sharer.typical_concurrent_nets, 3,
+            "one observed day makes its peak the P75"
+        );
         assert_eq!(
             sharer.impossible_travel_hops, 1,
             "US→DE in 15 min = one impossible-travel hop"
@@ -7721,10 +7739,40 @@ mod tests {
         assert_eq!(sharer.distinct_asns, 2);
 
         assert_eq!(
-            solo.peak_concurrent_nets, 1,
+            solo.typical_concurrent_nets, 1,
             "solo never had two nets at once"
         );
         assert_eq!(solo.impossible_travel_hops, 0, "solo single country");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sharing_signals_uses_typical_concurrency_not_one_outlier_day() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_user(&sample_user("normal-mobile")).await?;
+
+        // demonnot-3 shape: mostly 1–2 simultaneous networks with one old
+        // four-network carrier hand-over. Absolute MAX returned 4 (65 pts)
+        // for a month; P75 correctly returns the normal value 2 (25 pts).
+        for (days_ago, peak) in [1, 1, 1, 2, 2, 2, 2, 4].into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO vpn_user_ip_concurrency
+                     (user_id, date, peak_concurrent_ips)
+                 VALUES (?1, date('now', ?2), ?3)",
+            )
+            .bind("normal-mobile")
+            .bind(format!("-{days_ago} days"))
+            .bind(peak)
+            .execute(&inv.pool)
+            .await?;
+        }
+
+        let sigs = inv.sharing_signals_all_users(30, 2.0).await?;
+        let normal = sigs
+            .iter()
+            .find(|s| s.user_id.0 == "normal-mobile")
+            .expect("user with concurrency samples present");
+        assert_eq!(normal.typical_concurrent_nets, 2);
         Ok(())
     }
 
