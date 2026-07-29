@@ -370,6 +370,37 @@ pub async fn scan_once(
         let cur = &rows[0];
         let prev = &rows[1];
         for ev in diff_rows(prev, cur) {
+            // A level-trigger catches a daemon that starts while the log
+            // is already oversized. Once the condition has been recorded,
+            // though, a manual ack must not reopen + re-push it every ten
+            // minutes while the same high spell continues. A real
+            // below-threshold recovery resets this history gate.
+            if ev.kind == "server.singbox.log.too_big"
+                && prev
+                    .sing_box_log_bytes
+                    .is_some_and(|b| b >= SINGBOX_LOG_TRIGGER_BYTES)
+            {
+                match inv
+                    .has_condition_since_recovery(
+                        ev.kind,
+                        "server.singbox.log.recovered",
+                        Some(&server.id),
+                    )
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            target = "vpnctld::health_monitor",
+                            server = %server.id.0,
+                            error = %e,
+                            "could not deduplicate steady oversized-log alert"
+                        );
+                        continue;
+                    }
+                }
+            }
             // payload is always built via `serde_json::json!{}` literal,
             // so serialization cannot fail in practice. But silently
             // dropping the context (`.ok()`) on the rare error would
@@ -1835,6 +1866,56 @@ mod tests {
         // consecutive test samples observably ordered on every SQLite
         // build, rather than relying on insertion order for equal stamps.
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    async fn record_singbox_log_health(inv: &SqliteInventory, server_id: &ServerId, bytes: u64) {
+        inv.record_node_health(
+            server_id,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(bytes),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn scan_once_does_not_reopen_acknowledged_steady_large_log() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("logs");
+        inv.add_server(&server).await.unwrap();
+
+        record_singbox_log_health(&inv, &server.id, 600 * 1024 * 1024).await;
+        record_singbox_log_health(&inv, &server.id, 700 * 1024 * 1024).await;
+        scan_once(&inv).await.unwrap();
+        let alert = inv
+            .recent_alerts(10, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.kind == "server.singbox.log.too_big")
+            .expect("steady-high bootstrap must fire once");
+        assert!(inv.ack_alert(alert.id).await.unwrap());
+
+        record_singbox_log_health(&inv, &server.id, 800 * 1024 * 1024).await;
+        scan_once(&inv).await.unwrap();
+        assert_eq!(
+            inv.recent_alerts(10, true).await.unwrap().len(),
+            1,
+            "the same high spell must stay acknowledged until recovery"
+        );
     }
 
     #[tokio::test]
