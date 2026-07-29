@@ -16669,6 +16669,13 @@ async fn sharing_page_lists_all_flagged_users_and_filters() {
 
     let all = fetch_html(app.clone(), "/admin/sharing").await;
     assert!(all.contains("Sharing-risk review"), "{all}");
+    assert!(
+        all.contains(r#"id="fleet-at-a-glance""#)
+            && all.contains(r#"ed-tab--on" href="/admin/sharing""#)
+            && all.contains(r#"href="/admin/overview""#)
+            && all.contains(r#"href="/admin/activity""#),
+        "sharing review must use the dashboard chrome and tab navigation: {all}"
+    );
     for i in 0..7 {
         assert!(
             all.contains(&format!("/admin/users/u{i}/activity#origins")),
@@ -16935,8 +16942,8 @@ async fn admin_user_detail_origins_empty_state_when_only_egress() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  ui-audit follow-up — dashboard split into 2 sub-route tabs
-//  (overview / activity). The KPI metrics + today-digest + fleet table
+//  ui-audit follow-up — dashboard split into sub-route tabs. The KPI
+//  metrics + today-digest + fleet table
 //  stay as CHROME (every tab — the glance is never hidden); the two tabs
 //  split only the deeper drill-downs. Bare /admin/ == overview.
 // ════════════════════════════════════════════════════════════════════
@@ -16962,6 +16969,12 @@ async fn dashboard_tabs_render_gate_and_mark_active() {
             "/admin/activity",
             "activity",
             "Fleet traffic",
+            "Health feed",
+        ),
+        (
+            "/admin/sharing",
+            "sharing",
+            "Sharing-risk review",
             "Health feed",
         ),
     ];
@@ -17014,7 +17027,7 @@ async fn dashboard_bare_url_renders_overview_tab() {
     );
 }
 
-/// Copy-contract — pin the 2 dashboard tab labels in both locales.
+/// Copy-contract — pin the dashboard tab labels in both locales.
 #[tokio::test]
 async fn dashboard_tab_labels_copy_contract() {
     let dir = TempDir::new().unwrap();
@@ -17022,11 +17035,12 @@ async fn dashboard_tab_labels_copy_contract() {
     seed(&s.inv, 1, 1, &[]).await;
     let app = router(s);
     let en = fetch_html(app.clone(), "/admin/").await;
-    for label in [">Overview</a>", ">Activity</a>"] {
+    for label in [">Overview</a>", ">Activity</a>", ">Sharing risk</a>"] {
         assert!(en.contains(label), "EN tab label drifted: {label:?}");
     }
     let ru = fetch_html_with_cookie(app, "/admin/", "vpnctl_lang=ru").await;
-    for label in [">Обзор</a>", ">Активность</a>"] {
+    for label in [">Обзор</a>", ">Активность</a>", ">Риск расшаривания</a>"]
+    {
         assert!(ru.contains(label), "RU tab label drifted: {label:?}");
     }
 }
