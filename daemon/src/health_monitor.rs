@@ -42,7 +42,7 @@
 //! | mem_used_pct crossed 95 going up | warning | `server.mem.pressure` |
 //! | mem_used_pct dropped below 90 (hysteresis) | info | `server.mem.recovered` |
 //! | sing_box_log_bytes is at least 500 MiB | warning | `server.singbox.log.too_big` |
-//! | sing_box_log_bytes dropped below 500 MiB | info | `server.singbox.log.recovered` |
+//! | sing_box_log_bytes is below 500 MiB after a recorded warning | info | `server.singbox.log.recovered` |
 //!
 //! Hysteresis on the disk/mem thresholds (90 vs 85, 95 vs 90) prevents
 //! flapping: a node hovering exactly at 90.0% disk would otherwise
@@ -237,6 +237,9 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
     }
 
     // ── sing-box log size ──────────────────────────────────────────
+    // Both sides are level-triggered. Two below-threshold probes can land
+    // before this scanner runs; the inventory history gate suppresses
+    // repeated/orphan recovery events.
     if let (Some(p), Some(c)) = (prev.sing_box_log_bytes, cur.sing_box_log_bytes) {
         if c >= SINGBOX_LOG_TRIGGER_BYTES {
             out.push(AlertEvent {
@@ -252,15 +255,12 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
                     "threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
                 }),
             });
-        } else if p >= SINGBOX_LOG_TRIGGER_BYTES && c < SINGBOX_LOG_TRIGGER_BYTES {
+        } else if c < SINGBOX_LOG_TRIGGER_BYTES {
             out.push(AlertEvent {
                 kind: "server.singbox.log.recovered",
                 resolves: Some("server.singbox.log.too_big"),
                 severity: "info",
-                summary: format!(
-                    "sing-box log size dropped back under 500 MiB ({} → {} bytes)",
-                    p, c
-                ),
+                summary: format!("sing-box log size is under 500 MiB ({} → {} bytes)", p, c),
                 payload: serde_json::json!({
                     "prior_bytes": p, "current_bytes": c,
                     "recover_threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
@@ -1597,7 +1597,7 @@ mod tests {
             Some(100),
             Some(80),
             Some(100),
-            Some(1024),
+            None,
         );
         let cur = row(
             0,
@@ -1607,7 +1607,7 @@ mod tests {
             Some(100),
             Some(80),
             Some(100),
-            Some(1024),
+            None,
         );
         assert!(diff_rows(&prev, &cur).is_empty());
     }
@@ -1768,6 +1768,34 @@ mod tests {
     }
 
     #[test]
+    fn diff_rows_steady_small_log_emits_level_recovery() {
+        let prev = row(
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100 * 1024 * 1024),
+        );
+        let cur = row(
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(20 * 1024 * 1024),
+        );
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.log.recovered");
+        assert_eq!(evs[0].resolves, Some("server.singbox.log.too_big"));
+    }
+
+    #[test]
     fn diff_rows_unknown_prior_emits_nothing() {
         // Probe parser couldn't get sing_box state on the prior tick
         // → can't tell whether this is a flip or a steady state. Don't
@@ -1915,6 +1943,65 @@ mod tests {
             inv.recent_alerts(10, true).await.unwrap().len(),
             1,
             "the same high spell must stay acknowledged until recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_once_recovers_stranded_large_log_after_two_small_samples() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("logs-race");
+        inv.add_server(&server).await.unwrap();
+
+        record_singbox_log_health(&inv, &server.id, 600 * 1024 * 1024).await;
+        record_singbox_log_health(&inv, &server.id, 700 * 1024 * 1024).await;
+        scan_once(&inv).await.unwrap();
+
+        // Reproduce production: both the manual probe and the shared-tick
+        // probe land after logrotate, hiding the original high → low pair.
+        record_singbox_log_health(&inv, &server.id, 20 * 1024 * 1024).await;
+        record_singbox_log_health(&inv, &server.id, 30 * 1024 * 1024).await;
+        scan_once(&inv).await.unwrap();
+
+        let history = inv.recent_alerts(10, true).await.unwrap();
+        let condition = history
+            .iter()
+            .find(|a| a.kind == "server.singbox.log.too_big")
+            .unwrap();
+        assert!(condition.acked_at.is_some(), "the stale warning must close");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|a| a.kind == "server.singbox.log.recovered")
+                .count(),
+            1
+        );
+
+        scan_once(&inv).await.unwrap();
+        assert_eq!(
+            inv.recent_alerts(10, true)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|a| a.kind == "server.singbox.log.recovered")
+                .count(),
+            1,
+            "level recovery must remain idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_once_suppresses_orphan_small_log_recovery() {
+        let (_dir, inv) = fresh_inv().await;
+        let server = probeable_server("logs-orphan");
+        inv.add_server(&server).await.unwrap();
+
+        record_singbox_log_health(&inv, &server.id, 20 * 1024 * 1024).await;
+        record_singbox_log_health(&inv, &server.id, 30 * 1024 * 1024).await;
+        scan_once(&inv).await.unwrap();
+
+        assert!(
+            inv.recent_alerts(10, true).await.unwrap().is_empty(),
+            "a healthy log with no warning history must stay quiet"
         );
     }
 
