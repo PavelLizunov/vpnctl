@@ -199,22 +199,59 @@ struct EnvelopePeer {
     allowed_ips: String,
 }
 
+/// Placeholder token emitted by `render_config` in PostUp/PostDown
+/// NAT rules. The apply script replaces it with the node's actual
+/// default egress interface (detected via `ip route`), so the
+/// rendered config is deterministic/testable while the real
+/// interface is resolved at apply time on the node.
+const EGRESS_IFACE_PLACEHOLDER: &str = "__EGRESS_IFACE__";
+
 /// Shell script run by [`AmneziaWg::apply_config`] after uploading the
-/// rendered config to `awg0.conf.new`: validate, atomically install, then
-/// (re)start `awg-quick@awg0` and poll it active. Fully static (no
-/// interpolation) so it can be unit-tested for the validation contract.
+/// rendered config to `awg0.conf.new`: validate, detect the default
+/// egress interface, persist IPv4 forwarding, atomically install, then
+/// (re)start `awg-quick@awg0` and poll it active. On failure, ROLL
+/// BACK to the previous config snapshot (same discipline as
+/// `sing_box_apply_script` / `xray_apply_script`).
 ///
 /// The validation copies the temp file to a path NAMED `awg0.conf` before
 /// running `awg-quick strip`, because `awg-quick strip` rejects any path
 /// not ending in `<iface>.conf` (a `.conf.new` name dies with "must be a
 /// valid interface name, followed by .conf"). Caught on the first live
 /// amneziawg deploy (de, 2026-06-27).
-const APPLY_CONFIG_CMD: &str = r#"
+fn awg_apply_script() -> String {
+    format!(
+        r#"
             set -eu
+
+            # ── Detect the default egress interface (safe fixed
+            #    pipeline — no untrusted shell text). Falls back to
+            #    eth0 when no default route exists yet (fresh LXC).
+            EGRESS=$(ip -o -4 route show to default 2>/dev/null | awk '{{print $5; exit}}')
+            EGRESS=${{EGRESS:-eth0}}
+
+            # ── Replace the render-time placeholder with the real
+            #    interface so PostUp/PostDown NAT rules target the
+            #    correct egress.
+            sed -i "s/{placeholder}/$EGRESS/g" /etc/amnezia/amneziawg/awg0.conf.new
+
+            # ── Persist + activate IPv4 forwarding (idempotent).
+            sysctl -w net.ipv4.ip_forward=1 >/dev/null
+            install -d -m 0755 /etc/sysctl.d
+            echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-vpnctl-forward.conf
+
+            # ── Validate via awg-quick strip (must see a path ending
+            #    in <iface>.conf, not .conf.new).
             _awgval=$(mktemp -d)
             cp /etc/amnezia/amneziawg/awg0.conf.new "$_awgval/awg0.conf"
             awg-quick strip "$_awgval/awg0.conf" > /dev/null
             rm -rf "$_awgval"
+
+            # ── Snapshot the live config for rollback (only if it
+            #    exists — first deploy has none; -a preserves perms).
+            if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
+                cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak 2>/dev/null || true
+            fi
+
             mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf
             chown root:root /etc/amnezia/amneziawg/awg0.conf
             chmod 0600 /etc/amnezia/amneziawg/awg0.conf
@@ -227,16 +264,32 @@ const APPLY_CONFIG_CMD: &str = r#"
             # the first attempt — not "active" by then = crash loop.
             for i in 1 2 3 4 5 6 7 8; do
                 state=$(systemctl is-active awg-quick@awg0 || true)
-                [ "$state" = "active" ] && exit 0
+                if [ "$state" = "active" ]; then
+                    rm -f /etc/amnezia/amneziawg/awg0.conf.bak
+                    exit 0
+                fi
                 sleep 1
             done
 
+            # Failed to come up. Dump diagnostics, then ROLL BACK to
+            # the snapshot so the node returns to its last-good config
+            # instead of crash-looping on the new one.
             echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2
             journalctl -u awg-quick@awg0 --no-pager -n 20 >&2 || true
             echo "--- attempted config (post-strip) ---" >&2
             awg-quick strip /etc/amnezia/amneziawg/awg0.conf >&2 || true
+            if [ -f /etc/amnezia/amneziawg/awg0.conf.bak ]; then
+                echo "rolling back to previous awg0 config" >&2
+                mv /etc/amnezia/amneziawg/awg0.conf.bak /etc/amnezia/amneziawg/awg0.conf || true
+                chown root:root /etc/amnezia/amneziawg/awg0.conf || true
+                chmod 0600 /etc/amnezia/amneziawg/awg0.conf || true
+                systemctl reload-or-restart awg-quick@awg0 || true
+            fi
             exit 1
-        "#;
+        "#,
+        placeholder = EGRESS_IFACE_PLACEHOLDER,
+    )
+}
 
 #[async_trait]
 impl Kernel for AmneziaWg {
@@ -335,16 +388,18 @@ impl Kernel for AmneziaWg {
             out.push_str(&format!("{ini_key} = {value}\n"));
         }
 
-        // PostUp / PostDown for NAT'ing outbound traffic. Idempotent
-        // would be `iptables -C ... || iptables -A ...` but
-        // wg-quick's PostUp runs once on `up`, so plain `-A` is fine
-        // and `PostDown` cleans up.
-        out.push_str(
-            "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\n",
-        );
-        out.push_str(
-            "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE\n",
-        );
+        // PostUp / PostDown for NAT'ing outbound traffic. The egress
+        // interface is a PLACEHOLDER token that the apply script
+        // replaces with the node's actual default-route interface
+        // (detected via `ip route` at apply time), so hosts with
+        // ens18/ens3/etc. get correct MASQUERADE rules. Symmetric:
+        // PostDown deletes exactly what PostUp added.
+        out.push_str(&format!(
+            "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {EGRESS_IFACE_PLACEHOLDER} -j MASQUERADE\n",
+        ));
+        out.push_str(&format!(
+            "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {EGRESS_IFACE_PLACEHOLDER} -j MASQUERADE\n",
+        ));
 
         // [Peer] blocks — one per envelope peer. Skip-with-comment
         // approach so the config-render-time order is stable AND
@@ -365,10 +420,12 @@ impl Kernel for AmneziaWg {
         ssh.upload("/etc/amnezia/amneziawg/awg0.conf.new", config)
             .await?;
         // Validate via `awg-quick strip` (exits non-zero on parse error
-        // and prints a useful error). Atomic-rename. Lock perms.
-        // Restart + verify-active poll, exact same pattern as sing-box's
-        // apply_config (CLAUDE.md staging-deploy lesson #3).
-        ssh.exec(APPLY_CONFIG_CMD).await?;
+        // and prints a useful error). Detect the real egress interface,
+        // persist IPv4 forwarding, atomic-rename, lock perms, restart +
+        // verify-active poll + ROLLBACK on failure — same discipline as
+        // sing_box_apply_script / xray_apply_script (CLAUDE.md staging-
+        // deploy lesson #3).
+        ssh.exec(&awg_apply_script()).await?;
         Ok(())
     }
 
@@ -683,7 +740,7 @@ mod tests {
 
     #[test]
     fn apply_config_validates_via_conf_named_temp_not_conf_new() {
-        let s = APPLY_CONFIG_CMD;
+        let s = awg_apply_script();
         // REGRESSION (de 2026-06-27, first live amneziawg deploy): the
         // original code ran `awg-quick strip .../awg0.conf.new`, which
         // awg-quick rejects ("must be a valid interface name, followed by
@@ -708,5 +765,118 @@ mod tests {
             "atomic install + service restart must remain: {s}"
         );
         assert!(s.contains("set -eu"), "fail-fast shell flags: {s}");
+    }
+
+    #[test]
+    fn apply_script_snapshots_before_swap_and_rolls_back_on_failure() {
+        let s = awg_apply_script();
+        // Snapshot precedes the mv swap.
+        let cp = s
+            .find("cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak")
+            .expect("snapshot cp -a to .bak missing");
+        let mv = s
+            .find("mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf")
+            .expect("atomic swap mv missing");
+        assert!(cp < mv, "snapshot must precede the swap");
+        // Snapshot is guarded on existence (first deploy has no live config).
+        assert!(
+            s.contains("if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then"),
+            "snapshot must be guarded on the live config existing: {s}"
+        );
+        // Rollback restores the .bak and restarts the service.
+        assert!(
+            s.contains("rolling back to previous awg0 config"),
+            "must roll back on activation failure: {s}"
+        );
+        assert!(
+            s.contains("mv /etc/amnezia/amneziawg/awg0.conf.bak /etc/amnezia/amneziawg/awg0.conf"),
+            "rollback must restore the .bak: {s}"
+        );
+        // Success path removes the .bak.
+        assert!(
+            s.contains("rm -f /etc/amnezia/amneziawg/awg0.conf.bak"),
+            "success path must remove the transient .bak: {s}"
+        );
+        assert!(
+            s.contains("journalctl -u awg-quick@awg0"),
+            "must dump diagnostics on failure: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_command_ordering_validate_snapshot_swap_restart() {
+        let s = awg_apply_script();
+        let validate = s.find("awg-quick strip").expect("validate step");
+        let snapshot = s.find("cp -a").expect("snapshot step");
+        let swap = s
+            .find("mv /etc/amnezia/amneziawg/awg0.conf.new")
+            .expect("swap step");
+        let restart = s
+            .find("systemctl reload-or-restart awg-quick@awg0")
+            .expect("restart step");
+        assert!(
+            validate < snapshot && snapshot < swap && swap < restart,
+            "ordering must be: validate → snapshot → swap → restart"
+        );
+    }
+
+    #[test]
+    fn apply_script_detects_egress_iface_and_persists_ip_forward() {
+        let s = awg_apply_script();
+        // Detects the default egress interface via a safe fixed pipeline.
+        assert!(
+            s.contains("ip -o -4 route show to default"),
+            "must detect the default egress interface: {s}"
+        );
+        // Falls back to eth0 when no default route exists.
+        assert!(
+            s.contains("EGRESS=${EGRESS:-eth0}"),
+            "must fall back to eth0: {s}"
+        );
+        // Replaces the placeholder in the staged config.
+        assert!(
+            s.contains(&format!(
+                "sed -i \"s/{EGRESS_IFACE_PLACEHOLDER}/$EGRESS/g\""
+            )),
+            "must replace the placeholder with the detected interface: {s}"
+        );
+        // Persists + activates IPv4 forwarding.
+        assert!(
+            s.contains("sysctl -w net.ipv4.ip_forward=1"),
+            "must activate IPv4 forwarding: {s}"
+        );
+        assert!(
+            s.contains("/etc/sysctl.d/99-vpnctl-forward.conf"),
+            "must persist IPv4 forwarding across reboots: {s}"
+        );
+    }
+
+    #[test]
+    fn render_config_uses_egress_placeholder_not_hardcoded_eth0() {
+        let s = dummy_server();
+        let secrets = server_secrets();
+        let ctx = RenderCtx::new(&s, &secrets);
+        let wg = WireGuard::new();
+        let bytes = AmneziaWg::new()
+            .render_config(&ctx, &[], &[&wg as &dyn Protocol])
+            .unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        // PostUp/PostDown use the placeholder, not a hardcoded interface.
+        assert!(
+            text.contains(&format!("-o {EGRESS_IFACE_PLACEHOLDER} -j MASQUERADE")),
+            "PostUp/PostDown must use the egress placeholder: {text}"
+        );
+        assert!(
+            !text.contains("-o eth0 -j MASQUERADE"),
+            "must NOT hardcode eth0 in the rendered config: {text}"
+        );
+        // PostUp and PostDown are symmetric (same interface token).
+        let placeholder_count = text
+            .matches(&format!("-o {EGRESS_IFACE_PLACEHOLDER} -j MASQUERADE"))
+            .count();
+        assert_eq!(
+            placeholder_count, 2,
+            "both PostUp and PostDown must reference the placeholder: {text}"
+        );
     }
 }

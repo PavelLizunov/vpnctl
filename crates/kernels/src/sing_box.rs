@@ -159,7 +159,18 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     # the rename path that orphans sing-box's open fd (no SIGHUP
     # reopen) — the two models must not coexist. Keep 14 rotations
     # = ~14 days at most under idle load.
+    # NO `su sing-box sing-box`: with copytruncate logrotate must
+    # create the rotated copy in root-owned /var/log — running as
+    # the sing-box user fails with EACCES. Root can read the
+    # sing-box-owned log and truncate it without issue.
     apt-get install -y --no-install-recommends logrotate
+    # Remove stale backup files that logrotate's `include /etc/logrotate.d`
+    # would parse as duplicate configs (dpkg conffile backups, editor
+    # turds). Our own fragment is written via `cat >` (overwrite, no
+    # backup), so these can only come from external tooling.
+    rm -f /etc/logrotate.d/sing-box.bak /etc/logrotate.d/sing-box~ \
+          /etc/logrotate.d/sing-box.dpkg-old /etc/logrotate.d/sing-box.dpkg-new \
+          /etc/logrotate.d/sing-box.dpkg-dist
     cat > /etc/logrotate.d/sing-box <<'LR'
 /var/log/sing-box.log {
     daily
@@ -170,12 +181,12 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     compress
     delaycompress
     copytruncate
-    su sing-box sing-box
 }
 LR
     # Verify the fragment parses — logrotate's parser is strict and a
-    # typo would silently disable rotation for ALL fragments.
-    logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1
+    # typo would silently disable rotation for ALL fragments. stderr
+    # is NOT suppressed so a parse failure surfaces in the deploy log.
+    logrotate -d /etc/logrotate.d/sing-box >/dev/null
     # fail2ban — SSH brute-force protection. The add-server wizard UI
     # promises it and the Phase-G health monitor alerts on
     # `server.fail2ban.down`, but NO deploy path actually installed it
@@ -937,6 +948,52 @@ mod tests {
         assert!(
             !fragment.contains("create "),
             "logrotate fragment must NOT carry a `create` directive (orphans sing-box's fd): {fragment}"
+        );
+    }
+
+    /// The logrotate fragment must NOT carry `su sing-box sing-box`:
+    /// with `copytruncate`, logrotate creates the rotated copy in
+    /// root-owned `/var/log` — running as the unprivileged sing-box
+    /// user fails with EACCES on every node. Root can read the
+    /// sing-box-owned log and truncate it without issue.
+    ///
+    /// Additionally: the validation step must NOT suppress stderr
+    /// (a parse failure must surface in the deploy log), and stale
+    /// backup files must be cleaned from `/etc/logrotate.d/` so
+    /// logrotate's `include` doesn't parse them as duplicate configs.
+    #[test]
+    fn logrotate_fragment_no_su_and_visible_errors() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // Isolate the heredoc body.
+        let start = s
+            .find("/var/log/sing-box.log {")
+            .expect("logrotate heredoc opening brace not found");
+        let fragment = &s[start..];
+        let end = fragment
+            .find('}')
+            .expect("logrotate heredoc closing brace not found");
+        let fragment = &fragment[..end];
+        assert!(
+            !fragment.contains("su "),
+            "logrotate fragment must NOT carry `su` (root runs copytruncate): {fragment}"
+        );
+        // Validation must not suppress stderr.
+        assert!(
+            s.contains("logrotate -d /etc/logrotate.d/sing-box >/dev/null\n"),
+            "validation must keep stderr visible (no 2>&1): {s}"
+        );
+        assert!(
+            !s.contains("logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1"),
+            "validation must NOT suppress stderr: {s}"
+        );
+        // Stale backup cleanup.
+        assert!(
+            s.contains("rm -f /etc/logrotate.d/sing-box.bak"),
+            "must clean stale .bak backups from the parsed logrotate dir: {s}"
+        );
+        assert!(
+            s.contains("sing-box.dpkg-old"),
+            "must clean dpkg conffile backups: {s}"
         );
     }
 

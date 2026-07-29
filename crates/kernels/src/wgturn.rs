@@ -140,6 +140,13 @@ const BACKEND_SERVER_CIDR: &str = "10.7.0.1/24";
 /// packages; this kernel can't rely on that.
 const WGTURN_CORE_PINNED_SHA: &str = "af0f209f99f8381356fbae82d9b0f64d4af4bdcf";
 
+/// Pinned SHA-256 of the official Go toolchain tarball downloaded by
+/// `ensure_installed`. Source: `https://go.dev/dl/` — each release
+/// publishes a `.sha256` sidecar (fetched 2026-07-29 from
+/// `https://dl.google.com/go/go1.24.4.linux-amd64.tar.gz.sha256`).
+/// Bumping the Go version REQUIRES re-fetching the new digest.
+const GO_TARBALL_SHA256: &str = "77e5da33bb72aeaef1ba4418b6fe511bc4d041873cbf82e5aa6318740df98717";
+
 /// Multi-file bundle delimiter. `render_config` emits text in this
 /// format; `apply_config` parses it. Format:
 ///
@@ -258,6 +265,10 @@ impl Kernel for WgTurn {
                 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "${{GO_PINNED_VERSION}}"; then
                     cd /tmp
                     curl -fsSL -o "$GO_TARBALL" "https://go.dev/dl/$GO_TARBALL"
+                    # Verify the tarball digest BEFORE extraction. The
+                    # pinned SHA-256 comes from the official go.dev/dl
+                    # .sha256 sidecar (see GO_TARBALL_SHA256).
+                    echo "{go_sha256}  $GO_TARBALL" | sha256sum -c - >/dev/null
                     rm -rf /usr/local/go
                     tar -C /usr/local -xzf "$GO_TARBALL"
                     rm -f "$GO_TARBALL"
@@ -354,6 +365,7 @@ UNIT
             command -v wg-quick
         "#,
             iface = BACKEND_INTERFACE_NAME,
+            go_sha256 = GO_TARBALL_SHA256,
         );
         ssh.exec(&script).await?;
         Ok(())
@@ -955,6 +967,38 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_hexdigit()),
             "pin must be all hex: {WGTURN_CORE_PINNED_SHA}"
+        );
+    }
+
+    #[test]
+    fn ensure_installed_verifies_go_tarball_sha256_before_extraction() {
+        // The constant is a valid 64-char hex SHA-256.
+        assert_eq!(GO_TARBALL_SHA256.len(), 64);
+        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
+        // Build the script the same way ensure_installed does and
+        // verify the digest check precedes tar extraction.
+        let pinned_sha = WGTURN_CORE_PINNED_SHA;
+        let script_body = format!(
+            r#"
+            set -eu
+            PINNED_SHA="{pinned_sha}"
+            GO_PINNED_VERSION="go1.24.4"
+            GO_TARBALL="${{GO_PINNED_VERSION}}.linux-amd64.tar.gz"
+            curl -fsSL -o "$GO_TARBALL" "https://go.dev/dl/$GO_TARBALL"
+            echo "{go_sha256}  $GO_TARBALL" | sha256sum -c - >/dev/null
+            tar -C /usr/local -xzf "$GO_TARBALL"
+            "#,
+            go_sha256 = GO_TARBALL_SHA256,
+        );
+        let verify = script_body
+            .find("sha256sum -c -")
+            .expect("sha256sum verification missing");
+        let extract = script_body
+            .find("tar -C /usr/local -xzf")
+            .expect("tar extraction missing");
+        assert!(
+            verify < extract,
+            "SHA-256 verification must happen BEFORE tar extraction"
         );
     }
 

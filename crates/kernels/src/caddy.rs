@@ -58,6 +58,13 @@ use vpnctl_core::{
 /// Go the same way.)
 pub(crate) const GO_VERSION: &str = "go1.26.4";
 
+/// Pinned SHA-256 of the official Go toolchain tarball downloaded by
+/// the on-node build fallback. Source: `https://go.dev/dl/` — each
+/// release publishes a `.sha256` sidecar (fetched 2026-07-29 from
+/// `https://dl.google.com/go/go1.26.4.linux-amd64.tar.gz.sha256`).
+/// Bumping [`GO_VERSION`] REQUIRES re-fetching the new digest.
+const GO_TARBALL_SHA256: &str = "1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f";
+
 /// Pinned Caddy release the plugin is compiled against. xcaddy's
 /// `build <version>` keeps the binary reproducible across nodes.
 pub(crate) const CADDY_VERSION: &str = "v2.11.4";
@@ -262,6 +269,10 @@ fn caddy_build_script() -> String {
         fi
 
         curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/{go_version}.linux-amd64.tar.gz"
+        # Verify the tarball digest BEFORE extraction. The pinned
+        # SHA-256 comes from the official go.dev/dl .sha256 sidecar
+        # (see GO_TARBALL_SHA256).
+        echo "{go_sha256}  /tmp/go.tgz" | sha256sum -c - >/dev/null
         rm -rf /usr/local/go
         tar -C /usr/local -xzf /tmp/go.tgz
         rm -f /tmp/go.tgz
@@ -281,6 +292,7 @@ fn caddy_build_script() -> String {
         fi
         "#,
         go_version = GO_VERSION,
+        go_sha256 = GO_TARBALL_SHA256,
         caddy_version = CADDY_VERSION,
         fp_pin = FORWARDPROXY_PIN,
     )
@@ -951,6 +963,34 @@ mod tests {
             "missing forwardproxy pin: {s}"
         );
         assert!(s.ends_with("-amd64"), "must be arch-stamped: {s}");
+    }
+
+    #[test]
+    fn build_script_verifies_go_tarball_sha256_before_extraction() {
+        let s = caddy_build_script();
+        // The pinned SHA-256 is embedded.
+        assert!(
+            s.contains(GO_TARBALL_SHA256),
+            "Go tarball SHA-256 must be pinned in the build script: {s}"
+        );
+        // Verification uses sha256sum -c BEFORE tar extraction.
+        assert!(
+            s.contains("sha256sum -c -"),
+            "must verify the tarball digest via sha256sum -c: {s}"
+        );
+        let verify = s
+            .find("sha256sum -c -")
+            .expect("sha256sum verification missing");
+        let extract = s
+            .find("tar -C /usr/local -xzf")
+            .expect("tar extraction missing");
+        assert!(
+            verify < extract,
+            "SHA-256 verification must happen BEFORE tar extraction: {s}"
+        );
+        // The constant is a valid 64-char hex SHA-256.
+        assert_eq!(GO_TARBALL_SHA256.len(), 64);
+        assert!(GO_TARBALL_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

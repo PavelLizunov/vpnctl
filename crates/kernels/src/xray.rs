@@ -63,6 +63,18 @@ impl Xray {
 /// deliberately; re-verify asset names haven't changed before bumping.
 const XRAY_VERSION: &str = "v26.3.27";
 
+/// Pinned SHA-256 digests for the Xray release archives, per
+/// architecture. Verified against the official `.dgst` sidecar
+/// assets published alongside each release archive at
+/// `https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{64,arm64-v8a}.zip.dgst`
+/// (fetched 2026-07-29; the `.dgst` files carry MD5/SHA1/SHA2-256/
+/// SHA2-512 — we pin SHA2-256). Bumping [`XRAY_VERSION`] REQUIRES
+/// re-fetching the new `.dgst` values from the same URL pattern.
+const XRAY_SHA256_LINUX_64: &str =
+    "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae";
+const XRAY_SHA256_LINUX_ARM64: &str =
+    "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c";
+
 const XRAY_BIN: &str = "/usr/local/bin/xray";
 const XRAY_CONFIG_DIR: &str = "/usr/local/etc/xray";
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
@@ -106,13 +118,25 @@ static XRAY_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new
                 apt-get install -y --no-install-recommends curl unzip ca-certificates
                 ARCH=$(uname -m)
                 case "$ARCH" in
-                    x86_64) XASSET="Xray-linux-64.zip" ;;
-                    aarch64) XASSET="Xray-linux-arm64-v8a.zip" ;;
+                    x86_64)
+                        XASSET="Xray-linux-64.zip"
+                        XSHA256="{sha256_64}"
+                        ;;
+                    aarch64)
+                        XASSET="Xray-linux-arm64-v8a.zip"
+                        XSHA256="{sha256_arm64}"
+                        ;;
                     *) echo "unsupported arch '$ARCH' for Xray-core" >&2; exit 1 ;;
                 esac
                 TMPDIR=$(mktemp -d)
                 curl -fsSL -o "$TMPDIR/xray.zip" \
                     "https://github.com/XTLS/Xray-core/releases/download/{version}/${{XASSET}}"
+                # Verify the archive digest BEFORE extracting/installing.
+                # The pinned SHA-256 comes from the official .dgst sidecar
+                # asset (see XRAY_SHA256_* constants). A mismatch aborts
+                # the deploy — a compromised CDN or MITM can't substitute
+                # a tampered binary.
+                echo "$XSHA256  $TMPDIR/xray.zip" | sha256sum -c - >/dev/null
                 unzip -o -q "$TMPDIR/xray.zip" -d "$TMPDIR"
                 install -o root -g root -m 0755 "$TMPDIR/xray" {bin}
                 rm -rf "$TMPDIR"
@@ -172,6 +196,8 @@ UNIT
         "#,
         version = XRAY_VERSION,
         bare_version = XRAY_VERSION.trim_start_matches('v'),
+        sha256_64 = XRAY_SHA256_LINUX_64,
+        sha256_arm64 = XRAY_SHA256_LINUX_ARM64,
         bin = XRAY_BIN,
         config_dir = XRAY_CONFIG_DIR,
         config_path = XRAY_CONFIG_PATH,
@@ -446,6 +472,41 @@ mod tests {
             "arm64 asset name: {s}"
         );
         assert!(s.contains("set -eu"), "fail-fast shell flags: {s}");
+    }
+
+    #[test]
+    fn setup_script_verifies_sha256_before_unzip() {
+        let s = XRAY_SETUP_SCRIPT.as_str();
+        // Both per-arch SHA-256 constants are embedded.
+        assert!(
+            s.contains(XRAY_SHA256_LINUX_64),
+            "x86_64 SHA-256 must be pinned in the script: {s}"
+        );
+        assert!(
+            s.contains(XRAY_SHA256_LINUX_ARM64),
+            "arm64 SHA-256 must be pinned in the script: {s}"
+        );
+        // Verification uses sha256sum -c BEFORE unzip.
+        assert!(
+            s.contains("sha256sum -c -"),
+            "must verify the archive digest via sha256sum -c: {s}"
+        );
+        let verify = s
+            .find("sha256sum -c -")
+            .expect("sha256sum verification missing");
+        let unzip = s.find("unzip -o -q").expect("unzip step missing");
+        assert!(
+            verify < unzip,
+            "SHA-256 verification must happen BEFORE unzip/install: {s}"
+        );
+        // The checksums are 64-char lowercase hex (valid SHA-256).
+        for digest in [XRAY_SHA256_LINUX_64, XRAY_SHA256_LINUX_ARM64] {
+            assert_eq!(digest.len(), 64, "SHA-256 must be 64 hex chars");
+            assert!(
+                digest.chars().all(|c| c.is_ascii_hexdigit()),
+                "SHA-256 must be all hex: {digest}"
+            );
+        }
     }
 
     #[test]
