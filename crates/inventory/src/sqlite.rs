@@ -610,6 +610,10 @@ fn real_client_ip_predicate(col: &str) -> String {
          AND {col} NOT LIKE '192.168.%' AND {col} NOT LIKE '169.254.%' \
          AND {col} NOT GLOB '172.1[6-9].*' AND {col} NOT GLOB '172.2[0-9].*' \
          AND {col} NOT GLOB '172.3[0-1].*' \
+         AND {col} <> '0.0.0.0' AND {col} <> '::' AND {col} <> '::1' \
+         AND {col} NOT LIKE 'fc%' AND {col} NOT LIKE 'fd%' \
+         AND {col} NOT LIKE 'fe8%' AND {col} NOT LIKE 'fe9%' \
+         AND {col} NOT LIKE 'fea%' AND {col} NOT LIKE 'feb%' \
          AND {col} NOT IN (SELECT address FROM servers){control_clause}"
     )
 }
@@ -7399,6 +7403,10 @@ mod tests {
             (UserId("u".into()), "172.20.5.5".into()),  // RFC1918 172.16-31
             (UserId("u".into()), "127.0.0.1".into()),   // loopback
             (UserId("u".into()), "169.254.9.9".into()), // link-local
+            (UserId("u".into()), "::1".into()),         // IPv6 loopback
+            (UserId("u".into()), "fe80::1".into()),     // IPv6 link-local
+            (UserId("u".into()), "fd12:3456::1".into()), // IPv6 ULA
+            (UserId("u".into()), "2001:db8::1".into()), // public IPv6 — KEEP
         ])
         .await?;
         let mut ips: Vec<String> = inv
@@ -7410,8 +7418,12 @@ mod tests {
         ips.sort();
         assert_eq!(
             ips,
-            vec!["172.32.5.5".to_string(), "203.0.113.9".to_string()],
-            "only the two real public clients survive; server/control/LAN/loopback/link-local all dropped"
+            vec![
+                "172.32.5.5".to_string(),
+                "2001:db8::1".to_string(),
+                "203.0.113.9".to_string(),
+            ],
+            "only public clients survive; server/control/LAN/loopback/link-local/ULA all dropped"
         );
         Ok(())
     }
