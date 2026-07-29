@@ -1303,11 +1303,15 @@ fn action_kind(action: &str) -> &'static str {
 // legacy Subscription-access table (R2 2026-07-10); the source-IPs
 // section carries its own labelling.
 
-/// Dashboard URL query — currently just the VPN traffic chart's
-/// window selector (`?vpn_window=24h|7d|30d|all`). Defaults to 24h.
+/// Dashboard URL query. Activity uses `vpn_window`; sharing uses the
+/// three filters below. Keeping one query type lets every dashboard tab
+/// flow through the same chrome and tab bar.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct DashboardQuery {
     pub vpn_window: Option<String>,
+    pub q: Option<String>,
+    pub level: Option<String>,
+    pub min_score: Option<String>,
 }
 
 /// dashboard's in-page tabs (ui-audit follow-up). The at-a-glance KPI
@@ -1319,6 +1323,7 @@ pub(crate) struct DashboardQuery {
 pub(crate) enum DashboardTab {
     Overview,
     Activity,
+    Sharing,
 }
 
 impl DashboardTab {
@@ -1326,6 +1331,7 @@ impl DashboardTab {
         match self {
             DashboardTab::Overview => "overview",
             DashboardTab::Activity => "activity",
+            DashboardTab::Sharing => "sharing",
         }
     }
 }
@@ -1348,23 +1354,22 @@ pub(crate) async fn dashboard_activity(
     dashboard_render(headers, state, query, DashboardTab::Activity).await
 }
 
-#[derive(serde::Deserialize, Default)]
-pub(crate) struct SharingQuery {
-    pub q: Option<String>,
-    pub level: Option<String>,
-    pub min_score: Option<String>,
-}
-
 pub(crate) async fn sharing(
     headers: HeaderMap,
     State(state): State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<SharingQuery>,
+    axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
+) -> Result<Markup, Response> {
+    dashboard_render(headers, state, query, DashboardTab::Sharing).await
+}
+
+fn sharing_review(
+    all: &[(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
+    query: &DashboardQuery,
+    lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
     use crate::sharing_score::SharingLevel;
 
-    let (theme, accent, lang) = theme_accent_lang(&headers);
-    let all = load_likely_shared(&state.inv).await;
     let q = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
     let level = match query.level.as_deref() {
         Some("high") => Some(SharingLevel::High),
@@ -1387,10 +1392,9 @@ pub(crate) async fn sharing(
 
     let body = html! {
         div.ed-art-eyebrow {
-            (tr(lang, "Likely-shared subscriptions", "Похожие на расшаренные подписки"))
+            (tr(lang, "Sharing-risk review", "Проверка риска расшаривания"))
             " · " (rows.len()) "/" (all.len())
         }
-        h1 { (tr(lang, "Sharing-risk review", "Проверка риска расшаривания")) }
         p.ed-deck {
             (tr(
                 lang,
@@ -1433,7 +1437,7 @@ pub(crate) async fn sharing(
             }
         }
     };
-    render_page(&state, "dashboard", &theme, &accent, lang, body).await
+    body
 }
 
 async fn dashboard_render(
@@ -1608,7 +1612,7 @@ async fn dashboard_render(
         (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
         // ── in-page tabs (ui-audit follow-up). The KPI metrics +
         // today-digest + fleet table ABOVE are chrome (every tab — the
-        // landing glance is never hidden); the two tabs below split only
+        // landing glance is never hidden); the three tabs below split only
         // the deeper drill-downs. Bare /admin/ == overview.
         (detail_tabs(
             "/admin",
@@ -1616,6 +1620,7 @@ async fn dashboard_render(
             &[
                 ("overview", crate::i18n::tr(lang, "Overview", "Обзор")),
                 ("activity", crate::i18n::tr(lang, "Activity", "Активность")),
+                ("sharing", crate::i18n::tr(lang, "Sharing risk", "Риск расшаривания")),
             ],
         ))
 
@@ -1672,6 +1677,11 @@ async fn dashboard_render(
             // PR-Dash dash#3 — kernel-floor rollup (shared helper).
             (kernel_floor_rollup(&kernel_versions, lang))
             (dashboard_heavy_users(&heavy_users, window, lang))
+        }
+
+        // ── SHARING — full fleet-wide review in the same dashboard flow.
+        @if tab == DashboardTab::Sharing {
+            (sharing_review(&likely_shared, &query, lang))
         }
     };
     Ok(render_page(&state, "dashboard", &theme, &accent, lang, body).await)
