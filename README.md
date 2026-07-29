@@ -4,9 +4,7 @@
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
-[![Version](https://img.shields.io/badge/version-0.8.0--dev-blue.svg)](#status--v08-in-flight)
-[![Lines of code](https://img.shields.io/badge/Rust-~46k%20LOC-blue.svg)](#project-size)
-[![Tests](https://img.shields.io/badge/tests-1096-brightgreen.svg)](#project-size)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](#production-health-check)
 
 Lightweight, fail-safe, Linux-only **control plane** for self-hosted VPN
 infrastructure. CLI + daemon + admin UI from a single workspace; SSH-first,
@@ -29,19 +27,14 @@ admin UI and per-node clash-api health probing.
 
 ### Project size
 
-A quick sense of scale (mirrors the badges above):
+A quick sense of scale (the authoritative protocol/kernel lists live in
+[Architecture](#architecture) and the registry — `vpnctl registry`):
 
-| Metric | Value |
+| Aspect | Value |
 |---|---|
-| Rust source | **~46k LOC** across **10 crates** (8 libs + `cli` + `daemon`) |
-| Tests | **1096** functions (`#[test]` + `#[tokio::test]`), ~25k LOC of test code — **~72k LOC** all-in |
-| Protocols × Kernels | **8 protocols** × **3 kernels**, fully orthogonal (see [Architecture](#architecture)) |
-| Schema | **28** SQLite migrations (`sqlx`, audit-on-mutation) |
+| Protocols × Kernels | **12 protocols** × **6 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.85+**, edition **2024** · single static Linux x86_64 binary (glibc 2.36+) |
-
-> LOC counted over `*.rs` excluding `target/`; tests counted as
-> `#[test]` + `#[tokio::test]` attributes across the workspace. Both
-> are easy to reproduce: `find crates cli daemon -name '*.rs' | xargs wc -l`.
 
 ### What ships today
 
@@ -52,8 +45,8 @@ A quick sense of scale (mirrors the badges above):
 | `vpnctl` CLI — server / user / grant / deploy / sub / status / migrate / bootstrap | ✅ |
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
-| Kernels — `sing-box`, `amneziawg`, `wgturn` (VK-TURN-relayed WireGuard) | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `wgturn` | ✅ (8 across 3 kernels) |
+| Kernels — `sing-box`, `amneziawg`, `wgturn` (VK-TURN-relayed WireGuard), `caddy` (naive / vless-ws cover site), `dns-tunnel` (slipstream last-resort), `xray` | ✅ |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `wgturn`, `naive`, `vless-ws`, `dns-tunnel`, `vless+xhttp` | ✅ (12 across 6 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -66,7 +59,7 @@ A quick sense of scale (mirrors the badges above):
 | Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
 | **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
-| 1096 workspace tests, GitHub Actions CI green | ✅ |
+| Workspace test suite, GitHub Actions CI green | ✅ |
 
 ### Known gaps (carried into v0.9)
 
@@ -93,8 +86,8 @@ the other:
 
 | Trait | Meaning | Examples |
 |---|---|---|
-| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `wgturn` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `wireguard`, `hysteria2`, ... |
+| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `wgturn`, `caddy`, `dns-tunnel`, `xray` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `wgturn`, `naive`, `vless-ws`, `dns-tunnel`, `vless+xhttp` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an
@@ -113,14 +106,18 @@ never live on the protocol struct.
 ```
 vpnctl/
 ├── crates/
-│   ├── core/             traits Kernel & Protocol, Registry, domain types
+│   ├── core/             traits Kernel & Protocol, Registry, domain types,
+│   │                     build provenance (build_version)
 │   ├── crypto/           UUID v4, x25519, REALITY short_id, password gen
 │   ├── host-fingerprint/ ssh-keyscan wrapper + SHA256 validate_shape
 │   ├── ssh/              SshTransport trait + russh implementations
 │   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
-│   │                     anytls, trojan, wgturn
-│   ├── kernels/          sing-box (full), amneziawg, wgturn
-│   └── inventory/        SqliteInventory, migrations, audit_log
+│   │                     anytls, trojan, wgturn, naive, vless-ws,
+│   │                     dns-tunnel, vless+xhttp
+│   ├── kernels/          sing-box (full), amneziawg, wgturn, caddy,
+│   │                     dns-tunnel, xray
+│   ├── inventory/        SqliteInventory, migrations, audit_log
+│   └── boosty-bridge/    Boosty subscription → user reconcile/sync
 ├── cli/                  clap binary `vpnctl`
 └── daemon/               axum binary `vpnctld` (admin UI + /sub + REST)
 ```
@@ -129,7 +126,7 @@ vpnctl/
 
 ```bash
 just check       # cargo check --workspace --all-targets
-just test        # cargo test --workspace (1096 tests)
+just test        # cargo test --workspace
 just clippy      # cargo clippy --workspace --all-targets -- -D warnings
 just fmt         # rustfmt all crates
 just deny        # cargo deny check (no openssl-sys, no native-tls)
@@ -148,12 +145,25 @@ daemon directly on its default listen address with:
 curl --fail --silent --show-error http://127.0.0.1:18402/api/v1/health
 ```
 
-The response is HTTP `200 OK` with a minimal JSON body containing the running
-binary's package version:
+The response is HTTP `200 OK` with a minimal JSON body. `version` is the
+stable SemVer — machine-readable and safe to grep/parse. `build` adds
+provenance: the same SemVer plus the short Git SHA the binary was built from
+(`+unknown` when built outside a Git checkout, e.g. a release tarball):
 
 ```json
-{"status":"ok","version":"0.8.0"}
+{"status":"ok","version":"0.9.0","build":"0.9.0+a1b2c3d"}
 ```
+
+**Release rule.** SemVer (`version`) changes only intentionally, when a
+release is cut — it is the operator-facing contract. The build SHA (`build`)
+changes on **every** build from a checkout, so two daemons that both report
+`version: 0.9.0` are still distinguishable by `build`. The same
+`<semver>+<sha>` stamp is shown in the admin UI footer/masthead and by
+`vpnctl --version`, giving one provenance string across the deployed daemon
+and CLI. The SHA is baked in at compile time: `scripts/deploy.sh` exports
+`VPNCTL_BUILD_SHA` before `cargo build`, and `vpnctl_core::build_version()`
+reads it via `option_env!` — no build script and no `git` at runtime
+(outside a checkout the stamp falls back to `+unknown`).
 
 Use the deployment's public base URL instead of `127.0.0.1:18402` to verify
 the reverse-proxy path as well. This endpoint reports `vpnctld` process

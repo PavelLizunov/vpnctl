@@ -97,9 +97,14 @@ async fn health_returns_stable_runtime_contract() {
         "application/json"
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
+    // Stable contract: `version` stays plain SemVer (machine-readable,
+    // greppable); `build` carries provenance `<semver>+<short-git-sha>`
+    // so the deployed commit is identifiable without breaking scripts
+    // that parse `version`.
     let expected = format!(
-        r#"{{"status":"ok","version":"{}"}}"#,
-        env!("CARGO_PKG_VERSION")
+        r#"{{"status":"ok","version":"{}","build":"{}"}}"#,
+        env!("CARGO_PKG_VERSION"),
+        vpnctl_core::build_version()
     );
     assert_eq!(body.as_ref(), expected.as_bytes());
 }

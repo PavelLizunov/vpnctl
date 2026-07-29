@@ -8,6 +8,9 @@
 pub mod humanize;
 pub mod shell;
 pub mod url_host;
+pub mod version;
+
+pub use version::build_version;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

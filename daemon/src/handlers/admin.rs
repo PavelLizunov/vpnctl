@@ -198,7 +198,7 @@ fn foot(lang: crate::i18n::Locale) -> Markup {
     html! {
         div.ed-foot {
             div.ed-foot__l {
-                span { "vpnctld " (env!("CARGO_PKG_VERSION")) }
+                span { "vpnctld " (vpnctl_core::build_version()) }
                 // The admin UI is server-rendered with maud; htmx was
                 // considered for the wizard but never landed (every
                 // mutation today is a plain POST + 303 redirect, no
@@ -500,7 +500,7 @@ fn dashboard_summary_bar(
             span.ed-sumbar__stat { b { (conns_now) } " " (tr(lang, "conns now", "подкл. сейчас")) }
             span.ed-sumbar__live {
                 span.ed-sumbar__dot {}
-                "vpnctld " b { (env!("CARGO_PKG_VERSION")) } " "
+                "vpnctld " b { (vpnctl_core::build_version()) } " "
                 em { (tr(lang, "live", "активен")) }
             }
         }

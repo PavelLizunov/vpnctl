@@ -9,7 +9,17 @@ mod registry;
 mod ui;
 
 #[derive(Parser, Debug)]
-#[command(name = "vpnctl", version, about = "VPN infrastructure control")]
+// `version` reports build provenance `<semver>+<short-git-sha>` (or
+// `+unknown` outside a Git checkout) so `vpnctl --version` on a node
+// identifies the exact deployed commit — the same stamp the daemon
+// health endpoint and admin footer show. Single source of truth:
+// `vpnctl_core::build_version()` (SemVer from CARGO_PKG_VERSION plus the
+// compile-time VPNCTL_BUILD_SHA the deploy script exports; no runtime git).
+#[command(
+    name = "vpnctl",
+    version = vpnctl_core::build_version(),
+    about = "VPN infrastructure control"
+)]
 struct Cli {
     /// Path to the SQLite inventory file. Created on first use.
     #[arg(long, env = "VPNCTL_DB", global = true)]

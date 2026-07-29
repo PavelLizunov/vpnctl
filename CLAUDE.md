@@ -451,10 +451,19 @@ CI пройдёт зелёно, но `/sub/<token>` (и любой live endpoint
 рестартован. Делать в той же сессии:
 
 ```bash
-cargo build --release -p vpnctld
-scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
-ssh user@192.168.0.236 'sudo install -o root -g root -m 0755 \
-  /tmp/vpnctld /opt/vpnctl/vpnctld && rm /tmp/vpnctld && \
+# Daemon + CLI from the SAME revision — installing only vpnctld used to
+# leave /usr/local/bin/vpnctl stale, which broke the weekly kernel updater
+# (old CLI migrations lagging the live DB).
+# Export the SHA BEFORE building so the binaries report `<semver>+<sha>`
+# (vpnctl_core::build_version reads VPNCTL_BUILD_SHA at compile time).
+export VPNCTL_BUILD_SHA=$(git rev-parse --short HEAD)
+cargo build --release -p vpnctld -p vpnctl
+scp target/release/vpnctld target/release/vpnctl scripts/deploy.sh \
+  user@192.168.0.236:/tmp/
+# scripts/deploy.sh installs BOTH atomically (temp file + rename), so a
+# failed copy can never leave a partial executable nor a stale CLI.
+ssh user@192.168.0.236 'sudo /tmp/deploy.sh /tmp/vpnctld /tmp/vpnctl && \
+  rm -f /tmp/vpnctld /tmp/vpnctl /tmp/deploy.sh && \
   sudo systemctl restart vpnctld'
 # Verify the new behaviour with a curl that exercises the changed code path.
 ```
@@ -607,14 +616,20 @@ Phase C-2 evidence — bugs each new layer caught that no other would:
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p vpnctld --test admin_smoke
 
-# 2. Live deploy to homelab (binary + CSS + favicon)
-cargo build --release -p vpnctld
-scp target/release/vpnctld user@192.168.0.236:/tmp/vpnctld
+# 2. Live deploy to homelab (daemon + CLI binaries, then CSS + favicon)
+#    Build daemon + CLI from the SAME revision; scripts/deploy.sh installs
+#    both atomically so /usr/local/bin/vpnctl never lags /opt/vpnctl/vpnctld.
+#    Export the SHA first so the binaries carry `<semver>+<sha>` provenance.
+export VPNCTL_BUILD_SHA=$(git rev-parse --short HEAD)
+cargo build --release -p vpnctld -p vpnctl
+scp target/release/vpnctld target/release/vpnctl scripts/deploy.sh \
+  user@192.168.0.236:/tmp/
 scp daemon/assets/{admin.css,favicon.svg} user@192.168.0.236:/tmp/
 ssh user@192.168.0.236 '
-  sudo install -o root -g root -m 0755 /tmp/vpnctld /opt/vpnctl/vpnctld &&
+  sudo /tmp/deploy.sh /tmp/vpnctld /tmp/vpnctl &&
   sudo install -o root -g root -m 0644 /tmp/admin.css /opt/vpnctl/assets/admin.css &&
   sudo install -o root -g root -m 0644 /tmp/favicon.svg /opt/vpnctl/assets/favicon.svg &&
+  rm -f /tmp/vpnctld /tmp/vpnctl /tmp/deploy.sh &&
   sudo systemctl restart vpnctld'
 
 # 3. Backend copy contract — confirm error responses match the prefix
