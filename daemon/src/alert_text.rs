@@ -380,6 +380,32 @@ pub fn render_alert(
                 None,
             )
         }
+        "server.singbox.restarted" => {
+            let delta = u(payload, "delta").unwrap_or(1);
+            let counter = u(payload, "current")
+                .map(|c| code(&format!("NRestarts={c}")))
+                .unwrap_or_default();
+            (
+                pick(
+                    loc,
+                    format!("sing-box restarted — {subj}"),
+                    format!("sing-box перезапустился — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!(
+                        "sing-box on {subj} was restarted {delta} time(s) between health probes {counter} — it read «active» at both samples, so this is a crash/OOM that systemd auto-restarted, not a clean reload."
+                    ),
+                    format!(
+                        "sing-box на ноде {subj} перезапустился {delta} раз(а) между проверками {counter} — на обеих пробах он был «active», значит это падение/OOM, которое systemd автоматически перезапустил, а не чистый перезапуск."
+                    ),
+                ),
+                Some(pick(
+                    loc,
+                    "Open the server page and review the recent probes — repeated restarts usually mean sing-box is running out of memory; consider growing the node's RAM.".into(),
+                    "Открой страницу сервера и посмотри свежие пробы — повторные перезапуски обычно означают нехватку памяти; подумай увеличить RAM ноды.".into())),
+            )
+        }
         "server.fingerprint.drift" => {
             let ip = ps(payload, "ip").map(code).unwrap_or_default();
             (
@@ -662,6 +688,7 @@ mod tests {
         ("server.mem.recovered", "info"),
         ("server.singbox.log.too_big", "warning"),
         ("server.singbox.log.recovered", "info"),
+        ("server.singbox.restarted", "warning"),
         ("server.fingerprint.drift", "warning"),
         ("user.traffic_limit", "warning"),
         ("server.attribution.stalled", "warning"),

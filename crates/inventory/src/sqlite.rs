@@ -700,6 +700,13 @@ pub struct NodeHealthRow {
     pub nic_iface: Option<String>,
     pub nic_rx_bytes: Option<u64>,
     pub nic_tx_bytes: Option<u64>,
+    /// sing-box monotonic systemd `NRestarts` counter (migration 0042).
+    /// RAW cumulative value; the health monitor (`diff_rows`) diffs
+    /// consecutive rows and fires a dedicated infra alert on an increase
+    /// (sing-box crashed + auto-restarted between probes), guarding the
+    /// drop that follows a host reboot / `systemctl reset-failed`. `None`
+    /// for rows predating this or ticks where `systemctl show` failed.
+    pub sing_box_nrestarts: Option<u64>,
 }
 
 /// Traffic-accounting breakdown for one server over a window, produced
@@ -6002,6 +6009,7 @@ impl SqliteInventory {
         nic_iface: Option<&str>,
         nic_rx_bytes: Option<u64>,
         nic_tx_bytes: Option<u64>,
+        sing_box_nrestarts: Option<u64>,
     ) -> Result<()> {
         // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
@@ -6012,9 +6020,10 @@ impl SqliteInventory {
               disk_used_mib, disk_total_mib,
               mem_available_mib, mem_total_mib,
               load_1min_x100, listening_ports_json, sing_box_log_bytes,
-              kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes)
+              kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+              sing_box_nrestarts)
              VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .bind(&server_id.0)
         .bind(sb)
@@ -6030,6 +6039,7 @@ impl SqliteInventory {
         .bind(nic_iface)
         .bind(nic_rx_bytes.and_then(|n| i64::try_from(n).ok()))
         .bind(nic_tx_bytes.and_then(|n| i64::try_from(n).ok()))
+        .bind(sing_box_nrestarts.and_then(|n| i64::try_from(n).ok()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -6047,7 +6057,8 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                    sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
@@ -6070,7 +6081,8 @@ impl SqliteInventory {
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                    sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
              ORDER BY ts DESC, rowid DESC
@@ -6973,6 +6985,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let nic_iface: Option<String> = r.try_get("nic_iface")?;
     let nic_rx: Option<i64> = r.try_get("nic_rx_bytes")?;
     let nic_tx: Option<i64> = r.try_get("nic_tx_bytes")?;
+    let nrestarts: Option<i64> = r.try_get("sing_box_nrestarts")?;
     Ok(NodeHealthRow {
         ts,
         server_id: ServerId(server_id),
@@ -6989,6 +7002,7 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         nic_iface,
         nic_rx_bytes: nic_rx.and_then(|n| u64::try_from(n).ok()),
         nic_tx_bytes: nic_tx.and_then(|n| u64::try_from(n).ok()),
+        sing_box_nrestarts: nrestarts.and_then(|n| u64::try_from(n).ok()),
     })
 }
 

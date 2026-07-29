@@ -53,6 +53,7 @@ async fn rec_nic(inv: &SqliteInventory, sid: &ServerId, iface: &str, rx: u64, tx
         Some(iface),
         Some(rx),
         Some(tx),
+        None,
     )
     .await
     .expect("record_node_health");

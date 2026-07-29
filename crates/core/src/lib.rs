@@ -662,7 +662,7 @@ impl DpiRisk {
                 "Recognisable on careful active probing (QUIC version, AEAD-on-port-N) but not trivially blocked. Useful as a fallback."
             }
             DpiRisk::Weak => {
-                "Trivially fingerprintable in RU/IR/CN 2026 (Shadowsocks high-entropy first byte, raw WireGuard 0x01 handshake tag, Trojan-without-fallback self-signed cert, Hysteria2-without-obfs QUIC). Consider hiding via NM-10."
+                "Trivially fingerprintable in RU/IR/CN 2026 (Shadowsocks high-entropy first byte, raw WireGuard 0x01 handshake tag, Trojan-without-fallback self-signed cert, Hysteria2 on legacy servers that lack the Salamander obfs secret — re-deploy mints it). Consider hiding via NM-10."
             }
         }
     }

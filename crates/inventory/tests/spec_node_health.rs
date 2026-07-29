@@ -64,6 +64,7 @@ async fn rec(
         None, // nic_iface
         None, // nic_rx_bytes
         None, // nic_tx_bytes
+        None, // sing_box_nrestarts — covered by the dedicated restart test
     )
     .await
     .expect("record_node_health");
@@ -399,6 +400,7 @@ async fn record_for_unknown_server_fails_fk() {
             None,
             None,
             None,
+            None,
         )
         .await;
     assert!(
@@ -573,6 +575,7 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -611,5 +614,71 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
     assert_eq!(
         latest.kernel_versions_json, None,
         "a probe with no versions persists NULL, not an empty object"
+    );
+}
+
+// 14. Migration 0042: sing_box_nrestarts roundtrips; NULL stays NULL for
+//     rows without a reading (non-systemd host / partial probe). The
+//     health monitor relies on NULL-vs-Some to skip first-observation.
+#[tokio::test]
+async fn sing_box_nrestarts_roundtrips_and_nullable() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    // Row WITH a counter reading.
+    inv.record_node_health(
+        &ServerId("s1".into()),
+        Some(true),
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(7),
+    )
+    .await
+    .unwrap();
+    let r = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .expect("one row");
+    assert_eq!(
+        r.sing_box_nrestarts,
+        Some(7),
+        "sing_box_nrestarts must roundtrip the monotonic counter"
+    );
+
+    // Row WITHOUT a reading (rec helper passes None) → stays NULL, NOT 0.
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let latest = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .expect("one row");
+    assert_eq!(
+        latest.sing_box_nrestarts, None,
+        "a probe with no NRestarts reading persists NULL, not zero"
     );
 }

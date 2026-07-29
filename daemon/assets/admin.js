@@ -96,7 +96,7 @@
           } catch (_) {}
           line("✗ " + msg, "var(--acc-bad, #97233f)");
         } else {
-          line("✗ connection lost — see vpnctld logs", "var(--acc-bad, #97233f)");
+          line("✗ connection lost — please retry", "var(--acc-bad, #97233f)");
         }
         es.close();
         btn.disabled = false;

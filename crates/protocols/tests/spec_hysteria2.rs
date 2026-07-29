@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use vpnctl_core::{KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId};
+use vpnctl_core::{
+    DpiRisk, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
+};
 use vpnctl_protocols::Hysteria2;
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -602,5 +604,35 @@ fn h8_realm_and_obfs_can_coexist() {
     assert!(
         v.get("obfs").is_some(),
         "obfs block must coexist with realm"
+    );
+}
+
+// ── H9: DPI risk tier honesty ───────────────────────────────────────────
+//
+// The tier stays Weak (legacy servers can lack the Salamander secret —
+// minting is deploy-triggered with no fleet backfill), but the operator
+// tooltip must describe that CONDITIONAL state, not claim there is simply
+// no obfuscation. Pins the conservative tier AND the honest copy.
+
+#[test]
+fn h9_dpi_risk_stays_weak_but_tooltip_explains_conditional_obfs() {
+    let risk = Hysteria2::new().dpi_risk();
+    assert_eq!(
+        risk,
+        DpiRisk::Weak,
+        "Hysteria2 must stay Weak: legacy/undeployed servers can lack the Salamander secret"
+    );
+    let tooltip = risk.tooltip();
+    assert!(
+        tooltip.contains("Salamander"),
+        "Weak tooltip must name the Salamander obfs so operators know new servers ARE obfuscated; got: {tooltip}"
+    );
+    assert!(
+        tooltip.contains("legacy"),
+        "Weak tooltip must scope the fingerprint to legacy servers lacking the secret; got: {tooltip}"
+    );
+    assert!(
+        !tooltip.contains("Hysteria2-without-obfs QUIC"),
+        "Weak tooltip must not claim Hysteria2 has no obfuscation outright; got: {tooltip}"
     );
 }

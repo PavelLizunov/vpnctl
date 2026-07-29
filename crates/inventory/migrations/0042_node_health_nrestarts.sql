@@ -1,0 +1,12 @@
+-- sing-box monotonic systemd restart counter, captured by the node
+-- probe alongside the existing infra telemetry. RAW cumulative value
+-- (not a delta) — the health monitor diffs consecutive rows and alerts
+-- on an INCREASE, with a reset guard for the counter dropping after a
+-- host reboot / `systemctl reset-failed`.
+--
+-- This closes the detection gap where a sing-box that OOMs and is
+-- auto-restarted BETWEEN two ten-minute probes reads `active` at both
+-- samples, so the plain down/up detector never fires. Additive +
+-- nullable — existing rows + the 30-day retention are unaffected, and
+-- the explicit-column INSERT simply gains one more bound parameter.
+ALTER TABLE node_health ADD COLUMN sing_box_nrestarts INTEGER;

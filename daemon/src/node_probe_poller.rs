@@ -1133,6 +1133,7 @@ pub(crate) async fn probe_one_server(
             probe.nic_iface.as_deref(),
             probe.nic_rx_bytes,
             probe.nic_tx_bytes,
+            probe.sing_box_nrestarts,
         )
         .await;
 

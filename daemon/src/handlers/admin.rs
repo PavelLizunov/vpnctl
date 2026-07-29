@@ -1974,8 +1974,10 @@ fn internal_error(err: anyhow::Error) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         // Opaque body — see doc-comment. Pinned by
-        // `internal_error_body_does_not_leak_anyhow_chain`.
-        error_text("internal error — see journalctl -u vpnctld"),
+        // `internal_error_body_does_not_leak_anyhow_chain`. No terminal
+        // instruction here (operator-action policy): the full chain lives
+        // in the structured log, the operator just gets an honest retry.
+        error_text("internal error — please retry the action"),
     )
         .into_response()
 }
@@ -2138,8 +2140,8 @@ pub(crate) async fn monitoring(
             h1.ed-sumbar__h { (tr(lang, "Fleet ", "Здоровье ")) em { (tr(lang, "health", "флота")) } }
             span.ed-tip title=(tr(
                 lang,
-                "node_probe runs on a fixed tick over SSH: systemctl state per kernel, disk/mem/load, log sizes, listening ports. Unknown probes are excluded from uptime denominators.",
-                "node_probe ходит по SSH с фиксированным тиком: состояние systemctl по каждому ядру, диск/память/load, размеры логов, слушающие порты. Неопределённые пробы не входят в знаменатель uptime.",
+                "node_probe runs on a fixed tick over SSH: service state per kernel, disk/mem/load, log sizes, listening ports. Unknown probes are excluded from uptime denominators.",
+                "node_probe ходит по SSH с фиксированным тиком: состояние сервисов по каждому ядру, диск/память/load, размеры логов, слушающие порты. Неопределённые пробы не входят в знаменатель uptime.",
             )) { "ⓘ" }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (probeable_total) " " (tr(lang, "nodes", "нод"))
@@ -2219,8 +2221,8 @@ pub(crate) async fn monitoring(
                 (tr(lang, "Uptime · sing-box service", "Uptime · сервис sing-box")) " "
                 span.ed-tip title=(tr(
                     lang,
-                    "Rolling-window aggregate over sing_box_active from the node_probe poller. «up» = systemctl reports active at probe time; unknown probes are excluded from the denominator.",
-                    "Скользящие окна sing_box_active от node_probe-поллера. «up» = systemctl показал active в момент пробы; неопределённые пробы не входят в знаменатель.",
+                    "Rolling-window aggregate over sing_box_active from the node_probe poller. «up» = the service reports active at probe time; unknown probes are excluded from the denominator.",
+                    "Скользящие окна sing_box_active от node_probe-поллера. «up» = сервис показал active в момент пробы; неопределённые пробы не входят в знаменатель.",
                 )) { "ⓘ" }
             }
             table.ed-grid style="margin-top: 8px;" {
@@ -2771,8 +2773,8 @@ pub(crate) async fn servers(
             span.ed-tip
                 title=(crate::i18n::tr(
                     lang,
-                    "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest), or use `vpnctl bootstrap` then `vpnctl deploy` from the CLI.",
-                    "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон), либо `vpnctl bootstrap` затем `vpnctl deploy` в CLI.",
+                    "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest) — it bootstraps secrets and deploys the config automatically.",
+                    "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон) — он сам создаст секреты и задеплоит конфиг.",
                 )) { "ⓘ" }
             // Fleet actions live top-right of the header (densify 2a).
             // Both stream via admin.js [data-sse-url]; their log panes
@@ -2878,12 +2880,10 @@ pub(crate) async fn servers(
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No servers yet. Click ", "Серверов ещё нет. Кликни "))
                 span.ed-mono { (crate::i18n::tr(lang, "add server →", "добавить сервер →")) }
-                (crate::i18n::tr(lang, " above, or run ", " выше, или запусти "))
-                span.ed-mono { "vpnctl bootstrap <id> --address <addr> --root-password <pw>" }
                 (crate::i18n::tr(
                     lang,
-                    " on a fresh node and refresh.",
-                    " на свежей ноде и обнови страницу.",
+                    " above and the wizard will bootstrap a fresh node — then refresh.",
+                    " выше, и мастер подготовит свежую ноду — затем обнови страницу.",
                 ))
             }
         } @else {
@@ -3213,11 +3213,7 @@ pub(crate) async fn users(
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
                 span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
-                (crate::i18n::tr(lang, ", or use ", ", либо запусти "))
-                span.ed-mono { "vpnctl user create <id>" }
-                (crate::i18n::tr(lang, " from the CLI. Then grant server access via ", " в CLI. Затем выдай доступ к серверу через "))
-                span.ed-mono { "vpnctl grant <user> <server>" }
-                (crate::i18n::tr(lang, " (web UI lands in C-3.3).", " (web UI приедет в C-3.3)."))
+                (crate::i18n::tr(lang, ". Then grant server access with the per-server toggles on the user's page.", ". Затем выдай доступ к серверу переключателями на странице юзера."))
             }
         } @else if pairs.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
@@ -4673,11 +4669,9 @@ async fn user_detail_render(
                                                 span.ed-mono { "wireguard" }
                                                 (crate::i18n::tr(
                                                     lang,
-                                                    " protocol need to be enabled on a node first (CLI: ",
-                                                    " протокол должны быть сначала включены на ноде (CLI: ",
+                                                    " protocol need to be enabled on the server first — open its Settings page, add the protocol and kernel, then redeploy.",
+                                                    " протокол должны быть сначала включены на сервере — открой страницу настроек сервера, добавь протокол и ядро, затем задеплой.",
                                                 ))
-                                                span.ed-mono { "vpnctl server add … --protocols vless+reality,wireguard --kernel amneziawg" }
-                                                ")."
                                             }
                                         }
                                     } @else {
@@ -4701,9 +4695,7 @@ async fn user_detail_render(
                                             span.ed-mono { "wireguard.server_public_key" }
                                             " / "
                                             span.ed-mono { "wireguard.server_private_key" }
-                                            (crate::i18n::tr(lang, " server secret — check ", " серверного секрета — проверь "))
-                                            span.ed-mono { "journalctl -u vpnctld" }
-                                            "."
+                                            (crate::i18n::tr(lang, " server secret — open the server's Settings page to review its secrets.", " серверного секрета — открой страницу настроек сервера и проверь секреты."))
                                         }
                                     }
                                 } @else {
@@ -4794,11 +4786,9 @@ async fn user_detail_render(
                                             }
                                             (crate::i18n::tr(
                                                 lang,
-                                                " — but AmneziaVPN link rendering failed (check ",
-                                                " — но рендер AmneziaVPN-ссылки провалился (проверь ",
+                                                " — but AmneziaVPN link rendering failed (open the server's Settings page to review its secrets).",
+                                                " — но рендер AmneziaVPN-ссылки провалился (открой страницу настроек сервера и проверь секреты).",
                                             ))
-                                            span.ed-mono { "journalctl -u vpnctld" }
-                                            ")."
                                         }
                                     }
                                 } @else {
@@ -5156,11 +5146,9 @@ async fn user_detail_render(
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
                     (crate::i18n::tr(
                         lang,
-                        "No servers in the inventory yet. Run ",
-                        "Серверов в инвентаре ещё нет. Запусти ",
+                        "No servers in the inventory yet. Add one from the Servers page wizard (paste IP + root password).",
+                        "Серверов в инвентаре ещё нет. Добавь сервер через мастер на странице серверов (вставь IP + root-пароль).",
                     ))
-                    span.ed-mono { "vpnctl bootstrap <id> --address <ip> --root-password <pw>" }
-                    (crate::i18n::tr(lang, " to add one (web wizard lands in Phase E).", " чтобы добавить (веб-мастер придёт в Phase E)."))
                 }
             } @else {
                 ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
@@ -5352,11 +5340,9 @@ async fn user_detail_render(
                         p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
                             (crate::i18n::tr(
                                 lang,
-                                "No share-links could be rendered (missing secrets or unregistered protocols). Check ",
-                                "Не удалось отрендерить ни одной ссылки (нет секретов или протокол не зарегистрирован). Смотри ",
+                                "No share-links could be rendered (missing secrets or unregistered protocols). Open each server's Settings page to review its secrets.",
+                                "Не удалось отрендерить ни одной ссылки (нет секретов или протокол не зарегистрирован). Открой страницу настроек каждого сервера и проверь секреты.",
                             ))
-                            span.ed-mono { "journalctl -u vpnctld" }
-                            (crate::i18n::tr(lang, " for warnings.", " — там будут warnings."))
                         }
                     } @else {
                         ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--soft);" {
@@ -6380,7 +6366,7 @@ async fn ua_clusters_section(
                 div.ed-rule {}
                 div.ed-art-eyebrow { (crate::i18n::tr(lang, "UA fingerprint", "Отпечаток User-Agent")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    "(temporarily unavailable — see journalctl)"
+                    "(temporarily unavailable — please retry)"
                 }
             };
         }
@@ -7400,7 +7386,7 @@ async fn live_vpn_stats_section(
                 div.ed-rule {}
                 div.ed-art-eyebrow { (tr(lang, "Live VPN stats", "Живая статистика VPN")) }
                 p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
-                    (tr(lang, "(temporarily unavailable — see journalctl)", "(временно недоступно — смотри journalctl)"))
+                    (tr(lang, "(temporarily unavailable — please retry)", "(временно недоступно — повтори попытку)"))
                 }
             };
         }
@@ -12642,20 +12628,14 @@ fn settings_disaster_recovery_section(
             li {
                 b { (tr(lang, "On the new host: decrypt + extract", "На новом хосте: расшифруй + распакуй")) }
                 " — "
-                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (Iceland) with ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (Iceland) через "))
-                span.ed-mono { "age -d -i /path/to/vpnctl-backup-key.age" }
-                (tr(lang, ". Extract the tar — you'll get the full ", ". Распакуй tar — получишь полный "))
+                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (Iceland) with the backup age key. Extract the tar — you'll get the full ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (Iceland) backup-ключом age. Распакуй tar — получишь полный "))
                 span.ed-mono { "vpnctl-snap/" }
                 (tr(lang, " tree.", " дерево."))
             }
             li {
                 b { (tr(lang, "On the new host: restore inv.db + start the daemon", "На новом хосте: восстанови inv.db + запусти демон")) }
                 " — "
-                (tr(lang, "install the new vpnctld binary (built from git, glibc-2.36-compatible), then ", "поставь свежий vpnctld binary (собранный из git, glibc-2.36-совместимый), затем "))
-                span.ed-mono { "vpnctl restore /path/to/inv.db" }
-                (tr(lang, ". This is the one CLI-only exception even on a HEALTHY host (daemon can't replace its own open DB); on a recovery host the daemon doesn't even exist yet. Copy env + assets + deploy key into place; ", ". Это один CLI-only шаг даже на ЗДОРОВОМ хосте (демон не может заменить свою же открытую БД); на recovery-хосте демона ещё нет. Скопируй env + assets + deploy-ключ на места; "))
-                span.ed-mono { "systemctl restart vpnctld" }
-                "."
+                (tr(lang, "install the new vpnctld binary (built from git, glibc-2.36-compatible), then run its restore subcommand against the recovered inv.db. This is the one CLI-only exception even on a HEALTHY host (daemon can't replace its own open DB); on a recovery host the daemon doesn't even exist yet. Copy env + assets + deploy key into place, then restart the daemon service.", "поставь свежий vpnctld binary (собранный из git, glibc-2.36-совместимый), затем выполни его подкоманду restore для восстановленной inv.db. Это один CLI-only шаг даже на ЗДОРОВОМ хосте (демон не может заменить свою же открытую БД); на recovery-хосте демона ещё нет. Скопируй env + assets + deploy-ключ на места, затем перезапусти сервис демона."))
             }
             li {
                 b { (tr(lang, "Verify + push deploy key", "Проверь + push deploy-ключ")) }
@@ -12740,7 +12720,7 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                     }
                     None => {
                         em style="color: var(--mute);" {
-                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                            (tr(lang, "(missing — use the «update now» button below)", "(отсутствует — нажми «обновить сейчас» ниже)"))
                         }
                     }
                 }
@@ -12758,7 +12738,7 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                     }
                     None => {
                         em style="color: var(--mute);" {
-                            (tr(lang, "(missing — run `vpnctl geoip-update`)", "(отсутствует — запусти `vpnctl geoip-update`)"))
+                            (tr(lang, "(missing — use the «update now» button below)", "(отсутствует — нажми «обновить сейчас» ниже)"))
                         }
                     }
                 }
@@ -12768,21 +12748,21 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
             @if any_loaded {
                 (tr(
                     lang,
-                    "Update once a month with ",
-                    "Обновлять раз в месяц через ",
+                    "Update once a month with the ",
+                    "Обновлять раз в месяц кнопкой ",
                 ))
             } @else {
                 (tr(
                     lang,
-                    "Drop fresh MMDB files into the dir + restart the daemon, or run ",
-                    "Положи свежие MMDB-файлы в папку + перезапусти демон, либо запусти ",
+                    "Drop fresh MMDB files into the dir + restart the daemon, or use the ",
+                    "Положи свежие MMDB-файлы в папку + перезапусти демон, либо используй ",
                 ))
             }
-            span.ed-mono { "vpnctl geoip-update" }
+            span.ed-mono { (tr(lang, "update now", "обновить сейчас")) }
             (tr(
                 lang,
-                " on the daemon host. The command downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir. Restart vpnctld for the new DB to load.",
-                " на хосте демона. Команда скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Перезапусти vpnctld чтобы новая БД загрузилась.",
+                " button below. It downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir, then reloads the DB.",
+                " ниже. Она скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке, затем перезагружает БД.",
             ))
         }
         // ── «update now» button (Phase 3c, CSP-safe since 2026-06-10) ──
@@ -12808,8 +12788,8 @@ fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                    style="font-family: var(--mono); font-size: 12px; padding: 6px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); cursor: pointer;"
                    title=(tr(
                        lang,
-                       "Spawn the `vpnctl geoip-update` subprocess on the daemon host and stream its progress here. Same action the monthly systemd timer fires.",
-                       "Запустить `vpnctl geoip-update` на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный systemd timer.",
+                       "Spawn the geoip-update subprocess on the daemon host and stream its progress here. Same action the monthly timer fires.",
+                       "Запустить подпроцесс geoip-update на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный таймер.",
                    )) {
                 (tr(lang, "update now", "обновить сейчас"))
             }
@@ -13123,12 +13103,10 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     }
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    (crate::i18n::tr(lang, "Restore-in-place is a ", "Восстановление поверх живой БД — это команда "))
-                    span.ed-mono { "vpnctl restore <snapshot>" }
                     (crate::i18n::tr(
                         lang,
-                        " CLI command (daemon can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
-                        " в CLI (демон не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
+                        "Restore-in-place is a CLI command (the daemon's restore subcommand — it can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
+                        "Восстановление поверх живой БД — это CLI-команда (подкоманда restore демона — он не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
                     ))
                 }
             }
@@ -13232,11 +13210,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         ": " (e)
                         (crate::i18n::tr(
                             lang,
-                            ". Most likely the daemon user doesn't have access — check ",
-                            ". Скорее всего у пользователя демона нет доступа — проверь ",
+                            ". Most likely the daemon user doesn't have access — check the permissions on the daemon's data directory.",
+                            ". Скорее всего у пользователя демона нет доступа — проверь права на каталог данных демона.",
                         ))
-                        span.ed-mono { "ls -la /var/lib/vpnctl/" }
-                        "."
                     }
                 }
             }
@@ -13640,11 +13616,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         span.ed-mono { (crate::i18n::tr(lang, "«push deploy key»", "«push deploy key»")) }
                         (crate::i18n::tr(
                             lang,
-                            " button. The daemon handles the SSH dance for you — no manual ",
-                            " кнопка. Демон делает SSH-танец сам — без ручного ",
+                            " button. The daemon handles the SSH dance for you — no manual SSH login or ",
+                            " кнопка. Демон делает SSH-танец сам — без ручного SSH-логина или редактирования ",
                         ))
-                        span.ed-mono { "ssh root@…" }
-                        (crate::i18n::tr(lang, " or ", " или редактирования "))
                         span.ed-mono { "authorized_keys" }
                         (crate::i18n::tr(
                             lang,
@@ -13658,12 +13632,10 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         (crate::i18n::tr(lang, "Public key file unreadable: ", "Публичный ключ не читается: ")) (e)
                         (crate::i18n::tr(lang, ". Most common cause: ", ". Чаще всего: "))
                         span.ed-mono { "/var/lib/vpnctl/.ssh" }
-                        (crate::i18n::tr(lang, " not writable by the daemon. Check ", " недоступен на запись демону. Проверь "))
-                        span.ed-mono { "ls -la /var/lib/vpnctl/" }
                         (crate::i18n::tr(
                             lang,
-                            "; vpnctld writes there as the systemd-unit user (typically ",
-                            "; vpnctld пишет туда из-под пользователя systemd-юнита (обычно ",
+                            " not writable by the daemon. Check its directory permissions; vpnctld writes there as the systemd-unit user (typically ",
+                            " недоступен на запись демону. Проверь права на каталог; vpnctld пишет туда из-под пользователя systemd-юнита (обычно ",
                         ))
                         span.ed-mono { "user" } ")."
                     }
@@ -14809,7 +14781,7 @@ pub(crate) async fn wizard_step2_sse(
                 error = %e,
                 "wizard SSE event serialisation failed — emitting placeholder"
             );
-            format!("{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}")
+            format!("{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}")
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
     });
@@ -14895,7 +14867,7 @@ pub(crate) async fn server_deploy_sse(
                 "redeploy SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15027,7 +14999,7 @@ fn deploy_servers_sse_response(state: &AppState, servers: Vec<vpnctl_core::Serve
                 "deploy-all SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15104,7 +15076,7 @@ pub(crate) async fn server_update_kernels_sse(
                 "update-kernels SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15168,7 +15140,7 @@ pub(crate) async fn servers_update_kernels_all_sse(
                 "update-kernels-all SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"phase\":\"serialise-error\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -15257,7 +15229,7 @@ pub(crate) async fn settings_geoip_update_now_sse(
                 "geoip-update SSE event serialisation failed — emitting placeholder"
             );
             format!(
-                "{{\"kind\":\"step\",\"stream\":\"stderr\",\"message\":\"daemon failed to serialise this event ({e}); see vpnctld logs\"}}"
+                "{{\"kind\":\"step\",\"stream\":\"stderr\",\"message\":\"daemon failed to serialise this event ({e}); please retry the action\"}}"
             )
         });
         Ok::<_, std::convert::Infallible>(Event::default().event(name).data(json))
@@ -16358,12 +16330,12 @@ async fn server_detail_render(
                     tr {
                         td { (ok(latest.as_ref().and_then(|h| h.sing_box_active) == Some(true))) }
                         td { b { "sing-box " (crate::i18n::tr(lang, "service active", "сервис активен")) } }
-                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                        td.num.ed-grid__mut.ed-grid__sm { "service active" }
                     }
                     tr {
                         td { (ok(latest.as_ref().and_then(|h| h.fail2ban_active) == Some(true))) }
                         td { b { "fail2ban " (crate::i18n::tr(lang, "active · sshd jail", "активен · sshd jail")) } }
-                        td.num.ed-grid__mut.ed-grid__sm { "systemctl is-active" }
+                        td.num.ed-grid__mut.ed-grid__sm { "service active" }
                     }
                     tr {
                         td { (ok(server.trusted_host_fingerprint.is_some())) }
@@ -16560,8 +16532,8 @@ fn server_detail_uptime_section(
                 " "
                 span.ed-tip title=(tr(
                     lang,
-                    "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means systemctl reported active at probe time; unknown probes are excluded from the denominator.",
-                    "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что systemctl показал active; неопределённые пробы не входят в знаменатель.",
+                    "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means the service reported active at probe time; unknown probes are excluded from the denominator.",
+                    "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что сервис показал active; неопределённые пробы не входят в знаменатель.",
                 )) { "ⓘ" }
             }
             table.ed-grid style="margin-top: 8px;" {
@@ -16593,8 +16565,8 @@ fn server_detail_uptime_section(
                         div style="color: #e6a23c;" {
                             (tr(
                                 lang,
-                                "Most recent probe is >20 min old — poller may be stalled. Check journalctl on 236.",
-                                "Последняя проба старше 20 минут — поллер может быть остановлен. Проверь journalctl на 236.",
+                                "Most recent probe is >20 min old — the poller may be stalled. Use the manual sweep button on this page to refresh.",
+                                "Последняя проба старше 20 минут — поллер может быть остановлен. Нажми кнопку ручного сканирования на этой странице, чтобы обновить.",
                             ))
                         }
                     }
@@ -17920,8 +17892,8 @@ fn server_detail_reserved_ports_section(
         div.ed-art-eyebrow
             title=(tr(
                 lang,
-                "Per-server allowlist of ports the daemon must NEVER bind via sing-box. Use when a co-tenant service (legacy 3x-ui Docker container, separate xray, another VPN stack) owns one of the standard ports — vpnctl deploys are refused fail-closed if any rendered inbound would collide.",
-                "Список портов на этом сервере, которые демону ЗАПРЕЩЕНО занимать через sing-box. Используется когда на хосте уже крутится сторонний сервис (legacy 3x-ui Docker, отдельный xray, другой VPN-стек) на стандартном порту — vpnctl deploy отказывается, если какой-то рендеренный inbound попытается их занять, fail-closed.",
+                "Per-server allowlist of ports the daemon must NEVER bind via sing-box. Use when a co-tenant service (legacy 3x-ui Docker container, separate xray, another VPN stack) owns one of the standard ports — deploys are refused fail-closed if any rendered inbound would collide.",
+                "Список портов на этом сервере, которые демону ЗАПРЕЩЕНО занимать через sing-box. Используется когда на хосте уже крутится сторонний сервис (legacy 3x-ui Docker, отдельный xray, другой VPN-стек) на стандартном порту — деплой отказывается, если какой-то рендеренный inbound попытается их занять, fail-closed.",
             )) {
                 (tr(lang, "RESERVED PORTS", "ЗАРЕЗЕРВИРОВАННЫЕ ПОРТЫ"))
             }

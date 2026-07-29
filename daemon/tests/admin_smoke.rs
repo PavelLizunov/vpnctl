@@ -696,17 +696,22 @@ async fn admin_dashboard_counts_match_seeded_inventory() {
 }
 
 /// Servers screen must show the empty-state when the DB is empty,
-/// quoting the bootstrap incantation so the operator knows what to do.
+/// pointing the operator at the web wizard (operator-action policy:
+/// no terminal instructions in admin copy).
 #[tokio::test]
-async fn admin_servers_empty_state_quotes_bootstrap() {
+async fn admin_servers_empty_state_points_at_wizard() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let html = fetch_html(app, "/admin/servers").await;
 
     assert!(html.contains("No servers yet"), "empty-state copy missing");
     assert!(
-        html.contains("vpnctl bootstrap"),
-        "bootstrap hint missing on empty servers page"
+        html.contains("wizard"),
+        "empty-state must point at the web wizard"
+    );
+    assert!(
+        !html.contains("vpnctl bootstrap"),
+        "empty-state must not instruct a CLI command"
     );
     // No <article class="ed-server"> when the list is empty.
     assert!(
@@ -903,7 +908,7 @@ async fn admin_servers_header_singular_for_one_server() {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Empty inventory must render the users page with the explicit
-/// empty-state and a hint pointing at the CLI workflow.
+/// empty-state and a hint pointing at the web workflow.
 #[tokio::test]
 async fn admin_users_empty_state_quotes_cli() {
     let dir = TempDir::new().unwrap();
@@ -916,8 +921,8 @@ async fn admin_users_empty_state_quotes_cli() {
     );
     assert!(html.contains("No users yet"), "empty-state copy missing");
     assert!(
-        html.contains("vpnctl user create"),
-        "empty-state should hint vpnctl user create"
+        html.contains("grant server access"),
+        "empty-state should hint the web grant workflow"
     );
     assert!(
         !html.contains(r#"class="ed-server""#),
@@ -2599,30 +2604,37 @@ async fn admin_frontend_section_headlines_match_voice() {
     );
 }
 
-/// Empty-state contract: when there are no users (or no servers), the
-/// page must quote a literal CLI command the operator can copy. The
-/// admin UI can't yet create either via web (Phase C-2 / D), so the CLI
-/// is the only path forward — losing the command would strand a fresh
-/// operator on their first visit.
+/// Empty-state contract (operator-action policy): when there are no
+/// users (or no servers), the page points the operator at the WEB action
+/// — NOT a terminal command. The admin UI creates both via web (the
+/// add-user form + the server wizard), so the copy that used to quote
+/// `vpnctl user create` / `vpnctl grant` / `vpnctl bootstrap` now
+/// describes the web path instead.
 #[tokio::test]
-async fn admin_empty_states_quote_cli_commands() {
+async fn admin_empty_states_point_at_web_actions() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
 
     let users = fetch_html(app.clone(), "/admin/users").await;
     assert!(
-        users.contains("vpnctl user create"),
-        "empty users page must quote `vpnctl user create`"
+        users.contains("create"),
+        "empty users page must point at the web create form"
     );
-    assert!(
-        users.contains("vpnctl grant"),
-        "empty users page must quote `vpnctl grant`"
-    );
+    for bad in ["vpnctl user create", "vpnctl grant"] {
+        assert!(
+            !users.contains(bad),
+            "empty users page must not quote CLI command «{bad}»"
+        );
+    }
 
     let servers = fetch_html(app.clone(), "/admin/servers").await;
     assert!(
-        servers.contains("vpnctl bootstrap"),
-        "empty servers page must quote `vpnctl bootstrap`"
+        servers.contains("wizard"),
+        "empty servers page must point at the web wizard"
+    );
+    assert!(
+        !servers.contains("vpnctl bootstrap"),
+        "empty servers page must not quote `vpnctl bootstrap`"
     );
 }
 
@@ -6594,6 +6606,7 @@ async fn admin_monitoring_renders_fleet_health() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -7797,6 +7810,7 @@ async fn admin_server_detail_with_probe_renders_kpis() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -7852,6 +7866,7 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
             Some(10),
             Some(r#"["tcp/22","tcp/443","udp/8444"]"#),
             Some(1000),
+            None,
             None,
             None,
             None,
@@ -8189,10 +8204,14 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
         "case B body must name the actually-granted servers"
     );
     // No WG-capable server in inventory either → tail message points
-    // at the CLI workaround.
+    // at the web workaround (operator-action policy: no CLI in copy).
     assert!(
-        html.contains("vpnctl server add"),
-        "case B must point at the CLI when inventory has zero WG-capable nodes"
+        html.contains("Settings page"),
+        "case B must point at the server's Settings page when inventory has zero WG-capable nodes"
+    );
+    assert!(
+        !html.contains("vpnctl server add"),
+        "case B must not instruct a CLI command"
     );
 }
 
@@ -10850,15 +10869,15 @@ async fn admin_settings_shows_backups_section_with_snapshot_button() {
         "Settings must include the 'snapshot now' button"
     );
     // Operator-facing copy: explain the off-site model + restore
-    // requires CLI. Catch regressions if someone reverts the
+    // procedure. Catch regressions if someone reverts the
     // operator-driven design.
     assert!(
         html.contains("Off-site is operator-driven"),
         "Settings must explain the operator-driven off-site model"
     );
     assert!(
-        html.contains("vpnctl restore"),
-        "Settings must mention the `vpnctl restore` CLI command"
+        html.contains("restore"),
+        "Settings must mention the restore procedure"
     );
 }
 
@@ -12962,7 +12981,7 @@ async fn track_1_3_suspicious_local_ip_dedup_is_per_user() {
 async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
     // The fresh-test harness doesn't drop MMDB files, so the
     // section should report both DBs as «missing» and surface
-    // the `vpnctl geoip-update` instruction.
+    // the web «update now» button.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/settings/system").await;
@@ -12971,11 +12990,11 @@ async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
         "Settings page must include the GeoIP eyebrow"
     );
     assert!(
-        html.contains("vpnctl geoip-update"),
-        "missing-DB branch must mention the CLI command"
+        html.contains("update now"),
+        "missing-DB branch must mention the web update button"
     );
     assert!(
-        html.contains("(missing — run") || html.contains("(отсутствует — запусти"),
+        html.contains("(missing — use the") || html.contains("(отсутствует — нажми"),
         "expected the 'missing' empty-state for both City + ASN"
     );
 }
@@ -13845,6 +13864,7 @@ async fn server_detail_renders_traffic_gap_section() {
                 Some("ens18"),
                 Some(rx),
                 Some(0),
+                None,
             )
             .await
             .unwrap();
@@ -13922,6 +13942,7 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
                 Some(50),    // load_1min_x100
                 Some("[\"tcp/443\",\"udp/8443\"]"),
                 Some(1024 * 1024),
+                None,
                 None,
                 None,
                 None,
@@ -14072,6 +14093,7 @@ async fn dashboard_fleet_uptime_section_renders_with_probe_data() {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -14156,6 +14178,7 @@ async fn dashboard_fleet_uptime_excludes_unpolled_server_from_polled_ratio() {
                 Some(50),
                 Some("[\"tcp/443\"]"),
                 Some(1024 * 1024),
+                None,
                 None,
                 None,
                 None,
@@ -14419,6 +14442,7 @@ async fn scan_once_auto_resolves_paired_alert_on_recovery() {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -14495,6 +14519,7 @@ async fn scan_once_auto_resolves_singbox_log_alert_after_rotation() {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -14542,6 +14567,7 @@ async fn scan_once_does_not_record_orphan_hysteresis_recovery() {
                 Some(1),
                 None,
                 Some(1024),
+                None,
                 None,
                 None,
                 None,
@@ -14728,8 +14754,8 @@ async fn alerts_page_omits_ack_all_button_when_no_unacked() {
 // Pre-2026-05-22 the body of a 500 response inlined `err.to_string()`.
 // That bled sqlx/anyhow chains (schema names, file paths, occasional
 // row contents) to anyone reaching the admin UI. The new contract:
-// body is a fixed opaque string «internal error — see journalctl»,
-// full chain stays in the structured log. We can't easily inject a
+// body is a fixed opaque string «internal error — please retry the
+// action», full chain stays in the structured log. We can't easily inject a
 // failure into a live handler from a smoke test without invasive
 // surgery, so this test uses an unknown-server detail route that
 // would surface a sqlx error if the body weren't sanitised, AND
@@ -14779,6 +14805,61 @@ async fn internal_error_body_does_not_leak_anyhow_chain() {
             !body_str.contains(needle),
             "4xx/5xx response body must not contain «{needle}» — leak: {body_str:?}"
         );
+    }
+}
+
+// ── B2 — operator-facing copy must not instruct terminal use ─────────
+//
+// Operator-action policy: the admin UI is web-only, so no rendered page
+// may tell the operator to run a shell command. Every needle below is a
+// command shape that used to appear in error bodies, tooltips, SSE
+// payloads or the restore runbook; each was replaced with a web action
+// or neutral guidance. Internal log messages and code comments may still
+// name these tools — this guard only covers what the operator sees
+// rendered, and targets imperative command shapes (NOT the bare `vpnctl `
+// prefix that every error body carries by contract).
+#[tokio::test]
+async fn admin_pages_contain_no_shell_command_instructions() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Seed a server + granted user so the detail pages render their
+    // guidance copy (not just the empty state).
+    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+
+    // The everyday operator surfaces.
+    let pages = [
+        "/admin/",
+        "/admin/servers",
+        "/admin/servers/s0",
+        "/admin/servers/s0/protocols",
+        "/admin/users",
+        "/admin/users/u0",
+        "/admin/monitoring",
+        "/admin/activity",
+        "/admin/settings",
+        "/admin/alerts",
+    ];
+    let needles = [
+        "journalctl",
+        "systemctl",
+        "ssh root@",
+        "ls -la",
+        "age -d",
+        "vpnctl bootstrap",
+        "vpnctl deploy",
+        "vpnctl restore",
+        "vpnctl server add",
+        "see vpnctld logs",
+    ];
+    let app = router(st);
+    for path in pages {
+        let html = fetch_html(app.clone(), path).await;
+        for needle in needles {
+            assert!(
+                !html.contains(needle),
+                "rendered page {path} must not contain shell-command instruction «{needle}» — operator copy is web-only"
+            );
+        }
     }
 }
 
@@ -16110,6 +16191,7 @@ async fn seed_dashboard_signals(inv: &SqliteInventory) {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -16225,6 +16307,7 @@ async fn dashboard_fleet_table_marks_version_drift() {
                 None,
                 None,
                 Some(&format!(r#"{{"sing-box":"{ver}"}}"#)),
+                None,
                 None,
                 None,
                 None,
@@ -17213,6 +17296,7 @@ async fn server_detail_kernel_rollup_renders_version_for_this_node() {
             Some(r#"["tcp/443","udp/8443"]"#),
             Some(1000),
             Some(r#"{"sing-box":"1.13.12"}"#),
+            None,
             None,
             None,
             None,
