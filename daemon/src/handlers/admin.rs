@@ -7887,6 +7887,24 @@ pub(crate) async fn user_mint_tuic_password(
                     "audit write failed for user.mint_tuic_password — mutation already committed"
                 );
             }
+            // Auto-deploy — the new password must land on every granted
+            // node so the protocol accepts it (same contract as
+            // grant/revoke auto-deploy).
+            let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    target = "vpnctld::admin",
+                    user = %user_id_str,
+                    error = %e,
+                    "servers_for_user failed; tuic mint not auto-applied — use Deploy all"
+                );
+                Vec::new()
+            });
+            spawn_user_servers_redeploy(
+                &state,
+                servers,
+                user_id_str.clone(),
+                "user.mint_tuic_password",
+            );
         }
         // Already had a password — idempotent no-op, no audit spam.
         Ok(false) => {}
@@ -7955,6 +7973,20 @@ pub(crate) async fn user_regen_wireguard(
             "audit write failed for user.wireguard.regen — mutation already committed"
         );
     }
+
+    // Auto-deploy — the new pubkey must land on every granted node's
+    // [Peer] list; without this the old key stays active and the new
+    // config fails (same contract as grant/revoke auto-deploy).
+    let servers = state.inv.servers_for_user(&uid).await.unwrap_or_else(|e| {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "servers_for_user failed; wireguard regen not auto-applied — use Deploy all"
+        );
+        Vec::new()
+    });
+    spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), "user.wireguard.regen");
 
     Redirect::to(&format!(
         "/admin/users/{}/delivery",
@@ -9070,13 +9102,13 @@ pub(crate) async fn server_enable_protocol(
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
 
     // Existence check (404 if no server).
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     // Reject unregistered protocol id — persisting a typo would
     // silently no-op every render+deploy from now on.
     if state.registry.protocol(&pid).is_none() {
@@ -9100,8 +9132,8 @@ pub(crate) async fn server_enable_protocol(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `newly_added` flag inside is honest-but-buried.
-    if inserted == 1
-        && let Err(e) = state
+    if inserted == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9113,12 +9145,21 @@ pub(crate) async fn server_enable_protocol(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.protocol.enable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.protocol.enable"
+            );
+        }
+        // Auto-deploy — the protocol change must land on the node;
+        // without this the rendered config diverges from inventory.
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.protocol.enable",
         );
     }
 
@@ -9139,13 +9180,13 @@ pub(crate) async fn server_disable_protocol(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let removed = match state.inv.remove_server_protocol(&sid, &pid).await {
         Ok(n) => n,
@@ -9155,8 +9196,8 @@ pub(crate) async fn server_disable_protocol(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `was_present` flag inside is honest-but-buried.
-    if removed == 1
-        && let Err(e) = state
+    if removed == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9168,12 +9209,19 @@ pub(crate) async fn server_disable_protocol(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.protocol.disable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.protocol.disable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.protocol.disable",
         );
     }
 
@@ -9773,13 +9821,13 @@ pub(crate) async fn server_enable_kernel(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let kid = vpnctl_core::KernelId(kernel_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
     // Reject unregistered kernel id — same posture as
     // server_enable_protocol: persisting a typo would silently no-op
     // every deploy.
@@ -9804,8 +9852,8 @@ pub(crate) async fn server_enable_kernel(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `newly_added` flag inside is honest-but-buried.
-    if inserted == 1
-        && let Err(e) = state
+    if inserted == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9817,12 +9865,19 @@ pub(crate) async fn server_enable_kernel(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.kernel.enable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.kernel.enable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.kernel.enable",
         );
     }
 
@@ -9842,13 +9897,13 @@ pub(crate) async fn server_disable_kernel(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let kid = vpnctl_core::KernelId(kernel_id_str.clone());
 
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => {
             return not_found(&format!("no such server '{server_id_str}'"));
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let removed = match state.inv.remove_server_kernel(&sid, &kid).await {
         Ok(n) => n,
@@ -9858,8 +9913,8 @@ pub(crate) async fn server_disable_kernel(
     // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
     // writes NO audit row — unconditional writes polluted the timeline
     // and the `was_present` flag inside is honest-but-buried.
-    if removed == 1
-        && let Err(e) = state
+    if removed == 1 {
+        if let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -9871,12 +9926,19 @@ pub(crate) async fn server_disable_kernel(
                 })),
             )
             .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            server = %server_id_str,
-            error = %e,
-            "audit write failed for server.kernel.disable"
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                server = %server_id_str,
+                error = %e,
+                "audit write failed for server.kernel.disable"
+            );
+        }
+        spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id_str.clone(),
+            "server.kernel.disable",
         );
     }
 

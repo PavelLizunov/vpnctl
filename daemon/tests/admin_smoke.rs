@@ -789,11 +789,12 @@ async fn admin_servers_renders_deploy_all_button() {
 }
 
 /// `run_deploy_all` flattens each server's re-deploy into one stream and
-/// ends in a single terminal Ok with a summary — even when servers fail
-/// (here: no deploy key on disk → every server errors, but the run still
-/// completes and reports the failures rather than aborting).
+/// ends in a terminal Error when ANY server failed (here: no deploy key
+/// on disk → every server errors). Per-server ✗ lines still surface
+/// individual failures; the terminal kind tells the frontend the run
+/// was not fully green.
 #[tokio::test]
-async fn run_deploy_all_streams_terminal_ok_with_per_server_failures() {
+async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
     use tokio_stream::StreamExt;
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -801,7 +802,7 @@ async fn run_deploy_all_streams_terminal_ok_with_per_server_failures() {
     let servers = s.inv.list_servers().await.unwrap();
     // A deploy-key path that does NOT exist → run_redeploy fails each
     // server at the pre-flight; deploy_all forwards the failures and
-    // still reaches its terminal Ok.
+    // reaches a terminal Error.
     let key = dir.path().join("nope-id_ed25519");
     let stream = vpnctld::wizard_bootstrap::run_deploy_all(
         servers,
@@ -814,12 +815,16 @@ async fn run_deploy_all_streams_terminal_ok_with_per_server_failures() {
     while let Some(ev) = stream.next().await {
         events.push(ev);
     }
-    // Exactly one terminal Ok, and it's the LAST event.
+    // Terminal Error — the failed list is non-empty.
     match events.last() {
-        Some(vpnctld::wizard_bootstrap::BootstrapEvent::Ok { server_id, .. }) => {
-            assert_eq!(server_id, "all");
+        Some(vpnctld::wizard_bootstrap::BootstrapEvent::Error { phase, message }) => {
+            assert_eq!(*phase, "done");
+            assert!(
+                message.contains("failed:"),
+                "summary must name failures: {message}"
+            );
         }
-        other => panic!("expected terminal Ok{{server_id:\"all\"}}, got {other:?}"),
+        other => panic!("expected terminal Error, got {other:?}"),
     }
     // Per-server failures surfaced as ✗ step lines, and a summary that
     // names them (both seeded servers failed → "failed: …").

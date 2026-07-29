@@ -626,3 +626,144 @@ async fn boosty_bridge_flips_count_as_user_mutations() {
         .unwrap();
     assert_eq!(got.len(), 1, "boosty.disable after deploy → pending");
 }
+
+// ── WireGuard regen + TUIC mint count as user mutations ────────────
+
+/// `user.wireguard.regen` changes the pubkey on every granted server;
+/// the pending-deploy detector must flag them until a deploy lands.
+#[tokio::test]
+async fn wireguard_regen_counts_as_user_mutation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("wg", 20)).await.unwrap();
+    inv.add_server(&srv("node")).await.unwrap();
+    inv.grant(&UserId("wg".into()), &ServerId("node".into()))
+        .await
+        .unwrap();
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("node"),
+        Some(&serde_json::json!({ "ssh_errors": [] })),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    inv.audit("admin", "user.wireguard.regen", Some("wg"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("wg".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "wireguard.regen after deploy → pending");
+
+    // Deploy catches up → cleared.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("node"),
+        Some(&serde_json::json!({ "ssh_errors": [] })),
+    )
+    .await
+    .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("wg".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert!(got.is_empty(), "deploy after regen clears pending");
+}
+
+/// `user.mint_tuic_password` changes the password protocols use on
+/// every granted server; the detector must flag them.
+#[tokio::test]
+async fn tuic_mint_counts_as_user_mutation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("tuic", 21)).await.unwrap();
+    inv.add_server(&srv("node")).await.unwrap();
+    inv.grant(&UserId("tuic".into()), &ServerId("node".into()))
+        .await
+        .unwrap();
+    inv.audit(
+        "admin",
+        "server.deploy",
+        Some("node"),
+        Some(&serde_json::json!({ "ssh_errors": [] })),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    inv.audit("admin", "user.mint_tuic_password", Some("tuic"), None)
+        .await
+        .unwrap();
+    let got = inv
+        .servers_pending_deploy_for_user(&UserId("tuic".into()), &[ServerId("node".into())])
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "mint_tuic_password after deploy → pending");
+}
+
+// ── Protocol/kernel mutations count for server_pending_deploy ──────
+
+/// The four protocol/kernel audit actions must raise the server-side
+/// pending-deploy flag until a fresh deploy lands.
+#[tokio::test]
+async fn protocol_kernel_mutations_raise_server_pending_deploy() {
+    let actions = [
+        "server.protocol.enable",
+        "server.protocol.disable",
+        "server.kernel.enable",
+        "server.kernel.disable",
+    ];
+    for action in actions {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        inv.add_server(&srv("srv")).await.unwrap();
+        // Baseline deploy → not pending.
+        inv.audit(
+            "admin",
+            "server.deploy",
+            Some("srv"),
+            Some(&serde_json::json!({ "ssh_errors": [] })),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !inv.server_pending_deploy(&ServerId("srv".into()))
+                .await
+                .unwrap(),
+            "{action}: baseline deploy → not pending"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Mutation → pending.
+        inv.audit("admin", action, Some("srv"), None).await.unwrap();
+        assert!(
+            inv.server_pending_deploy(&ServerId("srv".into()))
+                .await
+                .unwrap(),
+            "{action}: mutation after deploy → pending"
+        );
+
+        // Deploy catches up → cleared.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        inv.audit(
+            "admin",
+            "server.deploy",
+            Some("srv"),
+            Some(&serde_json::json!({ "ssh_errors": [] })),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !inv.server_pending_deploy(&ServerId("srv".into()))
+                .await
+                .unwrap(),
+            "{action}: deploy after mutation clears pending"
+        );
+    }
+}

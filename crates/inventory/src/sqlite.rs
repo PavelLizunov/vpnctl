@@ -2879,6 +2879,8 @@ impl SqliteInventory {
                      OR action IN ('user.add',
                                    'user.set_vpn_router_device_id',
                                    'user.disable', 'user.enable',
+                                   'user.wireguard.regen',
+                                   'user.mint_tuic_password',
                                    'boosty.disable', 'boosty.enable')
                    )",
             )
@@ -2943,8 +2945,11 @@ impl SqliteInventory {
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
             "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE action IN ('user.grant', 'user.revoke')
-               AND json_extract(payload, '$.server') = ?1",
+             WHERE (action IN ('user.grant', 'user.revoke')
+                    AND json_extract(payload, '$.server') = ?1)
+                OR (action IN ('server.protocol.enable', 'server.protocol.disable',
+                               'server.kernel.enable', 'server.kernel.disable')
+                    AND target = ?1)",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)

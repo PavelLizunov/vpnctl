@@ -383,18 +383,31 @@ async fn deploy_all_pipeline(
     let _ = tx
         .send(BootstrapEvent::Step {
             phase: "done",
-            message: summary,
+            message: summary.clone(),
         })
         .await;
-    // Terminal Ok — deploy-all is best-effort across the fleet; per-server
-    // failures are surfaced as ✗ lines above. The frontend reloads
-    // /admin/servers to reflect the new state.
-    let _ = tx
-        .send(BootstrapEvent::Ok {
+    // Terminal event — Ok when every node deployed, Error when any
+    // failed. The frontend uses the terminal kind to decide the
+    // banner colour; per-server failures are ALSO surfaced as ✗
+    // lines above so the operator sees exactly which nodes need
+    // attention.
+    let _ = tx.send(deploy_all_terminal(&failed, summary)).await;
+}
+
+/// Choose the terminal SSE event for a fleet deploy pass. Pure —
+/// tested in isolation below.
+fn deploy_all_terminal(failed: &[String], summary: String) -> BootstrapEvent {
+    if failed.is_empty() {
+        BootstrapEvent::Ok {
             server_id: "all".into(),
             redirect: "/admin/servers".into(),
-        })
-        .await;
+        }
+    } else {
+        BootstrapEvent::Error {
+            phase: "done",
+            message: summary,
+        }
+    }
 }
 
 /// Drive [`run_redeploy`] over `servers` sequentially and return per-server
@@ -2007,5 +2020,48 @@ mod tests {
             hint.contains("server page") || hint.contains("wizard"),
             "verify-key hint must point at the wizard / server page: {hint}"
         );
+    }
+
+    // ── deploy_all_terminal — fleet SSE terminal event selection ────
+
+    #[test]
+    fn deploy_all_terminal_ok_when_no_failures() {
+        let ev = deploy_all_terminal(&[], "done — deployed all 3 server(s).".into());
+        match ev {
+            BootstrapEvent::Ok {
+                server_id,
+                redirect,
+            } => {
+                assert_eq!(server_id, "all");
+                assert_eq!(redirect, "/admin/servers");
+            }
+            other => panic!("expected Ok terminal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deploy_all_terminal_error_on_partial_failure() {
+        let failed = vec!["nl".to_string()];
+        let ev = deploy_all_terminal(&failed, "done — 2/3 deployed; failed: nl".into());
+        match ev {
+            BootstrapEvent::Error { phase, message } => {
+                assert_eq!(phase, "done");
+                assert!(message.contains("failed: nl"), "message: {message}");
+            }
+            other => panic!("expected Error terminal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deploy_all_terminal_error_on_all_failure() {
+        let failed = vec!["s0".to_string(), "s1".to_string()];
+        let ev = deploy_all_terminal(&failed, "done — 0/2 deployed; failed: s0, s1".into());
+        match ev {
+            BootstrapEvent::Error { phase, message } => {
+                assert_eq!(phase, "done");
+                assert!(message.contains("failed: s0, s1"), "message: {message}");
+            }
+            other => panic!("expected Error terminal, got {other:?}"),
+        }
     }
 }
