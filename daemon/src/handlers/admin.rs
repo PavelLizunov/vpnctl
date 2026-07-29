@@ -885,12 +885,8 @@ fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
 }
 
 /// PR-Dash dash#2 — real fleet traffic totals beside the activity
-/// chart. Sums upload + download bytes over the picked window
-/// (weighted by `usage_coefficient`) and the prior equal-length window,
-/// reporting the window total ↑↓ plus a Δ% vs the prior window. Reuses
-/// the already-loaded `recent_vpn_stats_fleet` rows — the caller passes
-/// rows for TWICE the window so this fn can split current vs prior
-/// Rust-side without a second query.
+/// chart. Uses the same aligned buckets as the chart so the bars and
+/// totals cannot disagree at a day boundary.
 ///
 /// `coeffs` maps each server to its `usage_coefficient`; unknown
 /// servers default to 1.0.
@@ -901,11 +897,14 @@ fn dashboard_fleet_traffic_totals(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    use chrono::Utc;
-    let window_hours = (window.cells * window.bucket_hours) as i64;
-    let now = Utc::now();
-    let cur_start = now - chrono::Duration::hours(window_hours);
-    let prior_start = now - chrono::Duration::hours(window_hours * 2);
+    use chrono::{DurationRound, TimeDelta, Utc};
+    let bucket_seconds = i64::from(window.bucket_hours) * 3600;
+    let Ok(now) = Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+        return html! {};
+    };
+    let cur_start =
+        now - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds);
+    let prior_start = cur_start - TimeDelta::seconds(i64::from(window.cells) * bucket_seconds);
 
     // Sum ALL rows (per-user attributed + unattributed remainder).
     // Since the NM-11 attribution fix the server-wide row holds only
@@ -917,13 +916,19 @@ fn dashboard_fleet_traffic_totals(
     let mut cur_dn = 0f64;
     let mut prior_total = 0f64;
     for r in rows {
+        let Ok(row_bucket) = r.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+            continue;
+        };
+        if row_bucket > now {
+            continue;
+        }
         let w = weight(&r.server_id);
         let up = r.upload_bytes as f64 * w;
         let dn = r.download_bytes as f64 * w;
-        if r.ts >= cur_start {
+        if row_bucket >= cur_start {
             cur_up += up;
             cur_dn += dn;
-        } else if r.ts >= prior_start {
+        } else if row_bucket >= prior_start {
             prior_total += up + dn;
         }
     }
@@ -1326,12 +1331,11 @@ async fn dashboard_render(
     let since_hours = window.cells * window.bucket_hours;
     // PR-Dash dash#2 — pull TWICE the window so the real-traffic card
     // can compute Δ% vs the prior equal-length window Rust-side (no
-    // second query). The chart below only buckets rows inside the
-    // visible window — older rows fall outside its `buckets_ago` range
-    // and are ignored — so the wider pull is free for the chart.
+    // second query). Inventory returns compact per-(minute, server)
+    // aggregates, not every user's raw poll row.
     let fleet_rows = state
         .inv
-        .recent_vpn_stats_fleet(since_hours.saturating_mul(2))
+        .recent_vpn_stats_fleet(since_hours.saturating_mul(2), window.bucket_hours)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
@@ -1353,15 +1357,6 @@ async fn dashboard_render(
             tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
             Vec::new()
         });
-
-    // Phase 4b — per-server live activity rollup for the dashboard
-    // «VPN activity» tile. ONE call returns one entry per known
-    // server (defaults to zeros for unpolled servers); we sum +
-    // pass the per-server breakdown to the renderer.
-    let live_activity = state.inv.all_servers_live_activity(since_hours).await.unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "all_servers_live_activity failed");
-        Vec::new()
-    });
 
     // Post-2026-05-22 — fleet-wide uptime tile. Loops `list_servers`
     // and aggregates `uptime_for_server` for 24h / 7d / 30d. Loop
@@ -1433,6 +1428,12 @@ async fn dashboard_render(
             (s.id.clone(), n)
         })
         .collect();
+    let live_activity = dashboard_live_activity_from_rows(
+        &server_list_fleet,
+        &active_conns_now,
+        &fleet_rows,
+        window,
+    );
 
     // Dashboard 1b — health feed: newest 5 unacked alerts + the unacked
     // total for the eyebrow. Quiet-dashboard contract: empty ⇒ no card.
@@ -1476,34 +1477,18 @@ async fn dashboard_render(
         .map(|s| (s.id.clone(), s.usage_coefficient))
         .collect();
 
-    // PR-Dash dash#1 — fixed 24h server-wide traffic per server (the
-    // "traffic 24h" column is independent of the window picker).
-    // Summed Rust-side from the already-loaded `fleet_rows` (which span
-    // 2× the picked window ⊇ 24h for every window ≥ 24h; for narrower
-    // pulls we just sum whatever 24h subset is present), weighted by
-    // usage coefficient. EVERY row is summed — per-user (attributed)
-    // PLUS server-wide. Since the NM-11 attribution fix the poller writes
-    // the server-wide row (user_id IS NULL) as only the UNATTRIBUTED
-    // REMAINDER (interval total minus the per-user deltas), so the true
-    // node total is `SUM(per-user) + SUM(remainder)`. Summing the
-    // remainder alone would undercount by the whole attributed share.
-    // This matches `SqliteInventory::server_live_activity`, which sums
-    // every row for its bytes-in-window counters.
-    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = {
-        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-        let mut map: std::collections::HashMap<vpnctl_core::ServerId, u64> =
-            std::collections::HashMap::new();
-        for r in &fleet_rows {
-            if r.ts < cutoff {
-                continue;
-            }
-            let w = coeffs.get(&r.server_id).copied().unwrap_or(1.0);
-            let bytes = (r.upload_bytes.saturating_add(r.download_bytes) as f64 * w) as u64;
-            let entry = map.entry(r.server_id.clone()).or_insert(0);
-            *entry = entry.saturating_add(bytes);
-        }
-        map
-    };
+    // Fixed 24h fleet-table column is independent of the selected chart
+    // bucket. Keep it exact with one compact SQL aggregate per server.
+    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = state
+        .inv
+        .weighted_vpn_traffic_by_server(24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "weighted_vpn_traffic_by_server failed");
+            Vec::new()
+        })
+        .into_iter()
+        .collect();
 
     let conns_now: usize = active_conns_now.iter().filter_map(|(_, c)| *c).sum();
 
@@ -1729,9 +1714,78 @@ fn dashboard_fleet_uptime(
     }
 }
 
-/// Phase 4b — dashboard «VPN activity» tile. Sums per-server
-/// server-wide totals from `all_servers_live_activity(24)` and
-/// shows: total bytes, active conns now, per-server breakdown.
+fn dashboard_live_activity_from_rows(
+    servers: &[vpnctl_core::Server],
+    active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
+    rows: &[vpnctl_inventory::VpnStatsRow],
+    window: VpnSparklineWindow,
+) -> Vec<(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)> {
+    use chrono::{DurationRound, TimeDelta, Utc};
+
+    let bucket_seconds = i64::from(window.bucket_hours) * 3600;
+    let now = Utc::now()
+        .duration_trunc(TimeDelta::seconds(bucket_seconds))
+        .ok();
+    let oldest = now.map(|end| {
+        end - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds)
+    });
+
+    let mut by_server: std::collections::HashMap<
+        vpnctl_core::ServerId,
+        vpnctl_inventory::ServerLiveActivity,
+    > = servers
+        .iter()
+        .map(|server| {
+            (
+                server.id.clone(),
+                vpnctl_inventory::ServerLiveActivity::default(),
+            )
+        })
+        .collect();
+
+    if let (Some(oldest), Some(now)) = (oldest, now) {
+        for row in rows {
+            let Ok(row_bucket) = row.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
+                continue;
+            };
+            if row_bucket < oldest || row_bucket > now {
+                continue;
+            }
+            let Some(activity) = by_server.get_mut(&row.server_id) else {
+                continue;
+            };
+            let is_latest = activity.last_sample_ts.is_none_or(|last| row.ts > last);
+            activity.bytes_up_window = activity.bytes_up_window.saturating_add(row.upload_bytes);
+            activity.bytes_dn_window = activity.bytes_dn_window.saturating_add(row.download_bytes);
+            if is_latest {
+                activity.last_sample_ts = Some(row.ts);
+                activity.active_now = row.active_connections;
+            }
+        }
+    }
+
+    // A fresh in-memory snapshot is more authoritative than the persisted
+    // aggregate. Missing/stale cache entries fall back to the latest row.
+    for (server_id, count) in active_conns {
+        if let (Some(activity), Some(count)) = (by_server.get_mut(server_id), count) {
+            activity.active_now = u32::try_from(*count).unwrap_or(u32::MAX);
+        }
+    }
+
+    servers
+        .iter()
+        .map(|server| {
+            (
+                server.id.clone(),
+                by_server.remove(&server.id).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Phase 4b — dashboard «VPN activity» tile. Sums the already-loaded
+/// chart buckets per server and shows total bytes, active conns now,
+/// and the per-server breakdown.
 /// Renders even when the poller has zero data so the operator
 /// sees the structure (instead of guessing whether the section
 /// would EVER appear). Empty-state copy points at the NM-11

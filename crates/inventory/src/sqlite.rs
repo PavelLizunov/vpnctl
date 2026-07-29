@@ -5027,31 +5027,68 @@ impl SqliteInventory {
             .collect())
     }
 
-    /// **Fleet-wide raw stats** (2026-05-23 — backs the dashboard's
-    /// multi-window traffic chart). Same row shape as the per-
-    /// server/per-user variants but with no `WHERE` filter on the
-    /// subject — every server's every user's row in the window
-    /// returned, then the caller buckets / aggregates as it sees
-    /// fit.
+    /// Fleet-wide stats for the dashboard's multi-window traffic chart.
     ///
-    /// **Cardinality note:** at 5-min tick × N users × M servers,
-    /// the 30d window can pull ~864k rows for a 10-server, 100-user
-    /// fleet. Homelab scale (3 servers, 35 users) is comfortable
-    /// (~100k rows max at 30d, ~17 MB serialised) but a future
-    /// productisation should add a server-side bucket aggregate
-    /// helper. For now the chart aggregation runs Rust-side in
-    /// the daemon and the caller never paginates.
-    pub async fn recent_vpn_stats_fleet(&self, since_hours: u32) -> Result<Vec<VpnStatsRow>> {
+    /// The chart never needs per-user rows, so SQLite collapses them to
+    /// one row per `(chart bucket, server)` before they cross into Rust.
+    /// A 30-day request therefore returns days × servers, not users ×
+    /// poll ticks.
+    pub async fn recent_vpn_stats_fleet(
+        &self,
+        since_hours: u32,
+        bucket_hours: u32,
+    ) -> Result<Vec<VpnStatsRow>> {
+        let bucket_seconds = i64::from(bucket_hours)
+            .checked_mul(3600)
+            .filter(|seconds| *seconds > 0)
+            .ok_or_else(|| SqliteInventoryError::Invalid("bucket_hours must be > 0".into()))?;
         let rows = sqlx::query(
-            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
+            "SELECT
+                MAX(ts) AS ts,
+                server_id,
+                NULL AS user_id,
+                COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
+                COALESCE(SUM(download_bytes), 0) AS download_bytes,
+                COALESCE(MAX(active_connections), 0) AS active_connections
              FROM vpn_connection_stats
              WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             ORDER BY ts DESC",
+             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / ?2, server_id
+             ORDER BY ts DESC, server_id",
+        )
+        .bind(format!("-{since_hours} hours"))
+        .bind(bucket_seconds)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_vpn_stats).collect()
+    }
+
+    /// Weighted fleet-table traffic totals, one compact row per server.
+    pub async fn weighted_vpn_traffic_by_server(
+        &self,
+        since_hours: u32,
+    ) -> Result<Vec<(ServerId, u64)>> {
+        let rows = sqlx::query(
+            "SELECT
+                stats.server_id AS server_id,
+                CAST(SUM(
+                    (stats.upload_bytes + stats.download_bytes)
+                    * COALESCE(servers.usage_coefficient, 1.0)
+                ) AS INTEGER) AS total_bytes
+             FROM vpn_connection_stats stats
+             JOIN servers ON servers.id = stats.server_id
+             WHERE stats.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             GROUP BY stats.server_id",
         )
         .bind(format!("-{since_hours} hours"))
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(row_to_vpn_stats).collect()
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let server_id: String = row.try_get("server_id")?;
+            let total_bytes: i64 = row.try_get("total_bytes")?;
+            out.push((ServerId(server_id), total_bytes.max(0) as u64));
+        }
+        Ok(out)
     }
 
     /// Phase 4b — single-query rollup of server-wide live activity
