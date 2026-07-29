@@ -41,7 +41,7 @@
 //! | disk_pct dropped below 85 (hysteresis) | info | `server.disk.recovered` |
 //! | mem_used_pct crossed 95 going up | warning | `server.mem.pressure` |
 //! | mem_used_pct dropped below 90 (hysteresis) | info | `server.mem.recovered` |
-//! | sing_box_log_bytes crossed 500 MiB going up | warning | `server.singbox.log.too_big` |
+//! | sing_box_log_bytes is at least 500 MiB | warning | `server.singbox.log.too_big` |
 //! | sing_box_log_bytes dropped below 500 MiB | info | `server.singbox.log.recovered` |
 //!
 //! Hysteresis on the disk/mem thresholds (90 vs 85, 95 vs 90) prevents
@@ -238,12 +238,15 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
 
     // ── sing-box log size ──────────────────────────────────────────
     if let (Some(p), Some(c)) = (prev.sing_box_log_bytes, cur.sing_box_log_bytes) {
-        if p < SINGBOX_LOG_TRIGGER_BYTES && c >= SINGBOX_LOG_TRIGGER_BYTES {
+        if c >= SINGBOX_LOG_TRIGGER_BYTES {
             out.push(AlertEvent {
                 kind: "server.singbox.log.too_big",
                 resolves: None,
                 severity: "warning",
-                summary: format!("sing-box log size crossed 500 MiB ({} → {} bytes)", p, c),
+                summary: format!(
+                    "sing-box log size is at least 500 MiB ({} → {} bytes)",
+                    p, c
+                ),
                 payload: serde_json::json!({
                     "prior_bytes": p, "current_bytes": c,
                     "threshold_bytes": SINGBOX_LOG_TRIGGER_BYTES
@@ -1668,6 +1671,33 @@ mod tests {
             None,
             None,
             Some(600 * 1024 * 1024),
+        );
+        let evs = diff_rows(&prev, &cur);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "server.singbox.log.too_big");
+    }
+
+    #[test]
+    fn diff_rows_singbox_log_already_large_still_fires() {
+        let prev = row(
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(600 * 1024 * 1024),
+        );
+        let cur = row(
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(700 * 1024 * 1024),
         );
         let evs = diff_rows(&prev, &cur);
         assert_eq!(evs.len(), 1);

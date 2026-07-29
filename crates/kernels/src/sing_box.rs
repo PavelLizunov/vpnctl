@@ -188,6 +188,10 @@ LR
     # single fragment would miss duplicates hidden behind the include.
     # stderr is NOT suppressed so a parse failure surfaces in the log.
     logrotate -d /etc/logrotate.conf >/dev/null
+    # Apply the repaired fragment immediately. This is a no-op below
+    # 100 MiB; an oversized log is copy-truncated without restarting
+    # sing-box, then the system timer keeps handling future rotations.
+    logrotate /etc/logrotate.d/sing-box
     # fail2ban — SSH brute-force protection. The add-server wizard UI
     # promises it and the Phase-G health monitor alerts on
     # `server.fail2ban.down`, but NO deploy path actually installed it
@@ -983,6 +987,10 @@ mod tests {
         assert!(
             s.contains("logrotate -d /etc/logrotate.conf >/dev/null\n"),
             "must validate the global logrotate.conf include graph: {s}"
+        );
+        assert!(
+            s.contains("logrotate /etc/logrotate.d/sing-box\n"),
+            "deploy must immediately rotate an already-oversized log: {s}"
         );
         assert!(
             !s.contains("logrotate -d /etc/logrotate.conf >/dev/null 2>&1"),
