@@ -16622,6 +16622,38 @@ async fn dashboard_abuse_summary_links_to_origins_anchor() {
     );
 }
 
+/// The compact dashboard card shows six rows, then a native disclosure
+/// containing every remaining flagged user. Regression: this used to
+/// render `+N more flagged` as a plain span that could not be opened.
+#[tokio::test]
+async fn dashboard_abuse_summary_more_flagged_expands_to_all_users() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 7, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    for i in 1..7 {
+        s.inv
+            .record_user_ip_concurrency(&[(UserId(format!("u{i}")), 3)])
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s), "/admin/").await;
+    assert!(
+        html.contains("<summary") && html.contains("+1 more flagged"),
+        "overflow must be a native disclosure control: {html}"
+    );
+    let overflow = html
+        .split_once("<details")
+        .and_then(|(_, tail)| tail.split_once("</details>"))
+        .map(|(details, _)| details)
+        .expect("overflow disclosure missing");
+    assert!(
+        overflow.contains("/admin/users/") && overflow.contains("/activity#origins"),
+        "the disclosure must contain the previously hidden user: {overflow}"
+    );
+}
+
 /// abuse-origins — the deleted-user blank-row bug. Seeding a NULL-user
 /// (since-deleted) sub_access pattern that crosses the ASN threshold must
 /// NOT surface a nameless row in the dashboard abuse card (the

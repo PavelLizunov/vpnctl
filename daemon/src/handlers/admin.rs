@@ -1129,9 +1129,18 @@ fn dashboard_abuse_summary(
                 }
             }
             @if n > 6 {
-                div style="margin-top: 6px;" {
-                    span.ed-grid__mut style="font-family: var(--mono); font-size: 10px;" {
+                details style="margin-top: 6px;" {
+                    summary.ed-grid__mut style="font-family: var(--mono); font-size: 10px; cursor: pointer;" {
                         "+" (n - 6) " " (tr(lang, "more flagged", "ещё под флагом"))
+                    }
+                    ul style="margin: 8px 0 0 18px;" {
+                        @for (uid, _) in rows.iter().skip(6) {
+                            li {
+                                a href=(format!("/admin/users/{}/activity#origins", path_segment_encode(&uid.0))) {
+                                    (uid.0)
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -97,6 +97,17 @@ pub enum BridgeError {
     Config(String),
 }
 
+impl BridgeError {
+    /// Token refresh failures arrive either directly or wrapped by an
+    /// API call. Both mean the stored credentials cannot self-heal.
+    pub fn is_auth_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Auth(_) | Self::Api(boosty_api::error::ApiError::Auth(_))
+        )
+    }
+}
+
 /// Connection / total-request timeouts for the HTTP client. Token refresh
 /// holds the client's internal auth mutex across the network call (see
 /// boosty_api docs), so a client WITHOUT timeouts turns one hung connection
@@ -428,12 +439,13 @@ impl SyncReport {
 /// instruction — operator-action policy). Everything else (network, 5xx,
 /// model drift) is flagged transient.
 pub fn sync_failure_summary(err: &BridgeError) -> String {
-    match err {
-        BridgeError::Auth(_) => format!(
+    if err.is_auth_failure() {
+        format!(
             "Boosty auth failed — stored credentials are dead (the bridge cannot self-heal): \
              paste a fresh refresh token + device id on /admin/boosty. ({err})"
-        ),
-        _ => format!("Boosty sync failed (network/API; usually transient): {err}"),
+        )
+    } else {
+        format!("Boosty sync failed (network/API; usually transient): {err}")
     }
 }
 
@@ -452,6 +464,20 @@ mod tests {
             !s.to_lowercase().contains("ssh"),
             "operator-action policy: {s}"
         );
+    }
+
+    #[test]
+    fn api_wrapped_refresh_failure_is_still_auth_failure() {
+        let err = BridgeError::Api(boosty_api::error::ApiError::Auth(
+            boosty_api::error::AuthError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: r#"{"error":"invalid_grant"}"#.into(),
+            },
+        ));
+        let s = sync_failure_summary(&err);
+        assert!(err.is_auth_failure());
+        assert!(s.contains("credentials are dead"), "{s}");
+        assert!(!s.contains("usually transient"), "{s}");
     }
 
     #[test]

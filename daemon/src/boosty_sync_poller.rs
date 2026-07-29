@@ -150,7 +150,7 @@ async fn note_sync_failure(inv: &SqliteInventory, err: &vpnctl_boosty_bridge::Br
     // localized text from (kind, payload), so the auth-vs-transient branch
     // must live in the row, not only in the Telegram push.
     let payload = serde_json::json!({
-        "auth": matches!(err, vpnctl_boosty_bridge::BridgeError::Auth(_)),
+        "auth": err.is_auth_failure(),
     });
     match inv
         .insert_alert_if_no_unacked(
