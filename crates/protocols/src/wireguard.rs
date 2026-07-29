@@ -152,6 +152,20 @@ impl Protocol for WireGuard {
         vpnctl_core::DpiRisk::Weak
     }
 
+    fn appears_in_sing_box_sub(&self) -> bool {
+        // `client_config()` emits an INTERNAL `{ type: "wireguard",
+        // interface: {...}, peer: {...} }` object — the shape consumed
+        // by the wg-quick / AmneziaWG renderers, NOT a valid sing-box
+        // outbound (sing-box's wireguard outbound is a flat object with
+        // `server` / `server_port` / `private_key` / `peer_public_key`).
+        // If this slips into the /sub envelope, sing-box / Hiddify sees
+        // an unknown outbound shape and drops EVERY route (including the
+        // working VLESS / TUIC ones). WireGuard is delivered via its own
+        // `wg://` share link + `.conf` download. Hard `false`, same as
+        // wgturn / dns-tunnel.
+        false
+    }
+
     fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
         // Server-side Curve25519 keypair. The per-user pair lives in
         // the `users` table (a different bootstrap path — user_create).
@@ -762,6 +776,20 @@ mod tests {
         // Right length+padding but contains a `:` (not base64-alphabet).
         let k = "qXFvJL5KLmM3Of:hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=";
         assert!(!is_valid_wg_pubkey(k));
+    }
+
+    #[test]
+    fn appears_in_sing_box_sub_is_false() {
+        // CRITICAL: WireGuard's `client_config()` is an internal
+        // `{ type: "wireguard", interface, peer }` object, NOT a valid
+        // sing-box outbound. If the /sub handler doesn't skip it, the
+        // whole envelope becomes unparseable and Hiddify / sing-box
+        // drops every route (including the legit VLESS / TUIC ones).
+        // Pin the trait override (same contract as wgturn / dns-tunnel).
+        assert!(
+            !WireGuard::new().appears_in_sing_box_sub(),
+            "wireguard must opt OUT of the sing-box subscription"
+        );
     }
 
     // ── AmneziaVPN deep-link tests ─────────────────────────────────

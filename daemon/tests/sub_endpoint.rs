@@ -390,6 +390,123 @@ async fn sub_skips_dns_tunnel_protocol_in_sing_box_envelope() {
     );
 }
 
+/// Sibling of the wgturn / dns-tunnel exclusion tests for WireGuard.
+/// WireGuard's `client_config()` is an INTERNAL `{ type: "wireguard",
+/// interface, peer }` object (the wg-quick / AmneziaWG shape), NOT a
+/// valid sing-box outbound — sing-box's wireguard outbound is a flat
+/// `server` / `server_port` / `private_key` / `peer_public_key` object.
+/// Pre-fix the protocol inherited the default `appears_in_sing_box_sub()
+/// == true`, so a mixed server leaked this internal object into the /sub
+/// envelope and sing-box / Hiddify dropped EVERY route. This pins the
+/// exclusion end-to-end through the real router: the valid vless outbound
+/// survives, the wireguard internal object does not.
+#[tokio::test]
+async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
+    use vpnctl_protocols::WireGuard;
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    // Register wireguard so the registry lookup succeeds — the WHOLE
+    // point is to verify the handler then SKIPS its client_config rather
+    // than emitting the internal `{"type":"wireguard", interface, peer}`.
+    reg.register_protocol(Box::new(WireGuard::new())).unwrap();
+
+    // Server with BOTH protocols enabled. Without the filter, the sub
+    // envelope would carry the internal wireguard object and sing-box
+    // would refuse the entire config.
+    let server = Server {
+        id: ServerId("mixed".into()),
+        address: "10.0.0.52".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("wireguard".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+    // WireGuard server pubkey present so that, IF the filter were
+    // missing, client_config WOULD render (proving the test isn't
+    // vacuously passing because of a missing-secret skip).
+    inv.set_server_secret(
+        &server.id,
+        "wireguard.server_public_key",
+        "Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=",
+    )
+    .await
+    .unwrap();
+
+    let user = User {
+        id: UserId("u1".into()),
+        uuid: "uuid-u1".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
+    let token = inv
+        .get_user(&user.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let outbounds = v["outbounds"].as_array().expect("outbounds is array");
+
+    // No outbound may carry the internal wireguard object.
+    for ob in outbounds {
+        let ty = ob["type"].as_str().unwrap_or("");
+        assert_ne!(
+            ty, "wireguard",
+            "wireguard internal object leaked into sing-box sub envelope: {ob:?}. \
+             /sub handler must filter via Protocol::appears_in_sing_box_sub()."
+        );
+    }
+    // And the legit vless+reality outbound IS present.
+    let has_vless = outbounds
+        .iter()
+        .any(|ob| ob["type"].as_str() == Some("vless"));
+    assert!(
+        has_vless,
+        "vless+reality outbound is missing — filter dropped too much: {outbounds:?}"
+    );
+}
+
 /// dns-tunnel must ALSO stay out of the V2Ray-family base64 sub. That
 /// path (`resolve_v2ray_subscription`) hard-allowlists schemes
 /// (vless/vmess/trojan/ss/ssr/tuic/hy2/anytls); a `dns-tunnel://` line
@@ -1104,5 +1221,139 @@ async fn singbox_branch_still_enforces_token_ban() {
     assert!(
         s.contains("token-ban"),
         "sing-box banned-token response must say 'token-ban', got {s:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+//  Egress exemption for the legacy `/sub` per-IP axis
+//
+//  A VPN-connected client's `/sub` refresh EGRESSES its node, so vpnctld
+//  sees the SERVER's IP. Before this fix the legacy handler applied the
+//  shared per-IP bucket + 24h persistent ban to that egress IP — N users
+//  on one node collapsed into one bucket, and one user's retry-storm could
+//  ban the whole node's egress IP for 24h. Known server addresses must be
+//  exempt from the per-IP axis (parity with the prod `/api/v1/app/config`
+//  endpoint) while staying protected by the per-token axis.
+// ────────────────────────────────────────────────────────────────────────
+
+/// A source IP that IS one of our registered server addresses (VPN egress)
+/// must neither consume the shared per-IP bucket nor trip the per-IP ban,
+/// no matter how hard it hammers — but the per-token gate still throttles
+/// it. ConnectInfo carries the egress IP directly (no forwarding headers),
+/// so `sec_peer_ip` resolves to it and `is_known_server_address` exempts it.
+#[tokio::test]
+async fn sub_egress_ip_exempt_from_per_ip_ban() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use vpnctld::rate_limit::{K_DENIALS_TO_BAN, RateLimiter};
+
+    let dir = TempDir::new().unwrap();
+    // Tight limiter: capacity=1, no refill → 1 burst then every request
+    // 429s on whichever axis applies.
+    let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
+    let (inv, state, token) = seed_with_limiter(&dir, limiter).await;
+    // The seeded server's address IS 10.0.0.1 → a request whose source is
+    // 10.0.0.1 comes from a known server address (VPN egress).
+    let egress: SocketAddr = "10.0.0.1:40000".parse().unwrap();
+    let app = router(state);
+
+    // Hammer well past the volume that bans an untrusted IP (capacity 1 +
+    // K_DENIALS_TO_BAN). For an egress source the per-IP axis is skipped
+    // entirely, so the only 429s that can appear are per-TOKEN.
+    let mut saw_ip_gate = false;
+    let mut saw_token_gate = false;
+    for _ in 0..(K_DENIALS_TO_BAN + 5) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sub/{token}"))
+                    .extension(ConnectInfo(egress))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let s = std::str::from_utf8(&body).unwrap();
+            if s.contains("(ip)") {
+                saw_ip_gate = true;
+            }
+            if s.contains("token") {
+                saw_token_gate = true;
+            }
+        }
+    }
+
+    assert!(
+        !saw_ip_gate,
+        "egress source must never be throttled by the shared per-IP gate"
+    );
+    assert!(
+        saw_token_gate,
+        "egress source must still be protected by the per-token gate"
+    );
+
+    // The shared per-IP ban table must hold NO row for the egress IP.
+    let bans = inv.active_bans().await.unwrap();
+    assert!(
+        !bans.iter().any(|b| b.kind == "ip" && b.key == "10.0.0.1"),
+        "egress IP must never be persisted to the shared per-IP ban table: {bans:?}"
+    );
+}
+
+/// Sibling guard: an UNTRUSTED source IP (not a registered server) keeps
+/// the full pre-existing per-IP behaviour — it consumes the per-IP bucket
+/// and escalates to the persistent per-IP ban after K consecutive 429s.
+/// Proves the egress exemption didn't weaken the anti-flood defense for
+/// ordinary clients. Uses an unknown token so ONLY the per-IP axis runs
+/// (the per-token gate is never reached for an unresolved token).
+#[tokio::test]
+async fn sub_untrusted_ip_still_escalates_to_per_ip_ban() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use vpnctld::rate_limit::{K_DENIALS_TO_BAN, RateLimiter};
+
+    let dir = TempDir::new().unwrap();
+    let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
+    let (inv, state, _token) = seed_with_limiter(&dir, limiter).await;
+    // NOT a registered server address → ordinary untrusted client IP.
+    let client: SocketAddr = "203.0.113.9:40000".parse().unwrap();
+    let app = router(state);
+
+    let mut saw_ip_gate = false;
+    for _ in 0..(K_DENIALS_TO_BAN + 5) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sub/definitely-not-a-real-token")
+                    .extension(ConnectInfo(client))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let s = std::str::from_utf8(&body).unwrap();
+            if s.contains("(ip)") {
+                saw_ip_gate = true;
+            }
+        }
+    }
+
+    assert!(
+        saw_ip_gate,
+        "untrusted source must still be throttled by the per-IP gate"
+    );
+    let bans = inv.active_bans().await.unwrap();
+    assert!(
+        bans.iter()
+            .any(|b| b.kind == "ip" && b.key == "203.0.113.9"),
+        "untrusted IP must still escalate to the persistent per-IP ban: {bans:?}"
     );
 }

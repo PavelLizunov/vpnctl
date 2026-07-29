@@ -76,6 +76,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
+use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{RenderCtx, User, UserId};
 
 use crate::app::AppState;
@@ -301,7 +302,14 @@ fn render_vless_uri(
     let label = format!("{server_tag} VLESS ~{client_name}");
     let fragment = utf8_percent_encode(&label, NINITUX_QUOTE);
 
-    format!("vless://{client_uuid}@{server_ip}:{port}?{params}#{fragment}")
+    // IPv6 literals must be bracketed in the authority
+    // (`[2a00:1450::1]:443`) or every client parser splits on the wrong
+    // `:` and the link is dead. Same helper the Protocol-trait
+    // `share_link` path (`/sub`) uses, so both endpoints render
+    // byte-identical authorities.
+    let host = host_for_url(server_ip);
+
+    format!("vless://{client_uuid}@{host}:{port}?{params}#{fragment}")
 }
 
 /// Map an ISO-3166-1 alpha-2 server id to a user-facing country name.
@@ -868,7 +876,12 @@ pub(crate) async fn get_config_root_catchall(headers: HeaderMap) -> Response {
 /// — they're protected by the per-`device_id` bucket instead. Otherwise
 /// `Some(ip)` → apply the per-IP bucket. Pure (no I/O) so the
 /// egress-exemption rule is unit-testable without an HTTP rig.
-fn ip_to_throttle(
+///
+/// Shared by the prod `/api/v1/app/config` endpoint AND the legacy
+/// `/sub/<token>` handler (both must exempt our VPN-egress IPs from the
+/// shared per-IP axis) — `pub(crate)` so the exemption rule lives in ONE
+/// place instead of drifting between the two callers.
+pub(crate) fn ip_to_throttle(
     real_ip: Option<std::net::IpAddr>,
     is_known_server: bool,
 ) -> Option<std::net::IpAddr> {
@@ -1333,6 +1346,30 @@ mod tests {
         // 2026-06-16 DPI-evasion: `fp=randomized` (was `fp=chrome`).
         let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=randomized&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
         assert_eq!(got, expected, "vless URI fragment drifted");
+    }
+
+    #[test]
+    fn render_vless_uri_brackets_ipv6_authority() {
+        // Regression: the app-config renderer interpolated
+        // `Server.address` raw, so an IPv6 node produced
+        // `...@2a00:1450::1:443` — every client parser splits the
+        // authority on the wrong `:` and the link is dead. Must reuse
+        // `host_for_url` (same as the `/sub` share-link path) and emit
+        // a bracketed `@[2a00:1450::1]:443` authority.
+        let got = render_vless_uri(
+            "2a00:1450::1",
+            443,
+            "www.microsoft.com",
+            "gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A",
+            "d86e92a0c6dd2271",
+            "60063863-d2be-4d57-bc0b-aef4da88528b",
+            "Germany",
+            "tester-1",
+        );
+        assert!(
+            got.contains("@[2a00:1450::1]:443"),
+            "IPv6 authority must be bracketed: {got}"
+        );
     }
 
     #[test]
