@@ -99,12 +99,32 @@ pub enum BridgeError {
 
 impl BridgeError {
     /// Token refresh failures arrive either directly or wrapped by an
-    /// API call. Both mean the stored credentials cannot self-heal.
+    /// API call. Credential/client errors need operator action; network,
+    /// parse, rate-limit and server errors can recover on a later tick.
     pub fn is_auth_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::Auth(_) | Self::Api(boosty_api::error::ApiError::Auth(_))
-        )
+        use boosty_api::error::{ApiError, AuthError};
+        use reqwest::StatusCode;
+
+        let terminal_auth = |err: &AuthError| match err {
+            AuthError::HttpRequest(_) | AuthError::ParseError(_) => false,
+            AuthError::HttpStatus { status, .. } => {
+                status.is_client_error()
+                    && !matches!(
+                        *status,
+                        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                    )
+            }
+            _ => true,
+        };
+
+        match self {
+            Self::Auth(err) | Self::Api(ApiError::Auth(err)) => terminal_auth(err),
+            Self::Api(ApiError::Unauthorized) => true,
+            Self::Api(ApiError::HttpStatus { status, .. }) => {
+                matches!(*status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            }
+            _ => false,
+        }
     }
 }
 

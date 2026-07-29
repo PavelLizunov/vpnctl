@@ -180,7 +180,7 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     missingok
     notifempty
     compress
-    delaycompress
+    compressoptions -1
     copytruncate
 }
 LR
@@ -949,6 +949,10 @@ mod tests {
         assert!(
             fragment.contains("copytruncate"),
             "logrotate fragment must use copytruncate: {fragment}"
+        );
+        assert!(
+            fragment.contains("compressoptions -1") && !fragment.contains("delaycompress"),
+            "an immediate rotation must reclaim space without expensive default compression: {fragment}"
         );
         assert!(
             !fragment.contains("create "),
