@@ -1331,8 +1331,8 @@ async fn dashboard_render(
     let since_hours = window.cells * window.bucket_hours;
     // PR-Dash dash#2 — pull TWICE the window so the real-traffic card
     // can compute Δ% vs the prior equal-length window Rust-side (no
-    // second query). Inventory returns compact per-(minute, server)
-    // aggregates, not every user's raw poll row.
+    // second query). Inventory reads the ingest-time hourly rollup,
+    // not every user's raw poll row.
     let fleet_rows = state
         .inv
         .recent_vpn_stats_fleet(since_hours.saturating_mul(2), window.bucket_hours)
@@ -1346,17 +1346,20 @@ async fn dashboard_render(
         .await
         .map_err(internal_error)?;
 
-    // Heavy users — top-5 bandwidth consumers over the selected
-    // window (was hardcoded 24h pre-2026-05-23). Same data source
-    // as before; tile heading + caption reflect the chosen window.
-    let heavy_users = state
-        .inv
-        .top_users_by_traffic(since_hours, 5)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "top_users_by_traffic failed");
-            Vec::new()
-        });
+    // Heavy users — raw ticks for 24h, existing daily rollups for
+    // longer windows. The tile heading follows the selected window.
+    let heavy_users = if window.bucket_hours >= 24 {
+        state
+            .inv
+            .top_users_by_daily_traffic(since_hours.div_ceil(24), 5)
+            .await
+    } else {
+        state.inv.top_users_by_traffic(since_hours, 5).await
+    }
+    .unwrap_or_else(|e| {
+        tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
+        Vec::new()
+    });
 
     // Post-2026-05-22 — fleet-wide uptime tile. Loops `list_servers`
     // and aggregates `uptime_for_server` for 24h / 7d / 30d. Loop
@@ -1478,7 +1481,7 @@ async fn dashboard_render(
         .collect();
 
     // Fixed 24h fleet-table column is independent of the selected chart
-    // bucket. Keep it exact with one compact SQL aggregate per server.
+    // bucket. Read the same compact hourly rollup as the chart.
     let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = state
         .inv
         .weighted_vpn_traffic_by_server(24)
@@ -15763,17 +15766,21 @@ async fn server_detail_render(
             Vec::new()
         });
 
-    // server#4 — per-server traffic sparkline. Window slug picked from
-    // `?vpn_window=` (shared shape with dashboard + user-detail); rows
-    // are server-wide (`recent_vpn_stats_for_server`).
+    // server#4 — per-server traffic sparkline. Reuse the fleet's compact
+    // hourly rollup and retain only this server.
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
     let traffic_since_hours = traffic_window.cells * traffic_window.bucket_hours;
     let traffic_rows = state
         .inv
-        .recent_vpn_stats_for_server(&sid, traffic_since_hours)
+        .recent_vpn_stats_fleet(traffic_since_hours, traffic_window.bucket_hours)
         .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|row| row.server_id == sid)
+                .collect()
+        })
         .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "recent_vpn_stats_for_server failed");
+            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server traffic rollup query failed");
             Vec::new()
         });
 

@@ -3957,6 +3957,41 @@ impl SqliteInventory {
             .execute(&mut *tx)
             .await?;
         }
+        let rollup_up = deltas
+            .iter()
+            .fold(0u64, |sum, d| sum.saturating_add(d.upload_bytes));
+        let rollup_down = deltas
+            .iter()
+            .fold(0u64, |sum, d| sum.saturating_add(d.download_bytes));
+        let peak_connections = deltas
+            .iter()
+            .map(|d| d.active_connections)
+            .max()
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO vpn_server_hourly
+                (hour, server_id, upload_bytes, download_bytes,
+                 active_connections_peak, last_sample_ts)
+             VALUES (
+                strftime('%Y-%m-%dT%H:00:00.000Z', 'now'),
+                ?1, ?2, ?3, ?4,
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             )
+             ON CONFLICT(server_id, hour) DO UPDATE SET
+                upload_bytes = upload_bytes + excluded.upload_bytes,
+                download_bytes = download_bytes + excluded.download_bytes,
+                active_connections_peak = MAX(
+                    active_connections_peak,
+                    excluded.active_connections_peak
+                ),
+                last_sample_ts = excluded.last_sample_ts",
+        )
+        .bind(&server_id.0)
+        .bind(i64::try_from(rollup_up).unwrap_or(i64::MAX))
+        .bind(i64::try_from(rollup_down).unwrap_or(i64::MAX))
+        .bind(i64::from(peak_connections))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -5029,10 +5064,8 @@ impl SqliteInventory {
 
     /// Fleet-wide stats for the dashboard's multi-window traffic chart.
     ///
-    /// The chart never needs per-user rows, so SQLite collapses them to
-    /// one row per `(chart bucket, server)` before they cross into Rust.
-    /// A 30-day request therefore returns days × servers, not users ×
-    /// poll ticks.
+    /// Reads the ingest-time hourly rollup, then lets SQLite collapse
+    /// hours to the chart's selected bucket size.
     pub async fn recent_vpn_stats_fleet(
         &self,
         since_hours: u32,
@@ -5044,15 +5077,15 @@ impl SqliteInventory {
             .ok_or_else(|| SqliteInventoryError::Invalid("bucket_hours must be > 0".into()))?;
         let rows = sqlx::query(
             "SELECT
-                MAX(ts) AS ts,
+                MAX(last_sample_ts) AS ts,
                 server_id,
                 NULL AS user_id,
                 COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
                 COALESCE(SUM(download_bytes), 0) AS download_bytes,
-                COALESCE(MAX(active_connections), 0) AS active_connections
-             FROM vpn_connection_stats
-             WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / ?2, server_id
+                COALESCE(MAX(active_connections_peak), 0) AS active_connections
+             FROM vpn_server_hourly
+             WHERE hour >= strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1)
+             GROUP BY CAST(strftime('%s', hour) AS INTEGER) / ?2, server_id
              ORDER BY ts DESC, server_id",
         )
         .bind(format!("-{since_hours} hours"))
@@ -5062,11 +5095,15 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
-    /// Weighted fleet-table traffic totals, one compact row per server.
+    /// Weighted totals over the last `since_hours` aligned hourly buckets,
+    /// one compact row per server.
     pub async fn weighted_vpn_traffic_by_server(
         &self,
         since_hours: u32,
     ) -> Result<Vec<(ServerId, u64)>> {
+        if since_hours == 0 {
+            return Ok(Vec::new());
+        }
         let rows = sqlx::query(
             "SELECT
                 stats.server_id AS server_id,
@@ -5074,12 +5111,12 @@ impl SqliteInventory {
                     (stats.upload_bytes + stats.download_bytes)
                     * COALESCE(servers.usage_coefficient, 1.0)
                 ) AS INTEGER) AS total_bytes
-             FROM vpn_connection_stats stats
+             FROM vpn_server_hourly stats
              JOIN servers ON servers.id = stats.server_id
-             WHERE stats.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+             WHERE stats.hour >= strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1)
              GROUP BY stats.server_id",
         )
-        .bind(format!("-{since_hours} hours"))
+        .bind(format!("-{} hours", since_hours - 1))
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -5399,8 +5436,8 @@ impl SqliteInventory {
         &self,
         days: u32,
         limit: u32,
-    ) -> Result<Vec<(UserId, u64)>> {
-        let cutoff = format!("-{days} days");
+    ) -> Result<Vec<HeavyUser>> {
+        let cutoff = format!("-{} days", days.saturating_sub(1));
         // Weight each daily row by its server's `usage_coefficient`
         // before the per-user sum, mirroring the raw-tick path so the
         // heavy-users ranking is consistent whichever table feeds it.
@@ -5408,16 +5445,16 @@ impl SqliteInventory {
         // is the identity.
         let rows = sqlx::query(
             "SELECT d.user_id AS user_id,
-                    CAST(
-                        COALESCE(SUM((d.upload_bytes + d.download_bytes)
-                                     * COALESCE(sv.usage_coefficient, 1.0)), 0)
-                        AS INTEGER
-                    ) AS total
+                    CAST(SUM(d.upload_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
+                    CAST(SUM(d.download_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
              FROM vpn_user_daily d
              JOIN servers sv ON sv.id = d.server_id
              WHERE d.date >= strftime('%Y-%m-%d', 'now', ?1)
              GROUP BY d.user_id
-             ORDER BY total DESC
+             ORDER BY SUM((d.upload_bytes + d.download_bytes)
+                          * COALESCE(sv.usage_coefficient, 1.0)) DESC
              LIMIT ?2",
         )
         .bind(&cutoff)
@@ -5427,8 +5464,14 @@ impl SqliteInventory {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let uid: String = r.try_get("user_id")?;
-            let total: i64 = r.try_get("total")?;
-            out.push((UserId(uid), total.max(0) as u64));
+            let up = r.try_get::<i64, _>("up_b")?.max(0) as u64;
+            let down = r.try_get::<i64, _>("down_b")?.max(0) as u64;
+            out.push(HeavyUser {
+                user_id: UserId(uid),
+                upload_bytes: up,
+                download_bytes: down,
+                total_bytes: up.saturating_add(down),
+            });
         }
         Ok(out)
     }
