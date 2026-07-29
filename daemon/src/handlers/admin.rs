@@ -1422,13 +1422,15 @@ async fn dashboard_render(
 
     // PR-Dash dash#1 — "active conns now" per server, read from the
     // in-memory clash-api snapshot cache (no DB round-trip). `None`
-    // when the poller has never reached the server.
+    // when the poller has never reached the server OR the last snapshot
+    // went stale (polling stopped) — `get_live` gates on ~2 poll
+    // intervals so a frozen snapshot can't keep reporting a live count.
     let active_conns_now: Vec<(vpnctl_core::ServerId, Option<usize>)> = server_list_fleet
         .iter()
         .map(|s| {
             let n = state
                 .snapshot_cache
-                .get(&s.id)
+                .get_live(&s.id)
                 .map(|snap| snap.snapshot.connections.len());
             (s.id.clone(), n)
         })
@@ -1481,14 +1483,20 @@ async fn dashboard_render(
     // Summed Rust-side from the already-loaded `fleet_rows` (which span
     // 2× the picked window ⊇ 24h for every window ≥ 24h; for narrower
     // pulls we just sum whatever 24h subset is present), weighted by
-    // usage coefficient. Server-wide rows only (user_id IS NULL) so we
-    // don't double-count the per-user subset.
+    // usage coefficient. EVERY row is summed — per-user (attributed)
+    // PLUS server-wide. Since the NM-11 attribution fix the poller writes
+    // the server-wide row (user_id IS NULL) as only the UNATTRIBUTED
+    // REMAINDER (interval total minus the per-user deltas), so the true
+    // node total is `SUM(per-user) + SUM(remainder)`. Summing the
+    // remainder alone would undercount by the whole attributed share.
+    // This matches `SqliteInventory::server_live_activity`, which sums
+    // every row for its bytes-in-window counters.
     let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
         let mut map: std::collections::HashMap<vpnctl_core::ServerId, u64> =
             std::collections::HashMap::new();
         for r in &fleet_rows {
-            if r.user_id.is_some() || r.ts < cutoff {
+            if r.ts < cutoff {
                 continue;
             }
             let w = coeffs.get(&r.server_id).copied().unwrap_or(1.0);
@@ -1530,6 +1538,22 @@ async fn dashboard_render(
             div.ed-dash-cols {
                 (dashboard_abuse_summary(&likely_shared, lang))
                 (dashboard_health_feed(&recent_alerts, unacked_total, lang))
+            }
+            // Issue 5 — the 24h / 7d / 30d / all traffic picker moved to
+            // the Activity tab in the dashboard split, which hid it from
+            // the Overview landing glance (Overview shows only a fixed 24h
+            // fleet table). Surface a clear pointer so the existing
+            // multi-window traffic history stays discoverable — a link, not
+            // a duplicated chart/query.
+            div style="margin-top: 14px;" {
+                a href="/admin/activity#vpn-traffic"
+                  style="display: inline-block; font-family: var(--mono); font-size: 12px; color: var(--mute); text-decoration: none; border: 1px solid var(--rule); border-radius: 3px; padding: 4px 10px;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "Traffic history · 1 / 7 / 30 days →",
+                        "История трафика · 1 / 7 / 30 дней →",
+                    ))
+                }
             }
         }
 
@@ -3017,7 +3041,9 @@ pub(crate) async fn users(
     let mut live_conns_per_user: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     for server in &servers_list {
-        if let Some(snap) = state.snapshot_cache.get(&server.id) {
+        // `get_live`: a stale snapshot (polling stopped) must not keep
+        // painting users as connected on this fleet overview.
+        if let Some(snap) = state.snapshot_cache.get_live(&server.id) {
             for connection in &snap.snapshot.connections {
                 if let Some(user_id) = connection.metadata.user.as_deref() {
                     *live_conns_per_user.entry(user_id.to_string()).or_default() += 1;
@@ -5724,7 +5750,9 @@ async fn user_online_badge(
     let mut unresolved: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for sid in server_ids {
-        let Some(snap) = state.snapshot_cache.get(sid) else {
+        // `get_live`: the 🟢 online badge must NOT light up from a
+        // snapshot the poller stopped refreshing (~2 intervals stale).
+        let Some(snap) = state.snapshot_cache.get_live(sid) else {
             continue;
         };
         for c in &snap.snapshot.connections {
@@ -15454,9 +15482,11 @@ async fn server_detail_render(
     // Best-effort: a detector error renders no banner, not a 500.
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.unwrap_or(false);
 
-    // Design v2 3e — is the clash-api poller currently holding a
+    // Design v2 3e — is the clash-api poller currently holding a LIVE
     // snapshot for this node (checklist row «clash api reachable»).
-    let clash_ok = state.snapshot_cache.get(&sid).is_some();
+    // `get_live`: a stale snapshot (polling stopped) must read as
+    // NOT reachable, not keep a green «reachable» row from a frozen tick.
+    let clash_ok = state.snapshot_cache.get_live(&sid).is_some();
 
     // Design v2 3d — Grants-tab-only data: grant dates (migration
     // 0039), WHICH granted users still await a deploy, per-user live
@@ -15481,7 +15511,9 @@ async fn server_detail_render(
             .into_iter()
             .collect();
         let mut presence: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        if let Some(snap) = state.snapshot_cache.get(&sid) {
+        // `get_live`: per-user live conns on this node must drop out once
+        // the snapshot goes stale (polling stopped).
+        if let Some(snap) = state.snapshot_cache.get_live(&sid) {
             for c in &snap.snapshot.connections {
                 if let Some(uid) = c.metadata.user.as_deref() {
                     *presence.entry(uid.to_string()).or_default() += 1;
@@ -15571,8 +15603,10 @@ async fn server_detail_render(
     // Phase 4c+4d — last clash-api snapshot + log-derived
     // attribution for the «Live connections» drill-down. None
     // when the poller has never reached this server (fresh
-    // daemon start / no key / etc).
-    let last_server_snap = state.snapshot_cache.get(&sid);
+    // daemon start / no key / etc) OR the last snapshot went stale
+    // (`get_live`: polling stopped → the live connection tables must
+    // collapse to their empty state, not render a frozen tick as live).
+    let last_server_snap = state.snapshot_cache.get_live(&sid);
     // Phase 5a-2 — bulk-fetch cached PTR hostnames for unique
     // destination IPs in the snapshot. Used to enrich the «top
     // destinations» table — `35.217.1.178:50005` becomes

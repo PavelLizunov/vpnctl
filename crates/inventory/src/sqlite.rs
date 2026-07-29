@@ -214,22 +214,42 @@ pub struct SharingSignals {
     pub impossible_travel_hops: u64,
 }
 
-/// Collapse an IP to its network key for sharing-detection counting
-/// (2026-06-17): IPv4 → its `/24` (`"91.79.36.72"` → `"91.79.36"`), IPv6 →
-/// the address verbatim. Mobile carriers rotate a single device across many
-/// IPs WITHIN one `/24`-ish pool, so counting distinct `/24`s instead of raw
-/// IPs stops one rotating phone from looking like a dozen shared clients
-/// (the multiviruss false positive: 16 raw IPs were ~5 `/24`s, mostly one
-/// carrier). A real shared sub spans DIFFERENT access networks → different
-/// `/24`s. Not perfect (a carrier can span two `/24`s) but kills the bulk of
-/// the rotation inflation with zero geoip dependency.
-pub fn ipv4_net24(ip: &str) -> String {
-    if ip.contains(':') {
-        return ip.to_string(); // IPv6 — no cheap /24 analogue; keep whole.
-    }
-    match ip.rsplit_once('.') {
-        Some((prefix, _last_octet)) => prefix.to_string(),
-        None => ip.to_string(),
+/// Collapse an IP to its access-network key for sharing-detection counting
+/// (2026-06-17; IPv6-corrected 2026-07-29). IPv4 → its `/24`
+/// (`"91.79.36.72"` → `"91.79.36"`); IPv6 → its `/64` prefix
+/// (`"2001:db8::1"` → `"2001:db8:0:0::/64"`). Mobile carriers rotate a
+/// single device across many addresses WITHIN one prefix pool, so counting
+/// distinct network keys instead of raw addresses stops one rotating phone
+/// from looking like a dozen shared clients (the multiviruss false positive:
+/// 16 raw IPs were ~5 `/24`s, mostly one carrier). A real shared sub spans
+/// DIFFERENT access networks → different keys. Not perfect (a carrier can
+/// span two prefixes) but kills the bulk of the rotation inflation with zero
+/// geoip dependency.
+///
+/// Parsed with std [`std::net::IpAddr`] so the IPv6 `/64` collapse is exact:
+/// the old string-prefix version returned every IPv6 privacy address verbatim,
+/// which made one phone's rotating temporary addresses look like many distinct
+/// networks (the strongest, rotation-immune concurrency signal — exactly the
+/// false positive this function exists to prevent). Malformed input parses to
+/// nothing and is returned verbatim so it stays a single safe bucket rather
+/// than panicking or silently merging unrelated garbage.
+pub fn network_key(ip: &str) -> String {
+    use std::net::IpAddr;
+    match ip.parse::<IpAddr>() {
+        // /24 — keep the first three octets (matches the pre-IpAddr shape).
+        Ok(IpAddr::V4(v4)) => {
+            let [a, b, c, _] = v4.octets();
+            format!("{a}.{b}.{c}")
+        }
+        // /64 — keep the first four hextets in a canonical fixed-width form
+        // so every address in one /64 collapses to the SAME key (privacy
+        // addresses only vary in the low 64 bits).
+        Ok(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        // Malformed — keep verbatim (one safe bucket, no panic).
+        Err(_) => ip.to_string(),
     }
 }
 
@@ -4615,7 +4635,7 @@ impl SqliteInventory {
             per_day_nets
                 .entry((uid, date))
                 .or_default()
-                .insert(ipv4_net24(&ip));
+                .insert(network_key(&ip));
         }
         let mut max_nets: HashMap<String, u32> = HashMap::new();
         for ((uid, _date), nets) in per_day_nets {
@@ -7196,6 +7216,37 @@ mod tests {
             vpn_router_device_id: None,
             disabled: false,
         }
+    }
+
+    #[test]
+    fn network_key_ipv4_collapses_to_24() {
+        // Same /24 → identical key; a different /24 → distinct key.
+        assert_eq!(network_key("91.79.36.72"), "91.79.36");
+        assert_eq!(network_key("91.79.36.200"), "91.79.36");
+        assert_ne!(network_key("91.79.37.1"), "91.79.36");
+    }
+
+    #[test]
+    fn network_key_ipv6_privacy_addresses_in_one_64_collapse() {
+        // The 2026-07-29 fix: rotating IPv6 privacy addresses share their
+        // top 64 bits, so they MUST collapse to one key (the old verbatim
+        // behaviour made one phone look like many distinct networks).
+        let a = network_key("2001:db8:abcd:0012::1");
+        let b = network_key("2001:db8:abcd:0012:7334:1111:2222:3333");
+        let c = network_key("2001:db8:abcd:0012:9f00:aaaa:bbbb:cccc");
+        assert_eq!(a, b, "two privacy addrs in one /64 must share a key");
+        assert_eq!(b, c, "a third privacy addr in the same /64 too");
+        // A different /64 stays distinct.
+        assert_ne!(network_key("2001:db8:abcd:0013::1"), a);
+    }
+
+    #[test]
+    fn network_key_malformed_input_stays_safe() {
+        // Garbage neither panics nor merges with a real prefix — it stays
+        // its own single verbatim bucket.
+        assert_eq!(network_key("not-an-ip"), "not-an-ip");
+        assert_eq!(network_key(""), "");
+        assert_eq!(network_key("999.999.1.1"), "999.999.1.1");
     }
 
     #[tokio::test]

@@ -16276,6 +16276,71 @@ async fn dashboard_fleet_traffic_totals_render_beside_chart() {
     );
 }
 
+/// Issue 2 — the fleet table "traffic 24h" column must sum EVERY row
+/// (per-user attributed + server-wide remainder). Since the NM-11
+/// attribution fix the server-wide row holds only the unattributed
+/// remainder, so summing it alone undercounts by the attributed share.
+/// 900 attributed + 100 remainder must read as 1000, matching the
+/// server-detail / activity rollup (`server_live_activity`).
+#[tokio::test]
+async fn dashboard_traffic_24h_sums_attributed_and_remainder() {
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await; // s0, u0 granted
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[
+                // 900 bytes attributed to u0 (400 up + 500 down).
+                VpnStatsDelta {
+                    user_id: Some(UserId("u0".into())),
+                    upload_bytes: 400,
+                    download_bytes: 500,
+                    active_connections: 1,
+                },
+                // 100 bytes unattributed remainder (server-wide row).
+                VpnStatsDelta {
+                    user_id: None,
+                    upload_bytes: 40,
+                    download_bytes: 60,
+                    active_connections: 1,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/").await;
+    // 900 + 100 = 1000 → "1000 B". Pre-fix this column summed only the
+    // user_id IS NULL remainder and rendered "100 B".
+    assert!(
+        html.contains("1000 B"),
+        "traffic 24h must sum attributed (900) + remainder (100) = 1000 B"
+    );
+}
+
+/// Issue 5 — the multi-window (24h / 7d / 30d / all) traffic picker lives
+/// on the Activity tab after the dashboard split; Overview must surface a
+/// clear, bilingual pointer to it so the traffic history stays
+/// discoverable from the landing glance (a link, not a duplicated chart).
+#[tokio::test]
+async fn dashboard_overview_surfaces_traffic_history_link() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/").await;
+    // Bilingual label wording (EN copy on the default locale).
+    assert!(
+        html.contains("Traffic history · 1 / 7 / 30 days"),
+        "overview must label the traffic-history pointer with 1/7/30-day wording"
+    );
+    // …and it must actually link through to the Activity tab.
+    assert!(
+        html.contains("/admin/activity#vpn-traffic"),
+        "the traffic-history pointer must link to the Activity tab"
+    );
+}
+
 /// dash#3 — kernel rollup shows the fleet floor version + on-target
 /// state when every reporting node is at the floor.
 #[tokio::test]

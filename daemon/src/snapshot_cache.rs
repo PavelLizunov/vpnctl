@@ -31,7 +31,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use vpnctl_core::ServerId;
 
 use crate::clash_api::Snapshot;
@@ -40,9 +42,30 @@ use crate::clash_api::Snapshot;
 /// attribution lives on each `Connection.metadata.user` (emitted by
 /// our patched sing-box clash-api — the NM-11 fix), so the snapshot is
 /// self-describing and no side attribution map is needed.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ServerSnapshot {
     pub snapshot: Snapshot,
+    /// When the poller last wrote this entry. A cache entry is only
+    /// «live» for roughly two poll intervals after this stamp; past
+    /// that it is stale and must NOT drive green reachable badges or
+    /// live connection tables (the poller may have stopped reaching
+    /// the node, but the last good snapshot would otherwise sit here
+    /// forever looking current).
+    pub observed_at: DateTime<Utc>,
+}
+
+impl ServerSnapshot {
+    /// True once `now` is more than two `poll_interval`s past
+    /// [`Self::observed_at`]. Two intervals (not one) so a single
+    /// slow/missed tick doesn't flap the UI to «stale» — the node gets
+    /// one grace tick, matching the poller's own missed-tick tolerance.
+    /// Pure (no clock read) so tests exercise fresh vs stale by passing
+    /// a fixed `now` instead of sleeping.
+    pub fn is_stale(&self, now: DateTime<Utc>, poll_interval: Duration) -> bool {
+        let threshold = chrono::Duration::from_std(poll_interval.saturating_mul(2))
+            .unwrap_or(chrono::Duration::MAX);
+        now.signed_duration_since(self.observed_at) > threshold
+    }
 }
 
 /// Inner state behind the cache's `RwLock`: the freshest
@@ -67,11 +90,22 @@ impl SnapshotCache {
     }
 
     /// Store the freshest snapshot for `server`, replacing any previous
-    /// entry. A poisoned lock (another thread panicked mid-write) is
-    /// logged-and-ignored: the next successful write recovers, and a
-    /// poisoning event doesn't affect SQL correctness.
+    /// entry, stamped with the current wall clock. A poisoned lock
+    /// (another thread panicked mid-write) is logged-and-ignored: the
+    /// next successful write recovers, and a poisoning event doesn't
+    /// affect SQL correctness.
     pub fn store(&self, server: ServerId, snap: Snapshot) {
-        let entry = Arc::new(ServerSnapshot { snapshot: snap });
+        self.store_at(server, snap, Utc::now());
+    }
+
+    /// [`Self::store`] with an explicit observation time. The poller
+    /// always uses `store` (now); this entry point exists so tests can
+    /// back-date an entry and assert the staleness gate without sleeping.
+    pub fn store_at(&self, server: ServerId, snap: Snapshot, observed_at: DateTime<Utc>) {
+        let entry = Arc::new(ServerSnapshot {
+            snapshot: snap,
+            observed_at,
+        });
         match self.inner.write() {
             Ok(mut g) => {
                 g.snapshots.insert(server, entry);
@@ -105,9 +139,39 @@ impl SnapshotCache {
     }
 
     /// Borrow the freshest server-snapshot bundle for `server`.
-    /// None when the poller has never reached this server.
+    /// None when the poller has never reached this server. Returns the
+    /// entry regardless of age — callers rendering live badges/tables
+    /// must use [`Self::get_live`] (or [`Self::get_if_fresh`]) so a
+    /// snapshot the poller stopped refreshing can't keep looking current.
     pub fn get(&self, server: &ServerId) -> Option<Arc<ServerSnapshot>> {
         self.inner.read().ok()?.snapshots.get(server).cloned()
+    }
+
+    /// [`Self::get`] gated on freshness: `None` when the entry is older
+    /// than ~2 `poll_interval`s as of `now`. Both are injected so tests
+    /// drive fresh vs stale deterministically (no sleeps, no env).
+    pub fn get_if_fresh(
+        &self,
+        server: &ServerId,
+        now: DateTime<Utc>,
+        poll_interval: Duration,
+    ) -> Option<Arc<ServerSnapshot>> {
+        let entry = self.get(server)?;
+        (!entry.is_stale(now, poll_interval)).then_some(entry)
+    }
+
+    /// Production freshness gate: the entry for `server` only if the
+    /// poller refreshed it within ~2 of the configured poll interval
+    /// (env `VPNCTLD_POLL_INTERVAL_SECS`, 5-min default). Use this for
+    /// every «is the node live right now» surface — reachable badges,
+    /// active-conn counts, live connection tables — so polling that has
+    /// stopped can't keep painting a green picture from a frozen snapshot.
+    pub fn get_live(&self, server: &ServerId) -> Option<Arc<ServerSnapshot>> {
+        self.get_if_fresh(
+            server,
+            Utc::now(),
+            Duration::from_secs(crate::clash_poller::poll_interval_secs()),
+        )
     }
 }
 
@@ -321,6 +385,79 @@ mod tests {
     fn cache_get_for_unknown_server_returns_none() {
         let c = SnapshotCache::new();
         assert!(c.get(&ServerId("never-stored".into())).is_none());
+    }
+
+    /// A fixed `now` + a 5-min poll interval, so the fresh/stale boundary
+    /// is exercised purely (no sleeps, no env).
+    fn clock() -> (chrono::DateTime<chrono::Utc>, std::time::Duration) {
+        use chrono::TimeZone;
+        (
+            chrono::Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap(),
+            std::time::Duration::from_secs(300),
+        )
+    }
+
+    #[test]
+    fn snapshot_is_fresh_within_two_intervals() {
+        let (now, interval) = clock();
+        // Observed exactly now, and just under two intervals ago — both
+        // fresh (a single missed tick must not flap the UI to stale).
+        let fresh_now = ServerSnapshot {
+            snapshot: Snapshot::default(),
+            observed_at: now,
+        };
+        assert!(!fresh_now.is_stale(now, interval));
+
+        let one_missed = ServerSnapshot {
+            snapshot: Snapshot::default(),
+            observed_at: now - chrono::Duration::seconds(599), // < 2×300
+        };
+        assert!(
+            !one_missed.is_stale(now, interval),
+            "one missed tick (age < 2 intervals) must stay fresh"
+        );
+    }
+
+    #[test]
+    fn snapshot_is_stale_past_two_intervals() {
+        let (now, interval) = clock();
+        // Past the two-interval grace → stale. The poller has stopped
+        // reaching this node; the frozen snapshot must not look live.
+        let stale = ServerSnapshot {
+            snapshot: Snapshot::default(),
+            observed_at: now - chrono::Duration::seconds(601), // > 2×300
+        };
+        assert!(stale.is_stale(now, interval));
+    }
+
+    #[test]
+    fn get_if_fresh_returns_entry_when_fresh_and_none_when_stale() {
+        let (now, interval) = clock();
+        let c = SnapshotCache::new();
+        let sid = ServerId("de".into());
+        let s = snap(vec![conn(
+            "1.1.1.1", "2.2.2.2", "443", "x", "tcp", 100, 200,
+        )]);
+
+        // Fresh entry (observed now) is returned.
+        c.store_at(sid.clone(), s.clone(), now);
+        assert!(
+            c.get_if_fresh(&sid, now, interval).is_some(),
+            "a just-stored snapshot must be live"
+        );
+
+        // Back-dated past two intervals → gated out, even though `get`
+        // still sees it. This is the «live forever after polling stops»
+        // regression: the raw entry exists but must not be served as live.
+        c.store_at(sid.clone(), s, now - chrono::Duration::seconds(3600));
+        assert!(
+            c.get(&sid).is_some(),
+            "raw get still sees the (stale) entry"
+        );
+        assert!(
+            c.get_if_fresh(&sid, now, interval).is_none(),
+            "a snapshot older than ~2 intervals must not be served as live"
+        );
     }
 
     #[test]
