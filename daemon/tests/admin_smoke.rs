@@ -16276,6 +16276,42 @@ async fn dashboard_fleet_traffic_totals_render_beside_chart() {
     );
 }
 
+/// Issue 2 (Activity) — the fleet traffic totals beside the chart must
+/// sum ALL rows (attributed + remainder), not only user_id IS NULL.
+/// 900 attributed + 100 remainder = 1000 total.
+#[tokio::test]
+async fn activity_fleet_totals_sum_attributed_and_remainder() {
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[
+                VpnStatsDelta {
+                    user_id: Some(UserId("u0".into())),
+                    upload_bytes: 400,
+                    download_bytes: 500,
+                    active_connections: 1,
+                },
+                VpnStatsDelta {
+                    user_id: None,
+                    upload_bytes: 40,
+                    download_bytes: 60,
+                    active_connections: 1,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/activity").await;
+    assert!(
+        html.contains("1000 B"),
+        "activity fleet totals must sum attributed (900) + remainder (100) = 1000 B"
+    );
+}
+
 /// Issue 2 — the fleet table "traffic 24h" column must sum EVERY row
 /// (per-user attributed + server-wide remainder). Since the NM-11
 /// attribution fix the server-wide row holds only the unattributed

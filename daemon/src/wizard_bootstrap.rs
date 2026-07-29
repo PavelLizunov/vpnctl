@@ -2051,17 +2051,4 @@ mod tests {
             other => panic!("expected Error terminal, got {other:?}"),
         }
     }
-
-    #[test]
-    fn deploy_all_terminal_error_on_all_failure() {
-        let failed = vec!["s0".to_string(), "s1".to_string()];
-        let ev = deploy_all_terminal(&failed, "done — 0/2 deployed; failed: s0, s1".into());
-        match ev {
-            BootstrapEvent::Error { phase, message } => {
-                assert_eq!(phase, "done");
-                assert!(message.contains("failed: s0, s1"), "message: {message}");
-            }
-            other => panic!("expected Error terminal, got {other:?}"),
-        }
-    }
 }

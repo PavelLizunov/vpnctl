@@ -168,7 +168,8 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     # would parse as duplicate configs (dpkg conffile backups, editor
     # turds). Our own fragment is written via `cat >` (overwrite, no
     # backup), so these can only come from external tooling.
-    rm -f /etc/logrotate.d/sing-box.bak /etc/logrotate.d/sing-box~ \
+    rm -f /etc/logrotate.d/sing-box.bak /etc/logrotate.d/sing-box.bak.* \
+          /etc/logrotate.d/sing-box~ \
           /etc/logrotate.d/sing-box.dpkg-old /etc/logrotate.d/sing-box.dpkg-new \
           /etc/logrotate.d/sing-box.dpkg-dist
     cat > /etc/logrotate.d/sing-box <<'LR'
@@ -183,10 +184,10 @@ const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-
     copytruncate
 }
 LR
-    # Verify the fragment parses — logrotate's parser is strict and a
-    # typo would silently disable rotation for ALL fragments. stderr
-    # is NOT suppressed so a parse failure surfaces in the deploy log.
-    logrotate -d /etc/logrotate.d/sing-box >/dev/null
+    # Verify the GLOBAL include graph parses — validating only the
+    # single fragment would miss duplicates hidden behind the include.
+    # stderr is NOT suppressed so a parse failure surfaces in the log.
+    logrotate -d /etc/logrotate.conf >/dev/null
     # fail2ban — SSH brute-force protection. The add-server wizard UI
     # promises it and the Phase-G health monitor alerts on
     # `server.fail2ban.down`, but NO deploy path actually installed it
@@ -977,19 +978,24 @@ mod tests {
             !fragment.contains("su "),
             "logrotate fragment must NOT carry `su` (root runs copytruncate): {fragment}"
         );
-        // Validation must not suppress stderr.
+        // Validation targets the GLOBAL include graph, not just the
+        // single fragment, so duplicates cannot remain hidden.
         assert!(
-            s.contains("logrotate -d /etc/logrotate.d/sing-box >/dev/null\n"),
-            "validation must keep stderr visible (no 2>&1): {s}"
+            s.contains("logrotate -d /etc/logrotate.conf >/dev/null\n"),
+            "must validate the global logrotate.conf include graph: {s}"
         );
         assert!(
-            !s.contains("logrotate -d /etc/logrotate.d/sing-box >/dev/null 2>&1"),
+            !s.contains("logrotate -d /etc/logrotate.conf >/dev/null 2>&1"),
             "validation must NOT suppress stderr: {s}"
         );
-        // Stale backup cleanup.
+        // Stale backup cleanup — exact .bak AND the dateext family.
         assert!(
             s.contains("rm -f /etc/logrotate.d/sing-box.bak"),
             "must clean stale .bak backups from the parsed logrotate dir: {s}"
+        );
+        assert!(
+            s.contains("sing-box.bak.*"),
+            "must clean dateext-style sing-box.bak.<date> duplicates: {s}"
         );
         assert!(
             s.contains("sing-box.dpkg-old"),

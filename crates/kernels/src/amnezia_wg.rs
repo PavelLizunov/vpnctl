@@ -229,6 +229,15 @@ fn awg_apply_script() -> String {
             EGRESS=$(ip -o -4 route show to default 2>/dev/null | awk '{{print $5; exit}}')
             EGRESS=${{EGRESS:-eth0}}
 
+            # ── Validate the detected name before interpolating into
+            #    sed/iptables. Conservative Linux iface charset only.
+            case "$EGRESS" in
+                *[!a-zA-Z0-9._-]*)
+                    echo "egress interface name failed validation: $EGRESS" >&2
+                    exit 1
+                    ;;
+            esac
+
             # ── Replace the render-time placeholder with the real
             #    interface so PostUp/PostDown NAT rules target the
             #    correct egress.
@@ -248,7 +257,9 @@ fn awg_apply_script() -> String {
 
             # ── Snapshot the live config for rollback (only if it
             #    exists — first deploy has none; -a preserves perms).
+            HAD_PREV=0
             if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
+                HAD_PREV=1
                 cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak 2>/dev/null || true
             fi
 
@@ -271,19 +282,22 @@ fn awg_apply_script() -> String {
                 sleep 1
             done
 
-            # Failed to come up. Dump diagnostics, then ROLL BACK to
-            # the snapshot so the node returns to its last-good config
-            # instead of crash-looping on the new one.
+            # Failed to come up. Dump diagnostics, then ROLL BACK.
             echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2
             journalctl -u awg-quick@awg0 --no-pager -n 20 >&2 || true
             echo "--- attempted config (post-strip) ---" >&2
             awg-quick strip /etc/amnezia/amneziawg/awg0.conf >&2 || true
-            if [ -f /etc/amnezia/amneziawg/awg0.conf.bak ]; then
+            if [ "$HAD_PREV" = 1 ] && [ -f /etc/amnezia/amneziawg/awg0.conf.bak ]; then
                 echo "rolling back to previous awg0 config" >&2
                 mv /etc/amnezia/amneziawg/awg0.conf.bak /etc/amnezia/amneziawg/awg0.conf || true
                 chown root:root /etc/amnezia/amneziawg/awg0.conf || true
                 chmod 0600 /etc/amnezia/amneziawg/awg0.conf || true
                 systemctl reload-or-restart awg-quick@awg0 || true
+            else
+                echo "no previous config — removing failed deploy" >&2
+                systemctl stop awg-quick@awg0 || true
+                systemctl disable awg-quick@awg0 || true
+                rm -f /etc/amnezia/amneziawg/awg0.conf
             fi
             exit 1
         "#,
@@ -800,6 +814,53 @@ mod tests {
         assert!(
             s.contains("journalctl -u awg-quick@awg0"),
             "must dump diagnostics on failure: {s}"
+        );
+    }
+
+    #[test]
+    fn apply_script_first_deploy_failure_removes_config_and_disables() {
+        let s = awg_apply_script();
+        assert!(
+            s.contains("HAD_PREV=0"),
+            "must track whether a previous config existed: {s}"
+        );
+        assert!(
+            s.contains("HAD_PREV=1"),
+            "must set HAD_PREV=1 when snapshotting: {s}"
+        );
+        assert!(
+            s.contains("no previous config — removing failed deploy"),
+            "must handle first-deploy failure: {s}"
+        );
+        let stop = s
+            .find("systemctl stop awg-quick@awg0")
+            .expect("must stop the service on first-deploy failure");
+        let disable = s
+            .find("systemctl disable awg-quick@awg0")
+            .expect("must disable the service on first-deploy failure");
+        let rm_conf = s
+            .find("rm -f /etc/amnezia/amneziawg/awg0.conf\n")
+            .expect("must remove the rejected config on first-deploy failure");
+        assert!(
+            stop < disable && disable < rm_conf,
+            "ordering: stop → disable → remove config"
+        );
+    }
+
+    #[test]
+    fn apply_script_validates_egress_iface_charset() {
+        let s = awg_apply_script();
+        assert!(
+            s.contains("*[!a-zA-Z0-9._-]*"),
+            "must reject iface names outside the conservative charset: {s}"
+        );
+        let validate = s
+            .find("egress interface name failed validation")
+            .expect("must fail closed on malformed iface name");
+        let sed = s.find("sed -i").expect("sed interpolation");
+        assert!(
+            validate < sed,
+            "iface validation must precede sed interpolation"
         );
     }
 

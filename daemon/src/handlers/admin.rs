@@ -907,18 +907,16 @@ fn dashboard_fleet_traffic_totals(
     let cur_start = now - chrono::Duration::hours(window_hours);
     let prior_start = now - chrono::Duration::hours(window_hours * 2);
 
-    // Only the server-wide rows (user_id IS NULL) carry the full
-    // node traffic — per-user rows are a SUBSET of the same bytes, so
-    // summing both would double-count. Match `vpn_traffic_chart`'s
-    // intent: server-wide totals.
+    // Sum ALL rows (per-user attributed + unattributed remainder).
+    // Since the NM-11 attribution fix the server-wide row holds only
+    // the unattributed remainder, so filtering to user_id IS NULL
+    // undercounts by the attributed share. Match `vpn_traffic_chart`
+    // which already sums every row.
     let weight = |sid: &vpnctl_core::ServerId| -> f64 { coeffs.get(sid).copied().unwrap_or(1.0) };
     let mut cur_up = 0f64;
     let mut cur_dn = 0f64;
     let mut prior_total = 0f64;
     for r in rows {
-        if r.user_id.is_some() {
-            continue;
-        }
         let w = weight(&r.server_id);
         let up = r.upload_bytes as f64 * w;
         let dn = r.download_bytes as f64 * w;

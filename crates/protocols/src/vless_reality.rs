@@ -81,10 +81,6 @@ impl Protocol for VlessReality {
         ProtocolId("vless+reality".to_string())
     }
 
-    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
-        &[("tcp", 443)]
-    }
-
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         // REALITY serves a real TLS handshake to a real upstream
         // (`dest:` SNI, default yahoo.com — see DEFAULT_REALITY_SNI); any
