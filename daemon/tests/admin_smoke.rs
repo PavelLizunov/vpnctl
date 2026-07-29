@@ -1967,7 +1967,7 @@ async fn boosty_settings_save_via_web() {
                     .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
             )
             .body(Body::from(
-                "blog_url=ninitux&poll_interval_secs=1800&enabled=on",
+                "blog_url=ninitux&poll_interval_secs=1800&grace_days=14&enabled=on&auto_create_users=on",
             ))
             .unwrap(),
         )
@@ -1979,6 +1979,8 @@ async fn boosty_settings_save_via_web() {
     assert!(got.enabled);
     assert_eq!(got.blog_url.as_deref(), Some("ninitux"));
     assert_eq!(got.poll_interval_secs, 1800);
+    assert_eq!(got.grace_days, 14);
+    assert!(got.auto_create_users);
 }
 
 #[tokio::test]
@@ -2032,7 +2034,9 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
             "enabled": [],
             "disabled": [],
             "lapsed_pending": ["bob"],
+            "grace_pending": ["eve"],
             "new_subscribers": [{"subscriber_id": 300, "name": "Carol"}],
+            "provisioned": ["boosty-301"],
             "errors": [],
             "suppressed_disables": ["dave"]
         })
@@ -2048,6 +2052,8 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
         "lapsed user gets a confirm-disable button: {html}"
     );
     assert!(html.contains("Carol"), "new subscriber from stored report");
+    assert!(html.contains("boosty-301"), "auto-created user renders");
+    assert!(html.contains("eve"), "grace-period user renders");
     assert!(html.contains("dave"), "suppressed-disables banner renders");
 }
 
@@ -16622,11 +16628,10 @@ async fn dashboard_abuse_summary_links_to_origins_anchor() {
     );
 }
 
-/// The compact dashboard card shows six rows, then a native disclosure
-/// containing every remaining flagged user. Regression: this used to
-/// render `+N more flagged` as a plain span that could not be opened.
+/// The compact dashboard card shows six rows, then links to the dedicated
+/// filtered review page instead of appending an unstyled list in-place.
 #[tokio::test]
-async fn dashboard_abuse_summary_more_flagged_expands_to_all_users() {
+async fn dashboard_abuse_summary_more_flagged_links_to_full_page() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 7, &[(0, 0)]).await;
@@ -16640,17 +16645,73 @@ async fn dashboard_abuse_summary_more_flagged_expands_to_all_users() {
 
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("<summary") && html.contains("+1 more flagged"),
-        "overflow must be a native disclosure control: {html}"
+        html.contains(r#"href="/admin/sharing""#) && html.contains("+1 more flagged"),
+        "overflow must link to the full sharing-risk page: {html}"
     );
-    let overflow = html
-        .split_once("<details")
-        .and_then(|(_, tail)| tail.split_once("</details>"))
-        .map(|(details, _)| details)
-        .expect("overflow disclosure missing");
     assert!(
-        overflow.contains("/admin/users/") && overflow.contains("/activity#origins"),
-        "the disclosure must contain the previously hidden user: {overflow}"
+        !html.contains("<details"),
+        "dashboard must not append the old native disclosure list"
+    );
+}
+
+#[tokio::test]
+async fn sharing_page_lists_all_flagged_users_and_filters() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 7, &[(0, 0)]).await;
+    for i in 0..7 {
+        s.inv
+            .record_user_ip_concurrency(&[(UserId(format!("u{i}")), if i == 0 { 4 } else { 3 })])
+            .await
+            .unwrap();
+    }
+    let app = router(s);
+
+    let all = fetch_html(app.clone(), "/admin/sharing").await;
+    assert!(all.contains("Sharing-risk review"), "{all}");
+    for i in 0..7 {
+        assert!(
+            all.contains(&format!("/admin/users/u{i}/activity#origins")),
+            "u{i} missing from full sharing page"
+        );
+    }
+
+    let high = fetch_html(app.clone(), "/admin/sharing?level=high").await;
+    assert!(high.contains("/admin/users/u0/activity#origins"), "{high}");
+    assert!(!high.contains("/admin/users/u1/activity#origins"), "{high}");
+
+    let search = fetch_html(app, "/admin/sharing?q=u3&min_score=40").await;
+    assert!(
+        search.contains("/admin/users/u3/activity#origins"),
+        "{search}"
+    );
+    assert!(
+        !search.contains("/admin/users/u2/activity#origins"),
+        "{search}"
+    );
+}
+
+#[tokio::test]
+async fn sharing_page_invalid_or_empty_filters_stay_readable() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_user_ip_concurrency(&[(UserId("u0".into()), 3)])
+        .await
+        .unwrap();
+    let app = router(s);
+
+    let invalid = fetch_html(app.clone(), "/admin/sharing?level=wat&min_score=wat").await;
+    assert!(
+        invalid.contains("/admin/users/u0/activity#origins"),
+        "{invalid}"
+    );
+
+    let empty = fetch_html(app, "/admin/sharing?q=missing").await;
+    assert!(
+        empty.contains("No flagged users match these filters."),
+        "{empty}"
     );
 }
 

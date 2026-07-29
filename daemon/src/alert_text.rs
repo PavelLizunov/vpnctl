@@ -143,23 +143,47 @@ pub fn render_alert(
         }
         "server.singbox.up" => {
             let dur = ps(payload, "downtime_human");
+            let auto = payload
+                .get("auto_remediated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             (
-                pick(
-                    loc,
-                    format!("sing-box recovered — {subj}"),
-                    format!("sing-box поднялся — {subj}"),
-                ),
-                match dur {
-                    Some(d) => pick(
+                if auto {
+                    pick(
                         loc,
-                        format!("sing-box is active again on {subj}. Was down for {d}."),
-                        format!("sing-box снова активен на {subj}. Был недоступен {d}."),
-                    ),
-                    None => pick(
+                        format!("Fixed automatically — {subj}"),
+                        format!("Исправлено автоматически — {subj}"),
+                    )
+                } else {
+                    pick(
                         loc,
-                        format!("sing-box is active again on {subj}."),
-                        format!("sing-box снова активен на {subj}."),
-                    ),
+                        format!("sing-box recovered — {subj}"),
+                        format!("sing-box поднялся — {subj}"),
+                    )
+                },
+                if auto {
+                    pick(
+                        loc,
+                        format!(
+                            "vpnctl restarted sing-box on {subj} and verified that it is active."
+                        ),
+                        format!(
+                            "vpnctl перезапустил sing-box на {subj} и проверил, что он активен."
+                        ),
+                    )
+                } else {
+                    match dur {
+                        Some(d) => pick(
+                            loc,
+                            format!("sing-box is active again on {subj}. Was down for {d}."),
+                            format!("sing-box снова активен на {subj}. Был недоступен {d}."),
+                        ),
+                        None => pick(
+                            loc,
+                            format!("sing-box is active again on {subj}."),
+                            format!("sing-box снова активен на {subj}."),
+                        ),
+                    }
                 },
                 None,
             )
@@ -233,19 +257,43 @@ pub fn render_alert(
                 "Передеплой ноду или проверь службу fail2ban.".into(),
             )),
         ),
-        "server.fail2ban.up" => (
-            pick(
-                loc,
-                format!("fail2ban recovered — {subj}"),
-                format!("fail2ban снова работает — {subj}"),
-            ),
-            pick(
-                loc,
-                format!("fail2ban is active again on {subj}."),
-                format!("fail2ban снова активен на {subj}."),
-            ),
-            None,
-        ),
+        "server.fail2ban.up" => {
+            let auto = payload
+                .get("auto_remediated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (
+                if auto {
+                    pick(
+                        loc,
+                        format!("Fixed automatically — {subj}"),
+                        format!("Исправлено автоматически — {subj}"),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("fail2ban recovered — {subj}"),
+                        format!("fail2ban снова работает — {subj}"),
+                    )
+                },
+                if auto {
+                    pick(
+                        loc,
+                        format!(
+                            "vpnctl started fail2ban on {subj} and verified that it is active."
+                        ),
+                        format!("vpnctl запустил fail2ban на {subj} и проверил, что он активен."),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("fail2ban is active again on {subj}."),
+                        format!("fail2ban снова активен на {subj}."),
+                    )
+                },
+                None,
+            )
+        }
         "server.disk.pressure" => {
             let pct = u(payload, "current_pct")
                 .map(|p| code(&format!("{p}%")))
@@ -276,17 +324,41 @@ pub fn render_alert(
             let pct = u(payload, "current_pct")
                 .map(|p| code(&format!("{p}%")))
                 .unwrap_or_default();
+            let auto = payload
+                .get("auto_remediated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             (
-                pick(
-                    loc,
-                    format!("Disk recovered — {subj}"),
-                    format!("Диск разгрузился — {subj}"),
-                ),
-                pick(
-                    loc,
-                    format!("Disk on {subj} is back down to {pct}."),
-                    format!("Диск ноды {subj} разгрузился, сейчас {pct}."),
-                ),
+                if auto {
+                    pick(
+                        loc,
+                        format!("Fixed automatically — {subj}"),
+                        format!("Исправлено автоматически — {subj}"),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("Disk recovered — {subj}"),
+                        format!("Диск разгрузился — {subj}"),
+                    )
+                },
+                if auto {
+                    pick(
+                        loc,
+                        format!(
+                            "vpnctl rotated the sing-box log, kept 14 days of system journal, cleaned the package cache, and verified disk usage at {pct}."
+                        ),
+                        format!(
+                            "vpnctl ротировал лог sing-box, оставил 14 дней system journal, очистил кэш пакетов и проверил заполнение диска: {pct}."
+                        ),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("Disk on {subj} is back down to {pct}."),
+                        format!("Диск ноды {subj} разгрузился, сейчас {pct}."),
+                    )
+                },
                 None,
             )
         }
@@ -366,17 +438,41 @@ pub fn render_alert(
             let mib = u(payload, "current_bytes")
                 .map(|b| b / 1_048_576)
                 .unwrap_or(0);
+            let auto = payload
+                .get("auto_remediated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             (
-                pick(
-                    loc,
-                    format!("sing-box log recovered — {subj}"),
-                    format!("Лог sing-box снова в норме — {subj}"),
-                ),
-                pick(
-                    loc,
-                    format!("The sing-box log on {subj} is back under 500 MiB (≈{mib} MiB)."),
-                    format!("Лог sing-box на ноде {subj} снова меньше 500 МиБ (≈{mib} МиБ)."),
-                ),
+                if auto {
+                    pick(
+                        loc,
+                        format!("Fixed automatically — {subj}"),
+                        format!("Исправлено автоматически — {subj}"),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("sing-box log recovered — {subj}"),
+                        format!("Лог sing-box снова в норме — {subj}"),
+                    )
+                },
+                if auto {
+                    pick(
+                        loc,
+                        format!(
+                            "vpnctl rotated the sing-box log on {subj} and verified it at ≈{mib} MiB."
+                        ),
+                        format!(
+                            "vpnctl ротировал лог sing-box на {subj} и проверил его размер: ≈{mib} МиБ."
+                        ),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("The sing-box log on {subj} is back under 500 MiB (≈{mib} MiB)."),
+                        format!("Лог sing-box на ноде {subj} снова меньше 500 МиБ (≈{mib} МиБ)."),
+                    )
+                },
                 None,
             )
         }
@@ -735,6 +831,29 @@ mod tests {
             );
             assert_ne!(en.title, ru.title, "title not localized for {kind}");
             assert_ne!(en.body, ru.body, "body not localized for {kind}");
+        }
+    }
+
+    #[test]
+    fn auto_remediation_recovery_says_fixed_automatically() {
+        let payload = json!({
+            "auto_remediated": true,
+            "current_pct": 42,
+            "current_bytes": 1024,
+        });
+        for kind in [
+            "server.singbox.up",
+            "server.fail2ban.up",
+            "server.disk.recovered",
+            "server.singbox.log.recovered",
+        ] {
+            let en = render_alert(kind, "info", "node", &payload, Locale::En);
+            let ru = render_alert(kind, "info", "нода", &payload, Locale::Ru);
+            assert!(en.title.contains("Fixed automatically"), "{kind}: {en:?}");
+            assert!(
+                ru.title.contains("Исправлено автоматически"),
+                "{kind}: {ru:?}"
+            );
         }
     }
 

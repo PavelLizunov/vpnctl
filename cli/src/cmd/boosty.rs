@@ -114,6 +114,7 @@ async fn run_sync(inv: &SqliteInventory, apply: bool, disable_lapsed: bool) -> a
             .enabled
             .iter()
             .chain(report.disabled.iter())
+            .chain(report.provisioned.iter())
             .collect();
         if !flipped.is_empty() {
             let mut server_ids = std::collections::BTreeSet::new();
@@ -170,6 +171,20 @@ fn print_report(r: &SyncReport, mode: ApplyMode) {
             "lapsed, awaiting confirm ({}): {}",
             r.lapsed_pending.len(),
             r.lapsed_pending.join(", ")
+        );
+    }
+    if !r.grace_pending.is_empty() {
+        println!(
+            "inside grace period ({}): {}",
+            r.grace_pending.len(),
+            r.grace_pending.join(", ")
+        );
+    }
+    if !r.provisioned.is_empty() {
+        println!(
+            "provisioned ({}): {}",
+            r.provisioned.len(),
+            r.provisioned.join(", ")
         );
     }
     if !r.new_subscribers.is_empty() {
@@ -246,6 +261,8 @@ struct BoostyStatus {
     device_id: String,
     poll_interval_secs: u64,
     auto_disable_lapsed: bool,
+    grace_days: u16,
+    auto_create_users: bool,
     linked_users: usize,
 }
 
@@ -259,6 +276,8 @@ impl BoostyStatus {
             device_id: mask(settings.device_id.as_deref()),
             poll_interval_secs: settings.poll_interval_secs,
             auto_disable_lapsed: settings.auto_disable_lapsed,
+            grace_days: settings.grace_days,
+            auto_create_users: settings.auto_create_users,
             linked_users,
         }
     }
@@ -283,6 +302,8 @@ fn status_text(status: &BoostyStatus) -> String {
          device_id:           {}\n\
          poll_interval_secs:  {}\n\
          auto_disable_lapsed: {}\n\
+         grace_days:          {}\n\
+         auto_create_users:   {}\n\
          linked users:        {}\n",
         status.enabled,
         status.blog.as_deref().unwrap_or("(unset)"),
@@ -291,6 +312,8 @@ fn status_text(status: &BoostyStatus) -> String {
         status.device_id,
         status.poll_interval_secs,
         status.auto_disable_lapsed,
+        status.grace_days,
+        status.auto_create_users,
         status.linked_users,
     )
 }
@@ -396,6 +419,8 @@ mod tests {
             device_id: Some("device-wxyz".into()),
             poll_interval_secs: 1800,
             auto_disable_lapsed: true,
+            grace_days: 14,
+            auto_create_users: true,
         }
     }
 
@@ -406,7 +431,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":1800,"auto_disable_lapsed":true,"linked_users":3}"#
+            r#"{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":1800,"auto_disable_lapsed":true,"grace_days":14,"auto_create_users":true,"linked_users":3}"#
         );
         assert!(!json.contains("access-abcdef"));
         assert!(!json.contains("refresh-123456"));
@@ -426,6 +451,8 @@ mod tests {
              device_id:           ••••wxyz\n\
              poll_interval_secs:  1800\n\
              auto_disable_lapsed: true\n\
+             grace_days:          14\n\
+             auto_create_users:   true\n\
              linked users:        3\n"
         );
     }

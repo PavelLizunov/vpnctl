@@ -6,8 +6,10 @@
 
 use boosty_api::api_client::ApiClient;
 use serde_json::json;
-use vpnctl_boosty_bridge::{ApplyMode, build_client, sync_from_settings_at, sync_once};
-use vpnctl_core::{User, UserId};
+use vpnctl_boosty_bridge::{
+    ApplyMode, build_client, sync_from_settings_at, sync_once, sync_once_with_policy,
+};
+use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
 use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
 /// A PAID subscriber (level price 200) — the default in these tests, since
@@ -17,6 +19,12 @@ fn subscriber(id: i64, name: &str, status: &str) -> serde_json::Value {
 }
 
 /// A subscriber on the free "Follower" level (level price 0) — VPN-excluded.
+fn subscriber_with_off_time(id: i64, name: &str, off_time: i64) -> serde_json::Value {
+    let mut value = subscriber(id, name, "inactive");
+    value["offTime"] = json!(off_time);
+    value
+}
+
 fn follower(id: i64, name: &str, status: &str) -> serde_json::Value {
     subscriber_priced(id, name, status, 0.0, "Follower")
 }
@@ -70,6 +78,21 @@ fn user(id: &str, disabled: bool) -> User {
         sub_token: None,
         vpn_router_device_id: None,
         disabled,
+    }
+}
+
+fn vpn_server(id: &str) -> Server {
+    Server {
+        id: ServerId(id.into()),
+        address: format!("{id}.example.com"),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
     }
 }
 
@@ -536,6 +559,8 @@ async fn rotated_refresh_token_persisted_even_when_roster_fetch_fails() {
         device_id: Some("dev".into()),
         poll_interval_secs: 3600,
         auto_disable_lapsed: false,
+        grace_days: 14,
+        auto_create_users: false,
     };
     inv.set_boosty_settings(&settings).await.unwrap();
 
@@ -567,6 +592,175 @@ async fn build_client_prefers_refresh_flow_when_both_creds_set() {
         client.refresh_token().await.as_deref(),
         Some("ref1"),
         "client must be in refresh mode, not static-bearer mode"
+    );
+}
+
+#[tokio::test]
+async fn full_mode_waits_fourteen_days_before_disabling() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [
+            subscriber_with_off_time(100, "Grace", now - 13 * 86_400),
+            subscriber_with_off_time(200, "Expired", now - 15 * 86_400),
+        ],
+        "total": 2, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("grace", false)).await.unwrap();
+    inv.add_user(&user("expired", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("grace".into()), 100)
+        .await
+        .unwrap();
+    inv.link_boosty_subscriber(&UserId("expired".into()), 200)
+        .await
+        .unwrap();
+
+    let report = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 14, false)
+        .await
+        .unwrap();
+
+    assert_eq!(report.grace_pending, vec!["grace"]);
+    assert_eq!(report.disabled, vec!["expired"]);
+    assert!(
+        !inv.get_user(&UserId("grace".into()))
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+    assert!(
+        inv.get_user(&UserId("expired".into()))
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+}
+
+#[tokio::test]
+async fn new_paid_subscriber_gets_complete_user_and_every_server() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [subscriber(321, "New payer", "active")],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_server(&vpn_server("de")).await.unwrap();
+    inv.add_server(&vpn_server("fi")).await.unwrap();
+
+    let report = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::EnableOnly, 14, true)
+        .await
+        .unwrap();
+
+    assert_eq!(report.provisioned, vec!["boosty-321"]);
+    assert!(report.new_subscribers.is_empty());
+    let created = inv
+        .get_user(&UserId("boosty-321".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(created.tuic_password.is_some());
+    assert!(created.wireguard_pubkey.is_some());
+    assert!(created.wireguard_private.is_some());
+    assert!(created.sub_token.is_some());
+    assert!(created.vpn_router_device_id.is_some());
+    assert_eq!(
+        inv.servers_for_user(&created.id).await.unwrap().len(),
+        2,
+        "every current server is granted"
+    );
+    let audit = inv
+        .recent_audit(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.action == "boosty.provision")
+        .unwrap();
+    let payload = audit.payload.unwrap().to_string();
+    assert!(payload.contains("\"servers_granted\":2"));
+    assert!(!payload.contains("password"));
+    assert!(!payload.contains("private"));
+    assert!(!payload.contains("token"));
+}
+
+#[tokio::test]
+async fn concurrent_syncs_cannot_create_two_users_for_one_subscriber() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [subscriber(654, "Concurrent payer", "active")],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client_a = ApiClient::new(reqwest::Client::new(), server.url());
+    let client_b = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        sync_once_with_policy(&client_a, &inv, "ninitux", ApplyMode::EnableOnly, 14, true),
+        sync_once_with_policy(&client_b, &inv, "ninitux", ApplyMode::EnableOnly, 14, true),
+    );
+    assert!(a.is_ok(), "{a:?}");
+    assert!(b.is_ok(), "{b:?}");
+    let links = inv.list_boosty_links().await.unwrap();
+    assert_eq!(
+        links
+            .iter()
+            .filter(|(_, subscriber_id)| *subscriber_id == 654)
+            .count(),
+        1
+    );
+    assert_eq!(
+        inv.list_users()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|u| u.id.0.starts_with("boosty-654"))
+            .count(),
+        1
     );
 }
 

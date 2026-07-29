@@ -106,6 +106,8 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
                 enabled = report.enabled.len(),
                 disabled = report.disabled.len(),
                 lapsed_pending = report.lapsed_pending.len(),
+                grace_pending = report.grace_pending.len(),
+                provisioned = report.provisioned.len(),
                 new_subscribers = report.new_subscribers.len(),
                 suppressed_disables = report.suppressed_disables.len(),
                 errors = report.errors.len(),
@@ -122,6 +124,7 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
                 .enabled
                 .iter()
                 .chain(report.disabled.iter())
+                .chain(report.provisioned.iter())
                 .cloned()
                 .collect();
             if !flipped.is_empty() {

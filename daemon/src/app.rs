@@ -969,6 +969,8 @@ fn admin_router(state: AppState) -> Router {
         // routes; bare `/admin/` + `/admin/overview` render overview.
         .route("/admin/overview", get(admin::dashboard))
         .route("/admin/activity", get(admin::dashboard_activity))
+        .route("/admin/sharing", get(admin::sharing))
+        .route("/admin/sharing/", get(admin::sharing))
         .route("/admin/monitoring", get(admin::monitoring))
         .route("/admin/monitoring/", get(admin::monitoring))
         // v2 3a — manual probe sweep. POST-only (state-changing: writes

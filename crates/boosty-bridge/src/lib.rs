@@ -14,14 +14,15 @@ mod reconcile;
 pub use reconcile::{Action, LinkedUser, SubscriberState, reconcile};
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boosty_api::api_client::ApiClient;
-use vpnctl_core::UserId;
-use vpnctl_inventory::{BoostySettings, SqliteInventory};
+use vpnctl_core::{User, UserId};
+use vpnctl_inventory::{BoostySettings, SqliteInventory, SqliteInventoryError};
 
 /// Boosty API base URL.
 const BOOSTY_BASE_URL: &str = "https://api.boosty.to";
+const MAX_AUTO_PROVISION_PER_TICK: usize = 5;
 
 /// How aggressively [`sync_once`] applies the reconciliation plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +71,12 @@ pub struct SyncReport {
     /// Linked users whose subscription lapsed but were left enabled
     /// (mode `EnableOnly`) — the operator disables these via a button.
     pub lapsed_pending: Vec<String>,
+    /// Linked users still inside the configured auto-disable grace period.
+    pub grace_pending: Vec<String>,
     /// Active subscribers with no linked user.
     pub new_subscribers: Vec<NewSubscriberInfo>,
+    /// Complete vpnctl users automatically created during this pass.
+    pub provisioned: Vec<String>,
     /// Non-fatal per-action errors (one failed write doesn't abort the run).
     pub errors: Vec<String>,
     /// Disables suppressed by the zero-eligible fail-safe: the roster was
@@ -93,6 +98,8 @@ pub enum BridgeError {
     Auth(#[from] boosty_api::error::AuthError),
     #[error("inventory error: {0}")]
     Inventory(#[from] vpnctl_inventory::SqliteInventoryError),
+    #[error("credential generation failed: {0}")]
+    Crypto(#[from] std::io::Error),
     #[error("bridge misconfigured: {0}")]
     Config(String),
 }
@@ -204,7 +211,15 @@ pub async fn sync_from_settings_at(
         .ok_or_else(|| BridgeError::Config("blog_url not set".into()))?;
 
     let client = build_client(settings, base_url).await?;
-    let result = sync_once(&client, inv, blog, mode).await;
+    let result = sync_once_with_policy(
+        &client,
+        inv,
+        blog,
+        mode,
+        settings.grace_days,
+        settings.auto_create_users,
+    )
+    .await;
 
     // Boosty rotates the refresh token on every refresh and invalidates the
     // old one, and every pass starts with a refresh (fresh client). Persist
@@ -276,15 +291,45 @@ pub async fn sync_once(
     blog: &str,
     mode: ApplyMode,
 ) -> Result<SyncReport, BridgeError> {
+    sync_once_with_policy(client, inv, blog, mode, 0, false).await
+}
+
+/// Reconcile with the operator's grace-period and provisioning policy.
+pub async fn sync_once_with_policy(
+    client: &ApiClient,
+    inv: &SqliteInventory,
+    blog: &str,
+    mode: ApplyMode,
+    grace_days: u16,
+    auto_create_users: bool,
+) -> Result<SyncReport, BridgeError> {
     // 1. Fetch the live roster (active + inactive).
     let subscribers = client
         .get_all_subscribers(blog, Some("on_time"), Some("gt"))
         .await?;
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX);
+    let subscriber_ids: Vec<i64> = subscribers
+        .iter()
+        .map(|s| {
+            i64::try_from(s.id).map_err(|_| {
+                BridgeError::Config(format!("Boosty subscriber id {} exceeds SQLite i64", s.id))
+            })
+        })
+        .collect::<Result<_, _>>()?;
 
     let name_by_id: HashMap<i64, String> = subscribers
         .iter()
-        .map(|s| (s.id as i64, s.name.clone()))
+        .zip(&subscriber_ids)
+        .map(|(s, &id)| (id, s.name.clone()))
         .collect();
+    let subscriber_by_id: HashMap<i64, &boosty_api::model::Subscriber> =
+        subscriber_ids.iter().copied().zip(&subscribers).collect();
 
     // VPN-eligibility = actively subscribed to a PAID level. Boosty's free
     // "Follower" pseudo-level has `level.price == 0`; those follows report
@@ -298,8 +343,9 @@ pub async fn sync_once(
     // boosty_settings then — not needed for a single paid/free split.
     let states: Vec<SubscriberState> = subscribers
         .iter()
-        .map(|s| SubscriberState {
-            subscriber_id: s.id as i64,
+        .zip(&subscriber_ids)
+        .map(|(s, &id)| SubscriberState {
+            subscriber_id: id,
             active: is_vpn_eligible(s),
         })
         .collect();
@@ -314,25 +360,45 @@ pub async fn sync_once(
         .count();
 
     // 2. Join links with each linked user's current disabled state.
-    let link_pairs = inv.list_boosty_links().await?;
+    let link_pairs = inv.list_boosty_links_with_lapse().await?;
     let users = inv.list_users().await?;
     let disabled_by_user: HashMap<&str, bool> = users
         .iter()
         .map(|u| (u.id.0.as_str(), u.disabled))
         .collect();
 
-    let links: Vec<LinkedUser> = link_pairs
-        .iter()
-        .filter_map(|(uid, sid)| {
-            disabled_by_user
-                .get(uid.0.as_str())
-                .map(|&disabled| LinkedUser {
-                    user_id: uid.0.clone(),
-                    subscriber_id: *sid,
-                    disabled,
-                })
-        })
-        .collect();
+    let mut lapsed_by_user = HashMap::new();
+    let mut links = Vec::with_capacity(link_pairs.len());
+    for (uid, sid, stored_lapse) in &link_pairs {
+        if let Some(&disabled) = disabled_by_user.get(uid.0.as_str()) {
+            let subscriber = subscriber_by_id.get(sid).copied();
+            let lapse = if subscriber.is_some_and(is_vpn_eligible) {
+                None
+            } else {
+                let api_off_time = subscriber
+                    .and_then(|s| s.off_time)
+                    .filter(|ts| *ts > 0 && *ts <= now);
+                Some(
+                    stored_lapse
+                        .map(|stored| stored.min(api_off_time.unwrap_or(now)))
+                        .unwrap_or_else(|| api_off_time.unwrap_or(now)),
+                )
+            };
+            let observed = if mode == ApplyMode::DryRun {
+                lapse
+            } else {
+                inv.observe_boosty_lapse(uid, lapse).await?
+            };
+            if let Some(since) = observed {
+                lapsed_by_user.insert(uid.0.clone(), since);
+            }
+            links.push(LinkedUser {
+                user_id: uid.0.clone(),
+                subscriber_id: *sid,
+                disabled,
+            });
+        }
+    }
 
     let mut report = SyncReport {
         total_subscribers: subscribers.len(),
@@ -372,14 +438,39 @@ pub async fn sync_once(
                 ApplyMode::DryRun => report.disabled.push(user_id),
                 ApplyMode::EnableOnly => report.lapsed_pending.push(user_id),
                 ApplyMode::Full => {
-                    apply_disabled(inv, &mut report, &user_id, true, mode).await;
+                    let grace_secs = i64::from(grace_days) * 86_400;
+                    let since = lapsed_by_user.get(&user_id).copied().unwrap_or(now);
+                    if now.saturating_sub(since) < grace_secs {
+                        report.grace_pending.push(user_id);
+                    } else {
+                        apply_disabled(inv, &mut report, &user_id, true, mode).await;
+                    }
                 }
             },
             Action::NewSubscriber { subscriber_id } => {
-                report.new_subscribers.push(NewSubscriberInfo {
+                let info = NewSubscriberInfo {
                     subscriber_id,
                     name: name_by_id.get(&subscriber_id).cloned().unwrap_or_default(),
-                });
+                };
+                if mode == ApplyMode::DryRun
+                    || !auto_create_users
+                    || report.provisioned.len() >= MAX_AUTO_PROVISION_PER_TICK
+                {
+                    report.new_subscribers.push(info);
+                    continue;
+                }
+                match provision_boosty_user(inv, subscriber_id).await {
+                    Ok(user_id) => {
+                        report.linked += 1;
+                        report.provisioned.push(user_id);
+                    }
+                    Err(e) => {
+                        report.errors.push(format!(
+                            "provision Boosty subscriber {subscriber_id} failed: {e}"
+                        ));
+                        report.new_subscribers.push(info);
+                    }
+                }
             }
         }
     }
@@ -393,6 +484,62 @@ pub async fn sync_once(
     }
 
     Ok(report)
+}
+
+async fn provision_boosty_user(
+    inv: &SqliteInventory,
+    subscriber_id: i64,
+) -> Result<String, BridgeError> {
+    let id = format!("boosty-{subscriber_id}");
+    let (wireguard_private, wireguard_pubkey) = vpnctl_crypto::gen_wireguard_keypair();
+    let user = User {
+        id: UserId(id.clone()),
+        uuid: vpnctl_crypto::gen_uuid(),
+        tuic_password: Some(vpnctl_crypto::gen_password(24)?),
+        wireguard_pubkey: Some(wireguard_pubkey),
+        wireguard_private: Some(wireguard_private),
+        sub_token: None,
+        vpn_router_device_id: Some(vpnctl_crypto::gen_vpn_router_device_id()?),
+        disabled: false,
+    };
+    match inv.add_boosty_user(&user, subscriber_id).await {
+        Ok(grants) => {
+            if let Err(e) = inv
+                .audit(
+                    "boosty-bridge",
+                    "boosty.provision",
+                    Some(&id),
+                    Some(&serde_json::json!({
+                        "subscriber_id": subscriber_id,
+                        "servers_granted": grants,
+                    })),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target = "boosty_bridge",
+                    user = %id,
+                    error = %e,
+                    "audit boosty.provision failed"
+                );
+            }
+            Ok(id)
+        }
+        // A poller tick and a manual sync may race. The fixed username makes
+        // one INSERT win; the loser accepts only the link created for this
+        // exact subscriber, never an unrelated username collision.
+        Err(SqliteInventoryError::AlreadyExists(_)) => inv
+            .list_boosty_links()
+            .await?
+            .into_iter()
+            .find_map(|(uid, sid)| (sid == subscriber_id).then_some(uid.0))
+            .ok_or_else(|| {
+                BridgeError::Config(format!(
+                    "vpnctl user `{id}` already exists and is not linked to subscriber {subscriber_id}"
+                ))
+            }),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Apply one `disabled` flip (or record it, in dry-run), auditing on
