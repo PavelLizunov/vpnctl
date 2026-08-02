@@ -638,9 +638,38 @@ fn real_client_ip_predicate(col: &str) -> String {
          AND {col} NOT LIKE 'fc%' AND {col} NOT LIKE 'fd%' \
          AND {col} NOT LIKE 'fe8%' AND {col} NOT LIKE 'fe9%' \
          AND {col} NOT LIKE 'fea%' AND {col} NOT LIKE 'feb%' \
-         AND {col} NOT IN (SELECT address FROM servers){control_clause}"
+         AND {col} NOT IN (SELECT address FROM servers) \
+         AND {col} NOT IN (SELECT address FROM server_resolved_addresses){control_clause}"
     )
 }
+
+fn canonical_ip_text(ip: &str) -> String {
+    ip.parse::<std::net::IpAddr>()
+        .map_or_else(|_| ip.chars().take(45).collect(), |ip| ip.to_string())
+}
+
+const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
+        'server', (SELECT json_array(address, ssh_port, ssh_user, reserved_ports)
+                   FROM servers WHERE id = ?1),
+        'kernels', (SELECT json_group_array(kernel_id) FROM
+                   (SELECT kernel_id FROM server_kernels
+                    WHERE server_id = ?1 ORDER BY kernel_id)),
+        'protocols', (SELECT json_group_array(protocol_id) FROM
+                     (SELECT protocol_id FROM server_protocols
+                      WHERE server_id = ?1 ORDER BY protocol_id)),
+        'secrets', (SELECT json_group_array(json_array(key, value)) FROM
+                   (SELECT key, value FROM server_secrets
+                    WHERE server_id = ?1 ORDER BY key)),
+        'users', (SELECT json_group_array(json_array(id, uuid, tuic_password,
+                                                    wireguard_pubkey, wireguard_private)) FROM
+                 (SELECT u.id AS id, COALESCE(g.client_uuid, u.uuid) AS uuid,
+                         u.tuic_password AS tuic_password,
+                         u.wireguard_pubkey AS wireguard_pubkey,
+                         u.wireguard_private AS wireguard_private
+                  FROM grants g JOIN users u ON u.id = g.user_id
+                  WHERE g.server_id = ?1 AND u.disabled = 0
+                  ORDER BY u.id))
+    )";
 
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
 /// date) aggregated traffic + peak conns. Long-term retention
@@ -952,6 +981,16 @@ impl SqliteInventory {
                 .await?;
         }
 
+        if let Ok(ip) = s.address.parse::<std::net::IpAddr>() {
+            sqlx::query(
+                "INSERT INTO server_resolved_addresses (server_id, address) VALUES (?1, ?2)",
+            )
+            .bind(&s.id.0)
+            .bind(ip.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+
         // Phase 4a (migration 0021) — when a server is added AFTER
         // the migration has run, any pre-existing sub_access_log
         // rows that happened to come from this server's IP (e.g.
@@ -962,14 +1001,20 @@ impl SqliteInventory {
         if !s.address.is_empty() {
             sqlx::query(
                 "UPDATE sub_access_log SET is_vpn_egress = 1
-                 WHERE ip = ?1 AND is_vpn_egress = 0",
+                 WHERE is_vpn_egress = 0
+                   AND (ip = ?1 OR ip IN
+                        (SELECT address FROM server_resolved_addresses WHERE server_id = ?2))",
             )
             .bind(&s.address)
+            .bind(&s.id.0)
             .execute(&mut *tx)
             .await?;
         }
 
         tx.commit().await?;
+        if s.address.parse::<std::net::IpAddr>().is_err() {
+            self.refresh_server_resolved_addresses().await?;
+        }
         Ok(())
     }
 
@@ -1033,7 +1078,9 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// `true` if `addr` exactly matches a registered server's `address`.
+    /// `true` if `addr` is one of the canonical IPs currently belonging to a
+    /// registered server. Literal IPv4/IPv6 addresses are canonicalised;
+    /// hostnames are resolved off the async runtime and cached in SQLite.
     /// Used by the subscription rate-limiter to EXEMPT our own VPN-egress
     /// IPs: a client connected through a node has its config-refresh
     /// egress that node, so vpnctld sees the SERVER's IP. Without this
@@ -1043,11 +1090,87 @@ impl SqliteInventory {
     /// конфиге"). Cheap — the servers table is a handful of rows. Same
     /// membership the `sub_access_log.is_vpn_egress` trigger computes.
     pub async fn is_known_server_address(&self, addr: &str) -> Result<bool> {
-        let row: (i64,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM servers WHERE address = ?1)")
-            .bind(addr)
-            .fetch_one(&self.pool)
+        let Ok(target) = addr.parse::<std::net::IpAddr>() else {
+            return Ok(false);
+        };
+        Ok(self.known_server_ips().await?.contains(&target))
+    }
+
+    /// Canonical server IPs from literal inventory addresses plus the latest
+    /// hostname-resolution cache.
+    pub async fn known_server_ips(&self) -> Result<std::collections::HashSet<std::net::IpAddr>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT address FROM servers
+             UNION
+             SELECT address FROM server_resolved_addresses",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|address| address.parse().ok())
+            .collect())
+    }
+
+    /// Resolve every server address and atomically refresh the canonical-IP
+    /// cache. DNS work stays off Tokio workers; failed lookups retain their
+    /// last known-good cache rows.
+    pub async fn refresh_server_resolved_addresses(
+        &self,
+    ) -> Result<std::collections::HashSet<std::net::IpAddr>> {
+        use std::net::ToSocketAddrs;
+
+        let servers = sqlx::query_as::<_, (String, String)>("SELECT id, address FROM servers")
+            .fetch_all(&self.pool)
             .await?;
-        Ok(row.0 != 0)
+        let resolved = tokio::task::spawn_blocking(move || {
+            servers
+                .into_iter()
+                .map(|(id, address)| {
+                    let ips = match address.parse::<std::net::IpAddr>() {
+                        Ok(ip) => Some(vec![ip]),
+                        Err(_) => (address.as_str(), 0)
+                            .to_socket_addrs()
+                            .ok()
+                            .map(|iter| iter.map(|socket| socket.ip()).collect()),
+                    };
+                    (id, ips)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| SqliteInventoryError::Invalid(format!("resolve server addresses: {e}")))?;
+
+        let mut tx = self.pool.begin().await?;
+        let mut all = std::collections::HashSet::new();
+        for (server_id, ips) in resolved {
+            let Some(ips) = ips else { continue };
+            sqlx::query("DELETE FROM server_resolved_addresses WHERE server_id = ?1")
+                .bind(&server_id)
+                .execute(&mut *tx)
+                .await?;
+            for ip in ips {
+                all.insert(ip);
+                sqlx::query(
+                    "INSERT OR IGNORE INTO server_resolved_addresses (server_id, address)
+                     VALUES (?1, ?2)",
+                )
+                .bind(&server_id)
+                .bind(ip.to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        sqlx::query(
+            "UPDATE sub_access_log SET is_vpn_egress = 1
+             WHERE is_vpn_egress = 0
+               AND ip IN (SELECT address FROM server_resolved_addresses)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        all.extend(self.known_server_ips().await?);
+        Ok(all)
     }
 
     /// Return the id of the first server already registered with `addr`,
@@ -1065,6 +1188,56 @@ impl SqliteInventory {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.map(|(id,)| id))
+    }
+
+    /// Stable snapshot of every inventory value that can change a node
+    /// deploy. Compare before/after the SSH work so a concurrent Web edit
+    /// cannot be masked by a later canonical `server.deploy` audit row.
+    pub async fn deploy_input_revision(&self, id: &ServerId) -> Result<String> {
+        Ok(sqlx::query_scalar(DEPLOY_INPUT_REVISION_SQL)
+            .bind(&id.0)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Atomically compare deploy inputs and write either the canonical
+    /// baseline or a stale attempt. The no-op UPDATE acquires SQLite's write
+    /// lock before the comparison, so no mutation can commit between them.
+    pub async fn audit_deploy_if_revision(
+        &self,
+        actor: &str,
+        id: &ServerId,
+        expected: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE servers SET id = id WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        let current: String = sqlx::query_scalar(DEPLOY_INPUT_REVISION_SQL)
+            .bind(&id.0)
+            .fetch_one(&mut *tx)
+            .await?;
+        let matches = current == expected;
+        let mut payload = payload.clone();
+        payload["inputs_changed"] = serde_json::Value::Bool(!matches);
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(actor)
+        .bind(if matches {
+            "server.deploy"
+        } else {
+            "server.deploy.stale"
+        })
+        .bind(&id.0)
+        .bind(payload.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(matches)
     }
 
     /// Auto-suppress state for a server (migration 0030): the per-server
@@ -1293,6 +1466,7 @@ impl SqliteInventory {
         .bind(&id.0)
         .execute(&self.pool)
         .await?;
+        self.refresh_server_resolved_addresses().await?;
         Ok(())
     }
 
@@ -2473,9 +2647,9 @@ impl SqliteInventory {
 
     /// Design v2 3d — which granted users' key material is NOT yet in
     /// the node's deployed config: their `user.grant` audit row for
-    /// this server is newer than the last successful `server.deploy`.
-    /// Same timestamp logic as [`Self::server_pending_deploy`], but
-    /// per-user so the banner can NAME who's affected.
+    /// this server has a greater monotonic audit id than the last
+    /// successful `server.deploy`. Per-user so the banner can NAME
+    /// who's affected without relying on timestamp precision.
     pub async fn users_pending_deploy_for_server(
         &self,
         server_id: &ServerId,
@@ -2485,13 +2659,10 @@ impl SqliteInventory {
              WHERE a.action = 'user.grant'
                AND json_extract(a.payload, '$.server') = ?1
                AND a.target IN (SELECT user_id FROM grants WHERE server_id = ?1)
-               AND a.ts > COALESCE(
-                     (SELECT MAX(d.ts) FROM audit_log d
-                      WHERE d.target = ?1 AND d.action = 'server.deploy'
-                        AND json_extract(d.payload, '$.ssh_skip_reason') IS NULL
-                        AND (json_extract(d.payload, '$.ssh_errors') IS NULL
-                             OR json_array_length(d.payload, '$.ssh_errors') = 0)),
-                     '')
+               AND a.id > COALESCE(
+                     (SELECT MAX(d.id) FROM audit_log d
+                      WHERE d.target = ?1 AND d.action = 'server.deploy'),
+                     0)
              ORDER BY uid",
         )
         .bind(&server_id.0)
@@ -2996,26 +3167,13 @@ impl SqliteInventory {
     /// WITHOUT a `payload.server` field keep the old coarse reading
     /// (can't tell which server → assume relevant).
     ///
-    /// **Heuristic, not exact:** an alternative deploy via CLI (not
-    /// through the web button) doesn't write the same audit row.
-    /// Future-proof by extending the SQL `IN (...)` action list when
-    /// new audit actions appear.
+    /// **`None`-deploy case:** a server with no successful deploy audit
+    /// baseline is pending if the user has any relevant mutation.
     ///
-    /// **`None`-deploy case:** a server never deployed via web (only
-    /// via CLI / wizard) has no `server.deploy` audit row. We treat
-    /// this as «pending» if the user has ANY mutation — operator
-    /// resolves by clicking deploy at least once, which then sets
-    /// a baseline timestamp.
-    ///
-    /// **Only SUCCESSFUL deploys count as a baseline** (review
-    /// 2026-07-08, auto-deploy-on-grant follow-up): every deploy path
-    /// writes a `server.deploy` row even when it failed or was skipped
-    /// (`ssh_errors` non-empty / `ssh_skip_reason` set) — before this
-    /// filter, a failed deploy cleared the pending banner while the
-    /// node's `users[]` stayed stale, hiding the exact «connects but
-    /// no internet» class the banner exists to expose. Rows without
-    /// those payload fields (wizard-bootstrap success rows, legacy /
-    /// test-seeded baselines) keep counting as successes.
+    /// **Only SUCCESSFUL deploys count as a baseline:** all deploy paths
+    /// reserve the canonical `server.deploy` action for a config actually
+    /// applied from an unchanged inventory revision. Failed, skipped, and
+    /// stale attempts use distinct actions and cannot clear the banner.
     pub async fn servers_pending_deploy_for_user(
         &self,
         user_id: &UserId,
@@ -3024,7 +3182,7 @@ impl SqliteInventory {
         if granted_server_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // For each granted server: latest RELEVANT user-mutation ts
+        // For each granted server: latest RELEVANT user-mutation id
         // (grant/revoke scoped to this server via payload.server;
         // server-agnostic mutations + legacy no-payload rows always
         // relevant) vs the server's latest good deploy. Loop is cheap
@@ -3032,7 +3190,7 @@ impl SqliteInventory {
         let mut out: Vec<ServerId> = Vec::new();
         for sid in granted_server_ids {
             let user_row = sqlx::query(
-                "SELECT MAX(ts) AS ts FROM audit_log
+                "SELECT MAX(id) AS id FROM audit_log
                  WHERE target = ?1
                    AND (
                      (action IN ('user.grant', 'user.revoke')
@@ -3050,29 +3208,26 @@ impl SqliteInventory {
             .bind(&sid.0)
             .fetch_one(&self.pool)
             .await?;
-            let user_ts: Option<String> = user_row.try_get("ts")?;
-            let Some(user_ts) = user_ts else {
+            let user_latest_id: Option<i64> = user_row.try_get("id")?;
+            let Some(user_latest_id) = user_latest_id else {
                 // No mutation relevant to this server (legacy import
                 // with zero audit rows, or all grants target other
                 // nodes) — nothing to flag here.
                 continue;
             };
             let row = sqlx::query(
-                "SELECT MAX(ts) AS ts FROM audit_log
-                 WHERE target = ?1 AND action = 'server.deploy'
-                   AND json_extract(payload, '$.ssh_skip_reason') IS NULL
-                   AND (json_extract(payload, '$.ssh_errors') IS NULL
-                        OR json_array_length(payload, '$.ssh_errors') = 0)",
+                "SELECT MAX(id) AS id FROM audit_log
+                 WHERE target = ?1 AND action = 'server.deploy'",
             )
             .bind(&sid.0)
             .fetch_one(&self.pool)
             .await?;
-            let deploy_ts: Option<String> = row.try_get("ts")?;
+            let deploy_id: Option<i64> = row.try_get("id")?;
             // Pending if: no deploy ever recorded (None) OR last
             // deploy is older than the user's last relevant change.
-            match deploy_ts {
+            match deploy_id {
                 None => out.push(sid.clone()),
-                Some(dts) if dts < user_ts => out.push(sid.clone()),
+                Some(id) if id < user_latest_id => out.push(sid.clone()),
                 _ => {}
             }
         }
@@ -3102,11 +3257,11 @@ impl SqliteInventory {
     /// every granted server — duplicating them here would make the
     /// server banner near-permanent on busy inventories.
     ///
-    /// Only SUCCESSFUL deploys count as a baseline — same filter and
-    /// rationale as `servers_pending_deploy_for_user`.
+    /// Only the canonical successful `server.deploy` action counts as a
+    /// baseline, matching `servers_pending_deploy_for_user`.
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
-            "SELECT MAX(ts) AS ts FROM audit_log
+            "SELECT MAX(id) AS id FROM audit_log
              WHERE (action IN ('user.grant', 'user.revoke')
                     AND json_extract(payload, '$.server') = ?1)
                 OR (action IN ('server.protocol.enable', 'server.protocol.disable',
@@ -3116,24 +3271,21 @@ impl SqliteInventory {
         .bind(&server_id.0)
         .fetch_one(&self.pool)
         .await?;
-        let mutation_ts: Option<String> = row.try_get("ts")?;
-        let Some(mts) = mutation_ts else {
+        let mutation_id: Option<i64> = row.try_get("id")?;
+        let Some(mutation_id) = mutation_id else {
             return Ok(false);
         };
         let row = sqlx::query(
-            "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE target = ?1 AND action = 'server.deploy'
-               AND json_extract(payload, '$.ssh_skip_reason') IS NULL
-               AND (json_extract(payload, '$.ssh_errors') IS NULL
-                    OR json_array_length(payload, '$.ssh_errors') = 0)",
+            "SELECT MAX(id) AS id FROM audit_log
+             WHERE target = ?1 AND action = 'server.deploy'",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)
         .await?;
-        let deploy_ts: Option<String> = row.try_get("ts")?;
-        Ok(match deploy_ts {
+        let deploy_id: Option<i64> = row.try_get("id")?;
+        Ok(match deploy_id {
             None => true,
-            Some(dts) => dts < mts,
+            Some(id) => id < mutation_id,
         })
     }
 
@@ -3481,6 +3633,7 @@ impl SqliteInventory {
         tls_ja3: Option<&str>,
         tls_ja4: Option<&str>,
     ) -> Result<()> {
+        let ip = canonical_ip_text(ip);
         sqlx::query(
             "INSERT INTO sub_access_log
              (user_id, ip, ua, status, bytes,
@@ -5130,11 +5283,12 @@ impl SqliteInventory {
         active_days: u32,
     ) -> Result<Vec<SubFetchStallUser>> {
         use sqlx::Row;
-        let rows = sqlx::query(
+        let sql = format!(
             "WITH last_fetch AS (
                  SELECT user_id, MAX(ts) AS t
                  FROM sub_access_log
                  WHERE user_id IS NOT NULL AND is_vpn_egress = 0 AND status = 200
+                   AND {pred}
                  GROUP BY user_id
              )
              SELECT lf.user_id AS user_id,
@@ -5158,12 +5312,14 @@ impl SqliteInventory {
                      AND c2.ts < lf.t
                      AND (c2.upload_bytes > 0 OR c2.download_bytes > 0))
              ORDER BY lf.t ASC",
-        )
-        .bind(format!("-{grace_minutes} minutes"))
-        .bind(format!("-{lookback_minutes} minutes"))
-        .bind(format!("-{active_days} days"))
-        .fetch_all(&self.pool)
-        .await?;
+            pred = real_client_ip_predicate("ip")
+        );
+        let rows = sqlx::query(&sql)
+            .bind(format!("-{grace_minutes} minutes"))
+            .bind(format!("-{lookback_minutes} minutes"))
+            .bind(format!("-{active_days} days"))
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| SubFetchStallUser {
@@ -5915,7 +6071,7 @@ impl SqliteInventory {
             // Bound to 45 chars — the max textual IPv6 length
             // (incl. an IPv4-mapped tail). `.chars().take()` avoids a
             // mid-codepoint slice panic (defensive; IPs are ASCII).
-            let ip_truncated: String = ip.chars().take(45).collect();
+            let canonical_ip = canonical_ip_text(ip);
             sqlx::query(
                 "INSERT INTO vpn_user_source_ips
                     (user_id, source_ip, date, hit_count, last_seen)
@@ -5927,7 +6083,7 @@ impl SqliteInventory {
                      last_seen = excluded.last_seen",
             )
             .bind(&user_id.0)
-            .bind(&ip_truncated)
+            .bind(&canonical_ip)
             .execute(&mut *tx)
             .await?;
         }
@@ -7493,6 +7649,11 @@ mod tests {
         assert_eq!(network_key("999.999.1.1"), "999.999.1.1");
     }
 
+    #[test]
+    fn canonical_ip_text_collapses_equivalent_ipv6_spellings() {
+        assert_eq!(canonical_ip_text("2001:0db8:0:0::1"), "2001:db8::1");
+    }
+
     #[tokio::test]
     async fn migrations_apply_and_tables_exist() -> Result<()> {
         let inv = fresh().await;
@@ -7508,22 +7669,31 @@ mod tests {
     async fn sub_fetch_without_traffic_flags_regression_then_clears() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("s1")).await?;
-        for u in ["oleg", "newbie", "healthy", "justfetched"] {
+        for u in [
+            "oleg",
+            "newbie",
+            "healthy",
+            "justfetched",
+            "lanfetch",
+            "controlfetch",
+            "v6localfetch",
+        ] {
             inv.add_user(&sample_user(u)).await?;
         }
 
         // A real (non-egress) `/sub` fetch `mins_ago` in the past. IP differs
         // from the server address (1.2.3.4) so the is_vpn_egress trigger
         // leaves the row at 0.
-        async fn fetch(inv: &SqliteInventory, uid: &str, mins_ago: i64) {
+        async fn fetch(inv: &SqliteInventory, uid: &str, ip: &str, mins_ago: i64) {
             sqlx::query(
                 "INSERT INTO sub_access_log
                     (ts, user_id, ip, ua, status, bytes, is_vpn_egress)
                  VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now',?1), ?2,
-                         '198.51.100.7', 'Happ/1', 200, 900, 0)",
+                         ?3, 'Happ/1', 200, 900, 0)",
             )
             .bind(format!("-{mins_ago} minutes"))
             .bind(uid)
+            .bind(ip)
             .execute(&inv.pool)
             .await
             .unwrap();
@@ -7544,18 +7714,26 @@ mod tests {
         }
 
         // oleg — FIRES: active 2d ago, fetched 60m ago, silent since.
-        fetch(&inv, "oleg", 60).await;
+        fetch(&inv, "oleg", "198.51.100.7", 60).await;
         traffic(&inv, "oleg", "-2 days").await;
         // newbie — NO fire: fetched but never had any traffic (setup problem,
         // not a regression).
-        fetch(&inv, "newbie", 60).await;
+        fetch(&inv, "newbie", "198.51.100.7", 60).await;
         // healthy — NO fire: active before AND traffic 5m ago (after fetch).
-        fetch(&inv, "healthy", 60).await;
+        fetch(&inv, "healthy", "198.51.100.7", 60).await;
         traffic(&inv, "healthy", "-2 days").await;
         traffic(&inv, "healthy", "-5 minutes").await;
         // justfetched — NO fire: fetched only 10m ago, still inside the grace.
-        fetch(&inv, "justfetched", 10).await;
+        fetch(&inv, "justfetched", "198.51.100.7", 10).await;
         traffic(&inv, "justfetched", "-2 days").await;
+        for (uid, ip) in [
+            ("lanfetch", "192.168.0.200"),
+            ("controlfetch", OUR_EGRESS_CONTROL_IPS[0]),
+            ("v6localfetch", "fd12:3456::1"),
+        ] {
+            fetch(&inv, uid, ip, 60).await;
+            traffic(&inv, uid, "-2 days").await;
+        }
 
         let flagged = inv.sub_fetch_without_traffic_users(45, 360, 7).await?;
         let ids: Vec<&str> = flagged.iter().map(|u| u.user_id.0.as_str()).collect();
@@ -7618,6 +7796,9 @@ mod tests {
     async fn top_source_ips_excludes_all_infra_ip_classes() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("s1")).await?; // address 1.2.3.4
+        let mut v6_server = sample_server("s2");
+        v6_server.address = "2001:0db8:0:0::1".into();
+        inv.add_server(&v6_server).await?;
         inv.add_user(&sample_user("u")).await?;
         inv.record_user_source_ips(&[
             (UserId("u".into()), "203.0.113.9".into()), // real client — KEEP
@@ -7632,7 +7813,8 @@ mod tests {
             (UserId("u".into()), "::1".into()),         // IPv6 loopback
             (UserId("u".into()), "fe80::1".into()),     // IPv6 link-local
             (UserId("u".into()), "fd12:3456::1".into()), // IPv6 ULA
-            (UserId("u".into()), "2001:db8::1".into()), // public IPv6 — KEEP
+            (UserId("u".into()), "2001:0db8:0:0::1".into()), // equivalent s2 address
+            (UserId("u".into()), "2001:db8::99".into()), // public IPv6 — KEEP
         ])
         .await?;
         let mut ips: Vec<String> = inv
@@ -7646,7 +7828,7 @@ mod tests {
             ips,
             vec![
                 "172.32.5.5".to_string(),
-                "2001:db8::1".to_string(),
+                "2001:db8::99".to_string(),
                 "203.0.113.9".to_string(),
             ],
             "only public clients survive; server/control/LAN/loopback/link-local/ULA all dropped"
@@ -8274,6 +8456,44 @@ mod tests {
     }
 
     // ── session_observe FK gate ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deploy_input_revision_changes_with_render_inputs() -> Result<()> {
+        let inv = fresh().await;
+        let server = sample_server("s1");
+        inv.add_server(&server).await?;
+        let initial = inv.deploy_input_revision(&server.id).await?;
+        assert_eq!(initial, inv.deploy_input_revision(&server.id).await?);
+
+        inv.set_server_secret(&server.id, "vless.short_id", "deadbeef")
+            .await?;
+        let with_secret = inv.deploy_input_revision(&server.id).await?;
+        assert_ne!(initial, with_secret);
+        assert!(
+            !inv.audit_deploy_if_revision(
+                "admin",
+                &server.id,
+                &initial,
+                &serde_json::json!({"test": true}),
+            )
+            .await?
+        );
+        assert!(
+            inv.audit_deploy_if_revision(
+                "admin",
+                &server.id,
+                &with_secret,
+                &serde_json::json!({"test": true}),
+            )
+            .await?
+        );
+
+        let user = sample_user("u");
+        inv.add_user(&user).await?;
+        inv.grant(&user.id, &server.id).await?;
+        assert_ne!(with_secret, inv.deploy_input_revision(&server.id).await?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn session_observe_skips_unknown_user() -> Result<()> {

@@ -37,13 +37,36 @@ pub(crate) async fn run(
     let registry = crate::registry::build()?;
     registry.validate_server(&server)?;
 
+    if server.kernels.is_empty() {
+        anyhow::bail!("server '{}' has no kernels declared", server.id);
+    }
+    println!("→ bootstrapping per-protocol server secrets (idempotent)");
+    let (_, minted) = vpnctl_inventory::bootstrap_server_secrets(&inv, &server, &registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("secret bootstrap failed: {e}"))?;
+    for label in &minted {
+        println!("  minted {label}");
+    }
+
+    let deploy_revision = inv.deploy_input_revision(&sid).await?;
+    let server = inv
+        .get_server(&sid)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("server was removed before deploy: {server_id}"))?;
+    let secrets = inv.list_server_secrets(&sid).await?;
+    let users = inv.users_for_server(&sid).await?;
+    registry.validate_server(&server)?;
+    if server.kernels.is_empty() {
+        anyhow::bail!("server '{}' has no kernels declared", server.id);
+    }
+    if inv.deploy_input_revision(&sid).await? != deploy_revision {
+        anyhow::bail!("inventory changed while preparing deploy; retry");
+    }
+
     // Multi-kernel: resolve every declared kernel up front. validate_server
     // already verified each is registered + each protocol has at least one
     // kernel that supports it; the unwrap-ish lookup below is now just
     // construction of the dispatch loop.
-    if server.kernels.is_empty() {
-        anyhow::bail!("server '{}' has no kernels declared", server.id);
-    }
     let kernels: Vec<&dyn vpnctl_core::Kernel> = server
         .kernels
         .iter()
@@ -85,24 +108,6 @@ pub(crate) async fn run(
         k.ensure_installed(&ssh).await?;
     }
 
-    // ─── 3. Bootstrap missing secrets ────────────────────────────────────
-    // Declarative + shared with the daemon's wizard/web deploy
-    // (`vpnctl_inventory::bootstrap_server_secrets`): walk each enabled
-    // protocol's `server_secret_specs()` and mint+persist any missing
-    // server-side secret (REALITY keypair + short_id, WireGuard server
-    // keypair, Hysteria2 obfs password, Shadowsocks-2022 PSK, …).
-    // Idempotent — established keys are never rotated. Previously the CLI
-    // hand-rolled vless/wireguard minting only, so a server with
-    // shadowsocks-2022 hard-failed at render with `MissingSecret {
-    // ss2022.psk }` and hysteria2's Salamander obfs silently degraded.
-    println!("→ bootstrapping per-protocol server secrets (idempotent)");
-    let (secrets, minted) = vpnctl_inventory::bootstrap_server_secrets(&inv, &server, &registry)
-        .await
-        .map_err(|e| anyhow::anyhow!("secret bootstrap failed: {e}"))?;
-    for label in &minted {
-        println!("  minted {label}");
-    }
-
     // The shared node-side self-signed TLS cert (/etc/sing-box/{cert,key}.pem)
     // that tuic-v5 / hysteria2 / trojan / anytls all reference is now
     // provisioned idempotently by the sing-box kernel's `ensure_installed`
@@ -111,7 +116,6 @@ pub(crate) async fn run(
     // only node missed it; see `crates/kernels/src/sing_box.rs`.
 
     // ─── 4. Resolve users + per-kernel protocol partition ────────────────
-    let users = inv.users_for_server(&sid).await?;
     let ctx = RenderCtx::new(&server, &secrets);
 
     // ─── 5. Render + apply, one kernel at a time ─────────────────────────
@@ -172,19 +176,38 @@ pub(crate) async fn run(
         rendered_kernels.push(k.id().0);
     }
 
-    // ─── 6. Audit ────────────────────────────────────────────────────────
-    inv.audit(
-        "cli",
-        "server.deploy",
-        Some(server_id),
-        Some(&json!({
-            "users": users.len(),
-            "protocols": server.enabled_protocols.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
-            "kernels_rendered": rendered_kernels,
-            "config_bytes_total": total_config_bytes,
-        })),
-    )
-    .await?;
+    let payload = json!({
+        "users": users.len(),
+        "protocols": server.enabled_protocols.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+        "kernels_rendered": rendered_kernels,
+        "config_bytes_total": total_config_bytes,
+        "inputs_changed": false,
+    });
+    let audit_action = if rendered_kernels.is_empty() {
+        inv.audit(
+            "cli",
+            "server.deploy.skipped",
+            Some(server_id),
+            Some(&payload),
+        )
+        .await?;
+        "server.deploy.skipped"
+    } else if inv
+        .audit_deploy_if_revision("cli", &sid, &deploy_revision, &payload)
+        .await?
+    {
+        "server.deploy"
+    } else {
+        "server.deploy.stale"
+    };
+
+    if audit_action != "server.deploy" {
+        anyhow::bail!(if audit_action == "server.deploy.stale" {
+            "inventory changed during deploy; the server remains pending — deploy again"
+        } else {
+            "deploy skipped — no kernel config was applied"
+        });
+    }
 
     println!("✔ deploy complete");
     Ok(())

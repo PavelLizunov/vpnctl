@@ -1,6 +1,6 @@
 //! Design v2 3d — spec tests for `grant_dates_for_server` (migration
 //! 0039) and `users_pending_deploy_for_server` (per-user pending-deploy
-//! detection driven by audit timestamps).
+//! detection driven by monotonic audit ids).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -104,7 +104,7 @@ async fn pre_migration_grant_reads_as_none() {
 /// user pending; a later successful deploy clears them; a user whose
 /// grant was revoked (row gone from `grants`) never appears.
 #[tokio::test]
-async fn pending_deploy_tracks_grant_vs_deploy_timestamps() {
+async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
     let (_d, inv) = inv().await;
     inv.add_server(&server("s1")).await.unwrap();
     inv.add_user(&user("alice")).await.unwrap();
@@ -135,10 +135,8 @@ async fn pending_deploy_tracks_grant_vs_deploy_timestamps() {
         "grant without any deploy must be pending"
     );
 
-    // A successful deploy AFTER the grant clears the pending set.
-    // (audit ts has 1s resolution — bump the clock boundary by
-    // waiting out the same-second collision.)
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // A successful deploy AFTER the grant clears the pending set. Audit ids
+    // are monotonic, so this is deterministic even inside one timestamp tick.
     inv.audit(
         "admin",
         "server.deploy",
@@ -157,7 +155,6 @@ async fn pending_deploy_tracks_grant_vs_deploy_timestamps() {
     );
 
     // A NEW grant after that deploy re-marks only that user.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     inv.audit(
         "admin",
         "user.grant",
@@ -173,10 +170,9 @@ async fn pending_deploy_tracks_grant_vs_deploy_timestamps() {
     assert_eq!(pending, vec![UserId("bob".into())]);
 
     // A FAILED deploy (ssh_errors non-empty) must NOT clear pending.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     inv.audit(
         "admin",
-        "server.deploy",
+        "server.deploy.failed",
         Some("s1"),
         Some(&serde_json::json!({ "ssh_errors": ["boom"] })),
     )

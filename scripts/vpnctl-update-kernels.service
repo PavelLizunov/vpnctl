@@ -22,7 +22,7 @@ EnvironmentFile=-/etc/vpnctl/vpnctld.env
 # lives at /var/lib/vpnctl/.ssh/id_ed25519. `--key` is the #34-aware explicit
 # path (under sudo $HOME is /root, so any default-key fallback would resolve
 # to the wrong identity). Without it the per-node SSH fails publickey.
-ExecStart=/usr/local/bin/vpnctl update-kernels --all --key /var/lib/vpnctl/.ssh/id_ed25519
+ExecStart=/usr/local/bin/vpnctl update-kernels --all --key /var/lib/vpnctl/.ssh/id_ed25519 --db /var/lib/vpnctl/inv.db
 # Budget: apt refresh + per-node SSH across the whole fleet. caddy is
 # content-aware (a no-op when the on-node binary already matches), but
 # tolerate a worst case where every kernel on every node needs a reinstall.
@@ -43,10 +43,12 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-# known_hosts TOFU: the first SSH to a node writes its host key into
-# /var/lib/vpnctl/.ssh/known_hosts, so that one dir must stay writable.
-ReadWritePaths=/var/lib/vpnctl/.ssh
-ReadOnlyPaths=/var/lib/vpnctl /etc/vpnctl /opt/vpnctl
+# Inventory writes are part of this command's contract: first-connect TOFU
+# stores the host fingerprint and every attempt appends a kernel.update audit
+# row. Keep the complete vpnctl state directory writable for the SQLite DB,
+# its WAL/SHM sidecars, and .ssh/known_hosts.
+ReadWritePaths=/var/lib/vpnctl
+ReadOnlyPaths=/etc/vpnctl /opt/vpnctl
 PrivateTmp=true
 # Address families — outbound ssh over IPv4/IPv6 + unix sockets. No
 # AF_NETLINK / AF_PACKET needed.

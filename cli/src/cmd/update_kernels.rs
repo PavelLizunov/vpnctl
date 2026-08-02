@@ -87,6 +87,24 @@ fn summarize(before: Option<&str>, after: Option<&str>, err: bool) -> (bool, &'s
     }
 }
 
+fn inactive_after_error(active: bool) -> Option<String> {
+    (!active).then(|| "kernel is inactive after update".to_string())
+}
+
+fn failed_kernel_ids(updates: &[ServerUpdate]) -> Vec<String> {
+    updates
+        .iter()
+        .flat_map(|server| {
+            server.kernels.iter().filter_map(|kernel| {
+                kernel
+                    .error
+                    .as_ref()
+                    .map(|_| format!("{}/{}", server.server, kernel.kernel))
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn run(
     target: UpdateTarget,
     ssh_key: Option<PathBuf>,
@@ -150,7 +168,13 @@ pub(crate) async fn run(
             }
         }
         Ok(())
-    })
+    })?;
+
+    let failed = failed_kernel_ids(&all_updates);
+    if !failed.is_empty() {
+        anyhow::bail!("kernel update failed for: {}", failed.join(", "));
+    }
+    Ok(())
 }
 
 /// Connect to one server (TOFU-persisting the host fingerprint on a
@@ -219,13 +243,16 @@ async fn update_one_server(
         // this command (see module doc): it must not enter the DG-1
         // diff-guard, so inventory-drift nodes can still get the binary.
         let upgrade = k.ensure_installed(&ssh).await;
-        let error = upgrade.as_ref().err().map(|e| format!("{e:#}"));
+        let mut error = upgrade.as_ref().err().map(|e| format!("{e:#}"));
 
         // Re-query after the attempt regardless — even on a failed
         // upgrade the on-disk version + active flag are informative.
         let after_status = k.status(&ssh).await.ok();
         let version_after = after_status.as_ref().and_then(|s| s.version.clone());
         let active_after = after_status.as_ref().is_some_and(|s| s.active);
+        if error.is_none() {
+            error = inactive_after_error(active_after);
+        }
 
         let (changed, _label) =
             summarize(before.as_deref(), version_after.as_deref(), error.is_some());
@@ -306,5 +333,41 @@ mod tests {
         let (changed, label) = summarize(Some("1.10.0"), Some("1.11.0"), true);
         assert!(!changed, "an errored upgrade is never reported as changed");
         assert_eq!(label, "error");
+    }
+
+    #[test]
+    fn inactive_after_update_is_an_error() {
+        assert_eq!(
+            inactive_after_error(false).as_deref(),
+            Some("kernel is inactive after update")
+        );
+        assert_eq!(inactive_after_error(true), None);
+    }
+
+    #[test]
+    fn any_kernel_error_makes_the_command_fail() {
+        let updates = vec![ServerUpdate {
+            server: "de".into(),
+            kernels: vec![
+                KernelUpdate {
+                    kernel: "sing-box".into(),
+                    version_before: Some("1.0".into()),
+                    version_after: Some("1.1".into()),
+                    changed: true,
+                    active_after: true,
+                    error: None,
+                },
+                KernelUpdate {
+                    kernel: "caddy".into(),
+                    version_before: Some("2.0".into()),
+                    version_after: Some("2.0".into()),
+                    changed: false,
+                    active_after: false,
+                    error: Some("kernel is inactive after update".into()),
+                },
+            ],
+        }];
+
+        assert_eq!(failed_kernel_ids(&updates), vec!["de/caddy"]);
     }
 }
