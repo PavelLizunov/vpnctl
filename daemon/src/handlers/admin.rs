@@ -5088,17 +5088,9 @@ async fn user_detail_render(
                                             span.ed-mono { "wgturn:server_wg_public" }
                                             (crate::i18n::tr(
                                                 lang,
-                                                " server secret or the user has no ",
-                                                " серверного секрета или у пользователя отсутствует ",
+                                                " server secret. Open the server above and press Deploy.",
+                                                " серверного секрета. Открой сервер выше и нажми «Развернуть».",
                                             ))
-                                            span.ed-mono { "wireguard_private" }
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " (create the user with ",
-                                                " (создай пользователя с ",
-                                            ))
-                                            span.ed-mono { "--gen-wireguard" }
-                                            ")."
                                         }
                                     } @else {
                                         @for (sid, _pid, link) in &wgt_links {
@@ -9770,7 +9762,7 @@ pub(crate) async fn server_deploy(
     // server-side secret added for a future protocol is minted
     // identically by deploy + wizard. Idempotent — re-clicking
     // deploy when everything is already minted is a safe no-op.
-    let (secrets, bootstrapped) = match crate::wizard_bootstrap::bootstrap_server_secrets(
+    let (_, bootstrapped) = match crate::wizard_bootstrap::bootstrap_server_secrets(
         &state.inv,
         &server,
         &state.registry,
@@ -9780,6 +9772,22 @@ pub(crate) async fn server_deploy(
         Ok(v) => v,
         Err(e) => return internal_error(anyhow::anyhow!(e)),
     };
+    let deploy_revision = match state.inv.deploy_input_revision(&sid).await {
+        Ok(revision) => revision,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if let Err(e) = state.registry.validate_server(&server) {
+        return bad_request(&format!("config changed before deploy: {e}"));
+    }
 
     // SSH push to the node — Path C via SubprocessSshTransport.
     // For each declared kernel: ensure_installed → render config
@@ -9794,6 +9802,7 @@ pub(crate) async fn server_deploy(
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
     let mut ssh_errors: Vec<String> = Vec::new();
     let mut total_config_bytes: usize = 0;
+    let mut configs_applied: usize = 0;
     let ssh_skip_reason: Option<&'static str> = if !key_path.exists() {
         Some(crate::wizard_bootstrap::DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
@@ -9812,6 +9821,17 @@ pub(crate) async fn server_deploy(
             Ok(u) => u,
             Err(e) => return internal_error(anyhow::Error::new(e)),
         };
+        if state
+            .inv
+            .deploy_input_revision(&sid)
+            .await
+            .map_or(true, |current| current != deploy_revision)
+        {
+            return error_resp(
+                StatusCode::CONFLICT,
+                "inventory changed while preparing deploy — retry",
+            );
+        }
         let ctx = vpnctl_core::RenderCtx::new(&server, &secrets);
 
         for kid in &server.kernels {
@@ -9869,6 +9889,7 @@ pub(crate) async fn server_deploy(
                 continue;
             }
             ssh_kernels_pushed.push(kid.0.clone());
+            configs_applied += 1;
             // Best-effort firewall open (Kernel::open_firewall) — a fresh
             // deploy must be reachable without a manual `ufw allow`; non-fatal
             // (the config is already applied).
@@ -9878,33 +9899,61 @@ pub(crate) async fn server_deploy(
         }
     }
 
-    // Audit — record EVERY deploy click. Captures both the
-    // inventory-side bootstrap result AND the SSH-side push result
-    // so the operator (and future debugging) sees the full picture.
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.deploy",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "bootstrapped": bootstrapped,
-                "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
-                "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
-                "ssh_skip_reason": ssh_skip_reason,
-                "ssh_kernels_pushed": ssh_kernels_pushed,
-                "ssh_errors": ssh_errors,
-                "ssh_config_bytes_total": total_config_bytes,
-            })),
-        )
-        .await
-    {
+    let mut audit_action = crate::wizard_bootstrap::deploy_audit_action(
+        &ssh_errors,
+        configs_applied,
+        ssh_skip_reason,
+        false,
+    );
+    let payload = serde_json::json!({
+        "bootstrapped": bootstrapped,
+        "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+        "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+        "ssh_skip_reason": ssh_skip_reason,
+        "ssh_kernels_pushed": ssh_kernels_pushed,
+        "ssh_errors": ssh_errors,
+        "ssh_config_bytes_total": total_config_bytes,
+        "configs_applied": configs_applied,
+        "inputs_changed": false,
+    });
+    let audit_result = if audit_action == "server.deploy" {
+        state
+            .inv
+            .audit_deploy_if_revision("admin", &sid, &deploy_revision, &payload)
+            .await
+            .map(|matches| {
+                if !matches {
+                    audit_action = "server.deploy.stale";
+                }
+            })
+    } else {
+        state
+            .inv
+            .audit("admin", audit_action, Some(&server_id_str), Some(&payload))
+            .await
+    };
+    if let Err(e) = audit_result {
+        audit_action = "server.deploy.failed";
         tracing::warn!(
             target = "vpnctld::admin",
             server = %server_id_str,
+            action = audit_action,
             error = %e,
-            "audit write failed for server.deploy"
+            "audit write failed for deploy attempt"
         );
+    }
+
+    if audit_action != "server.deploy" {
+        let message = if let Some(reason) = ssh_skip_reason {
+            format!("deploy skipped — {reason}")
+        } else if !ssh_errors.is_empty() {
+            format!("deploy failed: {}", ssh_errors.join("; "))
+        } else if audit_action == "server.deploy.stale" {
+            "inventory changed during deploy; the server remains pending — deploy again".to_string()
+        } else {
+            "deploy skipped — no kernel config was applied".to_string()
+        };
+        return error_resp(StatusCode::BAD_GATEWAY, &message);
     }
 
     Redirect::to(&format!(

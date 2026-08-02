@@ -8320,6 +8320,26 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
         )
         .await
         .unwrap();
+    inv.add_server(&Server {
+        id: ServerId("wg-regen-node".into()),
+        address: "203.0.113.41".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("dave".into()), &ServerId("wg-regen-node".into()))
+        .await
+        .unwrap();
+    inv.audit("admin", "server.deploy", Some("wg-regen-node"), None)
+        .await
+        .unwrap();
     let before = inv.get_user(&UserId("dave".into())).await.unwrap().unwrap();
 
     // Rotate.
@@ -8358,6 +8378,26 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
         .unwrap_or_default();
     assert!(payload.contains("server-generated"));
     assert!(payload.contains(after.wireguard_pubkey.as_deref().unwrap()));
+    let rows = wait_for_autodeploy_rows(&inv, 1).await;
+    assert!(rows.iter().any(|row| {
+        row.target.as_deref() == Some("dave")
+            && row
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("trigger"))
+                .and_then(|v| v.as_str())
+                == Some("user.wireguard.regen")
+    }));
+    assert_eq!(
+        inv.servers_pending_deploy_for_user(
+            &UserId("dave".into()),
+            &[ServerId("wg-regen-node".into())],
+        )
+        .await
+        .unwrap(),
+        vec![ServerId("wg-regen-node".into())],
+        "failed auto-deploy must leave the regenerated key pending",
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -9597,8 +9637,8 @@ async fn servers_update_kernels_all_sse_cross_site_is_403() {
 }
 
 #[tokio::test]
-async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
-    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -9615,6 +9655,32 @@ async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
             jump_via: None,
             usage_coefficient: 1.0,
         })
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("wg-user".into()),
+            uuid: "00000000-0000-0000-0000-000000000099".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    s.inv
+        .grant(&UserId("wg-user".into()), &ServerId("wg-node".into()))
+        .await
+        .unwrap();
+    s.inv
+        .audit(
+            "admin",
+            "user.grant",
+            Some("wg-user"),
+            Some(&serde_json::json!({ "server": "wg-node" })),
+        )
         .await
         .unwrap();
     let app = router(s);
@@ -9638,7 +9704,7 @@ async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
     // Post-deploy: WG server keypair minted.
     let after = inv
@@ -9653,12 +9719,27 @@ async fn admin_server_deploy_bootstraps_wireguard_server_keypair() {
     assert!(priv_.ends_with('='));
     assert_ne!(pub_, priv_, "pub != priv");
 
-    // Audit recorded.
+    // The attempt is recorded, but not as the canonical success baseline.
     let audit = inv.recent_audit(5).await.unwrap();
     let row = audit
         .iter()
-        .find(|a| a.action == "server.deploy")
-        .expect("audit row");
+        .find(|a| {
+            matches!(
+                a.action.as_str(),
+                "server.deploy.skipped" | "server.deploy.failed"
+            )
+        })
+        .expect("failed/skipped deploy audit row");
+    assert!(
+        audit.iter().all(|a| a.action != "server.deploy"),
+        "a skipped SSH push must not clear pending-deploy state"
+    );
+    assert!(
+        inv.server_pending_deploy(&ServerId("wg-node".into()))
+            .await
+            .unwrap(),
+        "failed/skipped deploy must leave the granted server pending"
+    );
     let payload = row
         .payload
         .as_ref()
@@ -14866,8 +14947,12 @@ async fn admin_pages_contain_no_shell_command_instructions() {
         "age -d",
         "vpnctl bootstrap",
         "vpnctl deploy",
+        "vpnctl geoip-update",
+        "vpnctl grant",
         "vpnctl restore",
         "vpnctl server add",
+        "vpnctl user",
+        "--gen-wireguard",
         "see vpnctld logs",
     ];
     let app = router(st);

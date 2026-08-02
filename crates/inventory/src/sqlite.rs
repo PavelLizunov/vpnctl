@@ -648,6 +648,29 @@ fn canonical_ip_text(ip: &str) -> String {
         .map_or_else(|_| ip.chars().take(45).collect(), |ip| ip.to_string())
 }
 
+const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
+        'server', (SELECT json_array(address, ssh_port, ssh_user, reserved_ports)
+                   FROM servers WHERE id = ?1),
+        'kernels', (SELECT json_group_array(kernel_id) FROM
+                   (SELECT kernel_id FROM server_kernels
+                    WHERE server_id = ?1 ORDER BY kernel_id)),
+        'protocols', (SELECT json_group_array(protocol_id) FROM
+                     (SELECT protocol_id FROM server_protocols
+                      WHERE server_id = ?1 ORDER BY protocol_id)),
+        'secrets', (SELECT json_group_array(json_array(key, value)) FROM
+                   (SELECT key, value FROM server_secrets
+                    WHERE server_id = ?1 ORDER BY key)),
+        'users', (SELECT json_group_array(json_array(id, uuid, tuic_password,
+                                                    wireguard_pubkey, wireguard_private)) FROM
+                 (SELECT u.id AS id, COALESCE(g.client_uuid, u.uuid) AS uuid,
+                         u.tuic_password AS tuic_password,
+                         u.wireguard_pubkey AS wireguard_pubkey,
+                         u.wireguard_private AS wireguard_private
+                  FROM grants g JOIN users u ON u.id = g.user_id
+                  WHERE g.server_id = ?1 AND u.disabled = 0
+                  ORDER BY u.id))
+    )";
+
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
 /// date) aggregated traffic + peak conns. Long-term retention
 /// counterpart to the rolling 30-day `vpn_connection_stats`.
@@ -1165,6 +1188,56 @@ impl SqliteInventory {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.map(|(id,)| id))
+    }
+
+    /// Stable snapshot of every inventory value that can change a node
+    /// deploy. Compare before/after the SSH work so a concurrent Web edit
+    /// cannot be masked by a later canonical `server.deploy` audit row.
+    pub async fn deploy_input_revision(&self, id: &ServerId) -> Result<String> {
+        Ok(sqlx::query_scalar(DEPLOY_INPUT_REVISION_SQL)
+            .bind(&id.0)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Atomically compare deploy inputs and write either the canonical
+    /// baseline or a stale attempt. The no-op UPDATE acquires SQLite's write
+    /// lock before the comparison, so no mutation can commit between them.
+    pub async fn audit_deploy_if_revision(
+        &self,
+        actor: &str,
+        id: &ServerId,
+        expected: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE servers SET id = id WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        let current: String = sqlx::query_scalar(DEPLOY_INPUT_REVISION_SQL)
+            .bind(&id.0)
+            .fetch_one(&mut *tx)
+            .await?;
+        let matches = current == expected;
+        let mut payload = payload.clone();
+        payload["inputs_changed"] = serde_json::Value::Bool(!matches);
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(actor)
+        .bind(if matches {
+            "server.deploy"
+        } else {
+            "server.deploy.stale"
+        })
+        .bind(&id.0)
+        .bind(payload.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(matches)
     }
 
     /// Auto-suppress state for a server (migration 0030): the per-server
@@ -2574,9 +2647,9 @@ impl SqliteInventory {
 
     /// Design v2 3d — which granted users' key material is NOT yet in
     /// the node's deployed config: their `user.grant` audit row for
-    /// this server is newer than the last successful `server.deploy`.
-    /// Same timestamp logic as [`Self::server_pending_deploy`], but
-    /// per-user so the banner can NAME who's affected.
+    /// this server has a greater monotonic audit id than the last
+    /// successful `server.deploy`. Per-user so the banner can NAME
+    /// who's affected without relying on timestamp precision.
     pub async fn users_pending_deploy_for_server(
         &self,
         server_id: &ServerId,
@@ -2586,13 +2659,10 @@ impl SqliteInventory {
              WHERE a.action = 'user.grant'
                AND json_extract(a.payload, '$.server') = ?1
                AND a.target IN (SELECT user_id FROM grants WHERE server_id = ?1)
-               AND a.ts > COALESCE(
-                     (SELECT MAX(d.ts) FROM audit_log d
-                      WHERE d.target = ?1 AND d.action = 'server.deploy'
-                        AND json_extract(d.payload, '$.ssh_skip_reason') IS NULL
-                        AND (json_extract(d.payload, '$.ssh_errors') IS NULL
-                             OR json_array_length(d.payload, '$.ssh_errors') = 0)),
-                     '')
+               AND a.id > COALESCE(
+                     (SELECT MAX(d.id) FROM audit_log d
+                      WHERE d.target = ?1 AND d.action = 'server.deploy'),
+                     0)
              ORDER BY uid",
         )
         .bind(&server_id.0)
@@ -3097,26 +3167,13 @@ impl SqliteInventory {
     /// WITHOUT a `payload.server` field keep the old coarse reading
     /// (can't tell which server → assume relevant).
     ///
-    /// **Heuristic, not exact:** an alternative deploy via CLI (not
-    /// through the web button) doesn't write the same audit row.
-    /// Future-proof by extending the SQL `IN (...)` action list when
-    /// new audit actions appear.
+    /// **`None`-deploy case:** a server with no successful deploy audit
+    /// baseline is pending if the user has any relevant mutation.
     ///
-    /// **`None`-deploy case:** a server never deployed via web (only
-    /// via CLI / wizard) has no `server.deploy` audit row. We treat
-    /// this as «pending» if the user has ANY mutation — operator
-    /// resolves by clicking deploy at least once, which then sets
-    /// a baseline timestamp.
-    ///
-    /// **Only SUCCESSFUL deploys count as a baseline** (review
-    /// 2026-07-08, auto-deploy-on-grant follow-up): every deploy path
-    /// writes a `server.deploy` row even when it failed or was skipped
-    /// (`ssh_errors` non-empty / `ssh_skip_reason` set) — before this
-    /// filter, a failed deploy cleared the pending banner while the
-    /// node's `users[]` stayed stale, hiding the exact «connects but
-    /// no internet» class the banner exists to expose. Rows without
-    /// those payload fields (wizard-bootstrap success rows, legacy /
-    /// test-seeded baselines) keep counting as successes.
+    /// **Only SUCCESSFUL deploys count as a baseline:** all deploy paths
+    /// reserve the canonical `server.deploy` action for a config actually
+    /// applied from an unchanged inventory revision. Failed, skipped, and
+    /// stale attempts use distinct actions and cannot clear the banner.
     pub async fn servers_pending_deploy_for_user(
         &self,
         user_id: &UserId,
@@ -3125,7 +3182,7 @@ impl SqliteInventory {
         if granted_server_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // For each granted server: latest RELEVANT user-mutation ts
+        // For each granted server: latest RELEVANT user-mutation id
         // (grant/revoke scoped to this server via payload.server;
         // server-agnostic mutations + legacy no-payload rows always
         // relevant) vs the server's latest good deploy. Loop is cheap
@@ -3133,7 +3190,7 @@ impl SqliteInventory {
         let mut out: Vec<ServerId> = Vec::new();
         for sid in granted_server_ids {
             let user_row = sqlx::query(
-                "SELECT MAX(ts) AS ts FROM audit_log
+                "SELECT MAX(id) AS id FROM audit_log
                  WHERE target = ?1
                    AND (
                      (action IN ('user.grant', 'user.revoke')
@@ -3151,29 +3208,26 @@ impl SqliteInventory {
             .bind(&sid.0)
             .fetch_one(&self.pool)
             .await?;
-            let user_ts: Option<String> = user_row.try_get("ts")?;
-            let Some(user_ts) = user_ts else {
+            let user_latest_id: Option<i64> = user_row.try_get("id")?;
+            let Some(user_latest_id) = user_latest_id else {
                 // No mutation relevant to this server (legacy import
                 // with zero audit rows, or all grants target other
                 // nodes) — nothing to flag here.
                 continue;
             };
             let row = sqlx::query(
-                "SELECT MAX(ts) AS ts FROM audit_log
-                 WHERE target = ?1 AND action = 'server.deploy'
-                   AND json_extract(payload, '$.ssh_skip_reason') IS NULL
-                   AND (json_extract(payload, '$.ssh_errors') IS NULL
-                        OR json_array_length(payload, '$.ssh_errors') = 0)",
+                "SELECT MAX(id) AS id FROM audit_log
+                 WHERE target = ?1 AND action = 'server.deploy'",
             )
             .bind(&sid.0)
             .fetch_one(&self.pool)
             .await?;
-            let deploy_ts: Option<String> = row.try_get("ts")?;
+            let deploy_id: Option<i64> = row.try_get("id")?;
             // Pending if: no deploy ever recorded (None) OR last
             // deploy is older than the user's last relevant change.
-            match deploy_ts {
+            match deploy_id {
                 None => out.push(sid.clone()),
-                Some(dts) if dts < user_ts => out.push(sid.clone()),
+                Some(id) if id < user_latest_id => out.push(sid.clone()),
                 _ => {}
             }
         }
@@ -3203,11 +3257,11 @@ impl SqliteInventory {
     /// every granted server — duplicating them here would make the
     /// server banner near-permanent on busy inventories.
     ///
-    /// Only SUCCESSFUL deploys count as a baseline — same filter and
-    /// rationale as `servers_pending_deploy_for_user`.
+    /// Only the canonical successful `server.deploy` action counts as a
+    /// baseline, matching `servers_pending_deploy_for_user`.
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
-            "SELECT MAX(ts) AS ts FROM audit_log
+            "SELECT MAX(id) AS id FROM audit_log
              WHERE (action IN ('user.grant', 'user.revoke')
                     AND json_extract(payload, '$.server') = ?1)
                 OR (action IN ('server.protocol.enable', 'server.protocol.disable',
@@ -3217,24 +3271,21 @@ impl SqliteInventory {
         .bind(&server_id.0)
         .fetch_one(&self.pool)
         .await?;
-        let mutation_ts: Option<String> = row.try_get("ts")?;
-        let Some(mts) = mutation_ts else {
+        let mutation_id: Option<i64> = row.try_get("id")?;
+        let Some(mutation_id) = mutation_id else {
             return Ok(false);
         };
         let row = sqlx::query(
-            "SELECT MAX(ts) AS ts FROM audit_log
-             WHERE target = ?1 AND action = 'server.deploy'
-               AND json_extract(payload, '$.ssh_skip_reason') IS NULL
-               AND (json_extract(payload, '$.ssh_errors') IS NULL
-                    OR json_array_length(payload, '$.ssh_errors') = 0)",
+            "SELECT MAX(id) AS id FROM audit_log
+             WHERE target = ?1 AND action = 'server.deploy'",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)
         .await?;
-        let deploy_ts: Option<String> = row.try_get("ts")?;
-        Ok(match deploy_ts {
+        let deploy_id: Option<i64> = row.try_get("id")?;
+        Ok(match deploy_id {
             None => true,
-            Some(dts) => dts < mts,
+            Some(id) => id < mutation_id,
         })
     }
 
@@ -8405,6 +8456,44 @@ mod tests {
     }
 
     // ── session_observe FK gate ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deploy_input_revision_changes_with_render_inputs() -> Result<()> {
+        let inv = fresh().await;
+        let server = sample_server("s1");
+        inv.add_server(&server).await?;
+        let initial = inv.deploy_input_revision(&server.id).await?;
+        assert_eq!(initial, inv.deploy_input_revision(&server.id).await?);
+
+        inv.set_server_secret(&server.id, "vless.short_id", "deadbeef")
+            .await?;
+        let with_secret = inv.deploy_input_revision(&server.id).await?;
+        assert_ne!(initial, with_secret);
+        assert!(
+            !inv.audit_deploy_if_revision(
+                "admin",
+                &server.id,
+                &initial,
+                &serde_json::json!({"test": true}),
+            )
+            .await?
+        );
+        assert!(
+            inv.audit_deploy_if_revision(
+                "admin",
+                &server.id,
+                &with_secret,
+                &serde_json::json!({"test": true}),
+            )
+            .await?
+        );
+
+        let user = sample_user("u");
+        inv.add_user(&user).await?;
+        inv.grant(&user.id, &server.id).await?;
+        assert_ne!(with_secret, inv.deploy_input_revision(&server.id).await?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn session_observe_skips_unknown_user() -> Result<()> {

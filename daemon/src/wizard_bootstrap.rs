@@ -493,6 +493,7 @@ async fn redeploy_pipeline(
     let mut ssh_errors: Vec<String> = Vec::new();
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
     let mut total_config_bytes: usize = 0;
+    let mut configs_applied: usize = 0;
 
     // ── 0. Pre-flight: kernel/protocol compatibility ─────────────
     // Same check the synchronous handler runs before anything else
@@ -506,7 +507,7 @@ async fn redeploy_pipeline(
 
     // ── 1. Mint any missing per-protocol secrets (idempotent) ─────
     send_step!("secrets", "minting any missing per-protocol secrets…");
-    let (secrets, bootstrapped) = match bootstrap_server_secrets(&inv, &server, &registry).await {
+    let (_, bootstrapped) = match bootstrap_server_secrets(&inv, &server, &registry).await {
         Ok((secrets, minted)) => {
             if minted.is_empty() {
                 send_step!("secrets", "ok — all secrets already present.");
@@ -520,10 +521,27 @@ async fn redeploy_pipeline(
         Err(e) => fail!("secrets", "secret bootstrap failed: {e}"),
     };
 
+    let deploy_revision = match inv.deploy_input_revision(&server.id).await {
+        Ok(revision) => revision,
+        Err(e) => fail!("deploy", "cannot snapshot deploy inputs: {e}"),
+    };
+    let server = match inv.get_server(&server.id).await {
+        Ok(Some(server)) => server,
+        Ok(None) => fail!("deploy", "server was removed before deploy"),
+        Err(e) => fail!("deploy", "cannot refresh server before deploy: {e}"),
+    };
+    let secrets = match inv.list_server_secrets(&server.id).await {
+        Ok(secrets) => secrets,
+        Err(e) => fail!("deploy", "cannot refresh server secrets: {e}"),
+    };
+    if let Err(e) = registry.validate_server(&server) {
+        fail!("validate", "config changed before deploy: {e}");
+    }
+
     // ── 2. SSH skip-reason ────────────────────────────────────────
-    // Mirror the synchronous handler: these two conditions STILL write
-    // a `server.deploy` audit row carrying `ssh_skip_reason` (so the
-    // timeline records the attempt), then end in a terminal Error.
+    // Mirror the synchronous handler: these conditions write a distinct
+    // skipped-attempt audit row carrying `ssh_skip_reason`, then end in a
+    // terminal Error.
     let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
         Some(DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
@@ -532,7 +550,19 @@ async fn redeploy_pipeline(
         None
     };
     if let Some(reason) = skip_reason {
-        write_deploy_audit(&inv, &server, &bootstrapped, &[], &[], 0, Some(reason)).await;
+        write_deploy_audit(
+            &inv,
+            &server,
+            &bootstrapped,
+            &[],
+            &[],
+            0,
+            0,
+            Some(reason),
+            false,
+            None,
+        )
+        .await;
         fail!("deploy", "deploy skipped — {reason}.");
     }
 
@@ -547,6 +577,26 @@ async fn redeploy_pipeline(
         Ok(u) => u,
         Err(e) => fail!("deploy", "users_for_server failed: {e}"),
     };
+    if inv
+        .deploy_input_revision(&server.id)
+        .await
+        .map_or(true, |current| current != deploy_revision)
+    {
+        write_deploy_audit(
+            &inv,
+            &server,
+            &bootstrapped,
+            &[],
+            &[],
+            0,
+            0,
+            None,
+            true,
+            None,
+        )
+        .await;
+        fail!("deploy", "inventory changed while preparing deploy; retry");
+    }
     let ctx = RenderCtx::new(&server, &secrets);
 
     // ── 3. Per-kernel install → render → apply ────────────────────
@@ -623,6 +673,7 @@ async fn redeploy_pipeline(
             continue;
         }
         ssh_kernels_pushed.push(kid.0.clone());
+        configs_applied += 1;
         send_step!("apply", "✓ {} — config applied, service active.", kid.0);
         // Open the host firewall for the ports these protocols bind, so a
         // fresh deploy is reachable without a manual `ufw allow`. Best-effort:
@@ -634,19 +685,22 @@ async fn redeploy_pipeline(
     }
 
     // ── 4. Audit (same shape + action as the synchronous handler) ──
-    write_deploy_audit(
+    let audit_action = write_deploy_audit(
         &inv,
         &server,
         &bootstrapped,
         &ssh_kernels_pushed,
         &ssh_errors,
         total_config_bytes,
+        configs_applied,
         None,
+        false,
+        Some(&deploy_revision),
     )
     .await;
 
     // ── 5. Terminal event — Ok ONLY when every kernel succeeded ───
-    if ssh_errors.is_empty() {
+    if audit_action == "server.deploy" {
         let _ = tx
             .send(BootstrapEvent::Ok {
                 server_id: server.id.0.clone(),
@@ -654,14 +708,21 @@ async fn redeploy_pipeline(
             })
             .await;
     } else {
+        let message = if audit_action == "server.deploy.stale" && ssh_errors.is_empty() {
+            "inventory changed during deploy; the server remains pending — deploy again".to_string()
+        } else if ssh_errors.is_empty() {
+            "deploy skipped — no kernel config was applied".to_string()
+        } else {
+            format!(
+                "deploy finished with {} error(s): {}",
+                ssh_errors.len(),
+                ssh_errors.join("; ")
+            )
+        };
         let _ = tx
             .send(BootstrapEvent::Error {
                 phase: "apply",
-                message: format!(
-                    "deploy finished with {} error(s): {}",
-                    ssh_errors.len(),
-                    ssh_errors.join("; ")
-                ),
+                message,
             })
             .await;
     }
@@ -991,8 +1052,29 @@ async fn write_update_kernels_audit(
     }
 }
 
-/// Write the `server.deploy` audit row for an SSE re-deploy. Same
-/// action + payload shape as the synchronous `server_deploy` handler
+pub(crate) fn deploy_audit_action(
+    ssh_errors: &[String],
+    configs_applied: usize,
+    ssh_skip_reason: Option<&str>,
+    inputs_changed: bool,
+) -> &'static str {
+    if ssh_skip_reason.is_some() {
+        "server.deploy.skipped"
+    } else if !ssh_errors.is_empty() {
+        "server.deploy.failed"
+    } else if inputs_changed {
+        "server.deploy.stale"
+    } else if configs_applied == 0 {
+        "server.deploy.skipped"
+    } else {
+        "server.deploy"
+    }
+}
+
+/// Write the deploy-attempt audit row for an SSE re-deploy. Only a
+/// fully successful pass that applied at least one config uses the canonical
+/// `server.deploy` action consumed by pending-deploy detection. Same
+/// payload shape as the synchronous `server_deploy` handler
 /// (`bootstrapped`, `kernels`, `protocols`, `ssh_kernels_pushed`,
 /// `ssh_errors`, `ssh_config_bytes_total`, `ssh_skip_reason`) plus
 /// `via:"sse"`. Shared between the skip-reason early-exit and the
@@ -1006,33 +1088,52 @@ async fn write_deploy_audit(
     ssh_kernels_pushed: &[String],
     ssh_errors: &[String],
     total_config_bytes: usize,
+    configs_applied: usize,
     ssh_skip_reason: Option<&'static str>,
-) {
-    if let Err(e) = inv
-        .audit(
+    inputs_changed: bool,
+    expected_revision: Option<&str>,
+) -> &'static str {
+    let mut action =
+        deploy_audit_action(ssh_errors, configs_applied, ssh_skip_reason, inputs_changed);
+    let payload = serde_json::json!({
+        "bootstrapped": bootstrapped,
+        "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+        "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+        "ssh_kernels_pushed": ssh_kernels_pushed,
+        "ssh_errors": ssh_errors,
+        "ssh_config_bytes_total": total_config_bytes,
+        "configs_applied": configs_applied,
+        "ssh_skip_reason": ssh_skip_reason,
+        "inputs_changed": inputs_changed,
+        "via": "sse",
+    });
+    let result = if action == "server.deploy" {
+        inv.audit_deploy_if_revision(
             "admin",
-            "server.deploy",
-            Some(&server.id.0),
-            Some(&serde_json::json!({
-                "bootstrapped": bootstrapped,
-                "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
-                "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
-                "ssh_kernels_pushed": ssh_kernels_pushed,
-                "ssh_errors": ssh_errors,
-                "ssh_config_bytes_total": total_config_bytes,
-                "ssh_skip_reason": ssh_skip_reason,
-                "via": "sse",
-            })),
+            &server.id,
+            expected_revision.expect("successful deploy has a revision"),
+            &payload,
         )
         .await
-    {
+        .map(|matches| {
+            if !matches {
+                action = "server.deploy.stale";
+            }
+        })
+    } else {
+        inv.audit("admin", action, Some(&server.id.0), Some(&payload))
+            .await
+    };
+    if let Err(e) = result {
+        action = "server.deploy.failed";
         tracing::warn!(
             target = "vpnctld::redeploy",
             server = %server.id.0,
             error = %e,
-            "audit write failed for server.deploy (sse)"
+            "audit write failed for deploy attempt (sse)"
         );
     }
+    action
 }
 
 /// Operator-facing remediation for the verify-key phase, rendered into
@@ -1276,21 +1377,40 @@ async fn bootstrap_pipeline(
     // server-side secret arrives, that helper is the only place to
     // touch — see the function's own doc-comment for the long-term
     // plan (`Protocol::mint_server_secrets` trait method).
-    let secrets = match bootstrap_server_secrets(&inv, &server, &registry).await {
-        Ok((secrets, minted)) => {
+    match bootstrap_server_secrets(&inv, &server, &registry).await {
+        Ok((_, minted)) => {
             for label in minted {
                 send_step!("secrets", "ok — {label} minted.");
             }
-            secrets
         }
         Err(e) => fail!("secrets", "{e}"),
     };
 
     // ── 7-8. Per-kernel install + apply ───────────────────────────
+    let deploy_revision = match inv.deploy_input_revision(&server.id).await {
+        Ok(revision) => revision,
+        Err(e) => fail!("install", "cannot snapshot deploy inputs: {e}"),
+    };
+    let server = match inv.get_server(&server.id).await {
+        Ok(Some(server)) => server,
+        Ok(None) => fail!("install", "server was removed during bootstrap"),
+        Err(e) => fail!("install", "cannot refresh server: {e}"),
+    };
+    let secrets = match inv.list_server_secrets(&server.id).await {
+        Ok(secrets) => secrets,
+        Err(e) => fail!("install", "cannot refresh server secrets: {e}"),
+    };
     let users = match inv.users_for_server(&server.id).await {
         Ok(u) => u,
         Err(e) => fail!("install", "users_for_server: {e}"),
     };
+    if inv
+        .deploy_input_revision(&server.id)
+        .await
+        .map_or(true, |current| current != deploy_revision)
+    {
+        fail!("install", "inventory changed while preparing deploy; retry");
+    }
     let ctx = RenderCtx::new(&server, &secrets);
     for kid in &server.kernels {
         let Some(kernel) = registry.kernel(kid) else {
@@ -1385,41 +1505,19 @@ async fn bootstrap_pipeline(
     // exactly when it should. Reaching this point = every kernel
     // applied successfully (any failure above returned via fail!).
     //
-    // MASKING GUARD (review-agent important): the applied config was
-    // rendered from the `users` snapshot taken BEFORE the slow
-    // install/apply steps. A grant landing in that window would get
-    // `user.grant ts < server.deploy ts` → the detector would call it
-    // deployed while the live config excludes the user — the exact
-    // silent-miss class this fix targets. So re-fetch the grant set
-    // and SKIP the baseline if it changed: with no `server.deploy`
-    // row the detector's «no deploy ever» branch correctly marks
-    // those grants pending. Audit failure is non-fatal — node is live.
-    let snapshot_ids: std::collections::HashSet<&str> =
-        users.iter().map(|u| u.id.0.as_str()).collect();
-    let grants_unchanged = match inv.users_for_server(&server.id).await {
-        Ok(now) => {
-            let now_ids: std::collections::HashSet<String> =
-                now.into_iter().map(|u| u.id.0).collect();
-            now_ids.len() == snapshot_ids.len()
-                && now_ids.iter().all(|id| snapshot_ids.contains(id.as_str()))
-        }
-        // Can't verify → assume changed (skip the baseline; safe side).
-        Err(_) => false,
-    };
-    if grants_unchanged {
-        if let Err(e) = inv
-            .audit(
-                "admin",
-                "server.deploy",
-                Some(&plan.server_id),
-                Some(&serde_json::json!({
-                    "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
-                    "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
-                    "via": "wizard-bootstrap",
-                })),
-            )
-            .await
-        {
+    // The revision covers every render input, not only grant membership,
+    // and the compare + audit insert are one SQLite write transaction.
+    let payload = serde_json::json!({
+        "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
+        "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+        "via": "wizard-bootstrap",
+    });
+    match inv
+        .audit_deploy_if_revision("admin", &server.id, &deploy_revision, &payload)
+        .await
+    {
+        Ok(true) => {}
+        Err(e) => {
             tracing::warn!(
                 target = "vpnctld::wizard",
                 server = %plan.server_id,
@@ -1427,12 +1525,13 @@ async fn bootstrap_pipeline(
                 "audit write failed for server.deploy (wizard-bootstrap) — node already live"
             );
         }
-    } else {
-        send_step!(
-            "apply",
-            "note: grants changed while bootstrapping — the applied config predates them; \
-             deploy this server again to include the new users."
-        );
+        Ok(false) => {
+            send_step!(
+                "apply",
+                "note: inventory changed while bootstrapping — the applied config predates it; \
+                 deploy this server again."
+            );
+        }
     }
 
     // ── 9. Done ───────────────────────────────────────────────────
@@ -1927,6 +2026,27 @@ mod tests {
         };
         let json_err = serde_json::to_string(&err).unwrap();
         assert!(json_err.contains("\"kind\":\"error\""), "got: {json_err}");
+    }
+
+    #[test]
+    fn deploy_audit_action_reserves_baseline_for_applied_success() {
+        assert_eq!(deploy_audit_action(&[], 1, None, false), "server.deploy");
+        assert_eq!(
+            deploy_audit_action(&[], 0, Some("deploy key absent"), false),
+            "server.deploy.skipped"
+        );
+        assert_eq!(
+            deploy_audit_action(&[], 0, None, false),
+            "server.deploy.skipped"
+        );
+        assert_eq!(
+            deploy_audit_action(&["sing-box failed".into()], 1, None, false),
+            "server.deploy.failed"
+        );
+        assert_eq!(
+            deploy_audit_action(&[], 1, None, true),
+            "server.deploy.stale"
+        );
     }
 
     // ─── per-server deploy concurrency gate (DeployGuard) ────────────

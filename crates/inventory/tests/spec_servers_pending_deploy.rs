@@ -64,6 +64,26 @@ async fn empty_granted_list_returns_empty() {
 }
 
 #[tokio::test]
+async fn back_to_back_mutation_after_deploy_is_pending_without_clock_delay() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let sid = ServerId("fast".into());
+    let uid = UserId("fast-user".into());
+    inv.audit("admin", "server.deploy", Some(&sid.0), None)
+        .await
+        .unwrap();
+    inv.audit("admin", "user.wireguard.regen", Some(&uid.0), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.servers_pending_deploy_for_user(&uid, std::slice::from_ref(&sid))
+            .await
+            .unwrap(),
+        vec![sid]
+    );
+}
+
+#[tokio::test]
 async fn user_with_zero_audit_rows_returns_empty() {
     // Legacy import: user exists in `users` but no audit_log entry.
     // We refuse to flag — operator never «changed» the user via the
@@ -284,11 +304,9 @@ async fn server_side_detector_tracks_membership_vs_deploy() {
 
 // ── Only SUCCESSFUL deploys count as a baseline (review 2026-07-08) ────
 //
-// Every deploy path writes a `server.deploy` row even when it failed or
-// was skipped (`ssh_errors` non-empty / `ssh_skip_reason` set). Such a
-// row must NOT clear the pending banner: the node's users[] is still
-// stale — hiding that is exactly the «connects but no internet» class
-// the banner exists to expose.
+// Failed and skipped attempts use distinct audit actions. Only canonical
+// `server.deploy` is an applied-state baseline; attempts that never updated
+// the node must not clear the pending banner.
 
 #[tokio::test]
 async fn failed_deploy_row_does_not_clear_user_side_pending() {
@@ -302,7 +320,7 @@ async fn failed_deploy_row_does_not_clear_user_side_pending() {
     // Deploy attempt AFTER the grant, but it failed (ssh_errors set).
     inv.audit(
         "admin",
-        "server.deploy",
+        "server.deploy.failed",
         Some("srv"),
         Some(&serde_json::json!({
             "ssh_errors": ["sing-box: apply_config failed: node unreachable"],
@@ -354,7 +372,7 @@ async fn skipped_deploy_row_does_not_clear_user_side_pending() {
     // the node.
     inv.audit(
         "admin",
-        "server.deploy",
+        "server.deploy.skipped",
         Some("srv"),
         Some(&serde_json::json!({
             "ssh_errors": [],
@@ -391,7 +409,7 @@ async fn failed_deploy_row_does_not_clear_server_side_pending() {
     // the revoked UUID is still live on the node.
     inv.audit(
         "admin",
-        "server.deploy",
+        "server.deploy.failed",
         Some("srv"),
         Some(&serde_json::json!({
             "ssh_errors": ["sing-box: apply_config failed: refusing to REMOVE 1 user UUID(s)"],
