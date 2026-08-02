@@ -213,10 +213,15 @@ fn delta(prior: u64, new: u64) -> u64 {
 ///     a single legitimate user. The SQL signals already exclude these via
 ///     `NOT IN (SELECT address FROM servers)`; this keeps the concurrency term
 ///     consistent with them.
-fn is_real_client_ip(ip: &str, known_server_addrs: &std::collections::HashSet<&str>) -> bool {
+fn is_real_client_ip(
+    ip: &str,
+    known_server_addrs: &std::collections::HashSet<std::net::IpAddr>,
+) -> bool {
     crate::ip_kind::classify_ip(ip) == crate::ip_kind::IpKind::Public
         && !vpnctl_inventory::sqlite::OUR_EGRESS_CONTROL_IPS.contains(&ip)
-        && !known_server_addrs.contains(ip)
+        && ip
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| !known_server_addrs.contains(&ip))
 }
 
 /// Realistic homelab cadence: rapid enough that the UI feels live (5-min
@@ -328,8 +333,17 @@ pub fn spawn_clash_poller(
             // signal can drop VPN-over-VPN hops — the same `NOT IN
             // (SELECT address FROM servers)` semantics the SQL-side
             // `real_client_ip_predicate` applies to every other signal.
-            let known_server_addrs: std::collections::HashSet<&str> =
-                servers.iter().map(|s| s.address.as_str()).collect();
+            let known_server_addrs = match inv.refresh_server_resolved_addresses().await {
+                Ok(addresses) => addresses,
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::poller",
+                        error = %e,
+                        "server address resolution failed; using cached addresses"
+                    );
+                    inv.known_server_ips().await.unwrap_or_default()
+                }
+            };
 
             for server in &servers {
                 poll_one_server(
@@ -354,7 +368,7 @@ async fn poll_one_server(
     engine: &mut DiffEngine,
     snapshot_cache: &crate::snapshot_cache::SnapshotCache,
     server: &vpnctl_core::Server,
-    known_server_addrs: &std::collections::HashSet<&str>,
+    known_server_addrs: &std::collections::HashSet<std::net::IpAddr>,
 ) {
     // Only sing-box nodes expose clash-api at 9090. AmneziaWG nodes are
     // skipped here — their per-user source IPs are collected separately by
@@ -613,8 +627,12 @@ mod tests {
     #[test]
     fn is_real_client_ip_excludes_known_server_hops_control_and_private() {
         // Two registered VPN server addresses.
-        let known: std::collections::HashSet<&str> =
-            ["104.194.156.93", "51.15.42.10"].into_iter().collect();
+        let known = [
+            "104.194.156.93".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
 
         // A genuine remote client passes.
         assert!(is_real_client_ip("8.8.8.8", &known));
@@ -625,7 +643,7 @@ mod tests {
             !is_real_client_ip("104.194.156.93", &known),
             "a registered server address must not count as a concurrent client"
         );
-        assert!(!is_real_client_ip("51.15.42.10", &known));
+        assert!(!is_real_client_ip("2001:0db8:0:0::1", &known));
 
         // The hardcoded control egress stays excluded.
         assert!(!is_real_client_ip("83.97.108.34", &known));

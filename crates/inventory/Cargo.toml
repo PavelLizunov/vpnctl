@@ -25,6 +25,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
 ] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+tokio = { version = "1", features = ["rt"] }
 # Phase 5c — restore self-test uses `NamedTempFile` to copy the
 # snapshot to a per-call scratch path BEFORE running the migrator
 # against it. Promoted from dev-dependencies (where it was used by

@@ -638,8 +638,14 @@ fn real_client_ip_predicate(col: &str) -> String {
          AND {col} NOT LIKE 'fc%' AND {col} NOT LIKE 'fd%' \
          AND {col} NOT LIKE 'fe8%' AND {col} NOT LIKE 'fe9%' \
          AND {col} NOT LIKE 'fea%' AND {col} NOT LIKE 'feb%' \
-         AND {col} NOT IN (SELECT address FROM servers){control_clause}"
+         AND {col} NOT IN (SELECT address FROM servers) \
+         AND {col} NOT IN (SELECT address FROM server_resolved_addresses){control_clause}"
     )
+}
+
+fn canonical_ip_text(ip: &str) -> String {
+    ip.parse::<std::net::IpAddr>()
+        .map_or_else(|_| ip.chars().take(45).collect(), |ip| ip.to_string())
 }
 
 /// One row in `vpn_user_daily` (Phase 5a-1) — per-(user, server,
@@ -952,6 +958,16 @@ impl SqliteInventory {
                 .await?;
         }
 
+        if let Ok(ip) = s.address.parse::<std::net::IpAddr>() {
+            sqlx::query(
+                "INSERT INTO server_resolved_addresses (server_id, address) VALUES (?1, ?2)",
+            )
+            .bind(&s.id.0)
+            .bind(ip.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+
         // Phase 4a (migration 0021) — when a server is added AFTER
         // the migration has run, any pre-existing sub_access_log
         // rows that happened to come from this server's IP (e.g.
@@ -962,14 +978,20 @@ impl SqliteInventory {
         if !s.address.is_empty() {
             sqlx::query(
                 "UPDATE sub_access_log SET is_vpn_egress = 1
-                 WHERE ip = ?1 AND is_vpn_egress = 0",
+                 WHERE is_vpn_egress = 0
+                   AND (ip = ?1 OR ip IN
+                        (SELECT address FROM server_resolved_addresses WHERE server_id = ?2))",
             )
             .bind(&s.address)
+            .bind(&s.id.0)
             .execute(&mut *tx)
             .await?;
         }
 
         tx.commit().await?;
+        if s.address.parse::<std::net::IpAddr>().is_err() {
+            self.refresh_server_resolved_addresses().await?;
+        }
         Ok(())
     }
 
@@ -1033,7 +1055,9 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// `true` if `addr` exactly matches a registered server's `address`.
+    /// `true` if `addr` is one of the canonical IPs currently belonging to a
+    /// registered server. Literal IPv4/IPv6 addresses are canonicalised;
+    /// hostnames are resolved off the async runtime and cached in SQLite.
     /// Used by the subscription rate-limiter to EXEMPT our own VPN-egress
     /// IPs: a client connected through a node has its config-refresh
     /// egress that node, so vpnctld sees the SERVER's IP. Without this
@@ -1043,11 +1067,87 @@ impl SqliteInventory {
     /// конфиге"). Cheap — the servers table is a handful of rows. Same
     /// membership the `sub_access_log.is_vpn_egress` trigger computes.
     pub async fn is_known_server_address(&self, addr: &str) -> Result<bool> {
-        let row: (i64,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM servers WHERE address = ?1)")
-            .bind(addr)
-            .fetch_one(&self.pool)
+        let Ok(target) = addr.parse::<std::net::IpAddr>() else {
+            return Ok(false);
+        };
+        Ok(self.known_server_ips().await?.contains(&target))
+    }
+
+    /// Canonical server IPs from literal inventory addresses plus the latest
+    /// hostname-resolution cache.
+    pub async fn known_server_ips(&self) -> Result<std::collections::HashSet<std::net::IpAddr>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT address FROM servers
+             UNION
+             SELECT address FROM server_resolved_addresses",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|address| address.parse().ok())
+            .collect())
+    }
+
+    /// Resolve every server address and atomically refresh the canonical-IP
+    /// cache. DNS work stays off Tokio workers; failed lookups retain their
+    /// last known-good cache rows.
+    pub async fn refresh_server_resolved_addresses(
+        &self,
+    ) -> Result<std::collections::HashSet<std::net::IpAddr>> {
+        use std::net::ToSocketAddrs;
+
+        let servers = sqlx::query_as::<_, (String, String)>("SELECT id, address FROM servers")
+            .fetch_all(&self.pool)
             .await?;
-        Ok(row.0 != 0)
+        let resolved = tokio::task::spawn_blocking(move || {
+            servers
+                .into_iter()
+                .map(|(id, address)| {
+                    let ips = match address.parse::<std::net::IpAddr>() {
+                        Ok(ip) => Some(vec![ip]),
+                        Err(_) => (address.as_str(), 0)
+                            .to_socket_addrs()
+                            .ok()
+                            .map(|iter| iter.map(|socket| socket.ip()).collect()),
+                    };
+                    (id, ips)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| SqliteInventoryError::Invalid(format!("resolve server addresses: {e}")))?;
+
+        let mut tx = self.pool.begin().await?;
+        let mut all = std::collections::HashSet::new();
+        for (server_id, ips) in resolved {
+            let Some(ips) = ips else { continue };
+            sqlx::query("DELETE FROM server_resolved_addresses WHERE server_id = ?1")
+                .bind(&server_id)
+                .execute(&mut *tx)
+                .await?;
+            for ip in ips {
+                all.insert(ip);
+                sqlx::query(
+                    "INSERT OR IGNORE INTO server_resolved_addresses (server_id, address)
+                     VALUES (?1, ?2)",
+                )
+                .bind(&server_id)
+                .bind(ip.to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        sqlx::query(
+            "UPDATE sub_access_log SET is_vpn_egress = 1
+             WHERE is_vpn_egress = 0
+               AND ip IN (SELECT address FROM server_resolved_addresses)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        all.extend(self.known_server_ips().await?);
+        Ok(all)
     }
 
     /// Return the id of the first server already registered with `addr`,
@@ -1293,6 +1393,7 @@ impl SqliteInventory {
         .bind(&id.0)
         .execute(&self.pool)
         .await?;
+        self.refresh_server_resolved_addresses().await?;
         Ok(())
     }
 
@@ -3481,6 +3582,7 @@ impl SqliteInventory {
         tls_ja3: Option<&str>,
         tls_ja4: Option<&str>,
     ) -> Result<()> {
+        let ip = canonical_ip_text(ip);
         sqlx::query(
             "INSERT INTO sub_access_log
              (user_id, ip, ua, status, bytes,
@@ -5130,11 +5232,12 @@ impl SqliteInventory {
         active_days: u32,
     ) -> Result<Vec<SubFetchStallUser>> {
         use sqlx::Row;
-        let rows = sqlx::query(
+        let sql = format!(
             "WITH last_fetch AS (
                  SELECT user_id, MAX(ts) AS t
                  FROM sub_access_log
                  WHERE user_id IS NOT NULL AND is_vpn_egress = 0 AND status = 200
+                   AND {pred}
                  GROUP BY user_id
              )
              SELECT lf.user_id AS user_id,
@@ -5158,12 +5261,14 @@ impl SqliteInventory {
                      AND c2.ts < lf.t
                      AND (c2.upload_bytes > 0 OR c2.download_bytes > 0))
              ORDER BY lf.t ASC",
-        )
-        .bind(format!("-{grace_minutes} minutes"))
-        .bind(format!("-{lookback_minutes} minutes"))
-        .bind(format!("-{active_days} days"))
-        .fetch_all(&self.pool)
-        .await?;
+            pred = real_client_ip_predicate("ip")
+        );
+        let rows = sqlx::query(&sql)
+            .bind(format!("-{grace_minutes} minutes"))
+            .bind(format!("-{lookback_minutes} minutes"))
+            .bind(format!("-{active_days} days"))
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| SubFetchStallUser {
@@ -5915,7 +6020,7 @@ impl SqliteInventory {
             // Bound to 45 chars — the max textual IPv6 length
             // (incl. an IPv4-mapped tail). `.chars().take()` avoids a
             // mid-codepoint slice panic (defensive; IPs are ASCII).
-            let ip_truncated: String = ip.chars().take(45).collect();
+            let canonical_ip = canonical_ip_text(ip);
             sqlx::query(
                 "INSERT INTO vpn_user_source_ips
                     (user_id, source_ip, date, hit_count, last_seen)
@@ -5927,7 +6032,7 @@ impl SqliteInventory {
                      last_seen = excluded.last_seen",
             )
             .bind(&user_id.0)
-            .bind(&ip_truncated)
+            .bind(&canonical_ip)
             .execute(&mut *tx)
             .await?;
         }
@@ -7493,6 +7598,11 @@ mod tests {
         assert_eq!(network_key("999.999.1.1"), "999.999.1.1");
     }
 
+    #[test]
+    fn canonical_ip_text_collapses_equivalent_ipv6_spellings() {
+        assert_eq!(canonical_ip_text("2001:0db8:0:0::1"), "2001:db8::1");
+    }
+
     #[tokio::test]
     async fn migrations_apply_and_tables_exist() -> Result<()> {
         let inv = fresh().await;
@@ -7508,22 +7618,31 @@ mod tests {
     async fn sub_fetch_without_traffic_flags_regression_then_clears() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("s1")).await?;
-        for u in ["oleg", "newbie", "healthy", "justfetched"] {
+        for u in [
+            "oleg",
+            "newbie",
+            "healthy",
+            "justfetched",
+            "lanfetch",
+            "controlfetch",
+            "v6localfetch",
+        ] {
             inv.add_user(&sample_user(u)).await?;
         }
 
         // A real (non-egress) `/sub` fetch `mins_ago` in the past. IP differs
         // from the server address (1.2.3.4) so the is_vpn_egress trigger
         // leaves the row at 0.
-        async fn fetch(inv: &SqliteInventory, uid: &str, mins_ago: i64) {
+        async fn fetch(inv: &SqliteInventory, uid: &str, ip: &str, mins_ago: i64) {
             sqlx::query(
                 "INSERT INTO sub_access_log
                     (ts, user_id, ip, ua, status, bytes, is_vpn_egress)
                  VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now',?1), ?2,
-                         '198.51.100.7', 'Happ/1', 200, 900, 0)",
+                         ?3, 'Happ/1', 200, 900, 0)",
             )
             .bind(format!("-{mins_ago} minutes"))
             .bind(uid)
+            .bind(ip)
             .execute(&inv.pool)
             .await
             .unwrap();
@@ -7544,18 +7663,26 @@ mod tests {
         }
 
         // oleg — FIRES: active 2d ago, fetched 60m ago, silent since.
-        fetch(&inv, "oleg", 60).await;
+        fetch(&inv, "oleg", "198.51.100.7", 60).await;
         traffic(&inv, "oleg", "-2 days").await;
         // newbie — NO fire: fetched but never had any traffic (setup problem,
         // not a regression).
-        fetch(&inv, "newbie", 60).await;
+        fetch(&inv, "newbie", "198.51.100.7", 60).await;
         // healthy — NO fire: active before AND traffic 5m ago (after fetch).
-        fetch(&inv, "healthy", 60).await;
+        fetch(&inv, "healthy", "198.51.100.7", 60).await;
         traffic(&inv, "healthy", "-2 days").await;
         traffic(&inv, "healthy", "-5 minutes").await;
         // justfetched — NO fire: fetched only 10m ago, still inside the grace.
-        fetch(&inv, "justfetched", 10).await;
+        fetch(&inv, "justfetched", "198.51.100.7", 10).await;
         traffic(&inv, "justfetched", "-2 days").await;
+        for (uid, ip) in [
+            ("lanfetch", "192.168.0.200"),
+            ("controlfetch", OUR_EGRESS_CONTROL_IPS[0]),
+            ("v6localfetch", "fd12:3456::1"),
+        ] {
+            fetch(&inv, uid, ip, 60).await;
+            traffic(&inv, uid, "-2 days").await;
+        }
 
         let flagged = inv.sub_fetch_without_traffic_users(45, 360, 7).await?;
         let ids: Vec<&str> = flagged.iter().map(|u| u.user_id.0.as_str()).collect();
@@ -7618,6 +7745,9 @@ mod tests {
     async fn top_source_ips_excludes_all_infra_ip_classes() -> Result<()> {
         let inv = fresh().await;
         inv.add_server(&sample_server("s1")).await?; // address 1.2.3.4
+        let mut v6_server = sample_server("s2");
+        v6_server.address = "2001:0db8:0:0::1".into();
+        inv.add_server(&v6_server).await?;
         inv.add_user(&sample_user("u")).await?;
         inv.record_user_source_ips(&[
             (UserId("u".into()), "203.0.113.9".into()), // real client — KEEP
@@ -7632,7 +7762,8 @@ mod tests {
             (UserId("u".into()), "::1".into()),         // IPv6 loopback
             (UserId("u".into()), "fe80::1".into()),     // IPv6 link-local
             (UserId("u".into()), "fd12:3456::1".into()), // IPv6 ULA
-            (UserId("u".into()), "2001:db8::1".into()), // public IPv6 — KEEP
+            (UserId("u".into()), "2001:0db8:0:0::1".into()), // equivalent s2 address
+            (UserId("u".into()), "2001:db8::99".into()), // public IPv6 — KEEP
         ])
         .await?;
         let mut ips: Vec<String> = inv
@@ -7646,7 +7777,7 @@ mod tests {
             ips,
             vec![
                 "172.32.5.5".to_string(),
-                "2001:db8::1".to_string(),
+                "2001:db8::99".to_string(),
                 "203.0.113.9".to_string(),
             ],
             "only public clients survive; server/control/LAN/loopback/link-local/ULA all dropped"
