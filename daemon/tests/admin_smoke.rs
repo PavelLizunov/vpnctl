@@ -2039,8 +2039,9 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
     cfg.refresh_token = Some("r".into());
     cfg.device_id = Some("d".into());
     inv.set_boosty_settings(&cfg).await.unwrap();
-    inv.set_boosty_last_report(
+    inv.set_boosty_report_and_events(
         &serde_json::json!({
+            "observed_at": 1_754_000_000_i64,
             "total_subscribers": 2,
             "active_subscribers": 1,
             "linked": 1,
@@ -2051,9 +2052,31 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
             "new_subscribers": [{"subscriber_id": 300, "name": "Carol"}],
             "provisioned": ["boosty-301"],
             "errors": [],
-            "suppressed_disables": ["dave"]
+            "suppressed_disables": ["dave"],
+            "subscribers": [{
+                "subscriber_id": 300,
+                "name": "Carol",
+                "present": true,
+                "status": "active",
+                "subscribed": true,
+                "price": "500",
+                "payments": "1500",
+                "level_id": 7,
+                "level_name": "Supporter",
+                "level_price": "500",
+                "can_write": true
+            }]
         })
         .to_string(),
+        &[(
+            "boosty.subscriber.changed".into(),
+            Some("300".into()),
+            serde_json::json!({
+                "kind": "changed",
+                "name": "Carol",
+                "payments": "1500"
+            }),
+        )],
     )
     .await
     .unwrap();
@@ -2068,6 +2091,14 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
     assert!(html.contains("boosty-301"), "auto-created user renders");
     assert!(html.contains("eve"), "grace-period user renders");
     assert!(html.contains("dave"), "suppressed-disables banner renders");
+    assert!(html.contains("Boosty roster snapshot"));
+    assert!(html.contains("1500"), "cumulative payments value renders");
+    assert!(html.contains("boosty.subscriber.changed"));
+    assert!(html.contains("{…}"), "full event payload is expandable");
+    assert!(
+        html.contains("configured"),
+        "refresh + device is sufficient"
+    );
 }
 
 /// BB-3 (link-UX): a subscriber the operator already linked must NOT linger

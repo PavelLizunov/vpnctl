@@ -199,13 +199,30 @@ async fn settings_round_trip_and_refresh_rotation() {
 
     // Rotation persists only the refresh token.
     inv.set_boosty_refresh_token("ref2").await.unwrap();
+    assert!(
+        !inv.rotate_boosty_refresh_token("ref1", "stale")
+            .await
+            .unwrap(),
+        "an in-flight refresh must not overwrite a newer saved token"
+    );
+    assert!(
+        inv.rotate_boosty_refresh_token("ref2", "ref3")
+            .await
+            .unwrap()
+    );
     let after = inv.get_boosty_settings().await.unwrap();
-    assert_eq!(after.refresh_token.as_deref(), Some("ref2"));
+    assert_eq!(after.refresh_token.as_deref(), Some("ref3"));
     assert_eq!(
         after.access_token.as_deref(),
         Some("acc"),
         "other fields untouched"
     );
+
+    assert!(inv.acquire_boosty_sync_lease("a", 60).await.unwrap());
+    assert!(!inv.acquire_boosty_sync_lease("b", 60).await.unwrap());
+    inv.release_boosty_sync_lease("a").await.unwrap();
+    assert!(inv.acquire_boosty_sync_lease("b", 60).await.unwrap());
+    inv.release_boosty_sync_lease("b").await.unwrap();
 }
 
 #[tokio::test]

@@ -1238,6 +1238,10 @@ fn summarize_audit_payload(payload: &serde_json::Value) -> String {
         "kind",
         "count",
         "server",
+        "name",
+        "status",
+        "level",
+        "payments",
     ];
     for k in SAFE_KEYS {
         if let Some(v) = map.get(*k) {
@@ -8346,6 +8350,13 @@ fn boosty_mask_secret(secret: Option<&str>) -> String {
     }
 }
 
+fn boosty_time(ts: Option<i64>) -> String {
+    ts.filter(|ts| *ts > 0)
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .map(format_msk_iso)
+        .unwrap_or_else(|| "—".into())
+}
+
 /// `GET /admin/boosty` — bridge status, settings form, and the actionable
 /// link/disable surfaces, rendered from the LAST APPLIED sync report
 /// (stored by the poller / «sync now» / CLI `--apply`). Deliberately NO
@@ -8399,11 +8410,23 @@ pub(crate) async fn boosty_page(
         };
     let report = last_report.as_ref().map(|(r, _)| r);
     let last_sync_at = last_report.as_ref().map(|(_, ts)| ts.as_str());
+    let boosty_events = state
+        .inv
+        .recent_audit_paginated(50, 0, None, Some("boosty."), None, None)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     use crate::i18n::tr;
-    let configured = settings.blog_url.is_some()
-        && settings.access_token.is_some()
-        && settings.refresh_token.is_some();
+    let configured = settings.blog_url.as_deref().is_some_and(|v| !v.is_empty())
+        && (settings
+            .access_token
+            .as_deref()
+            .is_some_and(|v| !v.is_empty())
+            || (settings
+                .refresh_token
+                .as_deref()
+                .is_some_and(|v| !v.is_empty())
+                && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
     let body = html! {
         div.ed-art-eyebrow { "Boosty" }
         div.ed-headrow {
@@ -8672,6 +8695,102 @@ pub(crate) async fn boosty_page(
             }
         }
 
+        // ── Subscriber roster snapshot ─────────────────────────
+        @if let Some(r) = report {
+            @if !r.subscribers.is_empty() {
+                div.ed-rule {}
+                div.ed-art-eyebrow {
+                    (tr(lang, "Boosty roster snapshot", "Снимок подписчиков Boosty")) " · "
+                    (r.subscribers.iter().filter(|s| s.present).count())
+                }
+                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
+                    (tr(
+                        lang,
+                        "Payments is Boosty's observed cumulative value, not a transaction, refund or currency ledger. Missing means absent from the latest API roster, not a confirmed unsubscribe.",
+                        "Payments — наблюдаемое накопительное значение Boosty, а не реестр транзакций, возвратов или валют. Missing означает отсутствие в последнем ответе API, а не подтверждённую отписку.",
+                    ))
+                }
+                table.ed-grid {
+                    thead { tr {
+                        th { (tr(lang, "subscriber", "подписчик")) }
+                        th { (tr(lang, "status", "статус")) }
+                        th { (tr(lang, "level", "уровень")) }
+                        th { (tr(lang, "price / payments", "цена / payments")) }
+                        th { (tr(lang, "on / off / next pay", "начало / конец / след. платёж")) }
+                        th { (tr(lang, "API flags", "флаги API")) }
+                    }}
+                    tbody {
+                        @for sub in &r.subscribers {
+                            tr {
+                                td {
+                                    b { (sub.name) }
+                                    " " span.ed-grid__mut { (sub.subscriber_id) }
+                                }
+                                td {
+                                    @if sub.present {
+                                        (sub.status)
+                                    } @else {
+                                        span style="color: var(--warm);" { "missing" }
+                                        " · " span.ed-grid__mut { (boosty_time(sub.missing_since)) }
+                                    }
+                                }
+                                td {
+                                    (sub.level_name)
+                                    " " span.ed-grid__mut { "#" (sub.level_id) " · " (sub.level_price) }
+                                }
+                                td.ed-grid__mut { (sub.price) " / " (sub.payments) }
+                                td.ed-grid__mut {
+                                    (boosty_time(Some(sub.on_time))) " / "
+                                    (boosty_time(sub.off_time)) " / "
+                                    (boosty_time(sub.next_pay_time))
+                                }
+                                td.ed-grid__mut {
+                                    @if sub.subscribed { "subscribed " }
+                                    @if sub.is_fee_paid { "fee-paid " }
+                                    @if sub.can_write { "can-write " }
+                                    @if sub.is_black_listed { "blacklisted" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Durable Boosty event timeline ───────────────────────
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "Boosty events · latest 50", "События Boosty · последние 50"))
+            " · " a href="/admin/audit?action=boosty." { (tr(lang, "full audit →", "полный аудит →")) }
+        }
+        @if boosty_events.is_empty() {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                (tr(lang, "No Boosty events yet; the first successful sync records a baseline.", "Событий Boosty пока нет; первый успешный синк запишет базовую точку."))
+            }
+        } @else {
+            div.ed-time.ed-time--compact {
+                @for e in &boosty_events {
+                    div.ed-time-row {
+                        span.ed-time-row__t { (format_msk_iso(e.ts)) }
+                        span class=(format!("ed-time-row__a ed-time-row__a--{}", action_kind(&e.action))) { (e.action) }
+                        span.ed-time-row__pl {
+                            @if let Some(target) = &e.target { span.ed-mono { (target) " · " } }
+                            @if let Some(payload) = &e.payload {
+                                (summarize_audit_payload(payload))
+                                " "
+                                details style="display: inline-block; vertical-align: baseline;" {
+                                    summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { "{…}" }
+                                    pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10px; white-space: pre-wrap; max-width: 680px;" {
+                                        (serde_json::to_string_pretty(&redact_audit_payload(payload)).unwrap_or_default())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Bridge settings ─────────────────────────────────────
         div.ed-rule {}
         div.ed-art-eyebrow {
@@ -8853,7 +8972,7 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
     } else {
         ApplyMode::EnableOnly
     };
-    match vpnctl_boosty_bridge::sync_from_settings(&state.inv, &settings, mode).await {
+    match vpnctl_boosty_bridge::sync_from_inventory(&state.inv, mode).await {
         Ok(report) => {
             tracing::info!(
                 target = "vpnctld::boosty",

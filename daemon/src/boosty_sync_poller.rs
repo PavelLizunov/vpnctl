@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use vpnctl_boosty_bridge::{ApplyMode, sync_from_settings};
+use vpnctl_boosty_bridge::{ApplyMode, sync_from_inventory};
 use vpnctl_core::{Registry, Server, UserId};
 use vpnctl_inventory::SqliteInventory;
 
@@ -95,7 +95,7 @@ pub async fn run_tick(inv: &SqliteInventory, registry: &Arc<Registry>, deploy_ke
         ApplyMode::EnableOnly
     };
 
-    match sync_from_settings(inv, &settings, mode).await {
+    match sync_from_inventory(inv, mode).await {
         Ok(report) => {
             // Recovery: a working pass silently acks the open failure
             // alert (auto-recovery pattern — good news needs no manual

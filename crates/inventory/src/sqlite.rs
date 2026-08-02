@@ -2546,19 +2546,89 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Persist a rotated token only if the credential used to obtain it is
+    /// still current. A token pasted in the Web UI during an in-flight poll
+    /// must win instead of being overwritten by that older poll.
+    pub async fn rotate_boosty_refresh_token(&self, expected: &str, rotated: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE boosty_settings
+                SET refresh_token = ?1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1 AND refresh_token = ?2",
+        )
+        .bind(rotated)
+        .bind(expected)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Cross-process lease for the rotating Boosty credential and the
+    /// snapshot→event transaction. Expired leases recover automatically.
+    pub async fn acquire_boosty_sync_lease(&self, owner: &str, ttl_secs: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE boosty_settings
+                SET sync_lease_owner = ?1,
+                    sync_lease_until = CAST(strftime('%s', 'now') AS INTEGER) + ?2
+              WHERE id = 1
+                AND sync_lease_until <= CAST(strftime('%s', 'now') AS INTEGER)",
+        )
+        .bind(owner)
+        .bind(ttl_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn release_boosty_sync_lease(&self, owner: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET sync_lease_owner = NULL, sync_lease_until = 0
+              WHERE id = 1 AND sync_lease_owner = ?1",
+        )
+        .bind(owner)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Persist the last APPLIED sync report (serialized `SyncReport`).
     /// `/admin/boosty` renders its actionable sections from this instead of
     /// doing a live (state-mutating) sync on GET.
     pub async fn set_boosty_last_report(&self, report_json: &str) -> Result<()> {
+        self.set_boosty_report_and_events(report_json, &[]).await
+    }
+
+    /// Atomically replace the applied Boosty snapshot and append its derived
+    /// subscriber events. The transaction prevents a crash from writing an
+    /// event twice (or losing it) on the next poll.
+    pub async fn set_boosty_report_and_events(
+        &self,
+        report_json: &str,
+        events: &[(String, Option<String>, serde_json::Value)],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (action, target, payload) in events {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', ?1, ?2, ?3)",
+            )
+            .bind(action)
+            .bind(target)
+            .bind(payload.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             "UPDATE boosty_settings
                 SET last_report_json = ?1,
-                    last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-              WHERE id = 1",
+                     last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE id = 1",
         )
         .bind(report_json)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
