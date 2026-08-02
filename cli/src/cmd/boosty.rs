@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use serde::Serialize;
 use serde_json::json;
-use vpnctl_boosty_bridge::{ApplyMode, SyncReport, sync_from_settings};
+use vpnctl_boosty_bridge::{ApplyMode, SyncReport, sync_from_inventory};
 use vpnctl_core::UserId;
 use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
@@ -95,14 +95,13 @@ pub(crate) async fn run(
 }
 
 async fn run_sync(inv: &SqliteInventory, apply: bool, disable_lapsed: bool) -> anyhow::Result<()> {
-    let settings = inv.get_boosty_settings().await?;
     let mode = match (apply, disable_lapsed) {
         (false, _) => ApplyMode::DryRun,
         (true, false) => ApplyMode::EnableOnly,
         (true, true) => ApplyMode::Full,
     };
 
-    let report = sync_from_settings(inv, &settings, mode).await?;
+    let report = sync_from_inventory(inv, mode).await?;
     print_report(&report, mode);
 
     // Applied flips only touch inv.db — the nodes keep serving their old

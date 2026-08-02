@@ -13,7 +13,8 @@ mod reconcile;
 
 pub use reconcile::{Action, LinkedUser, SubscriberState, reconcile};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boosty_api::api_client::ApiClient;
@@ -23,6 +24,17 @@ use vpnctl_inventory::{BoostySettings, SqliteInventory, SqliteInventoryError};
 /// Boosty API base URL.
 const BOOSTY_BASE_URL: &str = "https://api.boosty.to";
 const MAX_AUTO_PROVISION_PER_TICK: usize = 5;
+const TOMBSTONE_RETENTION_SECS: i64 = 90 * 86_400;
+// ponytail: 10 minutes exceeds today's bounded roster pass; renew the lease
+// only if a future account grows enough for a measured sync to approach it.
+const SYNC_LEASE_SECS: i64 = 600;
+
+fn sync_gate() -> &'static tokio::sync::Mutex<()> {
+    // ponytail: the schema has one Boosty account, so one local gate is enough;
+    // the DB lease in sync_from_inventory covers other processes.
+    static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 /// How aggressively [`sync_once`] applies the reconciliation plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +59,57 @@ pub struct NewSubscriberInfo {
     pub name: String,
 }
 
+/// Privacy-bounded snapshot of the Boosty roster. It deliberately excludes
+/// email, avatar URLs and unstructured level data; the operator gets the
+/// subscription/payment facts needed for support without retaining extra PII.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SubscriberSnapshot {
+    pub subscriber_id: i64,
+    pub name: String,
+    pub present: bool,
+    pub missing_since: Option<i64>,
+    pub status: String,
+    pub subscribed: bool,
+    pub on_time: i64,
+    pub off_time: Option<i64>,
+    pub next_pay_time: Option<i64>,
+    /// Boosty exposes floating-point totals without a transaction currency;
+    /// strings preserve the observed value without inventing accounting math.
+    pub price: String,
+    pub payments: String,
+    pub is_fee_paid: bool,
+    pub can_write: bool,
+    pub is_black_listed: bool,
+    pub level_id: i64,
+    pub level_name: String,
+    pub level_price: String,
+}
+
+impl Default for SubscriberSnapshot {
+    fn default() -> Self {
+        Self {
+            subscriber_id: 0,
+            name: String::new(),
+            present: true,
+            missing_since: None,
+            status: String::new(),
+            subscribed: false,
+            on_time: 0,
+            off_time: None,
+            next_pay_time: None,
+            price: String::new(),
+            payments: String::new(),
+            is_fee_paid: false,
+            can_write: false,
+            is_black_listed: false,
+            level_id: 0,
+            level_name: String::new(),
+            level_price: String::new(),
+        }
+    }
+}
+
 /// Outcome of one [`sync_once`] pass.
 ///
 /// Serializable: the daemon persists the last APPLIED report so the admin
@@ -55,6 +118,8 @@ pub struct NewSubscriberInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SyncReport {
+    /// Unix timestamp at which Boosty returned this roster.
+    pub observed_at: i64,
     /// Total subscribers fetched from Boosty.
     pub total_subscribers: usize,
     /// How many of those are VPN-eligible (active AND on a paid level).
@@ -86,6 +151,9 @@ pub struct SyncReport {
     /// nothing was touched. A genuine single lapse/downgrade still flows
     /// through to disable.
     pub suppressed_disables: Vec<String>,
+    /// Current roster plus retained missing tombstones, used to derive the
+    /// append-only event timeline on the next applied pass.
+    pub subscribers: Vec<SubscriberSnapshot>,
 }
 
 /// Errors that abort a whole sync pass (as opposed to a single-action
@@ -196,6 +264,40 @@ pub async fn sync_from_settings(
     sync_from_settings_at(inv, settings, mode, BOOSTY_BASE_URL).await
 }
 
+/// Production entry point. Serializing refreshes prevents the manual Web
+/// button and background poller from consuming the same rotating token.
+pub async fn sync_from_inventory(
+    inv: &SqliteInventory,
+    mode: ApplyMode,
+) -> Result<SyncReport, BridgeError> {
+    let _guard = sync_gate().lock().await;
+    let owner = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    if !inv
+        .acquire_boosty_sync_lease(&owner, SYNC_LEASE_SECS)
+        .await?
+    {
+        return Err(BridgeError::Config(
+            "another Boosty sync is already in progress".into(),
+        ));
+    }
+
+    let result = match inv.get_boosty_settings().await {
+        Ok(settings) => sync_from_settings(inv, &settings, mode).await,
+        Err(error) => Err(error.into()),
+    };
+    if let Err(error) = inv.release_boosty_sync_lease(&owner).await {
+        tracing::warn!(target = "boosty_bridge", %error, "releasing Boosty sync lease failed");
+    }
+    result
+}
+
 /// [`sync_from_settings`] against an explicit API base URL (tests point
 /// this at a mock server; production uses [`BOOSTY_BASE_URL`]).
 pub async fn sync_from_settings_at(
@@ -211,7 +313,7 @@ pub async fn sync_from_settings_at(
         .ok_or_else(|| BridgeError::Config("blog_url not set".into()))?;
 
     let client = build_client(settings, base_url).await?;
-    let result = sync_once_with_policy(
+    let mut result = sync_once_with_policy(
         &client,
         inv,
         blog,
@@ -226,21 +328,28 @@ pub async fn sync_from_settings_at(
     // the rotated value BEFORE propagating a sync error: a pass that
     // authenticated but failed mid-fetch has already consumed the stored
     // token — losing the rotated one would brick auth on the next pass.
-    if settings.refresh_token.is_some()
+    if let Some(expected) = settings.refresh_token.as_deref()
         && let Some(rotated) = client.refresh_token().await
-        && settings.refresh_token.as_deref() != Some(rotated.as_str())
+        && expected != rotated
     {
-        if let Err(e) = inv.set_boosty_refresh_token(&rotated).await {
-            if result.is_ok() {
-                // Sync worked; the failed persist is now the real error —
-                // the next pass would refresh with a consumed token.
-                return Err(e.into());
-            }
-            tracing::warn!(
+        match inv.rotate_boosty_refresh_token(expected, &rotated).await {
+            Ok(true) => {}
+            Ok(false) => tracing::info!(
                 target = "boosty_bridge",
-                error = %e,
-                "persisting rotated refresh token failed after a failed sync"
-            );
+                "kept the Boosty refresh credential changed during this sync"
+            ),
+            Err(e) => {
+                if result.is_ok() {
+                    // Sync worked; the failed persist is now the real error —
+                    // the next pass would refresh with a consumed token.
+                    return Err(e.into());
+                }
+                tracing::warn!(
+                    target = "boosty_bridge",
+                    error = %e,
+                    "persisting rotated refresh token failed after a failed sync"
+                );
+            }
         }
     }
 
@@ -248,15 +357,22 @@ pub async fn sync_from_settings_at(
     // sections without a live (state-mutating) sync on GET. Dry-run passes
     // are pure previews and deliberately leave the stored report untouched.
     if mode != ApplyMode::DryRun
-        && let Ok(report) = &result
+        && let Ok(report) = &mut result
     {
+        let previous = inv
+            .boosty_last_report()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(json, _)| serde_json::from_str::<SyncReport>(&json).ok());
+        let events = subscriber_events(previous.as_ref(), report);
         match serde_json::to_string(report) {
             Ok(json) => {
-                if let Err(e) = inv.set_boosty_last_report(&json).await {
+                if let Err(e) = inv.set_boosty_report_and_events(&json, &events).await {
                     tracing::warn!(
                         target = "boosty_bridge",
                         error = %e,
-                        "persisting last sync report failed"
+                        "persisting sync report + subscriber events failed"
                     );
                 }
             }
@@ -269,6 +385,142 @@ pub async fn sync_from_settings_at(
     }
 
     result
+}
+
+type AuditEvent = (String, Option<String>, serde_json::Value);
+
+/// Merge live observations with missing tombstones and derive one durable
+/// audit event per changed subscriber. The first enriched report establishes
+/// a baseline instead of pretending every existing subscriber joined today.
+fn subscriber_events(previous: Option<&SyncReport>, report: &mut SyncReport) -> Vec<AuditEvent> {
+    let Some(previous) = previous.filter(|r| r.observed_at > 0) else {
+        report.subscribers.sort_by_key(|s| s.subscriber_id);
+        return vec![(
+            "boosty.baseline".into(),
+            None,
+            serde_json::json!({
+                "kind": "baseline",
+                "count": report.subscribers.len(),
+                "observed_at": report.observed_at,
+            }),
+        )];
+    };
+
+    let mut old: BTreeMap<i64, SubscriberSnapshot> = previous
+        .subscribers
+        .iter()
+        .filter(|s| {
+            s.present
+                || s.missing_since.is_none_or(|ts| {
+                    ts >= report.observed_at.saturating_sub(TOMBSTONE_RETENTION_SECS)
+                })
+        })
+        .cloned()
+        .map(|s| (s.subscriber_id, s))
+        .collect();
+    let mut merged = Vec::with_capacity(report.subscribers.len() + old.len());
+    let mut events = Vec::new();
+
+    for current in report.subscribers.drain(..) {
+        let target = Some(current.subscriber_id.to_string());
+        match old.remove(&current.subscriber_id) {
+            None => events.push(snapshot_event("joined", &current, target)),
+            Some(previous) if !previous.present => {
+                events.push(snapshot_event("reappeared", &current, target.clone()));
+                if let Some(changes) = snapshot_changes(&previous, &current) {
+                    events.push(changed_event(
+                        &current,
+                        report.observed_at,
+                        &changes,
+                        target,
+                    ));
+                }
+            }
+            Some(previous) => {
+                if let Some(changes) = snapshot_changes(&previous, &current) {
+                    events.push(changed_event(
+                        &current,
+                        report.observed_at,
+                        &changes,
+                        target,
+                    ));
+                }
+            }
+        }
+        merged.push(current);
+    }
+
+    for (_, mut missing) in old {
+        if missing.present {
+            missing.present = false;
+            missing.missing_since = Some(report.observed_at);
+            events.push(snapshot_event(
+                "missing",
+                &missing,
+                Some(missing.subscriber_id.to_string()),
+            ));
+        }
+        merged.push(missing);
+    }
+    merged.sort_by_key(|s| s.subscriber_id);
+    report.subscribers = merged;
+    events
+}
+
+fn changed_event(
+    snapshot: &SubscriberSnapshot,
+    observed_at: i64,
+    changes: &serde_json::Map<String, serde_json::Value>,
+    target: Option<String>,
+) -> AuditEvent {
+    (
+        "boosty.subscriber.changed".into(),
+        target,
+        serde_json::json!({
+            "kind": "changed",
+            "name": snapshot.name,
+            "observed_at": observed_at,
+            "changes": changes,
+        }),
+    )
+}
+
+fn snapshot_event(kind: &str, snapshot: &SubscriberSnapshot, target: Option<String>) -> AuditEvent {
+    (
+        format!("boosty.subscriber.{kind}"),
+        target,
+        serde_json::json!({
+            "kind": kind,
+            "name": snapshot.name,
+            "status": snapshot.status,
+            "level": snapshot.level_name,
+            "payments": snapshot.payments,
+            "off_time": snapshot.off_time,
+            "missing_since": snapshot.missing_since,
+        }),
+    )
+}
+
+fn snapshot_changes(
+    old: &SubscriberSnapshot,
+    new: &SubscriberSnapshot,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let old = serde_json::to_value(old).ok()?.as_object()?.clone();
+    let new = serde_json::to_value(new).ok()?.as_object()?.clone();
+    let mut changes = serde_json::Map::new();
+    for (key, new_value) in new {
+        if matches!(key.as_str(), "subscriber_id" | "present" | "missing_since") {
+            continue;
+        }
+        let old_value = old.get(&key).cloned().unwrap_or(serde_json::Value::Null);
+        if old_value != new_value {
+            changes.insert(
+                key,
+                serde_json::json!({ "old": old_value, "new": new_value }),
+            );
+        }
+    }
+    (!changes.is_empty()).then_some(changes)
 }
 
 /// Whether a Boosty subscriber should have VPN access: actively subscribed
@@ -322,6 +574,36 @@ pub async fn sync_once_with_policy(
             })
         })
         .collect::<Result<_, _>>()?;
+    let subscriber_snapshots: Vec<SubscriberSnapshot> = subscribers
+        .iter()
+        .zip(&subscriber_ids)
+        .map(|(s, &subscriber_id)| {
+            Ok(SubscriberSnapshot {
+                subscriber_id,
+                name: s.name.clone(),
+                present: true,
+                missing_since: None,
+                status: s.status.clone(),
+                subscribed: s.subscribed,
+                on_time: s.on_time,
+                off_time: s.off_time,
+                next_pay_time: s.next_pay_time,
+                price: s.price.to_string(),
+                payments: s.payments.to_string(),
+                is_fee_paid: s.is_fee_paid,
+                can_write: s.can_write,
+                is_black_listed: s.is_black_listed,
+                level_id: i64::try_from(s.level.id).map_err(|_| {
+                    BridgeError::Config(format!(
+                        "Boosty level id {} exceeds SQLite i64",
+                        s.level.id
+                    ))
+                })?,
+                level_name: s.level.name.clone(),
+                level_price: s.level.price.to_string(),
+            })
+        })
+        .collect::<Result<_, BridgeError>>()?;
 
     let name_by_id: HashMap<i64, String> = subscribers
         .iter()
@@ -401,10 +683,12 @@ pub async fn sync_once_with_policy(
     }
 
     let mut report = SyncReport {
+        observed_at: now,
         total_subscribers: subscribers.len(),
         active_subscribers: active_count,
         excluded_unpaid,
         linked: links.len(),
+        subscribers: subscriber_snapshots,
         ..Default::default()
     };
 
@@ -620,6 +904,80 @@ pub fn sync_failure_summary(err: &BridgeError) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn snapshot(id: i64, payments: &str) -> SubscriberSnapshot {
+        SubscriberSnapshot {
+            subscriber_id: id,
+            name: format!("subscriber-{id}"),
+            payments: payments.into(),
+            status: "active".into(),
+            subscribed: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn subscriber_journal_baselines_then_records_changes_and_missing() {
+        let mut first = SyncReport {
+            observed_at: 10,
+            subscribers: vec![snapshot(1, "100"), snapshot(2, "200")],
+            ..Default::default()
+        };
+        let baseline = subscriber_events(None, &mut first);
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].0, "boosty.baseline");
+
+        let mut second = SyncReport {
+            observed_at: 20,
+            subscribers: vec![snapshot(1, "150")],
+            ..Default::default()
+        };
+        let events = subscriber_events(Some(&first), &mut second);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|e| {
+            e.0 == "boosty.subscriber.changed"
+                && e.2["changes"]["payments"]["old"] == "100"
+                && e.2["changes"]["payments"]["new"] == "150"
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.0 == "boosty.subscriber.missing" && e.1.as_deref() == Some("2"))
+        );
+        assert_eq!(second.subscribers.len(), 2, "missing tombstone is retained");
+        assert!(!second.subscribers[1].present);
+
+        let mut third = SyncReport {
+            observed_at: 30,
+            subscribers: vec![SubscriberSnapshot {
+                name: "renamed".into(),
+                ..snapshot(2, "250")
+            }],
+            ..Default::default()
+        };
+        let reappeared = subscriber_events(Some(&second), &mut third);
+        assert!(
+            reappeared
+                .iter()
+                .any(|e| e.0 == "boosty.subscriber.reappeared")
+        );
+        assert!(reappeared.iter().any(|e| {
+            e.0 == "boosty.subscriber.changed"
+                && e.2["changes"]["name"]["old"] == "subscriber-2"
+                && e.2["changes"]["payments"]["new"] == "250"
+        }));
+
+        let mut empty = SyncReport {
+            observed_at: 40,
+            ..Default::default()
+        };
+        assert_eq!(subscriber_events(None, &mut empty).len(), 1);
+        let mut still_empty = SyncReport {
+            observed_at: 50,
+            ..Default::default()
+        };
+        assert!(subscriber_events(Some(&empty), &mut still_empty).is_empty());
+    }
 
     #[test]
     fn auth_failure_summary_names_the_web_fix_surface_not_ssh() {
