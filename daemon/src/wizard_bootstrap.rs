@@ -560,7 +560,7 @@ async fn redeploy_pipeline(
             0,
             Some(reason),
             false,
-            None,
+            &deploy_revision,
         )
         .await;
         fail!("deploy", "deploy skipped — {reason}.");
@@ -592,7 +592,7 @@ async fn redeploy_pipeline(
             0,
             None,
             true,
-            None,
+            &deploy_revision,
         )
         .await;
         fail!("deploy", "inventory changed while preparing deploy; retry");
@@ -695,7 +695,7 @@ async fn redeploy_pipeline(
         configs_applied,
         None,
         false,
-        Some(&deploy_revision),
+        &deploy_revision,
     )
     .await;
 
@@ -1091,7 +1091,7 @@ async fn write_deploy_audit(
     configs_applied: usize,
     ssh_skip_reason: Option<&'static str>,
     inputs_changed: bool,
-    expected_revision: Option<&str>,
+    expected_revision: &str,
 ) -> &'static str {
     let mut action =
         deploy_audit_action(ssh_errors, configs_applied, ssh_skip_reason, inputs_changed);
@@ -1108,18 +1108,13 @@ async fn write_deploy_audit(
         "via": "sse",
     });
     let result = if action == "server.deploy" {
-        inv.audit_deploy_if_revision(
-            "admin",
-            &server.id,
-            expected_revision.expect("successful deploy has a revision"),
-            &payload,
-        )
-        .await
-        .map(|matches| {
-            if !matches {
-                action = "server.deploy.stale";
-            }
-        })
+        inv.audit_deploy_if_revision("admin", &server.id, expected_revision, &payload)
+            .await
+            .map(|matches| {
+                if !matches {
+                    action = "server.deploy.stale";
+                }
+            })
     } else {
         inv.audit("admin", action, Some(&server.id.0), Some(&payload))
             .await
