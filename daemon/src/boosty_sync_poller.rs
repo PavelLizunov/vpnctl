@@ -359,4 +359,74 @@ mod tests {
             "no servers -> no autodeploy audit row"
         );
     }
+
+    /// A node-apply failure must be operator-visible in the audit timeline.
+    /// A missing key exercises the shared redeploy guard without SSH/network.
+    #[tokio::test]
+    async fn deploy_flipped_users_audits_redeploy_failure() {
+        use vpnctl_core::{KernelId, ProtocolId, ServerId, User};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let registry = Arc::new(crate::app::build_registry().unwrap());
+        let uid = UserId("alice".into());
+        let sid = ServerId("de".into());
+        inv.add_user(&User {
+            id: uid.clone(),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+        inv.add_server(&Server {
+            id: sid.clone(),
+            address: "192.0.2.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        inv.grant(&uid, &sid).await.unwrap();
+
+        deploy_flipped_users(
+            &inv,
+            &registry,
+            &tmp.path().join("missing-deploy-key"),
+            &[uid.0],
+            "test",
+        )
+        .await;
+
+        let row = inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.action == "boosty.autodeploy")
+            .expect("failed redeploy must be audited");
+        let payload = row.payload.expect("autodeploy audit payload");
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["servers"], serde_json::json!(["de"]));
+        // The failure must preserve its actionable cause, not degrade to a
+        // generic apply error that sends the operator hunting through logs.
+        assert!(
+            payload["failed"][0]
+                .as_str()
+                .is_some_and(|s| s.contains("deploy key")),
+            "failure must explain the missing deploy key: {payload}"
+        );
+    }
 }

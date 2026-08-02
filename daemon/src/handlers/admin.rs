@@ -8693,9 +8693,16 @@ pub(crate) async fn boosty_page(
         // Current credential state (masked) so the operator sees what's
         // stored without the write-only form fields revealing it.
         div style="display: flex; flex-wrap: wrap; gap: 24px; margin: 8px 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-            span { "access " span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
-            span { "refresh " span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
-            span { "device " span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
+            span { (tr(lang, "access fallback ", "резервный access ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
+            span { (tr(lang, "refresh preferred ", "основной refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
+            span { (tr(lang, "device · with refresh ", "device · для refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px;" {
+            (tr(
+                lang,
+                "Preferred: refresh token + device id (renewed automatically). Access token is a short-lived fallback used only when that pair is incomplete.",
+                "Основной способ: refresh token + device id (обновляются автоматически). Access token — короткоживущий резерв, он используется только если пара заполнена не полностью.",
+            ))
         }
         form method="post" action="/admin/boosty/settings" {
             div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
@@ -8707,19 +8714,19 @@ pub(crate) async fn boosty_page(
                       placeholder="boosty.to/yourblog";
 
                 label for="boosty_access" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "access token", "access token"))
+                    (tr(lang, "access token · fallback", "access token · резервный"))
                 }
                 input id="boosty_access" type="password" name="access_token" autocomplete="off"
                       placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
 
                 label for="boosty_refresh" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "refresh token", "refresh token"))
+                    (tr(lang, "refresh token · preferred", "refresh token · основной"))
                 }
                 input id="boosty_refresh" type="password" name="refresh_token" autocomplete="off"
                       placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
 
                 label for="boosty_device" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "device id", "device id"))
+                    (tr(lang, "device id · with refresh", "device id · для refresh"))
                 }
                 input id="boosty_device" type="password" name="device_id" autocomplete="off"
                       placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));

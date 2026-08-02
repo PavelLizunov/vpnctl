@@ -1984,6 +1984,19 @@ async fn boosty_settings_save_via_web() {
 }
 
 #[tokio::test]
+async fn boosty_page_explains_refresh_credentials_are_preferred() {
+    let dir = TempDir::new().unwrap();
+    let html = fetch_html(router(state(&dir).await), "/admin/boosty").await;
+
+    assert!(html.contains("refresh token · preferred"));
+    assert!(html.contains("device id · with refresh"));
+    assert!(html.contains("access token · fallback"));
+    assert!(html.contains(
+        "Access token is a short-lived fallback used only when that pair is incomplete."
+    ));
+}
+
+#[tokio::test]
 async fn boosty_disable_button_soft_mutes_user() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
