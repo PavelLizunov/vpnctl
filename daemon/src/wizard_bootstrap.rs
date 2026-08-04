@@ -501,7 +501,13 @@ async fn redeploy_pipeline(
     // server but supported by NO declared kernel is silently filtered
     // out of every per-kernel render and the deploy still reports Ok —
     // the operator would never learn it isn't being delivered.
-    if let Err(e) = registry.validate_server(&server) {
+    // Secrets loaded BEFORE validation so the port-conflict guard sees
+    // per-server overrides (vless.listen_port) already set by the operator.
+    let pre_secrets = match inv.list_server_secrets(&server.id).await {
+        Ok(s) => s,
+        Err(e) => fail!("validate", "cannot load server secrets: {e}"),
+    };
+    if let Err(e) = registry.validate_server(&server, &pre_secrets) {
         fail!("validate", "config invalid before deploy: {e}");
     }
 
@@ -534,7 +540,7 @@ async fn redeploy_pipeline(
         Ok(secrets) => secrets,
         Err(e) => fail!("deploy", "cannot refresh server secrets: {e}"),
     };
-    if let Err(e) = registry.validate_server(&server) {
+    if let Err(e) = registry.validate_server(&server, &secrets) {
         fail!("validate", "config changed before deploy: {e}");
     }
 
@@ -679,7 +685,7 @@ async fn redeploy_pipeline(
         // fresh deploy is reachable without a manual `ufw allow`. Best-effort:
         // a firewall failure (no ufw / cloud-firewall host) is surfaced but
         // does NOT fail the deploy — the config is already live.
-        if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+        if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             send_step!("apply", "⚠ {} — firewall step skipped: {e}", kid.0);
         }
     }
@@ -1483,7 +1489,7 @@ async fn bootstrap_pipeline(
         send_step!("apply", "{}: ok — service running with new config.", kid.0);
         // Best-effort firewall open (Kernel::open_firewall) — fresh deploy
         // reachable without a manual `ufw allow`; non-fatal (config is live).
-        if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+        if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             send_step!("apply", "⚠ {}: firewall step skipped: {e}", kid.0);
         }
     }

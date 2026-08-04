@@ -190,7 +190,9 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         jump_via: None,
         usage_coefficient: args.usage_coefficient,
     };
-    registry.validate_server(&server)?;
+    // No secrets yet at bootstrap time (they are minted by the first
+    // deploy) — the port-conflict guard validates default ports here.
+    registry.validate_server(&server, &std::collections::HashMap::new())?;
     inv.add_server(&server).await?;
 
     inv.audit(

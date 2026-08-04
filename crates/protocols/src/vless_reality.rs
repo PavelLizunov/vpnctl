@@ -106,6 +106,31 @@ impl Protocol for VlessReality {
         ]
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        // Default REALITY cover port. Per-server `vless.listen_port`
+        // override is honoured by `effective_listen_ports` below.
+        &[("tcp", 443)]
+    }
+
+    fn effective_listen_ports(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        // Mirror the `server_inbound` / `client_config` / `share_link`
+        // override semantics EXACTLY: parse `vless.listen_port`, fall back
+        // to the gold-standard 443 on absence or a typo. Keeping the
+        // firewall step, the port-conflict guard and the drift table in
+        // sync with what sing-box actually binds is the whole point —
+        // cdn incident 2026-08-05: reality moved to 8443 via the override
+        // while ufw + drift still assumed the static default, so the port
+        // was firewalled and the admin table showed «no fixed port».
+        let port: u16 = secrets
+            .get("vless.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(443);
+        vec![("tcp", port)]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;

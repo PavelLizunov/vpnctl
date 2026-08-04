@@ -40,13 +40,16 @@ pub(crate) async fn run(server: &str, db_flag: Option<PathBuf>) -> anyhow::Resul
         .await?
         .ok_or_else(|| anyhow::anyhow!("server not in inventory: {server}"))?;
 
+    // Secrets loaded BEFORE validation so the port-conflict guard sees
+    // per-server overrides (vless.listen_port) — same order `deploy` uses.
+    let secrets = inv.list_server_secrets(&sid).await?;
+
     // Same protocol-vs-kernel validation `deploy` does pre-SSH — fail
     // here too so operators don't get a surprise from `sing-box check`
     // on the rendered output.
-    reg.validate_server(&server_row)?;
+    reg.validate_server(&server_row, &secrets)?;
 
     let users = inv.users_for_server(&sid).await?;
-    let secrets = inv.list_server_secrets(&sid).await?;
     let ctx = RenderCtx::new(&server_row, &secrets);
 
     // Multi-kernel: render each declared kernel's config separately,

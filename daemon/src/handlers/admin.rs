@@ -9853,7 +9853,13 @@ pub(crate) async fn server_deploy(
     // rendered by any of its kernels, every bootstrap step below
     // would still succeed but the render would later fail with a
     // confusing "unsupported protocol" — surface that upfront.
-    if let Err(e) = state.registry.validate_server(&server) {
+    // Secrets are loaded first so the port-conflict guard honours
+    // per-server overrides (vless.listen_port).
+    let pre_secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if let Err(e) = state.registry.validate_server(&server, &pre_secrets) {
         return bad_request(&format!("config invalid before deploy: {e}"));
     }
 
@@ -9904,7 +9910,7 @@ pub(crate) async fn server_deploy(
         Ok(secrets) => secrets,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if let Err(e) = state.registry.validate_server(&server) {
+    if let Err(e) = state.registry.validate_server(&server, &secrets) {
         return bad_request(&format!("config changed before deploy: {e}"));
     }
 
@@ -10012,7 +10018,7 @@ pub(crate) async fn server_deploy(
             // Best-effort firewall open (Kernel::open_firewall) — a fresh
             // deploy must be reachable without a manual `ufw allow`; non-fatal
             // (the config is already applied).
-            if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+            if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
                 tracing::warn!(target = "vpnctld::deploy", kernel = %kid.0, error = %e, "open_firewall skipped (best-effort)");
             }
         }
@@ -15656,19 +15662,26 @@ pub(crate) async fn settings_geoip_update_now_sse(
 /// matches what each `Protocol::server_inbound` emits.
 /// Look up expected `(proto, port)` tuples for a given protocol via
 /// the registry. **Single source of truth** — each protocol owns its
-/// own `listen_ports()` (see `vpnctl_core::Protocol`), so adding a
+/// own port declaration (see `vpnctl_core::Protocol`), so adding a
 /// new protocol doesn't require touching this function. (Refactored
 /// 2026-05-16 per review-agent finding — previous hand-maintained
 /// map violated kernel/protocol orthogonality.)
+///
+/// `secrets` = this server's secret map: `effective_listen_ports`
+/// resolves runtime-configurable ports (vless.listen_port override),
+/// so the table shows the port the node ACTUALLY binds — not the
+/// compile-time default (cdn incident 2026-08-05: reality on 8443
+/// rendered as «no fixed port» while 443 stayed firewalled).
 fn expected_ports_for_protocol(
     registry: &vpnctl_core::Registry,
     pid: &vpnctl_core::ProtocolId,
+    secrets: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, u16)> {
     match registry.protocol(pid) {
         Some(p) => p
-            .listen_ports()
-            .iter()
-            .map(|(s, n)| ((*s).to_string(), *n))
+            .effective_listen_ports(secrets)
+            .into_iter()
+            .map(|(s, n)| (s.to_string(), n))
             .collect(),
         None => Vec::new(),
     }
@@ -16176,7 +16189,7 @@ async fn server_detail_render(
     let expected: std::collections::BTreeSet<(String, u16)> = server
         .enabled_protocols
         .iter()
-        .flat_map(|pid| expected_ports_for_protocol(&state.registry, pid))
+        .flat_map(|pid| expected_ports_for_protocol(&state.registry, pid, &server_secrets))
         .collect();
 
     let missing: Vec<_> = expected.difference(&observed).cloned().collect();
@@ -16398,7 +16411,7 @@ async fn server_detail_render(
             // on this tab's label is about drift, but the grid used to
             // sit at the very bottom below four config forms: the tab
             // opened without answering its own warning.
-            (server_detail_drift_section(&server, &state.registry, &observed, &missing, &extra, latest.is_some(), lang))
+            (server_detail_drift_section(&server, &state.registry, &server_secrets, &observed, &missing, &extra, latest.is_some(), lang))
             (server_detail_kernels_section(&server, &state.registry, lang))
             // Enabled protocols — enable/disable/hide (NM-10 hidden_map:
             // hidden=1 keeps the inbound running but stops emitting the
@@ -19792,9 +19805,11 @@ fn server_detail_drift_summary(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
+    secrets: &std::collections::HashMap<String, String>,
     observed: &std::collections::BTreeSet<(String, u16)>,
     missing: &[(String, u16)],
     extra: &[(String, u16)],
@@ -19851,7 +19866,7 @@ fn server_detail_drift_section(
                 }
                 tbody {
                     @for pid in &server.enabled_protocols {
-                        @let ports = expected_ports_for_protocol(registry, pid);
+                        @let ports = expected_ports_for_protocol(registry, pid, secrets);
                         @let silent = ports.iter().any(|pp| !observed.contains(pp));
                         tr class=(if silent && !ports.is_empty() { "on-warn" } else { "" }) {
                             td { b { (pid.0) } }

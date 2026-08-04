@@ -394,6 +394,10 @@ fn hysteria2_missing_password_is_error() {
 }
 
 #[test]
-fn vless_reality_listen_ports_is_empty() {
-    assert!(VlessReality::new().listen_ports().is_empty());
+fn vless_reality_listen_ports_is_tcp_443_default() {
+    // Post cdn-incident (2026-08-05): REALITY declares its default cover
+    // port so the firewall step, the port-conflict guard and the drift
+    // table see it. The per-server `vless.listen_port` override is
+    // resolved by `effective_listen_ports` (spec_vless_reality_ports.rs).
+    assert_eq!(VlessReality::new().listen_ports(), &[("tcp", 443)]);
 }

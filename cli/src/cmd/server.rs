@@ -150,7 +150,9 @@ pub(crate) async fn run(
                 jump_via: jump_via.map(ServerId),
                 usage_coefficient,
             };
-            reg.validate_server(&server)?;
+            // A freshly-added server has no secrets yet (first deploy
+            // mints them) — the guard validates default ports.
+            reg.validate_server(&server, &std::collections::HashMap::new())?;
             inv.add_server(&server).await?;
             // Whitelist what goes into audit_log — if Server ever gains a
             // sensitive field (api token, jump credentials), serializing

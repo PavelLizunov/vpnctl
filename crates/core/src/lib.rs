@@ -425,10 +425,11 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()>;
 
     /// Открыть хост-фаервол под порты, которые биндят включённые
-    /// `protocols` — источник правды `Protocol::listen_ports()` (тот же
-    /// набор, что у cross-protocol port-conflict guard'а). Чтобы свежий
-    /// `deploy` был доступен СРАЗУ, без ручного `ufw allow` (иначе смысл
-    /// автоматизации теряется).
+    /// `protocols` — источник правды `Protocol::effective_listen_ports()`
+    /// (тот же набор, что у cross-protocol port-conflict guard'а), т.е.
+    /// с учётом пер-серверных оверрайдов портов из `ctx.secrets`. Чтобы
+    /// свежий `deploy` был доступен СРАЗУ, без ручного `ufw allow`
+    /// (иначе смысл автоматизации теряется).
     ///
     /// DEFAULT — no-op: ядра без управляемого хост-фаервола, или
     /// управляющие им инлайн (amneziawg / wgturn через wg-quick PostUp
@@ -442,6 +443,7 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     async fn open_firewall(
         &self,
         _ssh: &dyn SshTransport,
+        _ctx: &RenderCtx<'_>,
         _protocols: &[&dyn Protocol],
     ) -> Result<()> {
         Ok(())
@@ -496,6 +498,22 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     /// violated the kernel/protocol orthogonality invariant.)
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
         &[]
+    }
+
+    /// Effective `(proto, port)` tuples this protocol's inbound will bind
+    /// on a SPECIFIC server, taking that server's secrets into account.
+    /// Defaults to the static [`listen_ports`](Self::listen_ports);
+    /// protocols whose port is runtime-configurable via a per-server secret
+    /// (today: VLESS+REALITY's `vless.listen_port` co-tenant override)
+    /// override this so the firewall step, the cross-protocol port-conflict
+    /// guard and the admin drift table all see the REAL port instead of the
+    /// compile-time default. Consumers that have server context MUST call
+    /// this rather than `listen_ports`.
+    fn effective_listen_ports(
+        &self,
+        _secrets: &HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        self.listen_ports().to_vec()
     }
 
     /// Does this protocol's `client_config` produce a sing-box-
@@ -778,7 +796,11 @@ impl Registry {
             .collect()
     }
 
-    pub fn validate_server(&self, server: &Server) -> Result<()> {
+    pub fn validate_server(
+        &self,
+        server: &Server,
+        secrets: &HashMap<String, String>,
+    ) -> Result<()> {
         if server.kernels.is_empty() {
             return Err(CoreError::Render(format!(
                 "server '{}' has no kernels assigned — assign at least one (sing-box, amneziawg, …)",
@@ -816,21 +838,27 @@ impl Registry {
         // bind the same (transport, port) on one host collide at runtime
         // — e.g. naive's Caddy on tcp/443 vs VLESS+REALITY's sing-box on
         // tcp/443. Catch it here, before any SSH session, instead of
-        // discovering it as a crash-looping second daemon. Protocols
-        // whose port is runtime-configurable declare none (the
-        // `listen_ports()` default) and are skipped.
+        // discovering it as a crash-looping second daemon.
+        //
+        // `effective_listen_ports(secrets)` (not the static `listen_ports`)
+        // so a per-server override moves the protocol's declared port in
+        // lockstep — `vless.listen_port=8443` frees tcp/443 for naive on
+        // the same node, and a hypothetical second protocol squatting 8443
+        // is caught here. Protocols without listening-side semantics still
+        // declare nothing and are skipped (cdn incident 2026-08-05).
         let mut bound: HashMap<(&str, u16), &ProtocolId> = HashMap::new();
         for pid in &server.enabled_protocols {
             let Some(proto) = self.protocol(pid) else {
                 continue;
             };
-            for &(transport, port) in proto.listen_ports() {
+            for (transport, port) in proto.effective_listen_ports(secrets) {
                 if let Some(prev) = bound.insert((transport, port), pid) {
                     return Err(CoreError::Render(format!(
                         "port conflict on {transport}/{port}: protocols '{prev}' and \
                          '{pid}' both bind it on server '{}'. Move one to a different \
                          port or a dedicated node (naive needs a host with no 443/TCP \
-                         sing-box protocol).",
+                         sing-box protocol; a reality co-tenant can move via the \
+                         vless.listen_port server secret).",
                         server.id
                     )));
                 }
@@ -937,11 +965,15 @@ mod validate_server_port_conflict {
         }
     }
 
+    fn no_secrets() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn same_transport_and_port_conflicts() {
         let reg = registry(vec![("vless", &[("tcp", 443)]), ("naive", &[("tcp", 443)])]);
         let err = reg
-            .validate_server(&server(&["vless", "naive"]))
+            .validate_server(&server(&["vless", "naive"]), &no_secrets())
             .unwrap_err();
         match err {
             CoreError::Render(m) => {
@@ -956,19 +988,122 @@ mod validate_server_port_conflict {
     #[test]
     fn distinct_ports_ok() {
         let reg = registry(vec![("vless", &[("tcp", 443)]), ("tuic", &[("udp", 8443)])]);
-        assert!(reg.validate_server(&server(&["vless", "tuic"])).is_ok());
+        assert!(
+            reg.validate_server(&server(&["vless", "tuic"]), &no_secrets())
+                .is_ok()
+        );
     }
 
     #[test]
     fn same_port_different_transport_ok() {
         // tcp/443 and udp/443 are distinct sockets — not a conflict.
         let reg = registry(vec![("a", &[("tcp", 443)]), ("b", &[("udp", 443)])]);
-        assert!(reg.validate_server(&server(&["a", "b"])).is_ok());
+        assert!(
+            reg.validate_server(&server(&["a", "b"]), &no_secrets())
+                .is_ok()
+        );
     }
 
     #[test]
     fn protocol_without_declared_ports_never_conflicts() {
         let reg = registry(vec![("vless", &[("tcp", 443)]), ("portless", &[])]);
-        assert!(reg.validate_server(&server(&["vless", "portless"])).is_ok());
+        assert!(
+            reg.validate_server(&server(&["vless", "portless"]), &no_secrets())
+                .is_ok()
+        );
+    }
+
+    /// A protocol whose `effective_listen_ports` honours a secret override
+    /// moves its declared port for the guard too: with the override set the
+    /// naive-on-443 conflict disappears…
+    #[test]
+    fn secret_override_frees_default_port() {
+        #[derive(Debug)]
+        struct OverridableVless;
+        impl Protocol for OverridableVless {
+            fn id(&self) -> ProtocolId {
+                ProtocolId("vless".to_string())
+            }
+            fn server_inbound(&self, _: &RenderCtx<'_>, _: &[User]) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn client_config(&self, _: &RenderCtx<'_>, _: &User) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn share_link(&self, _: &RenderCtx<'_>, _: &User) -> Result<String> {
+                Ok(String::new())
+            }
+            fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+                &[("tcp", 443)]
+            }
+            fn effective_listen_ports(
+                &self,
+                secrets: &HashMap<String, String>,
+            ) -> Vec<(&'static str, u16)> {
+                let port: u16 = secrets
+                    .get("vless.listen_port")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(443);
+                vec![("tcp", port)]
+            }
+        }
+        let mut reg = Registry::new();
+        reg.register_kernel(Box::new(FakeKernel {
+            supports: vec!["vless", "naive"],
+        }))
+        .unwrap();
+        reg.register_protocol(Box::new(OverridableVless)).unwrap();
+        reg.register_protocol(Box::new(FakeProto {
+            id: "naive",
+            ports: &[("tcp", 443)],
+        }))
+        .unwrap();
+
+        // Without the override: naive + vless both claim tcp/443.
+        assert!(
+            reg.validate_server(&server(&["vless", "naive"]), &no_secrets())
+                .is_err()
+        );
+
+        // With vless.listen_port=8443 the conflict is resolved…
+        let mut overridden = no_secrets();
+        overridden.insert("vless.listen_port".into(), "8443".into());
+        assert!(
+            reg.validate_server(&server(&["vless", "naive"]), &overridden)
+                .is_ok()
+        );
+
+        // …but a third protocol squatting the override port conflicts.
+        reg.register_protocol(Box::new(FakeProto {
+            id: "squat",
+            ports: &[("tcp", 8443)],
+        }))
+        .unwrap();
+        let reg2 = {
+            let mut r = Registry::new();
+            r.register_kernel(Box::new(FakeKernel {
+                supports: vec!["vless", "naive", "squat"],
+            }))
+            .unwrap();
+            r.register_protocol(Box::new(OverridableVless)).unwrap();
+            r.register_protocol(Box::new(FakeProto {
+                id: "naive",
+                ports: &[("tcp", 443)],
+            }))
+            .unwrap();
+            r.register_protocol(Box::new(FakeProto {
+                id: "squat",
+                ports: &[("tcp", 8443)],
+            }))
+            .unwrap();
+            r
+        };
+        let err = reg2
+            .validate_server(&server(&["vless", "naive", "squat"]), &overridden)
+            .unwrap_err();
+        match err {
+            CoreError::Render(m) => assert!(m.contains("8443"), "msg: {m}"),
+            other => panic!("expected Render, got {other:?}"),
+        }
     }
 }

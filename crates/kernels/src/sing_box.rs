@@ -402,15 +402,21 @@ impl Kernel for SingBox {
     async fn open_firewall(
         &self,
         ssh: &dyn SshTransport,
+        ctx: &RenderCtx<'_>,
         protocols: &[&dyn Protocol],
     ) -> Result<()> {
-        // Source of truth = each `Protocol::listen_ports()` (the SAME data
-        // the cross-protocol port-conflict guard reads), so the firewall
-        // opens EXACTLY what sing-box binds — never a stale hardcoded list,
-        // and it grows automatically when a new protocol is enabled.
+        // Source of truth = each `Protocol::effective_listen_ports()` (the
+        // SAME data the cross-protocol port-conflict guard reads), so the
+        // firewall opens EXACTLY what sing-box binds — never a stale
+        // hardcoded list, and it grows automatically when a new protocol is
+        // enabled. `effective_*` (not the static `listen_ports`) so a
+        // per-server port override (e.g. vless.listen_port=8443 on a
+        // co-tenant host) opens the REAL port — the static default would
+        // open 443 that a co-owned caddy already holds and leave 8443
+        // firewalled (cdn incident 2026-08-05).
         let ports: Vec<(&str, u16)> = protocols
             .iter()
-            .flat_map(|p| p.listen_ports().iter().copied())
+            .flat_map(|p| p.effective_listen_ports(ctx.secrets))
             .collect();
         if let Some(script) = firewall_open_script(&ports) {
             ssh.exec(&script).await?;
