@@ -28,12 +28,16 @@
 //! inbound). The protocol never knows it's caddy; the kernel never
 //! hard-codes per-user identity.
 //!
-//! ## :443 coexistence
+//! ## Port coexistence
 //!
-//! [`listen_ports`](Protocol::listen_ports) returns `&[]` (no static
-//! port) — exactly like the configurable `vless.listen_port` path — so a
-//! node can run `vless-ws` (front on 8443/2087) ALONGSIDE VLESS+REALITY
-//! on :443 without tripping the cross-protocol port-conflict guard.
+//! [`listen_ports`](Protocol::listen_ports) returns `&[]` (no STATIC
+//! port), but [`effective_listen_ports`](Protocol::effective_listen_ports)
+//! resolves the real front port (default 8443) from secrets — so the
+//! cross-protocol port-conflict guard and the drift table DO see it: a
+//! node can run `vless-ws` ALONGSIDE VLESS+REALITY on :443 (different
+//! ports, guard validates), while reality being moved onto the SAME port
+//! via `vless.listen_port` is rejected pre-SSH instead of crash-looping
+//! caddy or sing-box at runtime (cdn incident follow-up, PR #139 review).
 //!
 //! ## Server params (via [`RenderCtx::secrets`])
 //!
@@ -147,7 +151,19 @@ fn checked_path<'a>(ctx: &'a RenderCtx<'_>) -> Result<&'a str> {
 /// back to the default so a typo never silently drops the inbound to
 /// port 0 (mirrors `vless_reality.rs`'s `vless.listen_port` handling).
 fn front_port(ctx: &RenderCtx<'_>) -> u16 {
-    ctx.secrets
+    front_port_from_secrets(ctx.secrets)
+}
+
+/// Secrets-only variant of [`front_port`] for consumers that have the
+/// server's secret map but no full [`RenderCtx`] — the cross-protocol
+/// port-conflict guard, the firewall step and the admin drift table
+/// (`effective_listen_ports`). MUST stay the single source of truth for
+/// "which public port caddy binds on this node": with the default 8443
+/// this protocol COLLIDES with a reality moved to 8443 via
+/// `vless.listen_port` (the cdn-incident remedy), and with 2087 with any
+/// other tenant of that port — the guard has to see it either way.
+fn front_port_from_secrets(secrets: &std::collections::HashMap<String, String>) -> u16 {
+    secrets
         .get("vlessws.listen_port")
         .and_then(|s| s.parse::<u16>().ok())
         .filter(|&p| p != 0)
@@ -160,13 +176,24 @@ impl Protocol for VlessWs {
     }
 
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
-        // NO static port: the front port is configurable (`vlessws.listen_port`)
-        // so the cross-protocol `(transport, port)` guard skips it, letting
-        // `vless-ws` coexist with VLESS+REALITY on :443. Same pattern as the
-        // secret-driven `vless.listen_port` (which also returns no static port
-        // in spirit). The actual port (8443/2087) is caddy's, not a public
-        // sing-box inbound's.
+        // NO static port: the front port is per-server configurable
+        // (`vlessws.listen_port`, default 8443), so a compile-time
+        // declaration would be wrong more often than right. Context-aware
+        // consumers (guard / firewall / drift) call
+        // `effective_listen_ports` instead, which resolves the real port.
         &[]
+    }
+
+    fn effective_listen_ports(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        // The public TLS port caddy binds on this node. Declaring it is
+        // what lets the cross-protocol guard reject a reality moved onto
+        // the SAME port via `vless.listen_port` (default front port 8443
+        // == reality's canonical escape port — the exact cdn-incident
+        // remedy would otherwise recreate the outage one port over).
+        vec![("tcp", front_port_from_secrets(secrets))]
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
@@ -380,6 +407,41 @@ mod tests {
         assert_eq!(
             VlessWs::new().server_inbound(&ctx0, &[]).unwrap()["front_port"],
             8443
+        );
+    }
+
+    /// `effective_listen_ports` must track the SAME front port the
+    /// envelope renders — default, override, and the 0/garbage fallback —
+    /// so the guard/drift/firewall see what caddy actually binds
+    /// (PR #139 review finding 1: without this, a reality moved to the
+    /// default front port 8443 recreated the cdn outage one port over).
+    #[test]
+    fn effective_listen_ports_tracks_front_port() {
+        let p = VlessWs::new();
+        // default
+        let sec = secrets();
+        assert_eq!(p.effective_listen_ports(&sec), vec![("tcp", 8443)]);
+        // override
+        let mut sec2 = secrets();
+        sec2.insert("vlessws.listen_port".into(), "2087".into());
+        assert_eq!(p.effective_listen_ports(&sec2), vec![("tcp", 2087)]);
+        // 0 / garbage → default, exactly like the envelope
+        for bad in ["0", "", "junk", "-1", "65536"] {
+            let mut s = secrets();
+            s.insert("vlessws.listen_port".into(), bad.into());
+            assert_eq!(
+                p.effective_listen_ports(&s),
+                vec![("tcp", 8443)],
+                "bad override {bad:?}"
+            );
+        }
+        // and it agrees with the rendered envelope
+        let srv = server();
+        let ctx = RenderCtx::new(&srv, &sec2);
+        let env = p.server_inbound(&ctx, &[]).unwrap();
+        assert_eq!(
+            env["front_port"].as_u64().unwrap() as u16,
+            p.effective_listen_ports(&sec2)[0].1
         );
     }
 

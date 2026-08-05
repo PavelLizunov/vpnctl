@@ -60,11 +60,43 @@ fn effective_listen_ports_honours_the_override() {
 
 #[test]
 fn effective_listen_ports_unparsable_override_falls_back_to_443() {
-    for bad in ["", "not-a-port", "8443x", "-1", "65536"] {
+    // "0" included: a parsed-but-zero port would bind an ephemeral socket
+    // and emit `:0` share-links — filtered out (PR #139 review finding 3).
+    for bad in ["", "0", "not-a-port", "8443x", "-1", "65536"] {
         let mut s = base_secrets();
         s.insert("vless.listen_port".into(), bad.into());
         let ports = VlessReality::new().effective_listen_ports(&s);
         assert_eq!(ports, vec![("tcp", 443)], "bad override {bad:?}");
+    }
+}
+
+#[test]
+fn listen_port_helper_is_the_single_source_of_truth() {
+    // The exported helper must agree with effective_listen_ports for
+    // every input class — daemon-side consumers (vpn-router resolver)
+    // resolve through it.
+    for (value, expected) in [
+        (None, 443u16),
+        (Some("8443"), 8443),
+        (Some("0"), 443),
+        (Some(""), 443),
+        (Some("junk"), 443),
+        (Some("65535"), 65535),
+    ] {
+        let mut s = base_secrets();
+        if let Some(v) = value {
+            s.insert("vless.listen_port".into(), v.into());
+        }
+        assert_eq!(
+            vpnctl_protocols::reality_listen_port(&s),
+            expected,
+            "override {value:?}"
+        );
+        assert_eq!(
+            VlessReality::new().effective_listen_ports(&s),
+            vec![("tcp", expected)],
+            "override {value:?}"
+        );
     }
 }
 

@@ -138,6 +138,23 @@ impl Protocol for WireGuard {
         &[("udp", WIREGUARD_PORT)]
     }
 
+    fn effective_listen_ports(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        // EXACT parse semantics of the inbound renderer (`server_inbound`
+        // and the wg-quick / AmneziaWG / awg-link paths): per-server
+        // `wireguard.listen_port` override, fallback to the static port,
+        // unparsable values included. Guard/firewall/drift must see the
+        // port wg-quick ACTUALLY binds — otherwise an overridden node
+        // shows «declared but NOT listening» forever (PR #139 review).
+        let port: u16 = secrets
+            .get("wireguard.listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(WIREGUARD_PORT);
+        vec![("udp", port)]
+    }
+
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         // Raw WireGuard's handshake initiation message is ALWAYS a
         // 148-byte UDP datagram that begins with `0x01 0x00 0x00 0x00`
@@ -805,6 +822,29 @@ mod tests {
 
     use std::collections::HashMap;
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+
+    /// `effective_listen_ports` must resolve the per-server
+    /// `wireguard.listen_port` override with the SAME semantics as the
+    /// inbound renderer — guard/drift/firewall see the port wg-quick
+    /// actually binds (PR #139 review finding 2).
+    #[test]
+    fn effective_listen_ports_honours_override() {
+        let p = WireGuard::new();
+        assert_eq!(
+            p.effective_listen_ports(&HashMap::new()),
+            vec![("udp", WIREGUARD_PORT)]
+        );
+        let mut overridden = HashMap::new();
+        overridden.insert("wireguard.listen_port".into(), "52820".into());
+        assert_eq!(p.effective_listen_ports(&overridden), vec![("udp", 52820)]);
+        // unparsable → default (identical to the inbound renderer)
+        let mut bad = HashMap::new();
+        bad.insert("wireguard.listen_port".into(), "junk".into());
+        assert_eq!(
+            p.effective_listen_ports(&bad),
+            vec![("udp", WIREGUARD_PORT)]
+        );
+    }
 
     fn fake_user() -> User {
         User {

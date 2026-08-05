@@ -796,11 +796,15 @@ impl Registry {
             .collect()
     }
 
-    pub fn validate_server(
-        &self,
-        server: &Server,
-        secrets: &HashMap<String, String>,
-    ) -> Result<()> {
+    /// Kernel/protocol SUPPORT validation only (no port-conflict gate).
+    /// For server-CREATE paths (`bootstrap`, `server add`) where no
+    /// secrets exist yet: the port-conflict guard is secret-aware
+    /// (`vless.listen_port` etc.), and the operator can't set the secret
+    /// until the server row exists — validating ports here would reject
+    /// exactly the naive+reality topology this guard exists to enable.
+    /// The deploy path runs the full [`validate_server`] with real
+    /// secrets; that is the authoritative gate.
+    pub fn validate_server_support(&self, server: &Server) -> Result<()> {
         if server.kernels.is_empty() {
             return Err(CoreError::Render(format!(
                 "server '{}' has no kernels assigned — assign at least one (sing-box, amneziawg, …)",
@@ -833,6 +837,15 @@ impl Registry {
                 });
             }
         }
+        Ok(())
+    }
+
+    pub fn validate_server(
+        &self,
+        server: &Server,
+        secrets: &HashMap<String, String>,
+    ) -> Result<()> {
+        self.validate_server_support(server)?;
 
         // Cross-protocol port-conflict guard: two enabled protocols that
         // bind the same (transport, port) on one host collide at runtime
@@ -843,9 +856,8 @@ impl Registry {
         // `effective_listen_ports(secrets)` (not the static `listen_ports`)
         // so a per-server override moves the protocol's declared port in
         // lockstep — `vless.listen_port=8443` frees tcp/443 for naive on
-        // the same node, and a hypothetical second protocol squatting 8443
-        // is caught here. Protocols without listening-side semantics still
-        // declare nothing and are skipped (cdn incident 2026-08-05).
+        // the same node, and a second protocol squatting 8443 (including
+        // vless-ws's front port) is caught here (cdn incident 2026-08-05).
         let mut bound: HashMap<(&str, u16), &ProtocolId> = HashMap::new();
         for pid in &server.enabled_protocols {
             let Some(proto) = self.protocol(pid) else {
@@ -1105,5 +1117,134 @@ mod validate_server_port_conflict {
             CoreError::Render(m) => assert!(m.contains("8443"), "msg: {m}"),
             other => panic!("expected Render, got {other:?}"),
         }
+    }
+
+    /// PR #139 review finding 1: a protocol that declares NO static port
+    /// but binds a secret-driven one (the vless-ws shape — caddy front on
+    /// `vlessws.listen_port`, default 8443) must still be visible to the
+    /// guard through `effective_listen_ports`. Its default front port
+    /// EQUALS reality's canonical override port 8443, so the cdn-incident
+    /// remedy (reality → 8443) silently recreated the outage on a
+    /// vless-ws co-resident node unless the guard sees both sides.
+    #[test]
+    fn secret_driven_front_port_conflicts_with_reality_override() {
+        // vless-ws shape: no static declaration, effective port from a
+        // secret with a non-443 default.
+        #[derive(Debug)]
+        struct WsLike;
+        impl Protocol for WsLike {
+            fn id(&self) -> ProtocolId {
+                ProtocolId("ws".to_string())
+            }
+            fn server_inbound(&self, _: &RenderCtx<'_>, _: &[User]) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn client_config(&self, _: &RenderCtx<'_>, _: &User) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn share_link(&self, _: &RenderCtx<'_>, _: &User) -> Result<String> {
+                Ok(String::new())
+            }
+            fn effective_listen_ports(
+                &self,
+                secrets: &HashMap<String, String>,
+            ) -> Vec<(&'static str, u16)> {
+                let port: u16 = secrets
+                    .get("front.listen_port")
+                    .and_then(|s| s.parse().ok())
+                    .filter(|&p| p != 0)
+                    .unwrap_or(8443);
+                vec![("tcp", port)]
+            }
+        }
+        // reality shape: default 443, `vless.listen_port` override.
+        #[derive(Debug)]
+        struct RealityLike;
+        impl Protocol for RealityLike {
+            fn id(&self) -> ProtocolId {
+                ProtocolId("reality".to_string())
+            }
+            fn server_inbound(&self, _: &RenderCtx<'_>, _: &[User]) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn client_config(&self, _: &RenderCtx<'_>, _: &User) -> Result<serde_json::Value> {
+                Ok(serde_json::Value::Null)
+            }
+            fn share_link(&self, _: &RenderCtx<'_>, _: &User) -> Result<String> {
+                Ok(String::new())
+            }
+            fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+                &[("tcp", 443)]
+            }
+            fn effective_listen_ports(
+                &self,
+                secrets: &HashMap<String, String>,
+            ) -> Vec<(&'static str, u16)> {
+                let port: u16 = secrets
+                    .get("vless.listen_port")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(443);
+                vec![("tcp", port)]
+            }
+        }
+
+        let reg = {
+            let mut r = Registry::new();
+            r.register_kernel(Box::new(FakeKernel {
+                supports: vec!["ws", "reality"],
+            }))
+            .unwrap();
+            r.register_protocol(Box::new(WsLike)).unwrap();
+            r.register_protocol(Box::new(RealityLike)).unwrap();
+            r
+        };
+
+        // reality's canonical remedy port == ws's default front port →
+        // the exact outage combination MUST be rejected pre-SSH.
+        let mut clash = no_secrets();
+        clash.insert("vless.listen_port".into(), "8443".into());
+        let err = reg
+            .validate_server(&server(&["ws", "reality"]), &clash)
+            .unwrap_err();
+        match err {
+            CoreError::Render(m) => assert!(m.contains("8443"), "msg: {m}"),
+            other => panic!("expected Render, got {other:?}"),
+        }
+
+        // defaults (ws 8443 / reality 443) cohabit fine…
+        assert!(
+            reg.validate_server(&server(&["ws", "reality"]), &no_secrets())
+                .is_ok()
+        );
+
+        // …as does ws moved off the override port.
+        let mut apart = no_secrets();
+        apart.insert("vless.listen_port".into(), "8443".into());
+        apart.insert("front.listen_port".into(), "2087".into());
+        assert!(
+            reg.validate_server(&server(&["ws", "reality"]), &apart)
+                .is_ok()
+        );
+    }
+
+    /// PR #139 review finding 5: server-CREATE paths have no secrets yet
+    /// (the override secret needs the server row to exist first), so they
+    /// validate support only — a naive+realty create must not abort on a
+    /// port conflict the operator is about to resolve via the secret; the
+    /// deploy-time gate (with real secrets) stays authoritative.
+    #[test]
+    fn support_only_validation_skips_port_gate() {
+        let reg = registry(vec![("vless", &[("tcp", 443)]), ("naive", &[("tcp", 443)])]);
+        assert!(
+            reg.validate_server_support(&server(&["vless", "naive"]))
+                .is_ok()
+        );
+        // …while the full gate still rejects the same combination.
+        assert!(
+            reg.validate_server(&server(&["vless", "naive"]), &no_secrets())
+                .is_err()
+        );
+        // support errors still fire on the support-only path.
+        assert!(reg.validate_server_support(&server(&["ghost"])).is_err());
     }
 }

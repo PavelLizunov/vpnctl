@@ -526,8 +526,9 @@ fn sing_box_apply_script() -> &'static str {
 /// hosts with no ufw (e.g. DigitalOcean droplets, where an upstream Cloud
 /// Firewall — not local ufw — governs ingress), `ufw allow` is idempotent
 /// (skips an existing rule) and opens both IPv4 + IPv6. `port` is `u16` and
-/// `transport` is a compile-time `"tcp"`/`"udp"` literal from
-/// `listen_ports()`, so the interpolation carries no injection surface.
+/// `transport` is a `"tcp"`/`"udp"` `&'static str` from the protocol's
+/// `effective_listen_ports()`, so the interpolation carries no injection
+/// surface.
 fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
     if uniq.is_empty() {
@@ -1330,6 +1331,61 @@ mod tests {
         assert!(
             s.contains("rm -f /etc/sing-box/config.json.bak"),
             "success path must clean up the .bak snapshot: {s}"
+        );
+    }
+
+    /// cdn-incident junction regression (PR #139 review): `open_firewall`
+    /// must feed `firewall_open_script` the EFFECTIVE ports. Reverting the
+    /// flat_map to the static `listen_ports()` — the exact regression that
+    /// caused the incident — used to leave the whole workspace green
+    /// because the script builder and the port declaration were tested
+    /// separately. With `vless.listen_port=8443` the emitted script must
+    /// open 8443/tcp and MUST NOT open the default 443/tcp.
+    #[tokio::test]
+    async fn open_firewall_uses_effective_listen_ports() {
+        #[derive(Debug, Default)]
+        struct Recording {
+            scripts: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl vpnctl_core::SshTransport for Recording {
+            async fn exec(&self, cmd: &str) -> vpnctl_core::Result<String> {
+                self.scripts.lock().unwrap().push(cmd.to_string());
+                Ok(String::new())
+            }
+            async fn upload(&self, _path: &str, _content: &[u8]) -> vpnctl_core::Result<()> {
+                Ok(())
+            }
+            async fn read_file(&self, _path: &str) -> vpnctl_core::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let s = dummy_server();
+        let mut secrets = HashMap::new();
+        secrets.insert("vless.listen_port".to_string(), "8443".to_string());
+        let ctx = dummy_ctx(&s, &secrets);
+        let ssh = Recording::default();
+        let reality = vpnctl_protocols::VlessReality::new();
+        let protocols: Vec<&dyn vpnctl_core::Protocol> = vec![&reality];
+
+        SingBox::new()
+            .open_firewall(&ssh, &ctx, &protocols)
+            .await
+            .unwrap();
+
+        let scripts = ssh.scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "exactly one ufw script expected");
+        let script = &scripts[0];
+        assert!(
+            script.contains("ufw allow 8443/tcp"),
+            "override port must be opened: {script}"
+        );
+        // " 443/tcp" (leading space) so the 8443 line doesn't substring-
+        // match the default-port rule.
+        assert!(
+            !script.contains(" 443/tcp"),
+            "static default must NOT be opened once overridden: {script}"
         );
     }
 }
