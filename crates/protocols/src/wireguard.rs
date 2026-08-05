@@ -87,6 +87,23 @@ impl WireGuard {
 /// endpoints without duplicating the literal.
 pub const WIREGUARD_PORT: u16 = 51820;
 
+/// Effective WireGuard bind port for a server: per-server
+/// `wireguard.listen_port` secret, falling back to [`WIREGUARD_PORT`] on
+/// absence, a typo, or an explicit zero (same zero-filter policy as
+/// `vless_reality::listen_port` and `vless_ws::front_port` — a
+/// parsed-but-zero port would bind an ephemeral socket and emit `:0`
+/// endpoints). **Single source of truth** — every renderer and
+/// `effective_listen_ports` resolve through it, so wg-quick's `ListenPort`,
+/// the client endpoints, the firewall/guard declaration and the drift
+/// table cannot diverge.
+fn listen_port(secrets: &std::collections::HashMap<String, String>) -> u16 {
+    secrets
+        .get("wireguard.listen_port")
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&p| p != 0)
+        .unwrap_or(WIREGUARD_PORT)
+}
+
 /// Default tunnel-side server CIDR. `/24` gives 254 peer slots — more
 /// than enough for a single-operator homelab.
 const DEFAULT_SERVER_CIDR: &str = "10.66.0.1/24";
@@ -142,17 +159,11 @@ impl Protocol for WireGuard {
         &self,
         secrets: &std::collections::HashMap<String, String>,
     ) -> Vec<(&'static str, u16)> {
-        // EXACT parse semantics of the inbound renderer (`server_inbound`
-        // and the wg-quick / AmneziaWG / awg-link paths): per-server
-        // `wireguard.listen_port` override, fallback to the static port,
-        // unparsable values included. Guard/firewall/drift must see the
-        // port wg-quick ACTUALLY binds — otherwise an overridden node
-        // shows «declared but NOT listening» forever (PR #139 review).
-        let port: u16 = secrets
-            .get("wireguard.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(WIREGUARD_PORT);
-        vec![("udp", port)]
+        // SAME resolution as the inbound renderer (the shared
+        // `listen_port` helper): guard/firewall/drift see the port
+        // wg-quick ACTUALLY binds — otherwise an overridden node shows
+        // «declared but NOT listening» forever (PR #139 review).
+        vec![("udp", listen_port(secrets))]
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
@@ -195,11 +206,7 @@ impl Protocol for WireGuard {
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         // Server-side material — required.
         let private_key = ctx.require("wireguard.server_private_key")?;
-        let listen_port: u16 = ctx
-            .secrets
-            .get("wireguard.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(WIREGUARD_PORT);
+        let listen_port: u16 = listen_port(ctx.secrets);
         let address_cidr = ctx
             .secrets
             .get("wireguard.server_address_cidr")
@@ -252,11 +259,7 @@ impl Protocol for WireGuard {
         // Server-side public key (NOT private) is what the client peer
         // needs in its [Peer] PublicKey field.
         let server_pub = ctx.require("wireguard.server_public_key")?;
-        let listen_port: u16 = ctx
-            .secrets
-            .get("wireguard.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(WIREGUARD_PORT);
+        let listen_port: u16 = listen_port(ctx.secrets);
 
         // Where THIS user lands in the /24. We can't know the index
         // without the full users slice; use the user's pubkey as a
@@ -435,11 +438,7 @@ fn peer_octet_for(ctx: &RenderCtx<'_>, user: &User) -> Result<u16> {
 ///   swap in the client-side privkey before forwarding to the user.
 fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let server_pub = ctx.require("wireguard.server_public_key")?;
-    let listen_port: u16 = ctx
-        .secrets
-        .get("wireguard.listen_port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(WIREGUARD_PORT);
+    let listen_port: u16 = listen_port(ctx.secrets);
     let peer_octet = peer_octet_for(ctx, user)?;
 
     let mut out = String::with_capacity(512);
@@ -563,11 +562,7 @@ pub fn amnezia_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         )));
     }
     let server_pub = ctx.require("wireguard.server_public_key")?;
-    let listen_port: u16 = ctx
-        .secrets
-        .get("wireguard.listen_port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(WIREGUARD_PORT);
+    let listen_port: u16 = listen_port(ctx.secrets);
     // Per-user /32 — derived from the user's index in `ctx.peers`.
     // Without this, multiple WG users on the same server would all
     // claim 10.66.0.2 and only the first would actually route.
@@ -719,11 +714,7 @@ pub fn awg_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
             user.id.0
         )));
     }
-    let listen_port: u16 = ctx
-        .secrets
-        .get("wireguard.listen_port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(WIREGUARD_PORT);
+    let listen_port: u16 = listen_port(ctx.secrets);
     let peer_octet = peer_octet_for(ctx, user)?;
     let address = format!("10.66.0.{peer_octet}/32");
 
@@ -837,13 +828,16 @@ mod tests {
         let mut overridden = HashMap::new();
         overridden.insert("wireguard.listen_port".into(), "52820".into());
         assert_eq!(p.effective_listen_ports(&overridden), vec![("udp", 52820)]);
-        // unparsable → default (identical to the inbound renderer)
-        let mut bad = HashMap::new();
-        bad.insert("wireguard.listen_port".into(), "junk".into());
-        assert_eq!(
-            p.effective_listen_ports(&bad),
-            vec![("udp", WIREGUARD_PORT)]
-        );
+        // unparsable or zero → default (identical to the inbound renderer)
+        for bad in ["junk", "0", "", "-1", "65536"] {
+            let mut s = HashMap::new();
+            s.insert("wireguard.listen_port".into(), bad.into());
+            assert_eq!(
+                p.effective_listen_ports(&s),
+                vec![("udp", WIREGUARD_PORT)],
+                "bad override {bad:?}"
+            );
+        }
     }
 
     fn fake_user() -> User {

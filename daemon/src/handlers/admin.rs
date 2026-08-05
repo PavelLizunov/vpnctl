@@ -18638,11 +18638,11 @@ pub(crate) async fn server_set_vlessws_config(
     body: String,
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id.clone());
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => return not_found(&format!("no such server '{server_id}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let domain_raw = form_field(&body, "domain").unwrap_or_default();
     let domain = domain_raw.trim();
@@ -18670,6 +18670,24 @@ pub(crate) async fn server_set_vlessws_config(
     // operator's typo is hidden.
     if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
         return bad_request("vpnctl admin: invalid vless-ws front port (1..=65535)");
+    }
+
+    // Save-time port-conflict gate, symmetric with reality-config: the
+    // front port is load-bearing (`effective_listen_ports`), so validate
+    // the CANDIDATE secret map before persisting — e.g. front 8443 next
+    // to a reality moved to 8443 via `vless.listen_port` is rejected
+    // here instead of at deploy time. Deploy stays the authoritative gate.
+    let mut candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if port.is_empty() {
+        candidate.remove("vlessws.listen_port");
+    } else {
+        candidate.insert("vlessws.listen_port".to_string(), port.to_string());
+    }
+    if let Err(e) = state.registry.validate_server(&server, &candidate) {
+        return bad_request(&format!("{e}"));
     }
 
     // Three per-key upserts (the generic KV setter is per-key). Same
@@ -18730,7 +18748,7 @@ pub(crate) async fn server_set_reality_config(
     let port_raw = form_field(&body, "listen_port").unwrap_or_default();
     let port = port_raw.trim();
     if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
-        return bad_request("vpnctl admin: invalid REALITY listen port (1..=65535)");
+        return bad_request("invalid REALITY listen port (1..=65535)");
     }
 
     // Reject port collisions at SAVE time: validate with the candidate
@@ -18747,7 +18765,7 @@ pub(crate) async fn server_set_reality_config(
         candidate.insert("vless.listen_port".to_string(), port.to_string());
     }
     if let Err(e) = state.registry.validate_server(&server, &candidate) {
-        return bad_request(&format!("vpnctl admin: {e}"));
+        return bad_request(&format!("{e}"));
     }
 
     // Blank stores "" — the parser treats empty as "default 443", same

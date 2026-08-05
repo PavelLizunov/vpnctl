@@ -867,10 +867,10 @@ impl Registry {
                 if let Some(prev) = bound.insert((transport, port), pid) {
                     return Err(CoreError::Render(format!(
                         "port conflict on {transport}/{port}: protocols '{prev}' and \
-                         '{pid}' both bind it on server '{}'. Move one to a different \
-                         port or a dedicated node (naive needs a host with no 443/TCP \
-                         sing-box protocol; a reality co-tenant can move via the \
-                         vless.listen_port server secret).",
+                         '{pid}' both bind it on server '{}'. Move one of them to a \
+                         different port via its per-server `*.listen_port` secret \
+                         (vless.listen_port, vlessws.listen_port, wireguard.listen_port, \
+                         wgturn:listen_port) or to a dedicated node.",
                         server.id
                     )));
                 }

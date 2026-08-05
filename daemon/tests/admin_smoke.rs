@@ -57,6 +57,16 @@ async fn state(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::DnsTunnel::new()))
         .unwrap();
+    // Lockstep with `app.rs::build_registry` (PR #139 round-2 review):
+    // xray kernel + vless-ws/vless+xhttp protocols were missing here, so
+    // any future admin-level test touching those protocols (e.g. the
+    // reality↔vless-ws front-port collision) would run against a vacuum.
+    reg.register_kernel(Box::new(vpnctl_kernels::Xray::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::VlessWs::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::VlessXhttp::new()))
+        .unwrap();
     // Wire the access-log writer the same way `build()` does. Drop the
     // JoinHandle — for tests that don't introspect the writer, the
     // task lives until the AppState clones drop, which happens at end
@@ -11868,19 +11878,21 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/allsrv/protocols").await;
     // Tier distribution across the FULL production registry (the test
-    // `state` mirrors `build_registry` — naive + dns-tunnel included):
-    //   Strong:   vless+reality, wgturn, naive     (3)
+    // `state` mirrors `build_registry` — naive + dns-tunnel + vless-ws
+    // + vless+xhttp included):
+    //   Strong:   vless+reality, wgturn, naive,
+    //             vless-ws, vless+xhttp            (5)
     //   Moderate: tuic-v5, anytls, dns-tunnel      (3)
     //   Weak:     shadowsocks-2022, wireguard,
     //             trojan, hysteria2                (4)
     //   ────────────────────────────────────────────
-    //   total                                      (10)
+    //   total                                      (12)
     let strong_count = html.matches("DPI: strong").count();
     let moderate_count = html.matches("DPI: moderate").count();
     let weak_count = html.matches("DPI: weak").count();
     assert_eq!(
-        strong_count, 3,
-        "expected 3 Strong chips (vless+reality, wgturn, naive), got {strong_count}"
+        strong_count, 5,
+        "expected 5 Strong chips (vless+reality, wgturn, naive, vless-ws, vless+xhttp), got {strong_count}"
     );
     assert_eq!(
         moderate_count, 3,
@@ -12007,15 +12019,15 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/unksrv/protocols").await;
-    // 10 registered protocols → 10 chips (Strong + Moderate + Weak
+    // 12 registered protocols → 12 chips (Strong + Moderate + Weak
     // sum). If the chip-or-no-chip decision branches on something
     // OTHER than "registry knows this id", the count drifts.
     let total_chips = html.matches("DPI: strong").count()
         + html.matches("DPI: moderate").count()
         + html.matches("DPI: weak").count();
     assert_eq!(
-        total_chips, 10,
-        "10 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+        total_chips, 12,
+        "12 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
     );
 }
 
@@ -18838,4 +18850,191 @@ async fn v2_user_activity_log_pagination_and_csv() {
         "CSV header drifted"
     );
     assert_eq!(csv.lines().count(), 31, "header + 30 data rows");
+}
+
+// ── reality-config: per-server VLESS+REALITY listen port (PR #139) ──────
+//
+// The cdn topology (naive/caddy on 443 + reality moved off it via
+// `vless.listen_port`) made the port load-bearing for firewall, guard
+// and drift — so the admin form gets the same save-time gate the naive
+// and vless-ws forms have, pinned here end-to-end.
+
+fn reality_naive_server(id: &str) -> vpnctl_core::Server {
+    // naive (caddy, tcp/443) + vless+reality (sing-box) on ONE node —
+    // exactly the combination the save-time guard exists for.
+    vpnctl_core::Server {
+        id: vpnctl_core::ServerId(id.into()),
+        address: "203.0.113.9".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![
+            vpnctl_core::KernelId("caddy".into()),
+            vpnctl_core::KernelId("sing-box".into()),
+        ],
+        enabled_protocols: vec![
+            vpnctl_core::ProtocolId("naive".into()),
+            vpnctl_core::ProtocolId("vless+reality".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
+#[tokio::test]
+async fn admin_server_set_reality_config_saves_valid_port_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&reality_naive_server("cdn"))
+        .await
+        .unwrap();
+
+    // UI section renders on the protocols tab for a reality-enabled node.
+    let html = fetch_html(router(s.clone()), "/admin/servers/cdn/protocols").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/cdn/reality-config""#),
+        "reality config form must POST to the right route"
+    );
+
+    // 8443 frees tcp/443 for naive → guard passes → 303 + persisted.
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/cdn/reality-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("listen_port=8443"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let sid = vpnctl_core::ServerId("cdn".into());
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "vless.listen_port")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("8443")
+    );
+    assert!(
+        s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.action == "server.reality.set" && e.target.as_deref() == Some("cdn")),
+        "audit row server.reality.set must land"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_set_reality_config_rejects_zero_with_single_prefix() {
+    // listen_port=0 → 400, and the body carries EXACTLY ONE
+    // `vpnctl admin: ` prefix — `error_text` is the single source of
+    // truth (PR #139 round-2 finding 1).
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&reality_naive_server("cdn"))
+        .await
+        .unwrap();
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/cdn/reality-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("listen_port=0"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.starts_with("vpnctl admin: invalid REALITY listen port"),
+        "copy contract (single prefix): {body:?}"
+    );
+    assert!(
+        !body.starts_with("vpnctl admin: vpnctl admin:"),
+        "doubled prefix regressed: {body:?}"
+    );
+    // Nothing persisted on rejection.
+    assert_eq!(
+        s.inv
+            .get_server_secret(&vpnctl_core::ServerId("cdn".into()), "vless.listen_port")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() {
+    // naive owns tcp/443 on this node; blank listen_port means reality
+    // falls back to its default 443 → the save-time guard must reject
+    // with the port-conflict copy BEFORE anything persists (deploy
+    // stays the authoritative gate, but the operator gets the answer
+    // at save time — symmetry with the vless-ws form).
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&reality_naive_server("cdn"))
+        .await
+        .unwrap();
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/cdn/reality-config")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("listen_port="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.starts_with("vpnctl admin: "),
+        "copy contract (single prefix): {body:?}"
+    );
+    assert!(
+        body.contains("port conflict on tcp/443"),
+        "port-conflict copy expected: {body:?}"
+    );
+    assert!(
+        s.inv
+            .get_server_secret(&vpnctl_core::ServerId("cdn".into()), "vless.listen_port")
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing may persist on rejection"
+    );
 }
