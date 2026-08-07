@@ -76,6 +76,24 @@ impl VlessReality {
     }
 }
 
+/// Effective REALITY bind port for a server: per-server `vless.listen_port`
+/// secret, falling back to the gold-standard 443 on absence, a typo, or an
+/// explicit zero (the zero filter matches `vless_ws::front_port` and makes
+/// the "a typo never silently drops the inbound to port 0" promise true).
+///
+/// **Single source of truth** — `server_inbound` / `client_config` /
+/// `share_link` / `effective_listen_ports` and the daemon's vpn-router
+/// resolver ALL go through this function, so the port sing-box binds, the
+/// port clients dial, the port ufw opens, the port the conflict guard
+/// validates and the port the drift table displays can never diverge.
+pub fn listen_port(secrets: &std::collections::HashMap<String, String>) -> u16 {
+    secrets
+        .get("vless.listen_port")
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&p| p != 0)
+        .unwrap_or(443)
+}
+
 impl Protocol for VlessReality {
     fn id(&self) -> ProtocolId {
         ProtocolId("vless+reality".to_string())
@@ -106,6 +124,27 @@ impl Protocol for VlessReality {
         ]
     }
 
+    fn listen_ports(&self) -> &'static [(&'static str, u16)] {
+        // Default REALITY cover port. Per-server `vless.listen_port`
+        // override is honoured by `effective_listen_ports` below.
+        &[("tcp", 443)]
+    }
+
+    fn effective_listen_ports(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        // Mirror the `server_inbound` / `client_config` / `share_link`
+        // override semantics EXACTLY: parse `vless.listen_port`, fall back
+        // to the gold-standard 443 on absence or a typo. Keeping the
+        // firewall step, the port-conflict guard and the drift table in
+        // sync with what sing-box actually binds is the whole point —
+        // cdn incident 2026-08-05: reality moved to 8443 via the override
+        // while ufw + drift still assumed the static default, so the port
+        // was firewalled and the admin table showed «no fixed port».
+        vec![("tcp", listen_port(secrets))]
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;
@@ -117,11 +156,7 @@ impl Protocol for VlessReality {
         // Operator sets `vless.listen_port` server-secret to e.g.
         // `8443`; invalid values fall through to 443 so a typo
         // never silently drops the inbound to port 0.
-        let listen_port: u16 = ctx
-            .secrets
-            .get("vless.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(443);
+        let listen_port: u16 = listen_port(ctx.secrets);
 
         // XTLS-Vision sub-protocol is the **required** flow for VLESS +
         // REALITY in modern sing-box (≥ 1.4): without it the client
@@ -166,11 +201,7 @@ impl Protocol for VlessReality {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
-        let server_port: u16 = ctx
-            .secrets
-            .get("vless.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(443);
+        let server_port: u16 = listen_port(ctx.secrets);
 
         // Mirror the server's `xtls-rprx-vision` flow — server REJECTS
         // sessions whose flow doesn't match the user-record's flow.
@@ -200,11 +231,7 @@ impl Protocol for VlessReality {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
-        let port: u16 = ctx
-            .secrets
-            .get("vless.listen_port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(443);
+        let port: u16 = listen_port(ctx.secrets);
         // user.id.0 lands in the URL fragment (`#name`) where chars like
         // `#`, ` `, `/` would corrupt the link or open a new component.
         // Percent-encode defensively even though server/CLI validate ids.

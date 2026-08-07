@@ -35,7 +35,13 @@ pub(crate) async fn run(
         .ok_or_else(|| anyhow::anyhow!("no such server: {server_id}"))?;
 
     let registry = crate::registry::build()?;
-    registry.validate_server(&server)?;
+    // Secrets are loaded BEFORE the first validate so the port-conflict
+    // guard sees per-server overrides (vless.listen_port) that earlier
+    // deploys or the operator already set — an empty map here would
+    // false-positive naive+reality on a co-tenant node where reality has
+    // been moved off 443.
+    let secrets = inv.list_server_secrets(&sid).await?;
+    registry.validate_server(&server, &secrets)?;
 
     if server.kernels.is_empty() {
         anyhow::bail!("server '{}' has no kernels declared", server.id);
@@ -55,7 +61,7 @@ pub(crate) async fn run(
         .ok_or_else(|| anyhow::anyhow!("server was removed before deploy: {server_id}"))?;
     let secrets = inv.list_server_secrets(&sid).await?;
     let users = inv.users_for_server(&sid).await?;
-    registry.validate_server(&server)?;
+    registry.validate_server(&server, &secrets)?;
     if server.kernels.is_empty() {
         anyhow::bail!("server '{}' has no kernels declared", server.id);
     }
@@ -169,7 +175,7 @@ pub(crate) async fn run(
         k.apply_config(&ssh, &config).await?;
         // Best-effort firewall open (Kernel::open_firewall) so a fresh
         // deploy is reachable without a manual `ufw allow`. Non-fatal.
-        if let Err(e) = k.open_firewall(&ssh, &protocols_for_k).await {
+        if let Err(e) = k.open_firewall(&ssh, &ctx, &protocols_for_k).await {
             println!("⚠ firewall step skipped for {}: {e}", k.id());
         }
         total_config_bytes += config.len();

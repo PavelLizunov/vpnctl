@@ -9853,7 +9853,13 @@ pub(crate) async fn server_deploy(
     // rendered by any of its kernels, every bootstrap step below
     // would still succeed but the render would later fail with a
     // confusing "unsupported protocol" — surface that upfront.
-    if let Err(e) = state.registry.validate_server(&server) {
+    // Secrets are loaded first so the port-conflict guard honours
+    // per-server overrides (vless.listen_port).
+    let pre_secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if let Err(e) = state.registry.validate_server(&server, &pre_secrets) {
         return bad_request(&format!("config invalid before deploy: {e}"));
     }
 
@@ -9904,7 +9910,7 @@ pub(crate) async fn server_deploy(
         Ok(secrets) => secrets,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if let Err(e) = state.registry.validate_server(&server) {
+    if let Err(e) = state.registry.validate_server(&server, &secrets) {
         return bad_request(&format!("config changed before deploy: {e}"));
     }
 
@@ -10012,7 +10018,7 @@ pub(crate) async fn server_deploy(
             // Best-effort firewall open (Kernel::open_firewall) — a fresh
             // deploy must be reachable without a manual `ufw allow`; non-fatal
             // (the config is already applied).
-            if let Err(e) = kernel.open_firewall(&ssh, &protocols).await {
+            if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
                 tracing::warn!(target = "vpnctld::deploy", kernel = %kid.0, error = %e, "open_firewall skipped (best-effort)");
             }
         }
@@ -15656,19 +15662,26 @@ pub(crate) async fn settings_geoip_update_now_sse(
 /// matches what each `Protocol::server_inbound` emits.
 /// Look up expected `(proto, port)` tuples for a given protocol via
 /// the registry. **Single source of truth** — each protocol owns its
-/// own `listen_ports()` (see `vpnctl_core::Protocol`), so adding a
+/// own port declaration (see `vpnctl_core::Protocol`), so adding a
 /// new protocol doesn't require touching this function. (Refactored
 /// 2026-05-16 per review-agent finding — previous hand-maintained
 /// map violated kernel/protocol orthogonality.)
+///
+/// `secrets` = this server's secret map: `effective_listen_ports`
+/// resolves runtime-configurable ports (vless.listen_port override),
+/// so the table shows the port the node ACTUALLY binds — not the
+/// compile-time default (cdn incident 2026-08-05: reality on 8443
+/// rendered as «no fixed port» while 443 stayed firewalled).
 fn expected_ports_for_protocol(
     registry: &vpnctl_core::Registry,
     pid: &vpnctl_core::ProtocolId,
+    secrets: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, u16)> {
     match registry.protocol(pid) {
         Some(p) => p
-            .listen_ports()
-            .iter()
-            .map(|(s, n)| ((*s).to_string(), *n))
+            .effective_listen_ports(secrets)
+            .into_iter()
+            .map(|(s, n)| (s.to_string(), n))
             .collect(),
         None => Vec::new(),
     }
@@ -16176,7 +16189,7 @@ async fn server_detail_render(
     let expected: std::collections::BTreeSet<(String, u16)> = server
         .enabled_protocols
         .iter()
-        .flat_map(|pid| expected_ports_for_protocol(&state.registry, pid))
+        .flat_map(|pid| expected_ports_for_protocol(&state.registry, pid, &server_secrets))
         .collect();
 
     let missing: Vec<_> = expected.difference(&observed).cloned().collect();
@@ -16398,7 +16411,7 @@ async fn server_detail_render(
             // on this tab's label is about drift, but the grid used to
             // sit at the very bottom below four config forms: the tab
             // opened without answering its own warning.
-            (server_detail_drift_section(&server, &state.registry, &observed, &missing, &extra, latest.is_some(), lang))
+            (server_detail_drift_section(&server, &state.registry, &server_secrets, &observed, &missing, &extra, latest.is_some(), lang))
             (server_detail_kernels_section(&server, &state.registry, lang))
             // Enabled protocols — enable/disable/hide (NM-10 hidden_map:
             // hidden=1 keeps the inbound running but stops emitting the
@@ -16408,6 +16421,8 @@ async fn server_detail_render(
             // Naive (Caddy) + vless-ws per-server config (domain + ACME).
             (server_detail_naive_config_section(&server, &server_secrets, lang))
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
+            // REALITY per-server listen port (co-tenant 443 override).
+            (server_detail_reality_config_section(&server, &server_secrets, lang))
             // naive↔HY2 UDP pairing opt-in (UX-3) — shared `pair=` so a
             // client routes UDP over the co-located HY2.
             (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
@@ -18109,6 +18124,61 @@ fn server_detail_vlessws_config_section(
     }
 }
 
+/// VLESS+REALITY per-server listen port (`vless.listen_port`). Default 443
+/// is the gold-standard cover; on a co-tenant host where something else
+/// owns 443 (naive/caddy here, legacy 3x-ui elsewhere) the operator moves
+/// reality to an alt port. Rendered ONLY when `vless+reality` is enabled.
+/// The value is load-bearing for the firewall step, the port-conflict guard
+/// and the drift table above (`effective_listen_ports`), so it gets the
+/// same web surface as `vlessws.listen_port` — "web is the ONLY operator
+/// surface" (PR #139 review finding 7).
+fn server_detail_reality_config_section(
+    server: &vpnctl_core::Server,
+    server_secrets: &std::collections::HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server
+        .enabled_protocols
+        .iter()
+        .any(|p| p.0 == "vless+reality")
+    {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let port = server_secrets
+        .get("vless.listen_port")
+        .map(String::as_str)
+        .unwrap_or("");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(lang,
+                "REALITY binds this port directly. Default 443 (gold-standard HTTPS cover); set an alternate port when a co-tenant owns 443 on this host (naive/caddy, legacy 3x-ui). Saving re-validates against every other protocol's port and takes effect on deploy.",
+                "REALITY слушает этот порт напрямую. По умолчанию 443 (золотой стандарт HTTPS-маскировки); задай другой порт, если 443 на этом хосте занят со-жителем (naive/caddy, легаси 3x-ui). При сохранении проверяется против портов всех остальных протоколов и вступает в силу при деплое.")) {
+            (tr(lang, "VLESS+REALITY CONFIG", "КОНФИГ VLESS+REALITY"))
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/reality-config"))
+             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
+            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "listen port", "порт"))
+            }
+            input type="text" name="listen_port" maxlength="5" inputmode="numeric"
+                  value=(port)
+                  placeholder="443"
+                  title=(tr(lang, "TCP port REALITY binds. Blank = 443. Must not collide with any other protocol on this node.", "TCP-порт, который слушает REALITY. Пусто = 443. Не должен совпадать с портом другого протокола на этом узле."))
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            span {}
+            button type="submit"
+                   title=(tr(lang, "Save the REALITY listen port", "Сохранить порт REALITY"))
+                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (tr(lang, "save reality port", "сохранить порт"))
+            }
+        }
+    }
+}
+
 fn server_detail_display_name_section(
     server: &vpnctl_core::Server,
     current: Option<&str>,
@@ -18568,11 +18638,11 @@ pub(crate) async fn server_set_vlessws_config(
     body: String,
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id.clone());
-    match state.inv.get_server(&sid).await {
-        Ok(Some(_)) => {}
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
         Ok(None) => return not_found(&format!("no such server '{server_id}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
-    }
+    };
 
     let domain_raw = form_field(&body, "domain").unwrap_or_default();
     let domain = domain_raw.trim();
@@ -18602,6 +18672,24 @@ pub(crate) async fn server_set_vlessws_config(
         return bad_request("vpnctl admin: invalid vless-ws front port (1..=65535)");
     }
 
+    // Save-time port-conflict gate, symmetric with reality-config: the
+    // front port is load-bearing (`effective_listen_ports`), so validate
+    // the CANDIDATE secret map before persisting — e.g. front 8443 next
+    // to a reality moved to 8443 via `vless.listen_port` is rejected
+    // here instead of at deploy time. Deploy stays the authoritative gate.
+    let mut candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if port.is_empty() {
+        candidate.remove("vlessws.listen_port");
+    } else {
+        candidate.insert("vlessws.listen_port".to_string(), port.to_string());
+    }
+    if let Err(e) = state.registry.validate_server(&server, &candidate) {
+        return bad_request(&format!("{e}"));
+    }
+
     // Three per-key upserts (the generic KV setter is per-key). Same
     // non-transactional, idempotent-form caveat as the naive handler.
     for (key, val) in [
@@ -18626,6 +18714,78 @@ pub(crate) async fn server_set_vlessws_config(
                 "acme_email_set": !email.is_empty(),
                 "listen_port": port,
             })),
+        )
+        .await;
+
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+/// `POST /admin/servers/{id}/reality-config` — set the VLESS+REALITY
+/// per-server listen port (`vless.listen_port`; blank = default 443).
+/// The value is load-bearing: sing-box binds it, client links carry it,
+/// the firewall step opens it, and the port-conflict guard + drift table
+/// read it (`effective_listen_ports`). Validated like
+/// `vlessws.listen_port` — blank or non-zero u16 — and the full
+/// port-conflict gate runs against the CANDIDATE secret map, so a
+/// collision (naive on 443, vless-ws on 8443, …) is rejected at save
+/// time instead of at deploy time. Redirects to the detail page.
+pub(crate) async fn server_set_reality_config(
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+
+    let port_raw = form_field(&body, "listen_port").unwrap_or_default();
+    let port = port_raw.trim();
+    if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
+        return bad_request("invalid REALITY listen port (1..=65535)");
+    }
+
+    // Reject port collisions at SAVE time: validate with the candidate
+    // secret map (current secrets + candidate override). Blank clears the
+    // override → default 443, which is validated too — that is exactly
+    // the naive-on-443 case the guard exists for.
+    let mut candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if port.is_empty() {
+        candidate.remove("vless.listen_port");
+    } else {
+        candidate.insert("vless.listen_port".to_string(), port.to_string());
+    }
+    if let Err(e) = state.registry.validate_server(&server, &candidate) {
+        return bad_request(&format!("{e}"));
+    }
+
+    // Blank stores "" — the parser treats empty as "default 443", same
+    // convention as vlessws.listen_port.
+    if let Err(e) = state
+        .inv
+        .set_server_secret(&sid, "vless.listen_port", port)
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    // set_server_secret has no built-in audit, so emit the row here.
+    // Best-effort: a failed audit must not 500 the save.
+    let _ = state
+        .inv
+        .audit(
+            "admin",
+            "server.reality.set",
+            Some(&server_id),
+            Some(&serde_json::json!({ "listen_port": port })),
         )
         .await;
 
@@ -19792,9 +19952,11 @@ fn server_detail_drift_summary(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn server_detail_drift_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
+    secrets: &std::collections::HashMap<String, String>,
     observed: &std::collections::BTreeSet<(String, u16)>,
     missing: &[(String, u16)],
     extra: &[(String, u16)],
@@ -19851,7 +20013,7 @@ fn server_detail_drift_section(
                 }
                 tbody {
                     @for pid in &server.enabled_protocols {
-                        @let ports = expected_ports_for_protocol(registry, pid);
+                        @let ports = expected_ports_for_protocol(registry, pid, secrets);
                         @let silent = ports.iter().any(|pp| !observed.contains(pp));
                         tr class=(if silent && !ports.is_empty() { "on-warn" } else { "" }) {
                             td { b { (pid.0) } }

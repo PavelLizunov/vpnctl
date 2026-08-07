@@ -1033,6 +1033,14 @@ fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/vlessws-config",
             post(admin::server_set_vlessws_config),
         )
+        // VLESS+REALITY per-server listen port — operator sets
+        // vless.listen_port (blank = default 443) when a co-tenant owns
+        // 443; validated against every other protocol's effective port
+        // at save time (PR #139 review finding 7).
+        .route(
+            "/admin/servers/{id}/reality-config",
+            post(admin::server_set_reality_config),
+        )
         // Auto-suppress opt-in (migration 0030). Toggle whether the
         // server is auto-hidden from subscriptions while unreachable
         // (health monitor sets/clears the runtime suppressed_at flag).

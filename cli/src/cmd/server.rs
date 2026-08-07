@@ -150,7 +150,11 @@ pub(crate) async fn run(
                 jump_via: jump_via.map(ServerId),
                 usage_coefficient,
             };
-            reg.validate_server(&server)?;
+            // Support-only validation: a freshly-added server has no
+            // secrets yet (`vpnctl server secret` needs the existing id),
+            // so the secret-aware port-conflict gate runs at deploy time,
+            // where real secrets are available.
+            reg.validate_server_support(&server)?;
             inv.add_server(&server).await?;
             // Whitelist what goes into audit_log — if Server ever gains a
             // sensitive field (api token, jump credentials), serializing

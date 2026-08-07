@@ -335,11 +335,12 @@ impl Kernel for Xray {
     async fn open_firewall(
         &self,
         ssh: &dyn SshTransport,
+        ctx: &RenderCtx<'_>,
         protocols: &[&dyn Protocol],
     ) -> Result<()> {
         let ports: Vec<(&str, u16)> = protocols
             .iter()
-            .flat_map(|p| p.listen_ports().iter().copied())
+            .flat_map(|p| p.effective_listen_ports(ctx.secrets))
             .collect();
         if let Some(script) = firewall_open_script(&ports) {
             ssh.exec(&script).await?;

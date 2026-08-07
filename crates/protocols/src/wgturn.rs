@@ -192,6 +192,22 @@ impl Protocol for WgTurn {
         &[("udp", WGTURN_PORT)]
     }
 
+    fn effective_listen_ports(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Vec<(&'static str, u16)> {
+        // Per-server `wgturn:listen_port` override (honoured by the
+        // kernel's render_config and `share_link`). `share_link` fails
+        // LOUD on an unparsable value, but this signature cannot — and
+        // the kernel's render-time validation means an invalid secret
+        // never reaches a deployed node anyway; advise with the default.
+        let port: u16 = secrets
+            .get("wgturn:listen_port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(WGTURN_PORT);
+        vec![("udp", port)]
+    }
+
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         // Custom WireGuard variant with the VK-TURN demuxer prepended
         // — the canonical raw-WG 0x01 handshake-initiation type tag is
@@ -336,6 +352,26 @@ mod tests {
         let p = WgTurn::new();
         let ports = p.listen_ports();
         assert_eq!(ports, &[("udp", 56000_u16)]);
+    }
+
+    /// `effective_listen_ports` must resolve the per-server
+    /// `wgturn:listen_port` override so guard/drift see the real demuxer
+    /// port; unparsable values advise the default (the kernel's render
+    /// fails loud on garbage before it ever reaches a node) — same shape
+    /// as the share_link override test below (PR #139 review finding 2).
+    #[test]
+    fn effective_listen_ports_honours_override() {
+        let p = WgTurn::new();
+        assert_eq!(
+            p.effective_listen_ports(&HashMap::new()),
+            vec![("udp", 56000_u16)]
+        );
+        let mut overridden = HashMap::new();
+        overridden.insert("wgturn:listen_port".into(), "57000".into());
+        assert_eq!(p.effective_listen_ports(&overridden), vec![("udp", 57000)]);
+        let mut bad = HashMap::new();
+        bad.insert("wgturn:listen_port".into(), "not-a-port".into());
+        assert_eq!(p.effective_listen_ports(&bad), vec![("udp", 56000_u16)]);
     }
 
     #[test]

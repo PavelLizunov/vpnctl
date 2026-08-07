@@ -190,7 +190,10 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         jump_via: None,
         usage_coefficient: args.usage_coefficient,
     };
-    registry.validate_server(&server)?;
+    // Support-only validation at bootstrap: no secrets exist yet (the
+    // first deploy mints them), so the secret-aware port-conflict gate
+    // cannot run here — the deploy path is the authoritative gate.
+    registry.validate_server_support(&server)?;
     inv.add_server(&server).await?;
 
     inv.audit(

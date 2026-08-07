@@ -21,6 +21,9 @@ sha2 = "0.10"
 # AmneziaWg kernel tests use the real WireGuard Protocol impl to
 # round-trip envelope → INI without a hand-rolled mock protocol.
 vpnctl-protocols = { path = "../protocols" }
+# open_firewall junction test (PR #139 review): the async Kernel method
+# needs an executor to run against a recording SshTransport mock.
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints]
 workspace = true
