@@ -738,6 +738,12 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 .ed-grid__sm { font-size: 10px; }
 .ed-grid__open { font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--acc); }
 .ed-grid__flag { color: var(--warm); cursor: help; }               /* the ⚠ / ≠ / +N-hidden marker */
+.ed-kvers {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; line-height: 1.2;
+}
+.ed-kvers__item + .ed-kvers__item { margin-left: 10px; }
+.ed-grid .ed-kvers { max-width: 320px; }
 /* heat: a cell that crossed a watermark (MEM/DISK > threshold) */
 .ed-grid td.warn {
   background: color-mix(in oklab, var(--warm) 15%, var(--paper));

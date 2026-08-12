@@ -19089,15 +19089,44 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
         .await
         .unwrap();
 
-    let detail = fetch_html(router(s.clone()), "/admin/servers/all-kernels").await;
+    let app = router(s);
+    let detail = fetch_html(app.clone(), "/admin/servers/all-kernels").await;
     assert!(detail.contains("Kernel versions"));
     assert!(detail.contains(r#"data-kernel-version="xray""#));
     assert!(detail.contains("26.3.27"));
     assert!(detail.contains("v26.3.27"));
 
-    let list = fetch_html(router(s), "/admin/servers").await;
+    let list = fetch_html(app.clone(), "/admin/servers").await;
     assert!(list.contains(r#"id="fleet-kernel-versions""#));
     assert!(list.contains("xray"));
+    assert!(
+        list.contains(r#"class="ed-kvers""#),
+        "fleet versions must use the single-line compact layout"
+    );
+    assert!(
+        list.contains(
+            r#"class="ed-kvers__value" title="af0f209f99f8381356fbae82d9b0f64d4af4bdcf">af0f209f99</span>"#
+        ),
+        "wgturn must render a short commit prefix with the full SHA in title"
+    );
+    assert!(
+        list.contains(r#"class="ed-kvers__value" title="1.0.20210913-1">1.0.2021…13-1</span>"#),
+        "amneziawg must use a compact middle ellipsis with the full package version in title"
+    );
+
+    let css = fetch_html(app.clone(), "/admin/assets/admin.css").await;
+    let compact_rule = css
+        .split_once(".ed-kvers {")
+        .and_then(|(_, tail)| tail.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("compact kernel-version CSS rule");
+    assert!(compact_rule.contains("white-space: nowrap"));
+    assert!(compact_rule.contains("overflow: hidden"));
+    assert!(compact_rule.contains("text-overflow: ellipsis"));
+
+    let list_ru = fetch_html_with_cookie(app, "/admin/servers", "vpnctl_lang=ru").await;
+    assert!(list_ru.contains("Версии ядер"));
+    assert!(list_ru.contains(r#"class="ed-kvers""#));
 }
 
 fn release_quality_sample(

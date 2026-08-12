@@ -606,20 +606,49 @@ fn sing_box_version_of(kernel_versions_json: Option<&str>) -> Option<String> {
         .and_then(|o| o.version)
 }
 
+fn compact_kernel_version(kernel: &str, version: &str) -> String {
+    let len = version.chars().count();
+    match kernel {
+        "wgturn" if len > 10 && version.chars().all(|c| c.is_ascii_hexdigit()) => {
+            version.chars().take(10).collect()
+        }
+        "amneziawg" if len > 13 => format!(
+            "{}…{}",
+            version.chars().take(8).collect::<String>(),
+            version.chars().skip(len - 4).collect::<String>()
+        ),
+        _ => version.to_string(),
+    }
+}
+
 fn kernel_versions_inline(
     server: &vpnctl_core::Server,
     kernel_versions_json: Option<&str>,
 ) -> Markup {
     let observations = kernel_observations_of(kernel_versions_json);
+    let full_versions = server
+        .kernels
+        .iter()
+        .map(|kid| {
+            let version = observations
+                .get(&kid.0)
+                .and_then(|o| o.version.as_deref())
+                .unwrap_or("—");
+            format!("{} {version}", kid.0)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
     html! {
-        div style="display: flex; flex-direction: column; gap: 2px; align-items: flex-end;" {
+        div.ed-kvers title=(full_versions) {
             @for kid in &server.kernels {
-                div {
-                    span style="color: var(--mute);" { (kid.0) " " }
+                span.ed-kvers__item {
+                    span.ed-grid__mut { (kid.0) " " }
                     @if let Some(version) = observations.get(&kid.0).and_then(|o| o.version.as_deref()) {
-                        (version)
+                        span.ed-kvers__value title=(version) {
+                            (compact_kernel_version(&kid.0, version))
+                        }
                     } @else {
-                        "—"
+                        span.ed-grid__mut { "—" }
                     }
                 }
             }
