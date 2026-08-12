@@ -17,7 +17,7 @@ use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{Protocol, RenderCtx, ServerId};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{NodeOperationLock, SqliteInventory};
 use vpnctl_ssh::RusshTransportBuilder;
 
 pub(crate) async fn run(
@@ -33,6 +33,8 @@ pub(crate) async fn run(
         .get_server(&sid)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no such server: {server_id}"))?;
+    let _operation_lock = NodeOperationLock::try_acquire(&server.id.0)?
+        .ok_or_else(|| anyhow::anyhow!("server '{}' is busy with deploy/update", server.id))?;
 
     let registry = crate::registry::build()?;
     // Secrets are loaded BEFORE the first validate so the port-conflict

@@ -1,19 +1,14 @@
 [Unit]
-Description=vpnctl kernel-update timer (weekly)
+Description=vpnctl kernel-update timer (daily 00:30 UTC / 03:30 MSK)
 Documentation=https://github.com/PavelLizunov/vpnctl
 
 [Timer]
-# Weekly, Sundays at 05:00 UTC. Deliberately past the existing nightly
-# windows to avoid SSH/apt contention on the fleet:
-#   vpnctl-backup.timer        → 03:00 UTC daily
-#   vpnctl-geoip-update.timer  → 04:00 UTC on the 4th
-# 05:00 Sunday clears both.
-OnCalendar=Sun *-*-* 05:00:00
-# Persistent: if the host was off when the timer would have fired, run on
-# next boot — a skipped week leaves nodes on a stale kernel floor.
+# Every night at 03:30 MSK, after vpnctl-backup.timer's 03:00 MSK window.
+# The CLI walks servers and each server's declared kernels sequentially.
+OnCalendar=*-*-* 00:30:00 UTC
+# Persistent: if the host was off at night, run once after the next boot.
 Persistent=true
-# 600 sec random delay so a future fleet doesn't kick off every node's apt +
-# SSH at the same UTC second. Single homelab today; future-proof.
+# Spread the actual start across 03:30–03:40 MSK.
 RandomizedDelaySec=600
 Unit=vpnctl-update-kernels.service
 

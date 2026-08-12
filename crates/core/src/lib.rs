@@ -407,6 +407,12 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     /// Список протоколов, которые это ядро вообще способно поднять.
     fn supported_protocols(&self) -> Vec<ProtocolId>;
 
+    /// Version target managed by [`Kernel::ensure_installed`]. `None`
+    /// means the kernel has no machine-comparable managed version.
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        None
+    }
+
     /// Проверка готовности (есть ли пакет в репо, есть ли systemd-юнит).
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()>;
 
@@ -458,6 +464,22 @@ pub struct KernelStatus {
     pub active: bool,
     pub version: Option<String>,
     pub uptime_seconds: Option<u64>,
+}
+
+/// How [`Kernel::ensure_installed`] interprets its managed version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelVersionPolicy {
+    /// Installed versions at or above the value are accepted.
+    Floor,
+    /// The installed build must match the value exactly.
+    Pin,
+}
+
+/// Registry-owned version metadata rendered by the admin UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelVersionRequirement {
+    pub policy: KernelVersionPolicy,
+    pub value: &'static str,
 }
 
 //

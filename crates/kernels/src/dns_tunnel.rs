@@ -77,8 +77,8 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 /// Pinned slipstream-rust build the cache binary is compiled from.
@@ -384,6 +384,13 @@ impl Kernel for DnsTunnel {
         // `if protocols_for_k.is_empty() { continue; }`). The dns-tunnel
         // wire shape is exactly one protocol.
         vec![ProtocolId("dns-tunnel".to_string())]
+    }
+
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Pin,
+            value: SLIPSTREAM_VERSION,
+        })
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
@@ -778,18 +785,22 @@ impl Kernel for DnsTunnel {
         // can't tell from a UDP socket whether anyone's listening), so
         // the combined check is the honest one — same as wgturn.
         let relay = ssh
-            .exec(&format!("systemctl is-active {RELAY_UNIT}"))
+            .exec(&format!(
+                "systemctl is-active {RELAY_UNIT} 2>/dev/null || true"
+            ))
             .await?
             .trim()
             .eq("active");
         let backend = ssh
-            .exec(&format!("systemctl is-active {BACKEND_UNIT}"))
+            .exec(&format!(
+                "systemctl is-active {BACKEND_UNIT} 2>/dev/null || true"
+            ))
             .await?
             .trim()
             .eq("active");
         let active = relay && backend;
         let version = ssh
-            .exec("slipstream-server --version 2>/dev/null | head -1")
+            .exec("slipstream-server --version 2>/dev/null | awk '{print $NF; exit}'")
             .await
             .ok()
             .map(|s| s.trim().to_string())

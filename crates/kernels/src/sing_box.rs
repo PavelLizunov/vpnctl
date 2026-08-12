@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 /// sing-box 1.13.x из официального APT-репо SagerNet.
@@ -45,7 +45,7 @@ impl SingBox {
 /// presence gates. The floor is a MINIMUM, not an exact pin — we don't
 /// attempt exact-version apt pinning (SagerNet version strings are
 /// brittle), the repo candidate (≥ floor) is acceptable.
-const SING_BOX_MIN_VERSION: &str = "1.13.12";
+const SING_BOX_MIN_VERSION: &str = "1.13.18";
 
 /// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
 /// EVERY deploy — both the CLI (`vpnctl deploy`) and the daemon web/SSE
@@ -272,6 +272,13 @@ impl Kernel for SingBox {
         ]
     }
 
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Floor,
+            value: SING_BOX_MIN_VERSION,
+        })
+    }
+
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         // Idempotent node setup — see [`SING_BOX_SETUP_SCRIPT`] for the
         // full rationale (sing-box install on minimal Debian, log-file
@@ -431,11 +438,16 @@ impl Kernel for SingBox {
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
         let active = ssh
-            .exec("systemctl is-active sing-box")
+            .exec("systemctl is-active sing-box 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
-        let version = ssh.exec("sing-box version 2>&1 | head -1").await.ok();
+        let version = ssh
+            .exec("sing-box version 2>/dev/null | awk '/version/{print $3; exit}'")
+            .await
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         Ok(KernelStatus {
             active,
             version,

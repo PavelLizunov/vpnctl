@@ -98,7 +98,7 @@ use crate::http_util::path_segment_encode;
 use crate::ssh_subprocess::{SubprocessSshTransport, ssh_safety_opts};
 use vpnctl_core::shell::single_quote as shell_single_quote;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{NodeOperationLock, SqliteInventory};
 // Per-server secret minting moved to `vpnctl_inventory::bootstrap` so the
 // CLI `vpnctl deploy` shares the SAME declarative `server_secret_specs()`
 // walk (was daemon-only → CLI drifted, missing ss2022.psk + hy2 obfs).
@@ -208,7 +208,10 @@ fn lock_inflight() -> std::sync::MutexGuard<'static, HashSet<String>> {
 /// hold a permit while exercising the handlers that contend on it
 /// (`server_deploy`, `server_delete`, the SSE redeploy).
 #[derive(Debug)]
-pub struct DeployGuard(String);
+pub struct DeployGuard {
+    server_id: String,
+    _process_lock: NodeOperationLock,
+}
 
 impl DeployGuard {
     /// Try to claim the per-server deploy permit. Returns `None` if a
@@ -217,17 +220,40 @@ impl DeployGuard {
     pub fn try_acquire(server_id: &str) -> Option<Self> {
         let mut set = lock_inflight();
         if set.contains(server_id) {
-            None
-        } else {
-            set.insert(server_id.to_string());
-            Some(Self(server_id.to_string()))
+            return None;
         }
+        let process_lock = match NodeOperationLock::try_acquire(server_id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    server = server_id,
+                    error = %error,
+                    "could not acquire node operation lock; refusing concurrent operation"
+                );
+                return None;
+            }
+        };
+        set.insert(server_id.to_string());
+        Some(Self {
+            server_id: server_id.to_string(),
+            _process_lock: process_lock,
+        })
+    }
+
+    /// Read-only hint for background probes. A race after this check is
+    /// harmless because quality alerts require consecutive bad samples.
+    pub(crate) fn is_active(server_id: &str) -> bool {
+        if lock_inflight().contains(server_id) {
+            return true;
+        }
+        !matches!(NodeOperationLock::try_acquire(server_id), Ok(Some(_)))
     }
 }
 
 impl Drop for DeployGuard {
     fn drop(&mut self) {
-        lock_inflight().remove(&self.0);
+        lock_inflight().remove(&self.server_id);
     }
 }
 
@@ -1365,6 +1391,10 @@ async fn bootstrap_pipeline(
         );
     }
     send_step!("register", "ok — server registered.");
+    let _deploy_guard = match DeployGuard::try_acquire(&server.id.0) {
+        Some(guard) => guard,
+        None => fail!("register", "another deploy started for this server; retry"),
+    };
 
     // ── 6. Bootstrap per-server secrets ───────────────────────────
     send_step!(

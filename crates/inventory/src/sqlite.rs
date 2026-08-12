@@ -1112,6 +1112,26 @@ impl SqliteInventory {
             .collect())
     }
 
+    /// Canonical resolved addresses for one server, used by direct
+    /// service-path probes. Literal IP addresses are cached at creation;
+    /// hostnames are refreshed by the existing resolver.
+    pub async fn resolved_ips_for_server(
+        &self,
+        server_id: &ServerId,
+    ) -> Result<Vec<std::net::IpAddr>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT address FROM server_resolved_addresses
+             WHERE server_id = ?1 ORDER BY address",
+        )
+        .bind(&server_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|address| address.parse().ok())
+            .collect())
+    }
+
     /// Resolve every server address and atomically refresh the canonical-IP
     /// cache. DNS work stays off Tokio workers; failed lookups retain their
     /// last known-good cache rows.
@@ -6723,6 +6743,105 @@ impl SqliteInventory {
 
     // ── Phase G admin_alerts ────────────────────────────────────────────
 
+    // ── Service-path quality samples ─────────────────────────────────
+
+    /// Persist one low-load TCP service-path poll batch. Telemetry rows are
+    /// their own audit trail, matching `node_health` and VPN stats.
+    pub async fn record_service_quality_sample(
+        &self,
+        sample: &crate::quality::ServiceQualitySample,
+    ) -> Result<()> {
+        let tcp_json = serde_json::to_string(&sample.tcp_rtt_ms)?;
+        let control_json = serde_json::to_string(&sample.control_rtt_ms)?;
+        let icmp_json = sample
+            .icmp_rtt_ms
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        sqlx::query(
+            "INSERT INTO server_quality_samples
+             (ts, server_id, vantage, target_count, available_targets,
+              attempts, successes, tcp_rtt_ms_json,
+              control_attempts, control_successes, control_rtt_ms_json,
+              icmp_attempts, icmp_successes, icmp_rtt_ms_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )
+        .bind(
+            sample
+                .ts
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )
+        .bind(&sample.server_id.0)
+        .bind(&sample.vantage)
+        .bind(i64::from(sample.target_count))
+        .bind(i64::from(sample.available_targets))
+        .bind(i64::from(sample.attempts))
+        .bind(i64::from(sample.successes))
+        .bind(tcp_json)
+        .bind(i64::from(sample.control_attempts))
+        .bind(i64::from(sample.control_successes))
+        .bind(control_json)
+        .bind(sample.icmp_attempts.map(i64::from))
+        .bind(sample.icmp_successes.map(i64::from))
+        .bind(icmp_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Raw batches in chronological order for exact percentile/jitter
+    /// aggregation over a rolling 24h or 7d window.
+    pub async fn service_quality_samples_for_server(
+        &self,
+        server_id: &ServerId,
+        window_hours: u32,
+    ) -> Result<Vec<crate::quality::ServiceQualitySample>> {
+        let rows = sqlx::query(
+            "SELECT ts, server_id, vantage, target_count, available_targets,
+                    attempts, successes, tcp_rtt_ms_json,
+                    control_attempts, control_successes, control_rtt_ms_json,
+                    icmp_attempts, icmp_successes, icmp_rtt_ms_json
+             FROM server_quality_samples
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             ORDER BY ts ASC, id ASC",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{window_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(row_to_service_quality_sample)
+            .collect()
+    }
+
+    pub async fn service_quality_for_server(
+        &self,
+        server_id: &ServerId,
+        window_hours: u32,
+        min_samples: u64,
+    ) -> Result<crate::quality::ServiceQualityScore> {
+        let samples = self
+            .service_quality_samples_for_server(server_id, window_hours)
+            .await?;
+        Ok(crate::quality::score_samples(
+            &samples,
+            window_hours,
+            min_samples,
+        ))
+    }
+
+    pub async fn purge_service_quality_older_than(&self, days: u32) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM server_quality_samples
+             WHERE ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        )
+        .bind(format!("-{days} days"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Insert one alert row. Returns the new row id so the caller can
     /// reference it in an `audit()` payload — every fired alert ALSO
     /// gets an audit_log row with `action='alert.fire'` so the full
@@ -7454,6 +7573,49 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
         nic_rx_bytes: nic_rx.and_then(|n| u64::try_from(n).ok()),
         nic_tx_bytes: nic_tx.and_then(|n| u64::try_from(n).ok()),
         sing_box_nrestarts: nrestarts.and_then(|n| u64::try_from(n).ok()),
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn row_to_service_quality_sample(
+    r: sqlx::sqlite::SqliteRow,
+) -> Result<crate::quality::ServiceQualitySample> {
+    let ts_s: String = r.try_get("ts")?;
+    let ts = DateTime::parse_from_rfc3339(&ts_s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| {
+            SqliteInventoryError::Invalid(format!(
+                "server_quality_samples.ts malformed: {ts_s}: {e}"
+            ))
+        })?;
+    let required_u32 = |column: &'static str, value: i64| -> Result<u32> {
+        u32::try_from(value).map_err(|_| {
+            SqliteInventoryError::Invalid(format!(
+                "server_quality_samples.{column} out of u32 range: {value}"
+            ))
+        })
+    };
+    let optional_u32 = |column: &'static str, value: Option<i64>| -> Result<Option<u32>> {
+        value.map(|n| required_u32(column, n)).transpose()
+    };
+    let tcp_json: String = r.try_get("tcp_rtt_ms_json")?;
+    let control_json: String = r.try_get("control_rtt_ms_json")?;
+    let icmp_json: Option<String> = r.try_get("icmp_rtt_ms_json")?;
+    Ok(crate::quality::ServiceQualitySample {
+        ts,
+        server_id: ServerId(r.try_get("server_id")?),
+        vantage: r.try_get("vantage")?,
+        target_count: required_u32("target_count", r.try_get("target_count")?)?,
+        available_targets: required_u32("available_targets", r.try_get("available_targets")?)?,
+        attempts: required_u32("attempts", r.try_get("attempts")?)?,
+        successes: required_u32("successes", r.try_get("successes")?)?,
+        tcp_rtt_ms: serde_json::from_str(&tcp_json)?,
+        control_attempts: required_u32("control_attempts", r.try_get("control_attempts")?)?,
+        control_successes: required_u32("control_successes", r.try_get("control_successes")?)?,
+        control_rtt_ms: serde_json::from_str(&control_json)?,
+        icmp_attempts: optional_u32("icmp_attempts", r.try_get("icmp_attempts")?)?,
+        icmp_successes: optional_u32("icmp_successes", r.try_get("icmp_successes")?)?,
+        icmp_rtt_ms: icmp_json.as_deref().map(serde_json::from_str).transpose()?,
     })
 }
 

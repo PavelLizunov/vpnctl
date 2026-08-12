@@ -43,8 +43,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 #[derive(Debug, Default)]
@@ -78,6 +78,8 @@ const XRAY_SHA256_LINUX_ARM64: &str =
 const XRAY_BIN: &str = "/usr/local/bin/xray";
 const XRAY_CONFIG_DIR: &str = "/usr/local/etc/xray";
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
+const XRAY_RESTART_IF_ACTIVE: &str =
+    "if systemctl is-active --quiet xray; then systemctl restart xray; fi";
 
 /// Staging path for the uploaded-but-not-yet-applied config. MUST end in
 /// `.json` — unlike sing-box/amneziawg's validators, Xray-core's `run
@@ -190,6 +192,9 @@ WantedBy=multi-user.target
 UNIT
             systemctl daemon-reload
             systemctl enable xray >/dev/null 2>&1 || true
+            if [ "$NEED" = 1 ]; then
+                {restart_if_active}
+            fi
 
             command -v xray
             test -x {bin}
@@ -198,6 +203,7 @@ UNIT
         bare_version = XRAY_VERSION.trim_start_matches('v'),
         sha256_64 = XRAY_SHA256_LINUX_64,
         sha256_arm64 = XRAY_SHA256_LINUX_ARM64,
+        restart_if_active = XRAY_RESTART_IF_ACTIVE,
         bin = XRAY_BIN,
         config_dir = XRAY_CONFIG_DIR,
         config_path = XRAY_CONFIG_PATH,
@@ -289,6 +295,13 @@ impl Kernel for Xray {
         vec![ProtocolId("vless+xhttp".to_string())]
     }
 
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Pin,
+            value: XRAY_VERSION,
+        })
+    }
+
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         ssh.exec(XRAY_SETUP_SCRIPT.as_str()).await?;
         Ok(())
@@ -355,11 +368,16 @@ impl Kernel for Xray {
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
         let active = ssh
-            .exec("systemctl is-active xray")
+            .exec("systemctl is-active xray 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
-        let version = ssh.exec("xray version 2>&1 | head -1").await.ok();
+        let version = ssh
+            .exec("xray version 2>/dev/null | awk 'NR==1 {print $2}'")
+            .await
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         Ok(KernelStatus {
             active,
             version,

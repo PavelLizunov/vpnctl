@@ -522,10 +522,77 @@ fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
     let mut parts = trimmed.split('.');
     // The first component must exist and parse, else the string isn't
     // a version we can reason about.
-    let major: u64 = parts.next()?.parse().ok()?;
-    let minor: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let numeric_prefix = |s: &str| -> Option<u64> {
+        let n: String = s.chars().take_while(char::is_ascii_digit).collect();
+        (!n.is_empty()).then_some(n)?.parse().ok()
+    };
+    let major = numeric_prefix(parts.next()?)?;
+    let minor = parts.next().and_then(numeric_prefix).unwrap_or(0);
+    let patch = parts.next().and_then(numeric_prefix).unwrap_or(0);
     Some((major, minor, patch))
+}
+
+#[derive(Debug, Clone, Default)]
+struct KernelObservation {
+    version: Option<String>,
+    active: Option<bool>,
+}
+
+/// Decode both historical `{kernel:"version"}` rows and the richer
+/// `{kernel:{version,active}}` rows emitted by the current poller.
+fn kernel_observations_of(
+    kernel_versions_json: Option<&str>,
+) -> std::collections::BTreeMap<String, KernelObservation> {
+    let Some(raw) = kernel_versions_json else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(serde_json::Value::Object(values)) = serde_json::from_str(raw) else {
+        return std::collections::BTreeMap::new();
+    };
+    values
+        .into_iter()
+        .filter_map(|(kernel, value)| match value {
+            serde_json::Value::String(version) => Some((
+                kernel,
+                KernelObservation {
+                    version: Some(version),
+                    active: None,
+                },
+            )),
+            serde_json::Value::Object(fields) => Some((
+                kernel,
+                KernelObservation {
+                    version: fields
+                        .get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    active: fields.get("active").and_then(serde_json::Value::as_bool),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn kernel_version_is_current(
+    observed: &str,
+    requirement: vpnctl_core::KernelVersionRequirement,
+) -> bool {
+    match requirement.policy {
+        vpnctl_core::KernelVersionPolicy::Floor => {
+            match (
+                parse_version_tuple(observed),
+                parse_version_tuple(requirement.value),
+            ) {
+                (Some(observed), Some(floor)) => observed >= floor,
+                _ => false,
+            }
+        }
+        vpnctl_core::KernelVersionPolicy::Pin => {
+            observed.trim().trim_start_matches('v')
+                == requirement.value.trim().trim_start_matches('v')
+        }
+    }
 }
 
 /// Extract the `"sing-box"` version from a server's
@@ -534,11 +601,63 @@ fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
 /// `sing-box` key. Shared by the fleet-at-a-glance version column
 /// (dash#1) and the kernel-floor rollup (dash#3).
 fn sing_box_version_of(kernel_versions_json: Option<&str>) -> Option<String> {
-    let raw = kernel_versions_json?;
-    let val: serde_json::Value = serde_json::from_str(raw).ok()?;
-    val.get("sing-box")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    kernel_observations_of(kernel_versions_json)
+        .remove("sing-box")
+        .and_then(|o| o.version)
+}
+
+fn compact_kernel_version(kernel: &str, version: &str) -> String {
+    let len = version.chars().count();
+    match kernel {
+        "wgturn" if len > 10 && version.chars().all(|c| c.is_ascii_hexdigit()) => {
+            version.chars().take(10).collect()
+        }
+        "amneziawg" if len > 13 => format!(
+            "{}…{}",
+            version.chars().take(8).collect::<String>(),
+            version.chars().skip(len - 4).collect::<String>()
+        ),
+        _ => version.to_string(),
+    }
+}
+
+fn kernel_versions_inline(
+    server: &vpnctl_core::Server,
+    kernel_versions_json: Option<&str>,
+    fleet_majority_version: Option<&str>,
+) -> Markup {
+    let observations = kernel_observations_of(kernel_versions_json);
+    let full_versions = server
+        .kernels
+        .iter()
+        .map(|kid| {
+            let version = observations
+                .get(&kid.0)
+                .and_then(|o| o.version.as_deref())
+                .unwrap_or("—");
+            format!("{} {version}", kid.0)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    html! {
+        div.ed-kvers title=(full_versions) {
+            @for kid in &server.kernels {
+                span.ed-kvers__item {
+                    span.ed-grid__mut { (kid.0) " " }
+                    @if let Some(version) = observations.get(&kid.0).and_then(|o| o.version.as_deref()) {
+                        span.ed-kvers__value title=(version) {
+                            (compact_kernel_version(&kid.0, version))
+                            @if kid.0 == "sing-box" && fleet_majority_version.is_some_and(|majority| majority != version) {
+                                " ≠"
+                            }
+                        }
+                    } @else {
+                        span.ed-grid__mut { "—" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Fleet-majority sing-box version — the most frequently reported one.
@@ -570,6 +689,86 @@ fn fleet_majority_version(
 /// GeoIP MMDB file freshness — mtimes of the city + ASN databases in
 /// `VPNCTLD_GEOIP_DIR`. Shared by the Settings GeoIP section and the
 /// monitoring page's «GeoIP DB» line (v2 3a).
+fn server_detail_kernel_inventory_section(
+    server: &vpnctl_core::Server,
+    registry: &vpnctl_core::Registry,
+    latest: Option<&vpnctl_inventory::NodeHealthRow>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let observations =
+        kernel_observations_of(latest.and_then(|row| row.kernel_versions_json.as_deref()));
+    let probe_age = latest.map(|row| chrono::Utc::now() - row.ts);
+    let probe_stale = probe_age.is_some_and(|age| age.num_seconds() > 1200);
+    html! {
+        section id="kernel-version-inventory" style="margin-top: 28px;" {
+            div.ed-art-eyebrow { (tr(lang, "Kernel versions", "Версии ядер")) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(
+                    lang,
+                    "Every declared kernel, its installed build and the managed floor or pin. Probe state older than 20 minutes is marked stale.",
+                    "Каждое объявленное ядро, установленная сборка и управляемый floor или pin. Проверка старше 20 минут помечается как устаревшая.",
+                ))
+                @if let Some(age) = probe_age {
+                    " · " (tr(lang, "measured ", "измерено ")) (humanize_age(age, lang))
+                }
+            }
+            table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
+                thead { tr style="border-bottom: 1px solid var(--ink);" {
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "declared kernel", "объявленное ядро")) }
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "installed", "установлено")) }
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "managed target", "целевая версия")) }
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "runtime", "сервис")) }
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "version state", "состояние версии")) }
+                } }
+                tbody {
+                    @for kid in &server.kernels {
+                        @let requirement = registry.kernel(kid).and_then(|k| k.version_requirement());
+                        @let observation = observations.get(&kid.0);
+                        @let installed = observation.and_then(|o| o.version.as_deref());
+                        @let current = installed.zip(requirement).map(|(v, r)| kernel_version_is_current(v, r));
+                        tr data-kernel-version=(kid.0) style="border-bottom: 1px dotted var(--rule);" {
+                            td style="padding:5px 8px;" { b { (kid.0) } }
+                            td style="padding:5px 8px;" { (installed.unwrap_or("unknown")) }
+                            td style="padding:5px 8px;" {
+                                @if let Some(req) = requirement {
+                                    (match req.policy {
+                                        vpnctl_core::KernelVersionPolicy::Floor => "floor",
+                                        vpnctl_core::KernelVersionPolicy::Pin => "pin",
+                                    })
+                                    " " (req.value)
+                                } @else { "unmanaged" }
+                            }
+                            td style="padding:5px 8px;" {
+                                @if probe_stale {
+                                    span style="color:#e6a23c;" { (tr(lang, "stale", "устарело")) }
+                                } @else {
+                                    @match observation.and_then(|o| o.active) {
+                                        Some(true) => span style="color:#2e7d32;" { (tr(lang, "active", "активно")) },
+                                        Some(false) => span style="color:#c62828;" { (tr(lang, "inactive", "неактивно")) },
+                                        None => span style="color:var(--mute);" { (tr(lang, "unknown", "неизвестно")) },
+                                    }
+                                }
+                            }
+                            td style="padding:5px 8px;" {
+                                @if probe_stale {
+                                    span style="color:#e6a23c;" { (tr(lang, "stale probe", "устаревшая проверка")) }
+                                } @else {
+                                    @match current {
+                                        Some(true) => span style="color:#2e7d32;" { (tr(lang, "current", "актуально")) },
+                                        Some(false) => span style="color:#c62828;" { (tr(lang, "stale", "устарело")) },
+                                        None => span style="color:var(--mute);" { (tr(lang, "unknown", "неизвестно")) },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct GeoipDbStat {
     city_mtime: Option<String>,
     asn_mtime: Option<String>,
@@ -748,7 +947,7 @@ fn dashboard_fleet_table(
                         th.num { (tr(lang, "conns", "подкл.")) }
                         th.num { (tr(lang, "traffic 24h", "трафик 24ч")) }
                         th { (tr(lang, "share of traffic", "доля трафика")) }
-                        th { (tr(lang, "version", "версия")) }
+                        th { (tr(lang, "kernel versions", "версии ядер")) }
                         th.num { (tr(lang, "probe", "проба")) }
                     }
                 }
@@ -762,10 +961,10 @@ fn dashboard_fleet_table(
                             .iter()
                             .find(|(id, _)| *id == s.id)
                             .and_then(|(_, c)| *c);
-                        @let kv = kernel_versions
+                        @let kv_json = kernel_versions
                             .iter()
                             .find(|(id, _)| *id == s.id)
-                            .and_then(|(_, j)| sing_box_version_of(j.as_deref()));
+                            .and_then(|(_, j)| j.as_deref());
                         @let traffic = traffic_24h.get(&s.id).copied();
                         @let busiest = max_traffic > 0 && traffic == Some(max_traffic);
                         @let disk_pct = health.and_then(pct_disk);
@@ -812,19 +1011,7 @@ fn dashboard_fleet_table(
                                 }
                             }
                             td.ed-grid__sm {
-                                @match kv {
-                                    Some(ref v) => {
-                                        @if majority_version.as_ref() != Some(v) {
-                                            span.ed-grid__flag
-                                                title=(tr(lang, "Version differs from the fleet majority — run update kernels", "Версия отличается от большинства флота — запусти обновление ядер")) {
-                                                (v) " ≠"
-                                            }
-                                        } @else {
-                                            span.ed-grid__mut { (v) }
-                                        }
-                                    },
-                                    None => span.ed-grid__mut { (dash) },
-                                }
+                                (kernel_versions_inline(s, kv_json, majority_version.as_deref()))
                             }
                             td.num.ed-grid__mut.ed-grid__sm {
                                 @match health.map(|h| h.ts) {
@@ -1519,6 +1706,25 @@ async fn dashboard_render(
         rows
     };
 
+    let mut fleet_quality = Vec::with_capacity(server_list_fleet.len());
+    for server in &server_list_fleet {
+        let q24 = state
+            .inv
+            .service_quality_for_server(&server.id, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+            .await
+            .unwrap_or_else(|_| {
+                vpnctl_inventory::score_samples(&[], 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+            });
+        let q7 = state
+            .inv
+            .service_quality_for_server(&server.id, 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+            .await
+            .unwrap_or_else(|_| {
+                vpnctl_inventory::score_samples(&[], 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+            });
+        fleet_quality.push((server.id.clone(), q24, q7));
+    }
+
     // PR-Dash — newest kernel-versions JSON per server (Q-4e). Backs
     // BOTH the fleet-at-a-glance "sing-box version" column (dash#1) AND
     // the kernel-floor rollup card (dash#3). One grouped query.
@@ -1614,6 +1820,7 @@ async fn dashboard_render(
         (dashboard_summary_bar(&stats, conns_now, lang))
         // Dashboard 1b — dense fleet table, right under the summary bar.
         (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
+        (dashboard_quality_ranking(&fleet_quality, lang))
         // ── in-page tabs (ui-audit follow-up). The KPI metrics +
         // today-digest + fleet table ABOVE are chrome (every tab — the
         // landing glance is never hidden); the three tabs below split only
@@ -1696,6 +1903,99 @@ async fn dashboard_render(
 /// `dashboard_fleet_uptime` chips so palette stays in one place. The
 /// thresholds (≥99 green, ≥95 amber, <95 red, None grey) match Pavel's
 /// confirmed SLO buckets for sing-box service uptime.
+fn quality_score_color(score: Option<u8>) -> &'static str {
+    match score {
+        Some(80..=100) => "#2e7d32",
+        Some(60..=79) => "#e6a23c",
+        Some(_) => "#c62828",
+        None => "var(--mute)",
+    }
+}
+
+fn dashboard_quality_ranking(
+    quality: &[(
+        vpnctl_core::ServerId,
+        vpnctl_inventory::ServiceQualityScore,
+        vpnctl_inventory::ServiceQualityScore,
+    )],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if quality.is_empty() {
+        return html! {};
+    }
+    let mut rows: Vec<_> = quality.iter().collect();
+    rows.sort_by(|a, b| b.1.score.cmp(&a.1.score).then_with(|| a.0.0.cmp(&b.0.0)));
+    html! {
+        section id="fleet-quality-ranking" style="margin-top:28px;" {
+            div.ed-art-eyebrow { (tr(lang, "Fleet quality ranking · service path", "Рейтинг качества флота · service path")) }
+            p style="font-family:var(--serif);font-style:italic;font-size:12px;color:var(--mute);margin:6px 0 12px;" {
+                (tr(
+                    lang,
+                    "TCP connects to every declared ingress port from vpnctld. Service quality and SSH/control availability are scored separately.",
+                    "TCP-подключения ко всем объявленным ingress-портам с vpnctld. Качество сервиса и доступность SSH/control оцениваются отдельно.",
+                ))
+            }
+            table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px;" {
+                thead { tr style="border-bottom:1px solid var(--ink);" {
+                    th style="text-align:right;padding:5px 8px;" { "#" }
+                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "server", "сервер")) }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 24h", "сервис 24ч")) }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 7d", "сервис 7д")) }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "availability", "доступность")) }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "loss", "потери")) }
+                    th style="text-align:right;padding:5px 8px;" { "p95" }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "control 24h", "control 24ч")) }
+                } }
+                tbody {
+                    @for (index, (id, q24, q7)) in rows.iter().enumerate() {
+                        tr data-quality-server=(id.0) style="border-bottom:1px dotted var(--rule);" {
+                            td style="text-align:right;padding:5px 8px;color:var(--mute);" { (index + 1) }
+                            td style="padding:5px 8px;" { a href=(format!("/admin/servers/{}", path_segment_encode(&id.0))) style="color:var(--ink);" { (id.0) } }
+                            td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                            td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q7.score))) { (q7.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                            td style="text-align:right;padding:5px 8px;" { (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                            td style="text-align:right;padding:5px 8px;" { (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                            td style="text-align:right;padding:5px 8px;" { (q24.p95_rtt_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
+                            td style="text-align:right;padding:5px 8px;" { (q24.control_score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn server_detail_quality_section(
+    q24: Option<&vpnctl_inventory::ServiceQualityScore>,
+    q7: Option<&vpnctl_inventory::ServiceQualityScore>,
+    history: &[vpnctl_inventory::ServiceQualitySample],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let Some(q24) = q24 else {
+        return html! {};
+    };
+    html! {
+        section id="server-quality" style="margin-top:18px;" {
+            div.ed-art-eyebrow { (tr(lang, "Quality · service path", "Качество · service path")) }
+            p style="font-family:var(--serif);font-style:italic;font-size:12px;color:var(--mute);margin:4px 0 12px;" {
+                (tr(lang, "Small TCP probes to real declared ingress ports from ", "Небольшие TCP-пробы реальных объявленных ingress-портов из "))
+                span.ed-mono { (q24.vantage.as_deref().unwrap_or("unknown")) }
+                " · " (history.len()) " " (tr(lang, "samples in 24h", "замеров за 24ч"))
+            }
+            div style="display:flex;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;" {
+                span { "24h " b style=(format!("color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) } }
+                span { "7d " b style=(format!("color:{};", quality_score_color(q7.and_then(|q| q.score)))) { (q7.and_then(|q| q.score).map_or_else(|| "—".into(), |v| format!("{v}/100"))) } }
+                span { (tr(lang, "availability ", "доступность ")) (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                span { (tr(lang, "loss ", "потери ")) (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                span { "p95 " (q24.p95_rtt_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
+                span { "control " (q24.control_score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+            }
+        }
+    }
+}
+
 fn pct_color(pct: Option<u8>) -> &'static str {
     match pct {
         Some(p) if p >= 99 => "#2e7d32", // green
@@ -2984,6 +3284,26 @@ pub(crate) async fn servers(
                            class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
                         (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
                         " (" (server_list.len()) ")"
+                    }
+                }
+            }
+        }
+
+        @if !server_list.is_empty() {
+            section id="fleet-kernel-versions" style="margin: 14px 0;" {
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "Kernel versions", "Версии ядер")) }
+                div style="display:grid;gap:5px;margin-top:6px;font-family:var(--mono);font-size:11px;" {
+                    @for server in &server_list {
+                        div style="display:flex;justify-content:space-between;gap:16px;border-bottom:1px dotted var(--rule);padding:3px 0;" {
+                            a href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) style="color:var(--ink);" { (server.id.0) }
+                            (kernel_versions_inline(
+                                server,
+                                latest_health
+                                    .get(&server.id)
+                                    .and_then(|row| row.kernel_versions_json.as_deref()),
+                                None,
+                            ))
+                        }
                     }
                 }
             }
@@ -15919,6 +16239,21 @@ async fn server_detail_render(
     let uptime_24h = state.inv.uptime_for_server(&sid, 24).await.ok();
     let uptime_7d = state.inv.uptime_for_server(&sid, 24 * 7).await.ok();
     let uptime_30d = state.inv.uptime_for_server(&sid, 24 * 30).await.ok();
+    let quality_24h = state
+        .inv
+        .service_quality_for_server(&sid, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+        .await
+        .ok();
+    let quality_7d = state
+        .inv
+        .service_quality_for_server(&sid, 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+        .await
+        .ok();
+    let quality_history = state
+        .inv
+        .service_quality_samples_for_server(&sid, 24)
+        .await
+        .unwrap_or_default();
 
     // A3 (audit 2026-05-22, shipped 2026-05-23) — 24h resource-trend
     // sparklines (disk %, mem-used %, sing-box log MiB). The hero
@@ -16361,6 +16696,13 @@ async fn server_detail_render(
                     (server_detail_resource_trend_section(&trend_rows, lang))
                 }
             }
+            (server_detail_kernel_inventory_section(&server, &state.registry, latest.as_ref(), lang))
+            (server_detail_quality_section(
+                quality_24h.as_ref(),
+                quality_7d.as_ref(),
+                &quality_history,
+                lang,
+            ))
         }
 
         // ── ACTIVITY — clash-api-snapshot-derived + the audit trail

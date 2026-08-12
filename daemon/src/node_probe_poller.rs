@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use vpnctl_core::ServerId;
+use vpnctl_core::{Registry, ServerId, SshTransport};
 use vpnctl_inventory::SqliteInventory;
 
 /// Centralised "does this kernel expose the probe-able surface" check.
@@ -58,7 +58,7 @@ use vpnctl_inventory::SqliteInventory;
 /// sing-box-only behaviour and add a sibling `probeable_amneziawg`.
 /// Today's grep target: `fn probeable`.
 pub(crate) fn probeable(server: &vpnctl_core::Server) -> bool {
-    server.kernels.iter().any(|k| k.0 == "sing-box")
+    !server.kernels.is_empty()
 }
 
 /// Realistic homelab cadence for telemetry. Slower than clash-api
@@ -290,6 +290,17 @@ pub fn spawn_node_probe_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<
     );
 
     tokio::spawn(async move {
+        let registry = match crate::app::build_registry() {
+            Ok(registry) => registry,
+            Err(e) => {
+                tracing::error!(
+                    target = "vpnctld::node_probe",
+                    error = %e,
+                    "canonical registry failed to build; node probe poller stopped"
+                );
+                return;
+            }
+        };
         let mut tick = interval(Duration::from_secs(interval_secs));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Drop the immediate first fire — daemon startup is hot;
@@ -320,7 +331,7 @@ pub fn spawn_node_probe_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<
             fail_state.prune(&live_ids);
 
             for server in &servers {
-                let outcome = probe_one_server(&inv, server).await;
+                let outcome = probe_one_server_with_registry(&inv, &registry, server).await;
                 dispatch_alerts(&inv, server, &outcome, &mut fail_state).await;
             }
         }
@@ -600,7 +611,7 @@ pub async fn dispatch_alerts(
 /// extracted as a free fn so both `dispatch_alerts` detector
 /// branches share one source of truth. Bug-hunt agent finding
 /// 2026-05-18.
-async fn audit_alert_fire(
+pub(crate) async fn audit_alert_fire(
     inv: &SqliteInventory,
     server_id: &ServerId,
     alert_id: i64,
@@ -997,7 +1008,12 @@ pub async fn build_alert_sink(
 /// the caller's tick loop must continue regardless of audit-write
 /// failures (an audit failure should not block the next server's
 /// probe).
-async fn auto_ack(inv: &SqliteInventory, server_id: &ServerId, kind: &str, reason: &str) {
+pub(crate) async fn auto_ack(
+    inv: &SqliteInventory,
+    server_id: &ServerId,
+    kind: &str,
+    reason: &str,
+) {
     match inv.ack_open_alerts(kind, Some(server_id)).await {
         Ok(0) => {} // no open row — nothing to log
         Ok(n) => {
@@ -1042,6 +1058,18 @@ pub(crate) async fn probe_one_server(
     inv: &SqliteInventory,
     server: &vpnctl_core::Server,
 ) -> ProbeOutcome {
+    let registry = match crate::app::build_registry() {
+        Ok(registry) => registry,
+        Err(e) => return ProbeOutcome::SshFailed(format!("registry build failed: {e}")),
+    };
+    probe_one_server_with_registry(inv, &registry, server).await
+}
+
+async fn probe_one_server_with_registry(
+    inv: &SqliteInventory,
+    registry: &Registry,
+    server: &vpnctl_core::Server,
+) -> ProbeOutcome {
     // Skip non-sing-box kernels for now via the centralised filter
     // (see `probeable` doc-comment for the AmneziaWG TODO). Once-per-
     // tick info log so the operator can grep + spot the no-op state
@@ -1080,7 +1108,7 @@ pub(crate) async fn probe_one_server(
 
     use crate::node_probe::{ProbeClient, SshProbeClient};
     let client = SshProbeClient::new(&ssh);
-    let probe = match client.snapshot().await {
+    let mut probe = match client.snapshot().await {
         Ok(p) => p,
         Err(e) => {
             let msg = e.to_string();
@@ -1093,6 +1121,12 @@ pub(crate) async fn probe_one_server(
             return ProbeOutcome::SshFailed(msg);
         }
     };
+
+    collect_declared_kernel_statuses(&mut probe, registry, server, &ssh).await;
+    if !server.kernels.iter().any(|kid| kid.0 == "sing-box") {
+        probe.sing_box_active = None;
+        probe.sing_box_log_bytes = None;
+    }
 
     // Serialise the sorted (proto, port) set as a JSON array of
     // "proto/port" strings — matches `0007_node_health.sql` schema
@@ -1111,11 +1145,23 @@ pub(crate) async fn probe_one_server(
     // PR-Q — serialise the on-node kernel versions as a JSON object
     // (BTreeMap → deterministic key order). NULL when empty (old node /
     // partial-probe tick) rather than `{}`.
-    let kernel_versions_json: Option<String> = if probe.kernel_versions.is_empty() {
-        None
-    } else {
-        serde_json::to_string(&probe.kernel_versions).ok()
-    };
+    let kernel_versions_json: Option<String> =
+        if probe.kernel_versions.is_empty() && probe.kernel_active.is_empty() {
+            None
+        } else {
+            let mut observations = std::collections::BTreeMap::new();
+            for kid in &server.kernels {
+                let version = probe.kernel_versions.get(&kid.0);
+                let active = probe.kernel_active.get(&kid.0);
+                if version.is_some() || active.is_some() {
+                    observations.insert(
+                        kid.0.clone(),
+                        serde_json::json!({ "version": version, "active": active }),
+                    );
+                }
+            }
+            serde_json::to_string(&observations).ok()
+        };
 
     let res = inv
         .record_node_health(
@@ -1156,6 +1202,43 @@ pub(crate) async fn probe_one_server(
                 "record_node_health failed"
             );
             ProbeOutcome::RowWriteFailed
+        }
+    }
+}
+
+/// Reuse each declared kernel's own status implementation instead of
+/// duplicating version parsers in the generic shell probe. One broken kernel
+/// leaves only that observation unknown; the rest of the snapshot survives.
+async fn collect_declared_kernel_statuses(
+    probe: &mut crate::node_probe::Probe,
+    registry: &Registry,
+    server: &vpnctl_core::Server,
+    ssh: &dyn SshTransport,
+) {
+    for kid in &server.kernels {
+        let Some(kernel) = registry.kernel(kid) else {
+            tracing::warn!(
+                target = "vpnctld::node_probe",
+                server = %server.id.0,
+                kernel = %kid.0,
+                "declared kernel is not registered; version remains unknown"
+            );
+            continue;
+        };
+        match kernel.status(ssh).await {
+            Ok(status) => {
+                probe.kernel_active.insert(kid.0.clone(), status.active);
+                if let Some(version) = status.version.filter(|v| !v.trim().is_empty()) {
+                    probe.kernel_versions.insert(kid.0.clone(), version);
+                }
+            }
+            Err(e) => tracing::warn!(
+                target = "vpnctld::node_probe",
+                server = %server.id.0,
+                kernel = %kid.0,
+                error = %e,
+                "kernel status probe failed; keeping partial node snapshot"
+            ),
         }
     }
 }

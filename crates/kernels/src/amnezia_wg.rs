@@ -40,8 +40,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 #[derive(Debug, Default)]
@@ -316,6 +316,13 @@ impl Kernel for AmneziaWg {
         vec![ProtocolId("wireguard".to_string())]
     }
 
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Floor,
+            value: AMNEZIAWG_MIN_VERSION,
+        })
+    }
+
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         // Same lessons as sing_box::ensure_installed (CLAUDE.md
         // staging-deploy table) PLUS three AmneziaWG-specific ones
@@ -451,13 +458,16 @@ impl Kernel for AmneziaWg {
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
         let active = ssh
-            .exec("systemctl is-active awg-quick@awg0")
+            .exec("systemctl is-active awg-quick@awg0 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
-        // `awg --version` outputs a single line like
-        // "wireguard-tools v1.0.20210914-amneziawg-... - userspace go ..."
-        let version = ssh.exec("awg --version 2>&1 | head -1").await.ok();
+        let version = ssh
+            .exec("dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null")
+            .await
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         Ok(KernelStatus {
             active,
             version,
