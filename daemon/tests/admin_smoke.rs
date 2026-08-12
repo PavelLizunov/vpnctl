@@ -19099,6 +19099,27 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
     let list = fetch_html(app.clone(), "/admin/servers").await;
     assert!(list.contains(r#"id="fleet-kernel-versions""#));
     assert!(list.contains("xray"));
+    let fleet_versions = list
+        .split_once("fleet-kernel-versions")
+        .expect("fleet kernel-version section")
+        .1;
+    let order = [
+        "sing-box",
+        "xray",
+        "amneziawg",
+        "caddy",
+        "dns-tunnel",
+        "wgturn",
+    ]
+    .map(|kernel| {
+        fleet_versions
+            .find(kernel)
+            .expect("kernel in fleet version section")
+    });
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "fleet kernels must use priority order: {order:?}"
+    );
     assert!(
         list.contains(r#"class="ed-kvers""#),
         "fleet versions must use the single-line compact layout"

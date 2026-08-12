@@ -621,14 +621,29 @@ fn compact_kernel_version(kernel: &str, version: &str) -> String {
     }
 }
 
+fn kernel_priority(kernel: &str) -> u8 {
+    match kernel {
+        "sing-box" => 0,
+        "xray" => 1,
+        "amneziawg" => 2,
+        _ => 3,
+    }
+}
+
+fn ordered_kernel_ids(server: &vpnctl_core::Server) -> Vec<&vpnctl_core::KernelId> {
+    let mut kernels = server.kernels.iter().collect::<Vec<_>>();
+    kernels.sort_by_key(|kernel| (kernel_priority(&kernel.0), kernel.0.as_str()));
+    kernels
+}
+
 fn kernel_versions_inline(
     server: &vpnctl_core::Server,
     kernel_versions_json: Option<&str>,
     fleet_majority_version: Option<&str>,
 ) -> Markup {
     let observations = kernel_observations_of(kernel_versions_json);
-    let full_versions = server
-        .kernels
+    let kernels = ordered_kernel_ids(server);
+    let full_versions = kernels
         .iter()
         .map(|kid| {
             let version = observations
@@ -641,7 +656,7 @@ fn kernel_versions_inline(
         .join(" · ");
     html! {
         div.ed-kvers title=(full_versions) {
-            @for kid in &server.kernels {
+            @for kid in kernels {
                 span.ed-kvers__item {
                     span.ed-grid__mut { (kid.0) " " }
                     @if let Some(version) = observations.get(&kid.0).and_then(|o| o.version.as_deref()) {
@@ -698,6 +713,7 @@ fn server_detail_kernel_inventory_section(
     use crate::i18n::tr;
     let observations =
         kernel_observations_of(latest.and_then(|row| row.kernel_versions_json.as_deref()));
+    let kernels = ordered_kernel_ids(server);
     let probe_age = latest.map(|row| chrono::Utc::now() - row.ts);
     let probe_stale = probe_age.is_some_and(|age| age.num_seconds() > 1200);
     html! {
@@ -722,7 +738,7 @@ fn server_detail_kernel_inventory_section(
                     th style="text-align:left;padding:5px 8px;" { (tr(lang, "version state", "состояние версии")) }
                 } }
                 tbody {
-                    @for kid in &server.kernels {
+                    @for kid in kernels {
                         @let requirement = registry.kernel(kid).and_then(|k| k.version_requirement());
                         @let observation = observations.get(&kid.0);
                         @let installed = observation.and_then(|o| o.version.as_deref());
@@ -16612,7 +16628,7 @@ async fn server_detail_render(
             " · "
             @if server.kernels.len() == 1 { (crate::i18n::tr(lang, "kernel ", "ядро ")) }
             @else { (crate::i18n::tr(lang, "kernels ", "ядра ")) }
-            (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            (ordered_kernel_ids(&server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
             " · " (crate::i18n::tr(lang, "hoster ", "хостер ")) (server.hoster)
         }
 
@@ -17972,7 +17988,12 @@ fn server_detail_kernels_section(
     use crate::i18n::tr;
     let enabled: std::collections::HashSet<&vpnctl_core::KernelId> =
         server.kernels.iter().collect();
-    let all_kernels = registry.kernel_ids();
+    let mut all_kernels = registry.kernel_ids();
+    all_kernels.sort_by(|left, right| {
+        kernel_priority(&left.0)
+            .cmp(&kernel_priority(&right.0))
+            .then_with(|| left.0.cmp(&right.0))
+    });
     let sid_enc = path_segment_encode(&server.id.0);
     html! {
         div.ed-rule {}
@@ -19490,7 +19511,7 @@ fn server_detail_protocols_section(
                                     (tr(lang, "kernel ", "ядром ")) (server.kernels[0].0)
                                 } @else {
                                     (tr(lang, "any kernel on this server: ", "ни одним ядром на этом сервере: "))
-                                    (server.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join(", "))
+                                    (ordered_kernel_ids(server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join(", "))
                                 }
                                 ")"
                             }
