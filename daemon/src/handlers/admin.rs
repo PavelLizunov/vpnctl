@@ -624,6 +624,7 @@ fn compact_kernel_version(kernel: &str, version: &str) -> String {
 fn kernel_versions_inline(
     server: &vpnctl_core::Server,
     kernel_versions_json: Option<&str>,
+    fleet_majority_version: Option<&str>,
 ) -> Markup {
     let observations = kernel_observations_of(kernel_versions_json);
     let full_versions = server
@@ -646,6 +647,9 @@ fn kernel_versions_inline(
                     @if let Some(version) = observations.get(&kid.0).and_then(|o| o.version.as_deref()) {
                         span.ed-kvers__value title=(version) {
                             (compact_kernel_version(&kid.0, version))
+                            @if kid.0 == "sing-box" && fleet_majority_version.is_some_and(|majority| majority != version) {
+                                " ≠"
+                            }
                         }
                     } @else {
                         span.ed-grid__mut { "—" }
@@ -922,6 +926,7 @@ fn dashboard_fleet_table(
     let max_traffic = traffic_24h.values().copied().max().unwrap_or(0);
     // Fleet-majority sing-box version: the most frequent reported one.
     // A node on any OTHER version gets a warm «≠» drift marker.
+    let majority_version = fleet_majority_version(kernel_versions);
     html! {
         section id="fleet-at-a-glance" style="margin-top: 18px;" {
             div.ed-art-eyebrow {
@@ -1005,7 +1010,9 @@ fn dashboard_fleet_table(
                                     span.ed-grid__mut { (dash) }
                                 }
                             }
-                            td.ed-grid__sm { (kernel_versions_inline(s, kv_json)) }
+                            td.ed-grid__sm {
+                                (kernel_versions_inline(s, kv_json, majority_version.as_deref()))
+                            }
                             td.num.ed-grid__mut.ed-grid__sm {
                                 @match health.map(|h| h.ts) {
                                     Some(ts) => (humanize_age(now - ts, lang)),
@@ -3294,6 +3301,7 @@ pub(crate) async fn servers(
                                 latest_health
                                     .get(&server.id)
                                     .and_then(|row| row.kernel_versions_json.as_deref()),
+                                None,
                             ))
                         }
                     }
