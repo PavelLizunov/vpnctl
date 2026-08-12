@@ -94,8 +94,8 @@
 
 use async_trait::async_trait;
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 /// Default public UDP port `wgturn-cli serve` listens on for the
@@ -146,6 +146,9 @@ const WGTURN_CORE_PINNED_SHA: &str = "af0f209f99f8381356fbae82d9b0f64d4af4bdcf";
 /// `https://dl.google.com/go/go1.24.4.linux-amd64.tar.gz.sha256`).
 /// Bumping the Go version REQUIRES re-fetching the new digest.
 const GO_TARBALL_SHA256: &str = "77e5da33bb72aeaef1ba4418b6fe511bc4d041873cbf82e5aa6318740df98717";
+const WGTURN_RESTART_IF_CHANGED: &str = r#"if [ "$need_rebuild" = "1" ]; then
+                if systemctl is-active --quiet wgturn; then systemctl restart wgturn; fi
+            fi"#;
 
 /// Multi-file bundle delimiter. `render_config` emits text in this
 /// format; `apply_config` parses it. Format:
@@ -199,6 +202,13 @@ impl Kernel for WgTurn {
         // protocol shape this kernel hosts. Plain WireGuard belongs
         // to AmneziaWg / a future WireGuardKernel.
         vec![ProtocolId("wgturn".to_string())]
+    }
+
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Pin,
+            value: WGTURN_CORE_PINNED_SHA,
+        })
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
@@ -357,6 +367,7 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
             systemctl daemon-reload
+            {restart_if_changed}
 
             # Final assertion — fail loud if any step above silently
             # produced an empty binary or PATH inversion.
@@ -366,6 +377,7 @@ UNIT
         "#,
             iface = BACKEND_INTERFACE_NAME,
             go_sha256 = GO_TARBALL_SHA256,
+            restart_if_changed = WGTURN_RESTART_IF_CHANGED,
         );
         ssh.exec(&script).await?;
         Ok(())
@@ -553,13 +565,13 @@ UNIT
         // UDP socket whether anyone's listening), so the combined
         // check is the honest one.
         let relay = ssh
-            .exec("systemctl is-active wgturn")
+            .exec("systemctl is-active wgturn 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
         let backend = ssh
             .exec(&format!(
-                "systemctl is-active wg-quick@{iface}",
+                "systemctl is-active wg-quick@{iface} 2>/dev/null || true",
                 iface = BACKEND_INTERFACE_NAME,
             ))
             .await?
@@ -567,10 +579,11 @@ UNIT
             .eq("active");
         let active = relay && backend;
         let version = ssh
-            .exec("wgturn-cli version 2>/dev/null | head -1")
+            .exec("cat /etc/wgturn/.installed-sha 2>/dev/null")
             .await
             .ok()
-            .map(|s| s.trim().to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Ok(KernelStatus {
             active,
             version,

@@ -108,6 +108,10 @@ pub struct Probe {
     /// `NULL` in that case rather than `{}`. Backs the admin UI's
     /// drift-detail card.
     pub kernel_versions: std::collections::BTreeMap<String, String>,
+    /// Active state for every declared kernel whose `Kernel::status`
+    /// call succeeded. Stored beside the versions in the existing
+    /// node-health JSON column.
+    pub kernel_active: std::collections::BTreeMap<String, bool>,
 
     // ─── Traffic ground-truth — public-interface byte counters ───
     /// Default-route interface name (e.g. `ens18`, `eth0`). `None` when

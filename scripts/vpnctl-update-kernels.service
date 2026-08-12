@@ -1,11 +1,12 @@
 [Unit]
-Description=vpnctl kernel-binary update (sing-box/caddy/amneziawg → version floor)
+Description=vpnctl update all declared kernel binaries (no config apply or reboot)
 Documentation=https://github.com/PavelLizunov/vpnctl
-# Order after the daemon so a concurrent vpnctld restart doesn't race the
-# per-node deploy. `After=` orders STARTUP only — once both are running this
-# oneshot can still fire while vpnctld is alive, which is fine: each node's
-# `vpnctl deploy` is content-aware/idempotent.
+# Start after the daemon. Runtime overlap with a Web deploy is refused by
+# the shared per-server advisory lock under /var/lib/vpnctl/locks.
 After=vpnctld.service
+# If both persistent timers catch up after a reboot, wait for the backup
+# job that is already queued/running; do not pull in an extra backup job.
+After=vpnctl-backup.service
 # Per-node SSH + apt need the network up.
 After=network-online.target
 Wants=network-online.target
@@ -17,18 +18,19 @@ Group=user
 # Reads VPNCTLD_* (e.g. VPNCTLD_TRUSTED_PROXIES is irrelevant here, but the
 # deploy/SSH knobs and any future kernel-version floor overrides live here).
 EnvironmentFile=-/etc/vpnctl/vpnctld.env
+Environment=VPNCTLD_NODE_LOCK_DIR=/var/lib/vpnctl/locks
 # Use the daemon DEPLOY key explicitly. This oneshot runs as `User=user`,
 # whose `~/.ssh/id_ed25519` is NOT the vpnctld deploy key — the deploy key
 # lives at /var/lib/vpnctl/.ssh/id_ed25519. `--key` is the #34-aware explicit
 # path (under sudo $HOME is /root, so any default-key fallback would resolve
 # to the wrong identity). Without it the per-node SSH fails publickey.
-ExecStart=/usr/local/bin/vpnctl update-kernels --all --key /var/lib/vpnctl/.ssh/id_ed25519 --db /var/lib/vpnctl/inv.db
+ExecStart=/usr/local/bin/vpnctl update-kernels --all --db /var/lib/vpnctl/inv.db --key /var/lib/vpnctl/.ssh/id_ed25519
 # Budget: apt refresh + per-node SSH across the whole fleet. caddy is
 # content-aware (a no-op when the on-node binary already matches), but
 # tolerate a worst case where every kernel on every node needs a reinstall.
 TimeoutStartSec=900
-# Don't auto-restart on failure — the next weekly tick (or an operator
-# clicking Deploy in the Web UI) is the recovery path; journald surfaces it.
+# Don't auto-restart on failure — the next nightly tick or the Web UI's
+# Update kernels action is the recovery path; admin alerts + journald surface it.
 Restart=no
 StandardOutput=journal
 StandardError=journal
@@ -43,10 +45,8 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Inventory writes are part of this command's contract: first-connect TOFU
-# stores the host fingerprint and every attempt appends a kernel.update audit
-# row. Keep the complete vpnctl state directory writable for the SQLite DB,
-# its WAL/SHM sidecars, and .ssh/known_hosts.
+# The CLI opens inv.db read/write (migrations + WAL), records audit rows, and
+# may persist a TOFU host key under .ssh, so the whole state dir must be writable.
 ReadWritePaths=/var/lib/vpnctl
 ReadOnlyPaths=/etc/vpnctl /opt/vpnctl
 PrivateTmp=true

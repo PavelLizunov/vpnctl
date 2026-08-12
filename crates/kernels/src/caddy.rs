@@ -49,8 +49,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use vpnctl_core::{
-    CoreError, Kernel, KernelId, KernelStatus, Protocol, ProtocolId, RenderCtx, Result,
-    SshTransport, User,
+    CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
+    Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
 /// Pinned Go toolchain for the on-node `xcaddy` build. Bump in lockstep
@@ -74,6 +74,8 @@ pub(crate) const CADDY_VERSION: &str = "v2.11.4";
 /// commit (not the moving `@naive` branch) makes the supply chain
 /// reproducible — a force-push to the branch can't change what we ship.
 pub(crate) const FORWARDPROXY_PIN: &str = "d62c80d3dd2c";
+const CADDY_RESTART_IF_ACTIVE: &str =
+    "if systemctl is-active --quiet caddy; then systemctl restart caddy; fi";
 
 /// The masquerade site served to unauthenticated probes. Constant
 /// (no per-deploy state), so it's provisioned once in `ensure_installed`
@@ -681,6 +683,13 @@ impl Kernel for Caddy {
         ]
     }
 
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Pin,
+            value: CADDY_VERSION,
+        })
+    }
+
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
         // FAST PATH: a prebuilt static (CGO-free) amd64 caddy cached on
         // the CONTROL node — upload it (seconds; no Go/swap/RAM pressure
@@ -688,7 +697,7 @@ impl Kernel for Caddy {
         // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
         // cache is present (e.g. a CLI deploy from a host without it).
         let cache = caddy_cache_path();
-        match std::fs::read(&cache) {
+        let binary_changed = match std::fs::read(&cache) {
             Ok(bytes) => {
                 // Content-aware idempotency: SHA256 the cache bytes up front
                 // (the same digest fed to `sha256sum -c` on the transfer) and
@@ -702,7 +711,8 @@ impl Kernel for Caddy {
                 let node_sha = ssh
                     .exec("sha256sum /usr/local/bin/caddy 2>/dev/null | cut -d' ' -f1")
                     .await?;
-                if caddy_needs_reinstall(&digest, &node_sha) {
+                let needs_reinstall = caddy_needs_reinstall(&digest, &node_sha);
+                if needs_reinstall {
                     // Integrity-verify on the node before installing it as a
                     // root systemd service: upload the cache bytes to .new,
                     // `sha256sum -c` the control-side digest there, then atomic
@@ -718,6 +728,7 @@ impl Kernel for Caddy {
                     ))
                     .await?;
                 }
+                needs_reinstall
             }
             // No cache → build on the node, gated on a presence probe (caddy
             // on PATH AND forward_proxy compiled in). A cache path that's SET
@@ -731,16 +742,21 @@ impl Kernel for Caddy {
                          && echo present || echo absent",
                     )
                     .await?;
-                if !caddy_present(&present) {
+                let needs_reinstall = !caddy_present(&present);
+                if needs_reinstall {
                     ssh.exec(&caddy_build_script()).await?;
                 }
+                needs_reinstall
             }
             Err(e) => return Err(CoreError::Io(e)),
-        }
+        };
 
         // Provision the runtime (user, masquerade site, systemd unit,
         // firewall) regardless of how the binary arrived. Idempotent.
         ssh.exec(&caddy_runtime_provision_script()).await?;
+        if binary_changed {
+            ssh.exec(CADDY_RESTART_IF_ACTIVE).await?;
+        }
         Ok(())
     }
 
@@ -895,12 +911,12 @@ impl Kernel for Caddy {
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
         let active = ssh
-            .exec("systemctl is-active caddy")
+            .exec("systemctl is-active caddy 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
         let version = ssh
-            .exec("/usr/local/bin/caddy version 2>/dev/null | head -1")
+            .exec("/usr/local/bin/caddy version 2>/dev/null | awk '{print $1; exit}'")
             .await
             .ok()
             .map(|v| v.trim().to_string())

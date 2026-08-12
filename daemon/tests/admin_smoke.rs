@@ -19038,3 +19038,119 @@ async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() 
         "nothing may persist on rejection"
     );
 }
+
+#[tokio::test]
+async fn kernel_quality_release_renders_all_kernel_versions() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let server = Server {
+        id: ServerId("all-kernels".into()),
+        address: "203.0.113.50".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: [
+            "sing-box",
+            "amneziawg",
+            "wgturn",
+            "caddy",
+            "dns-tunnel",
+            "xray",
+        ]
+        .into_iter()
+        .map(|id| KernelId(id.into()))
+        .collect(),
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    s.inv.add_server(&server).await.unwrap();
+    s.inv
+        .record_node_health(
+            &server.id,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(
+                r#"{"sing-box":{"version":"1.13.18","active":true},"amneziawg":{"version":"1.0.20210913-1","active":true},"wgturn":{"version":"af0f209f99f8381356fbae82d9b0f64d4af4bdcf","active":true},"caddy":{"version":"v2.11.4","active":true},"dns-tunnel":{"version":"v0.1.0","active":false},"xray":{"version":"26.3.27","active":true}}"#,
+            ),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let detail = fetch_html(router(s.clone()), "/admin/servers/all-kernels").await;
+    assert!(detail.contains("Kernel versions"));
+    assert!(detail.contains(r#"data-kernel-version="xray""#));
+    assert!(detail.contains("26.3.27"));
+    assert!(detail.contains("v26.3.27"));
+
+    let list = fetch_html(router(s), "/admin/servers").await;
+    assert!(list.contains(r#"id="fleet-kernel-versions""#));
+    assert!(list.contains("xray"));
+}
+
+fn release_quality_sample(
+    server_id: &str,
+    minute: i64,
+    available: bool,
+) -> vpnctl_inventory::ServiceQualitySample {
+    vpnctl_inventory::ServiceQualitySample {
+        ts: chrono::Utc::now() - chrono::Duration::minutes(minute),
+        server_id: ServerId(server_id.into()),
+        vantage: "vpnctld control host".into(),
+        target_count: 1,
+        available_targets: u32::from(available),
+        attempts: 3,
+        successes: if available { 3 } else { 0 },
+        tcp_rtt_ms: if available { vec![20, 21, 22] } else { vec![] },
+        control_attempts: 3,
+        control_successes: 3,
+        control_rtt_ms: vec![5, 6, 7],
+        icmp_attempts: None,
+        icmp_successes: None,
+        icmp_rtt_ms: None,
+    }
+}
+
+#[tokio::test]
+async fn kernel_quality_release_renders_dashboard_ranking_and_detail() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 0, &[]).await;
+    for minute in 1..=12 {
+        s.inv
+            .record_service_quality_sample(&release_quality_sample("s0", minute, true))
+            .await
+            .unwrap();
+        s.inv
+            .record_service_quality_sample(&release_quality_sample("s1", minute, false))
+            .await
+            .unwrap();
+    }
+
+    let dashboard = fetch_html(router(s.clone()), "/admin/").await;
+    let ranking = &dashboard[dashboard.find(r#"id="fleet-quality-ranking""#).unwrap()..];
+    assert!(ranking.contains("Fleet quality ranking · service path"));
+    assert!(ranking.contains("100/100"));
+    assert!(ranking.contains("0/100"));
+    assert!(
+        ranking.find(r#"data-quality-server="s0""#).unwrap()
+            < ranking.find(r#"data-quality-server="s1""#).unwrap()
+    );
+
+    let detail = fetch_html(router(s), "/admin/servers/s0").await;
+    assert!(detail.contains(r#"id="server-quality""#));
+    assert!(detail.contains("Quality · service path"));
+    assert!(detail.contains("vpnctld control host"));
+}

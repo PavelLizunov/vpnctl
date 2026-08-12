@@ -10,6 +10,7 @@ User=user
 Group=user
 WorkingDirectory=/opt/vpnctl
 EnvironmentFile=/etc/vpnctl/vpnctld.env
+Environment=VPNCTLD_NODE_LOCK_DIR=/var/lib/vpnctl/locks
 ExecStart=/opt/vpnctl/vpnctld
 Restart=on-failure
 RestartSec=2

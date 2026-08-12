@@ -1,11 +1,11 @@
 [Unit]
-Description=vpnctl backup snapshot timer (daily 03:00 UTC)
+Description=vpnctl backup snapshot timer (daily 00:00 UTC / 03:00 MSK)
 Documentation=https://github.com/PavelLizunov/vpnctl
 
 [Timer]
-# 03:00 UTC daily — minimal traffic on the homelab, nightly window
-# coincides with no human activity.
-OnCalendar=*-*-* 03:00:00
+# Start the backup window at 03:00 MSK. Kernel updates follow at
+# 00:30 UTC / 03:30 MSK, leaving a dedicated backup head start.
+OnCalendar=*-*-* 00:00:00 UTC
 # Persistent: if the host was off when the timer would have fired,
 # run on next boot. Backups should NEVER be silently skipped.
 Persistent=true

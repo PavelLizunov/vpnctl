@@ -167,6 +167,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     drop(crate::node_probe_poller::spawn_node_probe_poller(
         inv.clone(),
     ));
+    drop(crate::quality_poller::spawn_quality_poller(
+        inv.clone(),
+        Arc::clone(&registry),
+    ));
 
     // Phase G — operator-facing alerts on top of node_health rows.
     // Same cadence as the probe (10 min) — no point scanning faster
@@ -496,6 +500,24 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     target = "vpnctld::retention",
                     error = %e,
                     "node_health purge failed; will retry next tick"
+                ),
+            }
+            match crate::quality_poller::purge_old(&inv, RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    "server_quality_samples purge tick: nothing to remove"
+                ),
+                Ok(n) => tracing::info!(
+                    target = "vpnctld::retention",
+                    days = RETENTION_DAYS,
+                    removed = n,
+                    "purged old server_quality_samples rows"
+                ),
+                Err(e) => tracing::warn!(
+                    target = "vpnctld::retention",
+                    error = %e,
+                    "server_quality_samples purge failed; will retry next tick"
                 ),
             }
             // Phase G: sweep ACKED admin_alerts on the same cadence.

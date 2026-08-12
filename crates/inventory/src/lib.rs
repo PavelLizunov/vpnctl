@@ -15,6 +15,8 @@ pub mod backup;
 // shadowsocks-2022's `ss2022.psk` + hysteria2's obfs password).
 pub mod bootstrap;
 pub mod migrate;
+pub mod operation_lock;
+pub mod quality;
 pub mod sqlite;
 
 pub use backup::{
@@ -28,6 +30,8 @@ pub use migrate::{
     MigrationPlan, SkippedUser, apply_migration_plan, build_migration_plan,
     derive_server_id_from_ip, parse_bash_inventory_env, parse_bash_singbox,
 };
+pub use operation_lock::NodeOperationLock;
+pub use quality::{QUALITY_MIN_SAMPLES, ServiceQualitySample, ServiceQualityScore, score_samples};
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, BoostySettings, HeavyUser, NodeHealthRow,
     ProxyMaskedStats, ServerLiveActivity, SharingSignals, SqliteInventory, SqliteInventoryError,
