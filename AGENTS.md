@@ -65,9 +65,16 @@ then passes with the implementation.
 - Production deploy/restore is owner-gated and must follow the current `CLAUDE.md`
   live-deploy/restore procedure from green `main`, including backup before replacement.
   Code rollback is a new revert PR; do not force-push or rewrite published history.
+- When the owner explicitly asks to install, publish, or deploy a change, continue
+  through the full path `branch -> PR -> green CI -> merge main -> production`
+  unless the owner explicitly says to stop earlier. A local commit is not a live
+  release: always report `local`, `main`, and `production` state separately.
 
 ## Done
 
 A task is done only when its diff is scoped, the required commands above pass with
 recorded exit codes, target-specific checks are either proven or explicitly marked
 not run, secret scan is clean, and the PR reports pre-existing failures separately.
+For an explicitly requested production deployment, also require a production
+backup, active systemd, health response, and UI/version verification before saying
+the task is done.

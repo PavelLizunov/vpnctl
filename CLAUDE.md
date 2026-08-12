@@ -228,6 +228,10 @@ Pavel работает из **нескольких параллельных се
    один: деплой из feature-ветки перезапишет бинарь и потеряет фиксы
    других сессий. Перед деплоем — бэкап текущего бинаря
    (`sudo cp -a /opt/vpnctl/vpnctld /opt/vpnctl/vpnctld.bak-<метка>`).
+   Если Pavel явно пишет «устанавливай», «выкладывай» или «деплой»,
+   это означает полный цикл: PR → зелёный CI → merge в main → backup →
+   production install → systemd/health/UI verification. Локальный commit
+   или merge без live-проверки нельзя называть «готово».
 6. **После `git pull` перепроверь ветку** (п.1): pull на чужой ветке
    тянет её upstream, не main — «Merge … into <branch>» в выводе pull
    это красный флаг, что ты не на main.
