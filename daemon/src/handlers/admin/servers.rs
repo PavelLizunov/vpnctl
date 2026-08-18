@@ -7,7 +7,7 @@ use maud::{Markup, html};
 
 use crate::AppState;
 use crate::http_util::path_segment_encode;
-use super::legacy::{
+use super::helpers::{
     internal_error, kernel_versions_inline, render_page, theme_accent_lang,
 };
 
