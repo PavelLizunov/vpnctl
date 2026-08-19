@@ -1,16 +1,14 @@
 //! Common utility functions and formatting helpers for admin UI handlers.
 
-//! Common utility functions and formatting helpers for admin UI handlers.
-
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use maud::{DOCTYPE, Markup, html};
 
 use crate::AppState;
 use super::ui::{foot, root_class, topbar};
 
-const COOKIE_THEME: &str = "vpnctl_theme";
-const COOKIE_ACCENT: &str = "vpnctl_accent";
+pub(crate) const COOKIE_THEME: &str = "vpnctl_theme";
+pub(crate) const COOKIE_ACCENT: &str = "vpnctl_accent";
 
 pub(crate) async fn topbar_alert_count(state: &AppState) -> u64 {
     state.inv.unacked_alert_count().await.unwrap_or(0)
@@ -127,8 +125,33 @@ pub(crate) fn user_not_found(id: &str) -> Response {
     not_found(&format!("no such user '{id}'"))
 }
 
-pub(crate) fn unauthorized(detail: &str) -> Response {
-    error_resp(StatusCode::UNAUTHORIZED, detail)
+pub(crate) const COOKIE_LANG: &str = "vpnctl_lang";
+
+pub(crate) fn set_tweak_cookie(
+    headers: &HeaderMap,
+    cookie_name: &str,
+    valid: &[&str],
+    body: &str,
+) -> Response {
+    let value = body
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("value="))
+        .unwrap_or("");
+    if !valid.contains(&value) {
+        return bad_request(&format!(
+            "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+            valid.join(", ")
+        ));
+    }
+    let cookie_val =
+        format!("{cookie_name}={value}; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax");
+    let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok());
+    let target = sanitize_referer(referer);
+    let mut resp = Redirect::to(&target).into_response();
+    if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    resp
 }
 
 static DISPLAY_TZ: std::sync::OnceLock<std::sync::RwLock<chrono_tz::Tz>> =
@@ -342,6 +365,53 @@ pub(crate) fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
     }
 }
 
+pub(crate) fn sparkline_svg_scaled(
+    values: &[f64],
+    width: u32,
+    height: u32,
+    y_max_override: Option<f64>,
+    area_fill: bool,
+) -> Markup {
+    if values.is_empty() {
+        return html! { svg width=(width) height=(height) viewBox=(format!("0 0 {width} {height}")) {} };
+    }
+    let max = y_max_override.unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max)).max(1.0);
+    let n = values.len();
+    let dx = if n > 1 { width as f64 / (n - 1) as f64 } else { width as f64 };
+    let points: Vec<(f64, f64)> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = i as f64 * dx;
+            let y = height as f64 - (v / max * (height as f64 - 2.0)).min(height as f64 - 2.0) - 1.0;
+            (x, y)
+        })
+        .collect();
+
+    let path_data = points
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| if i == 0 { format!("M {x:.1} {y:.1}") } else { format!("L {x:.1} {y:.1}") })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    html! {
+        svg width=(width) height=(height) viewBox=(format!("0 0 {width} {height}")) fill="none" style="display: block;" {
+            @if area_fill && points.len() > 1 {
+                @let (first_x, _) = points[0];
+                @let (last_x, _) = points[points.len() - 1];
+                @let area_path = format!("{path_data} L {last_x:.1} {height} L {first_x:.1} {height} Z");
+                path d=(area_path) fill="var(--paper-tint)" opacity="0.5" {}
+            }
+            path d=(path_data) stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" {}
+        }
+    }
+}
+
+pub(crate) fn unauthorized(detail: &str) -> Response {
+    error_resp(StatusCode::UNAUTHORIZED, detail)
+}
+
 pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     let raw = match referer {
         Some(r) => r,
@@ -486,6 +556,51 @@ pub(crate) fn ordered_kernel_ids(server: &vpnctl_core::Server) -> Vec<&vpnctl_co
     let mut kernels = server.kernels.iter().collect::<Vec<_>>();
     kernels.sort_by_key(|kernel| (kernel_priority(&kernel.0), kernel.0.as_str()));
     kernels
+}
+
+pub(crate) fn sing_box_version_of(kernel_versions_json: Option<&str>) -> Option<String> {
+    kernel_observations_of(kernel_versions_json)
+        .remove("sing-box")
+        .and_then(|o| o.version)
+}
+
+pub(crate) fn fleet_majority_version(
+    kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
+) -> Option<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, j) in kernel_versions {
+        if let Some(v) = sing_box_version_of(j.as_deref()) {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(va, na), (vb, nb)| {
+            na.cmp(nb)
+                .then_with(|| parse_version_tuple(va).cmp(&parse_version_tuple(vb)))
+                .then_with(|| va.cmp(vb))
+        })
+        .map(|(v, _)| v)
+}
+
+pub(crate) struct GeoIpDbStat {
+    pub(crate) city_mtime: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) asn_mtime: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub(crate) fn geoip_db_stat() -> GeoIpDbStat {
+    let dir = std::env::var("VPNCTLD_GEOIP_DIR").unwrap_or_else(|_| "/var/lib/vpnctl/geoip".to_string());
+    let path_city = std::path::Path::new(&dir).join("GeoLite2-City.mmdb");
+    let path_asn = std::path::Path::new(&dir).join("GeoLite2-ASN.mmdb");
+    let mtime = |p: &std::path::Path| {
+        let meta = std::fs::metadata(p).ok()?;
+        let sys_t = meta.modified().ok()?;
+        Some(chrono::DateTime::<chrono::Utc>::from(sys_t))
+    };
+    GeoIpDbStat {
+        city_mtime: mtime(&path_city),
+        asn_mtime: mtime(&path_asn),
+    }
 }
 
 pub(crate) fn kernel_versions_inline(
