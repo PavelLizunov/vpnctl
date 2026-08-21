@@ -117,7 +117,11 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+    let safe_name: String = name
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+        .collect();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     resp
@@ -357,4 +361,18 @@ fn is_safe_snapshot_name(name: &str) -> bool {
     // Parser is the source of truth for the precise shape
     // (`inv.db.<RFC3339-ish>.bak`).
     vpnctl_inventory::parse_snapshot_filename(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_safe_snapshot_name_validates_pattern_and_rejects_injection() {
+        assert!(!is_safe_snapshot_name(""));
+        assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\r\nHeader: Value"));
+        assert!(!is_safe_snapshot_name("../inv.db.bak"));
+        assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\""));
+        assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\n"));
+    }
 }
