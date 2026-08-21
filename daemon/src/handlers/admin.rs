@@ -8,6 +8,10 @@
 //! All admin routes live behind a basic-auth middleware (see
 //! `super::auth::basic_auth_layer`).
 
+// Axum's Response is intentionally the handler error type throughout this
+// module. Rust 1.98 started flagging that established API as a large Err.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashSet;
 
 use axum::extract::{Path, State};
