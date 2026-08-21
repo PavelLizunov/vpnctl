@@ -370,7 +370,9 @@ mod tests {
     #[test]
     fn is_safe_snapshot_name_validates_pattern_and_rejects_injection() {
         assert!(!is_safe_snapshot_name(""));
-        assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\r\nHeader: Value"));
+        assert!(!is_safe_snapshot_name(
+            "inv.db.2026-05-20T12:00:00Z.bak\r\nHeader: Value"
+        ));
         assert!(!is_safe_snapshot_name("../inv.db.bak"));
         assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\""));
         assert!(!is_safe_snapshot_name("inv.db.2026-05-20T12:00:00Z.bak\n"));
