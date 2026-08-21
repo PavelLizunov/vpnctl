@@ -9491,12 +9491,7 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     // already.
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
-        Err(e) => {
-            return error_resp(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("backup dir not readable: {e}"),
-            );
-        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     let canon_path = match std::fs::canonicalize(&path) {
         Ok(p) => p,
