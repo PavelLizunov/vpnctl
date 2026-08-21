@@ -1362,3 +1362,48 @@ async fn sub_untrusted_ip_still_escalates_to_per_ip_ban() {
         "untrusted IP must still escalate to the persistent per-IP ban: {bans:?}"
     );
 }
+
+/// Baseline security response headers (X-Content-Type-Options: nosniff and
+/// X-Frame-Options: DENY) must be attached to public API and subscription
+/// endpoints for defense-in-depth against MIME sniffing and framing.
+#[tokio::test]
+async fn public_endpoints_carry_security_response_headers() {
+    let dir = TempDir::new().unwrap();
+    let (state, _token) = seed(&dir).await;
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+
+    let dir2 = TempDir::new().unwrap();
+    let (state2, token2) = seed(&dir2).await;
+    let app2 = router(state2);
+    let resp = app2
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sub/{token2}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+}
