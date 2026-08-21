@@ -905,7 +905,10 @@ pub fn router(state: AppState) -> Router {
 
     let admin_router = admin_router(state.clone());
 
-    Router::new()
+    // Security headers on public/API routes are applied via `route_layer` so they
+    // attach ONLY to matched public routes and do not leak on unmatched 404
+    // probes (e.g. `/etc/passwd`), preserving the anti-fingerprinting contract.
+    let public_router = Router::new()
         .route("/api/v1/health", get(handlers::health::get))
         // Phase F monitoring stats (NOT behind admin auth — exposes
         // only aggregate counts, no per-IP/per-token details).
@@ -942,6 +945,20 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/app/config/",
             get(handlers::vpn_router::get_config_root_catchall),
         )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+        )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::X_FRAME_OPTIONS,
+                axum::http::HeaderValue::from_static("DENY"),
+            ),
+        );
+
+    public_router
         .with_state(state)
         .merge(admin_router)
         .layer(TimeoutLayer::with_status_code(
