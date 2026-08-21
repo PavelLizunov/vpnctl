@@ -455,6 +455,9 @@ pub(crate) async fn server_deploy(
             Ok(u) => u,
             Err(e) => return internal_error(anyhow::Error::new(e)),
         };
+        if let Err(e) = state.inv.assert_no_uuid_collisions(&sid).await {
+            return internal_error(anyhow::Error::new(e));
+        }
         if state
             .inv
             .deploy_input_revision(&sid)
