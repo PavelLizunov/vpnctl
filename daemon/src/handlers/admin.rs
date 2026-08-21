@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Admin UI handlers — Phase A foundation.
 //!
 //! Builds the editorial-style v3 shell (masthead + inline nav + main +
@@ -9489,7 +9491,12 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     // already.
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
-        Err(e) => return internal_error(anyhow::Error::new(e)),
+        Err(e) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("backup dir not readable: {e}"),
+            );
+        }
     };
     let canon_path = match std::fs::canonicalize(&path) {
         Ok(p) => p,
