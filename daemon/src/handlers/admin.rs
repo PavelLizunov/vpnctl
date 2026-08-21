@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 //! Admin UI handlers — Phase A foundation.
 //!
 //! Builds the editorial-style v3 shell (masthead + inline nav + main +
@@ -9,6 +7,10 @@
 //!
 //! All admin routes live behind a basic-auth middleware (see
 //! `super::auth::basic_auth_layer`).
+
+// Axum's Response is intentionally the handler error type throughout this
+// module. Rust 1.98 started flagging that established API as a large Err.
+#![allow(clippy::result_large_err)]
 
 use std::collections::HashSet;
 
@@ -9491,12 +9493,7 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     // already.
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
-        Err(e) => {
-            return error_resp(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("backup dir not readable: {e}"),
-            );
-        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     let canon_path = match std::fs::canonicalize(&path) {
         Ok(p) => p,

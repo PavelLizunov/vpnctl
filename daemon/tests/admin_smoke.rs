@@ -11176,14 +11176,28 @@ async fn admin_backup_download_404_on_missing_snapshot() {
     // (canonicalize errors with NotFound → 500), OR it exists but
     // file is missing (404). Either keeps the operator's path
     // safe; we accept both.
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
     assert!(
         matches!(
-            resp.status(),
+            status,
             StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR
         ),
         "missing snapshot should be 404 or 500, got {:?}",
-        resp.status()
+        status
     );
+
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        assert_eq!(
+            body_str.trim(),
+            "vpnctl admin: internal error — please retry the action",
+            "500 response body must not leak internal filesystem paths or details"
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
