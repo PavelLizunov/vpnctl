@@ -11,10 +11,10 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
+use super::audit::{action_kind, redact_audit_payload, summarize_audit_payload};
 use super::helpers::{
     bad_request, format_msk_iso, internal_error, render_page, theme_accent_lang, user_not_found,
 };
-use super::legacy::{action_kind, redact_audit_payload, summarize_audit_payload};
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 

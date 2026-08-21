@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
-use super::legacy::{internal_error, render_page, theme_accent_lang};
+use super::helpers::{internal_error, render_page, theme_accent_lang};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 

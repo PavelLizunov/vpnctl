@@ -12,13 +12,15 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
-use super::helpers::{format_msk_iso, humanize_bytes};
+use super::helpers::{
+    format_msk_iso, humanize_bytes, internal_error, render_page, theme_accent_lang, user_not_found,
+};
 use super::legacy::{
-    collect_amnezia_links, collect_awg_links, collect_share_links, detail_tabs, internal_error,
-    live_vpn_stats_section, ninitux_url, qr_svg, render_page, share_link_card, sub_url,
-    theme_accent_lang, ua_clusters_section, user_detail_per_protocol_grid, user_is_likely_shared,
-    user_not_found, user_online_badge, user_sessions_section, user_source_ips_section,
-    user_subscription_origins_section, user_top_destinations_section, user_traffic_limit_section,
+    collect_amnezia_links, collect_awg_links, collect_share_links, detail_tabs,
+    live_vpn_stats_section, ninitux_url, qr_svg, share_link_card, sub_url, ua_clusters_section,
+    user_detail_per_protocol_grid, user_is_likely_shared, user_online_badge, user_sessions_section,
+    user_source_ips_section, user_subscription_origins_section, user_top_destinations_section,
+    user_traffic_limit_section,
 };
 use super::users::mask_secret;
 use crate::AppState;

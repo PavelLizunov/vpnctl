@@ -18,53 +18,6 @@ use super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
-pub(crate) async fn server_set_traffic_limit(
-    State(state): State<AppState>,
-    Path(server_id_str): Path<String>,
-    body: String,
-) -> Response {
-    let sid = vpnctl_core::ServerId(server_id_str.clone());
-    let server = match state.inv.get_server(&sid).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-
-    let limit_gib: f64 = form_field(&body, "limit_gib")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-
-    let bytes_str = if limit_gib > 0.0 && limit_gib.is_finite() {
-        ((limit_gib * 1_073_741_824.0) as u64).to_string()
-    } else {
-        String::new()
-    };
-
-    if let Err(e) = state
-        .inv
-        .set_server_secret(&server.id, "server.traffic_limit_bytes", &bytes_str)
-        .await
-    {
-        return internal_error(anyhow::Error::new(e));
-    }
-
-    let _ = state
-        .inv
-        .audit(
-            "admin",
-            "server.traffic_limit.set",
-            Some(&server_id_str),
-            Some(&serde_json::json!({ "limit_bytes": bytes_str, "limit_gib": limit_gib })),
-        )
-        .await;
-
-    Redirect::to(&format!(
-        "/admin/servers/{}",
-        path_segment_encode(&server_id_str)
-    ))
-    .into_response()
-}
-
 /// `POST /admin/servers/{id}/protocols/{proto}/enable` — add a
 /// protocol to a server's `enabled_protocols`. Idempotent at SQL.
 /// Returns 404 if server doesn't exist, 400 if protocol id isn't

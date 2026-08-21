@@ -150,44 +150,6 @@ pub(crate) fn foot(lang: crate::i18n::Locale) -> Markup {
     }
 }
 
-pub(crate) fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::tr;
-    const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
-    const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
-    html! {
-        div style="display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--soft); max-width: 480px;" {
-            form method="post" action="/admin/tweak/theme" style="display: flex; gap: 6px; align-items: baseline;" {
-                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "paper", "бумага")) }
-                @for &name in VALID_THEMES {
-                    button name="value" value=(name)
-                           title=(format!("{} {name}", tr(lang, "Switch paper theme to", "Переключить тему бумаги на")))
-                           style=(format!(
-                               "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
-                               if name == theme { "var(--ink)" } else { "transparent" },
-                               if name == theme { "var(--paper)" } else { "var(--ink)" },
-                           )) {
-                        (name)
-                    }
-                }
-            }
-            form method="post" action="/admin/tweak/accent" style="display: flex; gap: 6px; align-items: baseline;" {
-                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "accent", "акцент")) }
-                @for &name in VALID_ACCENTS {
-                    button name="value" value=(name)
-                           title=(format!("{} {name}", tr(lang, "Switch accent colour to", "Переключить акцентный цвет на")))
-                           style=(format!(
-                               "padding: 3px 9px; border: 1px solid var(--rule-s); background: {}; color: {}; font-family: var(--mono); font-size: 11px; cursor: pointer;",
-                               if name == accent { "var(--acc)" } else { "transparent" },
-                               if name == accent { "var(--paper)" } else { "var(--ink)" },
-                           )) {
-                        (name)
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn root_class(theme: &str, accent: &str) -> String {
     let mut cls = String::from("ed");
     match theme {
@@ -203,24 +165,6 @@ pub(crate) fn root_class(theme: &str, accent: &str) -> String {
         _ => {}
     }
     cls
-}
-
-pub(crate) fn detail_tabs(base: &str, active: &str, tabs: &[(&str, &str)]) -> Markup {
-    html! {
-        div.ed-tabs {
-            @for &(slug, label) in tabs {
-                a class=(if slug == active { "ed-tab ed-tab--on" } else { "ed-tab" })
-                  href=(format!("{base}/{slug}"))
-                  style="cursor: pointer; text-decoration: none;" {
-                    (label)
-                }
-            }
-        }
-    }
-}
-
-pub(crate) fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
-    status_tile_with_warn(label, value, value_color, false)
 }
 
 pub(crate) fn status_tile_with_warn(

@@ -1,5 +1,6 @@
 //! Common utility functions and formatting helpers for admin UI handlers.
 
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{DOCTYPE, Markup, html};
@@ -9,6 +10,9 @@ use crate::AppState;
 
 pub(crate) const COOKIE_THEME: &str = "vpnctl_theme";
 pub(crate) const COOKIE_ACCENT: &str = "vpnctl_accent";
+const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
+const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
+const VALID_LANGS: &[&str] = &["en", "ru"];
 
 pub(crate) async fn topbar_alert_count(state: &AppState) -> u64 {
     state.inv.unacked_alert_count().await.unwrap_or(0)
@@ -154,6 +158,29 @@ pub(crate) fn set_tweak_cookie(
     resp
 }
 
+pub(crate) async fn set_tweak(
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+    body: String,
+) -> Response {
+    match kind.as_str() {
+        "theme" => set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body),
+        "accent" => set_tweak_cookie(&headers, COOKIE_ACCENT, VALID_ACCENTS, &body),
+        "lang" => set_tweak_cookie(&headers, COOKIE_LANG, VALID_LANGS, &body),
+        unknown => not_found(&format!(
+            "unknown tweak kind '{unknown}' (known: theme, accent, lang)"
+        )),
+    }
+}
+
+pub(crate) async fn logout() -> Response {
+    let mut resp = Redirect::to("/admin/").into_response();
+    if let Ok(hv) = HeaderValue::from_str(&crate::handlers::auth::build_logout_cookie()) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    resp
+}
+
 static DISPLAY_TZ: std::sync::OnceLock<std::sync::RwLock<chrono_tz::Tz>> =
     std::sync::OnceLock::new();
 
@@ -210,23 +237,6 @@ pub(crate) fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> St
     format!("{}{}", days, tr(lang, "d ago", "д назад"))
 }
 
-pub(crate) fn humanize_since(
-    ts: chrono::DateTime<chrono::Utc>,
-    lang: crate::i18n::Locale,
-) -> String {
-    use crate::i18n::tr;
-    let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
-    if secs < 60 {
-        tr(lang, "just now", "только что").to_string()
-    } else if secs < 3600 {
-        format!("{}{}", secs / 60, tr(lang, "m ago", "м назад"))
-    } else if secs < 86_400 {
-        format!("{}{}", secs / 3600, tr(lang, "h ago", "ч назад"))
-    } else {
-        format!("{}{}", secs / 86_400, tr(lang, "d ago", "д назад"))
-    }
-}
-
 pub(crate) fn format_msk(dt: chrono::DateTime<chrono::Utc>) -> String {
     format_local_with_pattern(dt, "%m-%d %H:%M")
 }
@@ -253,13 +263,6 @@ pub(crate) fn pct_color(pct: Option<u8>) -> &'static str {
     }
 }
 
-pub(crate) fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
-    match pct {
-        Some(p) => format!("{p}%"),
-        None => crate::i18n::tr(lang, "— no data", "— нет данных").to_string(),
-    }
-}
-
 pub(crate) fn pct_disk(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     let (used, total) = (h.disk_used_mib?, h.disk_total_mib?);
     if total == 0 {
@@ -275,15 +278,6 @@ pub(crate) fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     }
     let free_pct = ((avail.saturating_mul(100)) / total).min(100) as u8;
     Some(100u8.saturating_sub(free_pct))
-}
-
-pub(crate) fn quality_score_color(score: Option<u8>) -> &'static str {
-    match score {
-        Some(80..=100) => "#2e7d32",
-        Some(60..=79) => "#e6a23c",
-        Some(_) => "#c62828",
-        None => "var(--mute)",
-    }
 }
 
 pub(crate) fn extract_ip_from_label(label: &str) -> Option<&str> {
@@ -318,51 +312,6 @@ pub(crate) fn enrich_destination_label(
     };
     let port_suffix = label.strip_prefix(ip).unwrap_or("");
     format!("{host}{port_suffix} ({ip})")
-}
-
-pub(crate) fn classify_reserved_ip(ip: &str) -> Option<&'static str> {
-    use std::net::IpAddr;
-    match ip.parse::<IpAddr>().ok()? {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            if v4.is_loopback() {
-                Some("loopback")
-            } else if v4.is_private() {
-                Some("private/LAN")
-            } else if o[0] == 100 && (o[1] & 0xc0) == 0x40 {
-                Some("CGNAT")
-            } else if v4.is_link_local() {
-                Some("link-local")
-            } else if v4.is_unspecified() {
-                Some("unspecified")
-            } else {
-                None
-            }
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() {
-                Some("loopback")
-            } else if v6.is_unspecified() {
-                Some("unspecified")
-            } else {
-                let seg = v6.segments();
-                if (seg[0] & 0xfe00) == 0xfc00 {
-                    Some("private/ULA")
-                } else if (seg[0] & 0xffc0) == 0xfe80 {
-                    Some("link-local")
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-pub(crate) fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
-    match classify_reserved_ip(ip) {
-        Some(cls) => html! { em style="color: var(--mute);" { (cls) } },
-        None => html! { em style="color: var(--mute);" { (unknown) } },
-    }
 }
 
 pub(crate) fn sparkline_svg_scaled(
@@ -421,10 +370,6 @@ pub(crate) fn sparkline_svg_scaled(
     }
 }
 
-pub(crate) fn unauthorized(detail: &str) -> Response {
-    error_resp(StatusCode::UNAUTHORIZED, detail)
-}
-
 pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     let raw = match referer {
         Some(r) => r,
@@ -452,19 +397,6 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     } else {
         "/admin/".to_string()
     }
-}
-
-pub(crate) fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        let mut parts = pair.trim().splitn(2, '=');
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if k == name {
-                return Some(v);
-            }
-        }
-    }
-    None
 }
 
 pub(crate) fn valid_user_id(id: &str) -> bool {

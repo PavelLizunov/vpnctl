@@ -5,7 +5,8 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 
-use super::legacy::{internal_error, not_found, spawn_user_servers_redeploy, user_not_found};
+use super::helpers::{internal_error, not_found, user_not_found};
+use super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 

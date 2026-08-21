@@ -23,22 +23,12 @@ use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 use vpnctl_core::humanize::format_size_bytes;
 
-const COOKIE_THEME: &str = "vpnctl_theme";
-const COOKIE_ACCENT: &str = "vpnctl_accent";
-/// Operator's locale preference. Set by the masthead `[EN | RU]`
-/// toggle (POST /admin/tweak/lang). Read in `Locale::from_request`,
-/// which falls back to Accept-Language then defaults to En.
-const COOKIE_LANG: &str = "vpnctl_lang";
-/// Valid values for the lang cookie. Mirrors the `Locale` enum
-/// variants in `crate::i18n` — adding a locale means extending this
-/// list AND the enum.
-const VALID_LANGS: &[&str] = &["en", "ru"];
-
 const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
 
 /// Inline glyph — `[•]` bracket-dot, scales with `currentColor`. Matches
 /// `Glyph()` from the design source.
+#[allow(dead_code)]
 fn glyph(size: u32) -> Markup {
     let stroke = (size as f32 / 12.0).max(1.5);
     let r = (size as f32 / 9.0).max(1.6);
@@ -52,6 +42,7 @@ fn glyph(size: u32) -> Markup {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct NavItem {
     /// The URL path segment AND the `active_nav` matcher token. Stays
     /// English in both locales (URLs aren't localised).
@@ -61,6 +52,7 @@ struct NavItem {
     label_key: crate::i18n::K,
 }
 
+#[allow(dead_code)]
 const NAV: &[NavItem] = &[
     NavItem {
         key: "dashboard",
@@ -98,6 +90,7 @@ const NAV: &[NavItem] = &[
 
 /// URL for a nav item. Dashboard lives at `/admin/` (canonical home),
 /// other sections at `/admin/<key>`. Keeps URLs predictable.
+#[allow(dead_code)]
 fn nav_href(key: &str) -> String {
     if key == "dashboard" {
         "/admin/".to_string()
@@ -111,6 +104,7 @@ fn nav_href(key: &str) -> String {
 /// LIVE unacked count · search (`/` hotkey via admin.js) · EN|RU toggle ·
 /// operator · logout. All colours from the ink token family (see
 /// `.ed-tb*` in admin.css).
+#[allow(dead_code)]
 fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Markup {
     use crate::i18n::{K, Locale, t};
     let other = match lang {
@@ -197,6 +191,7 @@ fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Marku
     }
 }
 
+#[allow(dead_code)]
 fn foot(lang: crate::i18n::Locale) -> Markup {
     use crate::i18n::{K, t};
     html! {
@@ -277,6 +272,7 @@ fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale) -> Markup
 /// /admin/settings the panel is gone, so the third arg disappeared
 /// too. Kept the same arity expected by callers via a new param? No
 /// — call sites updated to drop the arg directly.
+#[allow(dead_code)]
 fn root_class(theme: &str, accent: &str) -> String {
     let mut cls = String::from("ed");
     match theme {
@@ -294,17 +290,8 @@ fn root_class(theme: &str, accent: &str) -> String {
     cls
 }
 
-/// Wraps a screen-specific body in the chrome (masthead + nav + main +
-/// foot). `body` is the inner content of `<main class="ed-main">`.
-///
-/// `Markup` (a `PreEscaped<String>`) is owned and small; passing by value
-/// is intentional and clippy's needless_pass_by_value is over-eager here.
-///
-/// Pre-2026-05-17 this also took a `tweaks_open: bool` for the floating
-/// Tweaks panel state. Panel moved into /admin/settings; the arg is gone
-/// along with the cookie + the `/admin/tweak/tweaks` route.
-/// Load the live unacked-alert count for the topbar chip. Best-effort:
-/// a read failure renders no chip rather than 500-ing every page.
+// Wraps a screen-specific body in the chrome (masthead + nav + main +
+// foot). The implementation moved to helpers.rs.
 // `topbar_alert_count`, `render_page`, `shell`, `cookie`, `theme_accent`, `theme_accent_lang` moved to helpers.rs
 
 /// Aggregated counters used in the dashboard top-row metric tiles.
@@ -2051,17 +2038,8 @@ fn dashboard_heavy_users(
     }
 }
 
-/// Convert any error into a plaintext 500 response.
-///
-/// **Body is intentionally opaque.** Prior to 2026-05-22 this function
-/// inlined `err.to_string()` into the response so the operator could
-/// see the failure without checking journalctl. That bled sqlx /
-/// anyhow chains (schema names, file paths, occasionally row contents)
-/// to anyone who could reach the admin UI. For a single-LAN operator
-/// the leak was tolerable; for any external exposure (reverse proxy
-/// flapping, accidental 0.0.0.0 bind, future OAuth gating) it's a
-/// recon channel. Body is now a stable opaque string; the full chain
-/// stays in `journalctl -u vpnctld -t vpnctld::admin` where the
+// Error response helpers moved to helpers.rs. Their response body remains
+// intentionally opaque; full error chains stay in the service log.
 // `internal_error` and `error_text` moved to helpers.rs
 
 /// Inline-SVG sparkline. Pure SSR — width/height pinned, no JS,
@@ -2141,7 +2119,7 @@ fn sparkline_svg_scaled(
     }
 }
 
-/// Editorial server card — one per row, matches `.ed-server` from the
+// Editorial server card moved to servers.rs.
 // `fp_short`, `server_row`, and `servers` moved to servers.rs
 
 /// Build the canonical sub URL the QR encodes. Uses the request's `Host`

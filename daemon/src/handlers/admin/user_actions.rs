@@ -8,11 +8,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
-use super::helpers::valid_user_id;
-use super::legacy::{
-    DEFAULT_TRAFFIC_THRESHOLD_PCT, bad_request, internal_error, not_found, render_page,
-    spawn_user_servers_redeploy, theme_accent_lang, user_not_found,
+use super::helpers::{
+    bad_request, internal_error, not_found, render_page, theme_accent_lang, user_not_found,
+    valid_user_id,
 };
+use super::legacy::{DEFAULT_TRAFFIC_THRESHOLD_PCT, spawn_user_servers_redeploy};
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
