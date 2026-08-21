@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 //! Admin UI handlers — Phase A foundation.
 //!
 //! Builds the editorial-style v3 shell (masthead + inline nav + main +
