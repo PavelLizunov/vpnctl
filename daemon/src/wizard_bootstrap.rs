@@ -629,6 +629,12 @@ async fn redeploy_pipeline(
         .await;
         fail!("deploy", "inventory changed while preparing deploy; retry");
     }
+    // uuid-uniqueness gate (HANDOFF §4.1) — fail CLOSED before any render or
+    // `systemctl restart`: never push a config where two rendered users share
+    // an effective VLESS uuid (sing-box would dedup them and brick one).
+    if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
+        fail!("deploy", "{e}");
+    }
     let ctx = RenderCtx::new(&server, &secrets);
 
     // ── 3. Per-kernel install → render → apply ────────────────────
@@ -1441,6 +1447,10 @@ async fn bootstrap_pipeline(
         .map_or(true, |current| current != deploy_revision)
     {
         fail!("install", "inventory changed while preparing deploy; retry");
+    }
+    // uuid-uniqueness gate (HANDOFF §4.1) — fail CLOSED before render/apply.
+    if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
+        fail!("install", "{e}");
     }
     let ctx = RenderCtx::new(&server, &secrets);
     for kid in &server.kernels {

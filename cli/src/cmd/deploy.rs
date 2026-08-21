@@ -67,6 +67,7 @@ pub(crate) async fn run(
     if server.kernels.is_empty() {
         anyhow::bail!("server '{}' has no kernels declared", server.id);
     }
+    inv.assert_no_uuid_collisions(&sid).await?;
     if inv.deploy_input_revision(&sid).await? != deploy_revision {
         anyhow::bail!("inventory changed while preparing deploy; retry");
     }

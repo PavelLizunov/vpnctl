@@ -33,8 +33,8 @@ regexes = [
     '''checksum = "[a-f0-9]{64}"''',
 ]
 
-# Paths that contain ONLY test data — full file exemption is safer
-# than per-line regex chasing.
+# Generated/schema/test-only paths. Production source files are never
+# exempted wholesale: their fixtures are covered by exact regexes above.
 paths = [
     '''Cargo\.lock''',                          # crate checksums
     '''docs/BURST_REPORT_.*\.md''',             # operator-facing reports — never carry secrets
@@ -42,8 +42,4 @@ paths = [
     '''target/.*''',                            # build artefacts
     '''crates/inventory/tests/spec_.*\.rs''',   # test placeholders
     '''daemon/tests/admin_smoke\.rs''',         # test placeholders
-    '''daemon/src/handlers/auth\.rs''',         # contains hunter2 + argon2 PHC in #[cfg(test)] only
-    '''daemon/src/alert_sink\.rs''',            # contains SECRETTOKEN placeholders in #[cfg(test)] only
-    '''crates/kernels/src/wgturn\.rs''',        # contains WG keypair placeholders in #[cfg(test)] only
-    '''crates/protocols/src/wgturn\.rs''',      # same — share-link encoder unit tests use the same fixtures
 ]
