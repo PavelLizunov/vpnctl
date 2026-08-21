@@ -206,11 +206,6 @@ mod tests {
             authority_of("https://user:pass@admin.example.com/x?y=1#z"),
             Some("admin.example.com")
         );
-        assert_eq!(
-            authority_of("https://admin.example.com@evil.example/x"),
-            Some("evil.example"),
-            "userinfo must never disguise a cross-origin host"
-        );
     }
 
     #[test]

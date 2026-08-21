@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Library face of `vpnctld`. Lets integration tests build the SAME
 //! `Router` that the binary uses, so spec tests assert the real handler
 //! contract instead of a shim. Without this, the daemon binary alone
