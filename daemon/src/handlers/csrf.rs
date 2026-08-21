@@ -140,8 +140,13 @@ fn is_state_mutating(m: &Method) -> bool {
 /// `None` for malformed input — the middleware then refuses the
 /// request, which is the conservative outcome.
 ///
+/// Strips userinfo (`userinfo@`) per RFC 3986 §3.2 if present in the
+/// authority component, so that requests with embedded credentials
+/// in `Referer` (or `Origin`) match the HTTP `Host` header.
+///
 /// Examples:
 ///   `http://192.168.0.236:18402`           → `Some("192.168.0.236:18402")`
+///   `http://user:pass@192.168.0.236:18402` → `Some("192.168.0.236:18402")`
 ///   `https://admin.example.com/some/path`  → `Some("admin.example.com")`
 ///   `null`                                 → `None` (sandboxed iframe)
 ///   ``                                     → `None`
@@ -155,10 +160,15 @@ fn authority_of(s: &str) -> Option<&str> {
         .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..end];
-    if authority.is_empty() {
+    // Strip RFC 3986 §3.2 userinfo if present: `[ userinfo "@" ] host [ ":" port ]`
+    let host_port = match authority.rfind('@') {
+        Some(idx) => &authority[idx + 1..],
+        None => authority,
+    };
+    if host_port.is_empty() {
         None
     } else {
-        Some(authority)
+        Some(host_port)
     }
 }
 
@@ -183,12 +193,29 @@ mod tests {
     }
 
     #[test]
+    fn authority_of_strips_userinfo() {
+        assert_eq!(
+            authority_of("http://user:pass@192.168.0.236:18402"),
+            Some("192.168.0.236:18402")
+        );
+        assert_eq!(
+            authority_of("http://admin@192.168.0.236:18402/admin/users"),
+            Some("192.168.0.236:18402")
+        );
+        assert_eq!(
+            authority_of("https://user:pass@admin.example.com/x?y=1#z"),
+            Some("admin.example.com")
+        );
+    }
+
+    #[test]
     fn authority_of_rejects_malformed_inputs() {
         assert_eq!(authority_of("null"), None, "sandboxed-iframe Origin");
         assert_eq!(authority_of(""), None, "empty Origin");
         assert_eq!(authority_of("javascript:alert(1)"), None, "non-http scheme");
         assert_eq!(authority_of("ftp://example.com"), None, "non-http scheme");
         assert_eq!(authority_of("http://"), None, "scheme but no authority");
+        assert_eq!(authority_of("http://user@"), None, "userinfo but no host");
     }
 
     #[test]
