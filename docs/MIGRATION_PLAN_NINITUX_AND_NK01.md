@@ -44,7 +44,7 @@ to pick ONE manager and decommission the other.
   `connection_events` (1.86M), `links_snapshots`, `sync_jobs`
 
 **DB encryption key** is at `subscription-server`'s env
-`DB_ENCRYPTION_KEY=11b1dd33fcedb137a38c74d1cd43c26fb0ab407deb355e7d11010308cfbdfe79`.
+`DB_ENCRYPTION_KEY=<redacted>`.
 Tooling is `sqlcipher3` Python module. Plain `sqlite3` cannot
 open the file.
 

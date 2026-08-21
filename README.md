@@ -20,7 +20,7 @@ action also has a web button.
 > A mirror is published to a private, LAN-only Forgejo instance for
 > development. Issues and PRs go on GitHub.
 
-## Status — v0.8 in flight
+## Status — v0.9 in flight
 
 Operating in production across multiple nodes, with a bilingual EN/RU
 admin UI and per-node clash-api health probing.
@@ -234,7 +234,8 @@ VPNCTL_TEST_KEY=$HOME/.ssh/id_ed25519 \
 - **v0.5** admin UI feature delivery — users/grants/regen/abuse-signal ✅
 - **v0.6** backups + bash-migration ✅
 - **v0.7** add-server wizard + protocol breadth (8 protocols) + monitoring + audit + UA fingerprint + Phase H node probe ✅
-- **v0.8** restore close-out · uptime SLO chips · bulk-ack alerts · subscription-server migration · DPI-risk tiers · bilingual EN/RU ✅ in flight
+- **v0.8** restore close-out · uptime SLO chips · bulk-ack alerts · subscription-server migration · DPI-risk tiers · bilingual EN/RU ✅
+- **v0.9** Xray/XHTTP · Boosty automation · fleet kernel versions and quality ranking 🚧 in flight
 - **v1.0** _"everything in roadmap shipped + months of operating experience without rolling back"_
 
 ## License

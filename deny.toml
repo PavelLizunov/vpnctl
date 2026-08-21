@@ -8,12 +8,13 @@ version = 2
 yanked = "deny"
 ignore = [
     # RUSTSEC-2023-0071 — Marvin Attack: timing side-channel in `rsa` crate.
-    # Pulled transitively by russh. No patch upstream (as of 2026-05).
-    # Mitigation: vpnctl uses Ed25519 SSH keys throughout (claude-chat key is
-    # Ed25519). The RSA host-key auth path is unreachable in our control plane.
-    # Network-side timing on a deploy CLI does not apply (we initiate, the
-    # private key is on the client, and an attacker observing client-side
-    # timings has already won bigger).
+    # No patch upstream (as of 2026-07). Two dependency paths retain a
+    # vulnerable `rsa`, but neither exposes the affected operation here:
+    #   1. rsa 0.9.10 is an optional sqlx-mysql dependency recorded in the
+    #      lockfile. Inventory builds sqlx with SQLite only, so mysql is not
+    #      compiled (`cargo tree -i sqlx-mysql -e all --target all` is empty).
+    #   2. rsa 0.10.0-rc.16 comes through russh. vpnctl uses Ed25519 SSH keys;
+    #      the RSA private-key path is not used by this control plane.
     "RUSTSEC-2023-0071",
     # The following two reach us only via `testcontainers` (dev-dep used in
     # the e2e_sshd test); they cannot affect the shipped binary.
