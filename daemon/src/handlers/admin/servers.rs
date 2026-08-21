@@ -5,11 +5,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
+use super::helpers::{internal_error, kernel_versions_inline, render_page, theme_accent_lang};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
-use super::helpers::{
-    internal_error, kernel_versions_inline, render_page, theme_accent_lang,
-};
 
 /// Truncate an `SHA256:<base64>` host-fingerprint to `SHA256:head4…tail4`
 /// for a dense table cell; the full value rides in the cell's `title=`.

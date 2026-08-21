@@ -818,4 +818,3 @@ pub(crate) async fn boosty_disable(
     }
     Redirect::to("/admin/boosty").into_response()
 }
-

@@ -4,8 +4,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{DOCTYPE, Markup, html};
 
-use crate::AppState;
 use super::ui::{foot, root_class, topbar};
+use crate::AppState;
 
 pub(crate) const COOKIE_THEME: &str = "vpnctl_theme";
 pub(crate) const COOKIE_ACCENT: &str = "vpnctl_accent";
@@ -375,15 +375,22 @@ pub(crate) fn sparkline_svg_scaled(
     if values.is_empty() {
         return html! { svg width=(width) height=(height) viewBox=(format!("0 0 {width} {height}")) {} };
     }
-    let max = y_max_override.unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max)).max(1.0);
+    let max = y_max_override
+        .unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max))
+        .max(1.0);
     let n = values.len();
-    let dx = if n > 1 { width as f64 / (n - 1) as f64 } else { width as f64 };
+    let dx = if n > 1 {
+        width as f64 / (n - 1) as f64
+    } else {
+        width as f64
+    };
     let points: Vec<(f64, f64)> = values
         .iter()
         .enumerate()
         .map(|(i, &v)| {
             let x = i as f64 * dx;
-            let y = height as f64 - (v / max * (height as f64 - 2.0)).min(height as f64 - 2.0) - 1.0;
+            let y =
+                height as f64 - (v / max * (height as f64 - 2.0)).min(height as f64 - 2.0) - 1.0;
             (x, y)
         })
         .collect();
@@ -391,7 +398,13 @@ pub(crate) fn sparkline_svg_scaled(
     let path_data = points
         .iter()
         .enumerate()
-        .map(|(i, (x, y))| if i == 0 { format!("M {x:.1} {y:.1}") } else { format!("L {x:.1} {y:.1}") })
+        .map(|(i, (x, y))| {
+            if i == 0 {
+                format!("M {x:.1} {y:.1}")
+            } else {
+                format!("L {x:.1} {y:.1}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -589,7 +602,8 @@ pub(crate) struct GeoIpDbStat {
 }
 
 pub(crate) fn geoip_db_stat() -> GeoIpDbStat {
-    let dir = std::env::var("VPNCTLD_GEOIP_DIR").unwrap_or_else(|_| "/var/lib/vpnctl/geoip".to_string());
+    let dir =
+        std::env::var("VPNCTLD_GEOIP_DIR").unwrap_or_else(|_| "/var/lib/vpnctl/geoip".to_string());
     let path_city = std::path::Path::new(&dir).join("GeoLite2-City.mmdb");
     let path_asn = std::path::Path::new(&dir).join("GeoLite2-ASN.mmdb");
     let mtime = |p: &std::path::Path| {
