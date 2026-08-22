@@ -6,7 +6,7 @@
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use maud::{Markup, html};
 
@@ -534,19 +534,20 @@ pub(crate) async fn user_access_csv(
         out.push('\n');
     }
     let stamp = chrono::Utc::now().format("%Y%m%d");
-    let filename = format!("vpnctl-access-{}-{stamp}.csv", user_id_str);
-    (
-        StatusCode::OK,
-        [
-            ("content-type", "text/csv; charset=utf-8".to_string()),
-            (
-                "content-disposition",
-                format!("attachment; filename=\"{filename}\""),
-            ),
-        ],
-        out,
-    )
-        .into_response()
+    let safe_user_id: String = user_id_str
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+        .collect();
+    let filename = format!("vpnctl-access-{safe_user_id}-{stamp}.csv");
+    let mut resp = (StatusCode::OK, out).into_response();
+    let headers = resp.headers_mut();
+    if let Ok(v) = HeaderValue::from_str("text/csv; charset=utf-8") {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    resp
 }
 
 /// `GET /admin/audit.csv?actor=...&action=...` — same filter set as
@@ -672,5 +673,19 @@ mod csv_tests {
         // Plain fields stay untouched.
         assert_eq!(csv_field("user.grant"), "user.grant");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn filename_user_id_sanitization_removes_header_injection_chars() {
+        let user_id_str = "user\"\r\nHeader-Injection: evil\ncontrol\x07";
+        let safe_user_id: String = user_id_str
+            .chars()
+            .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+            .collect();
+        assert_eq!(safe_user_id, "userHeader-Injection: evilcontrol");
+        // Verify HeaderValue::from_str accepts the sanitized filename
+        let filename = format!("vpnctl-access-{safe_user_id}-20260101.csv");
+        let header_str = format!("attachment; filename=\"{filename}\"");
+        assert!(axum::http::HeaderValue::from_str(&header_str).is_ok());
     }
 }
