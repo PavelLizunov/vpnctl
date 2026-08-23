@@ -1536,7 +1536,11 @@ pub(super) fn vpn_traffic_chart(
 /// preserves Pavel's «scroll-to-top is annoying» feedback.
 ///
 /// `base_url` is the absolute path WITHOUT query string.
-pub(super) fn window_picker_section(base_url: &str, active_slug: &str, lang: crate::i18n::Locale) -> Markup {
+pub(super) fn window_picker_section(
+    base_url: &str,
+    active_slug: &str,
+    lang: crate::i18n::Locale,
+) -> Markup {
     html! {
         div id="timeframe" style="margin: 20px 0 6px; padding: 10px 14px; border: 1px solid var(--rule); background: var(--paper); display: flex; flex-wrap: wrap; gap: 18px; align-items: baseline;" {
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
@@ -2249,4 +2253,3 @@ pub(crate) fn spawn_user_servers_redeploy(
             .await;
     });
 }
-

@@ -1488,7 +1488,12 @@ pub(super) fn status_tile(label: &str, value: &str, value_color: &str) -> Markup
     status_tile_with_warn(label, value, value_color, false)
 }
 
-pub(super) fn status_tile_with_warn(label: &str, value: &str, value_color: &str, warn: bool) -> Markup {
+pub(super) fn status_tile_with_warn(
+    label: &str,
+    value: &str,
+    value_color: &str,
+    warn: bool,
+) -> Markup {
     html! {
         div class=(if warn { "ed-status-tile warn" } else { "ed-status-tile" }) {
             div.ed-status-tile__k { (label) }

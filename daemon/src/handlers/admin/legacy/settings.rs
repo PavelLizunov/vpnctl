@@ -1591,4 +1591,3 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
 }
 
 // `set_tweak_cookie`, `sanitize_referer`, `set_tweak`, `logout` moved to helpers.rs & tweaks.rs
-

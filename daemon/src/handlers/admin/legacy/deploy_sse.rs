@@ -919,4 +919,3 @@ pub(crate) async fn settings_geoip_update_now_sse(
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response()
 }
-

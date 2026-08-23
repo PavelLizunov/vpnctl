@@ -22,6 +22,5 @@ pub use sync::{
     sync_once_with_policy,
 };
 pub use types::{
-    ApplyMode, BridgeError, NewSubscriberInfo, SubscriberSnapshot, SyncReport,
-    sync_failure_summary,
+    ApplyMode, BridgeError, NewSubscriberInfo, SubscriberSnapshot, SyncReport, sync_failure_summary,
 };

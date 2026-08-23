@@ -107,11 +107,7 @@ fn changed_event(
     )
 }
 
-fn snapshot_event(
-    kind: &str,
-    snapshot: &SubscriberSnapshot,
-    target: Option<String>,
-) -> AuditEvent {
+fn snapshot_event(kind: &str, snapshot: &SubscriberSnapshot, target: Option<String>) -> AuditEvent {
     (
         format!("boosty.subscriber.{kind}"),
         target,

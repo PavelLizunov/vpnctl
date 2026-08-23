@@ -1841,4 +1841,3 @@ pub(super) fn sparkline_svg_scaled(
 
 // Editorial server card moved to servers.rs.
 // `fp_short`, `server_row`, and `servers` moved to servers.rs
-
