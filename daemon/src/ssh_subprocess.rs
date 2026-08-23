@@ -212,6 +212,19 @@ impl SubprocessSshTransport {
         self.run(remote_cmd.to_string(), Some(stdin_bytes)).await
     }
 
+    /// Execute a command as the SSH login itself, without the managed-node
+    /// sudo wrapper. Used only for per-user home operations such as installing
+    /// vpnctld's deploy key into that user's `~/.ssh/authorized_keys`.
+    pub async fn exec_unprivileged(&self, remote_cmd: &str) -> Result<String> {
+        let bytes = self.run(remote_cmd.to_string(), None).await?;
+        String::from_utf8(bytes).map_err(|e| {
+            CoreError::Transport(format!(
+                "ssh {}@{}:{} non-UTF-8 stdout: {e}",
+                self.user, self.host, self.port
+            ))
+        })
+    }
+
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let args = self.build_ssh_args(&remote_cmd);
         let label = format!("{}@{}:{}", self.user, self.host, self.port);
@@ -541,6 +554,14 @@ mod tests {
             t.privileged_command("printf '%s' \"$HOME\""),
             "sudo -n sh -c 'printf '\\''%s'\\'' \"$HOME\"'"
         );
+    }
+
+    #[test]
+    fn unprivileged_command_is_not_wrapped_in_sudo() {
+        let t =
+            SubprocessSshTransport::new("203.0.113.7", "debian", PathBuf::from("/tmp/test-key"));
+        let args = t.build_ssh_args("mkdir -p ~/.ssh");
+        assert_eq!(args.last().map(String::as_str), Some("mkdir -p ~/.ssh"));
     }
 
     #[test]

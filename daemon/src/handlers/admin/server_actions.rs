@@ -1373,6 +1373,11 @@ pub(crate) async fn server_push_deploy_key(
     };
 
     let password = form_field(&body, "root_password").unwrap_or_default();
+    let ssh_user_raw = form_field(&body, "ssh_user").unwrap_or_else(|| server.ssh_user.clone());
+    let ssh_user = match crate::wizard::validate_ssh_user(&ssh_user_raw) {
+        Ok(user) => user.to_string(),
+        Err(why) => return bad_request(&format!("invalid ssh_user — {why}")),
+    };
 
     // ─── Credentials gate (BEFORE expensive pubkey read) ─────────
     // 400 ASAP if operator gave neither a password nor a usable
@@ -1380,13 +1385,12 @@ pub(crate) async fn server_push_deploy_key(
     // deploy-pubkey file (read step below) would surface as a
     // misleading 500 hiding the real «no creds» bug.
     let reference_key_path = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
-    let try_reference = password.is_empty()
-        && reference_key_path
-            .as_ref()
-            .is_some_and(|p| !p.is_empty() && std::path::Path::new(p).exists());
+    let try_reference = reference_key_path
+        .as_ref()
+        .is_some_and(|p| !p.is_empty() && std::path::Path::new(p).exists());
     if password.is_empty() && !try_reference {
         return bad_request(
-            "root_password is required (or set VPNCTLD_REFERENCE_SSH_KEY \
+            "ssh password is required (or set VPNCTLD_REFERENCE_SSH_KEY \
              on the daemon host to use a pre-authorised key instead)",
         );
     }
@@ -1419,118 +1423,79 @@ pub(crate) async fn server_push_deploy_key(
         pk_q = vpnctl_core::shell::single_quote(&pubkey),
     );
 
+    let mut method = "sshpass";
+    let mut push_result: std::result::Result<(), String>;
     if let Some(ref_key) = reference_key_path.clone().filter(|_| try_reference) {
+        method = "reference-key";
         let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
             server.address.clone(),
-            server.ssh_user.clone(),
+            ssh_user.clone(),
             std::path::PathBuf::from(&ref_key),
         )
         .port(server.ssh_port);
-        use vpnctl_core::SshTransport;
-        match ssh.exec(&push_cmd).await {
-            Ok(_) => {
-                if let Err(audit_err) = state
-                    .inv
-                    .audit(
-                        "admin",
-                        "server.push_deploy_key",
-                        Some(&server_id_str),
-                        Some(&serde_json::json!({
-                            "success": true,
-                            "server_id": &server_id_str,
-                            "method": "reference-key",
-                            "reference_key_path": &ref_key,
-                        })),
-                    )
-                    .await
-                {
-                    // Bug-hunt 2026-05-18 — was `let _ =`, silently
-                    // losing the operator action trail. Mirror the
-                    // sshpass-path warn block.
-                    tracing::warn!(
-                        target = "vpnctld::admin::server_push_deploy_key",
-                        server = %server_id_str,
-                        error = %audit_err,
-                        "audit row for server.push_deploy_key (reference-key success) failed; push succeeded"
-                    );
-                }
-                return Redirect::to(&format!(
-                    "/admin/servers/{}/setup#push-deploy-key",
-                    path_segment_encode(&server_id_str)
-                ))
-                .into_response();
-            }
-            Err(e) => {
-                // Reference key didn't work (likely not authorised on
-                // THIS server). If a password was ALSO provided, fall
-                // through to sshpass path; otherwise surface the
-                // reference-key failure with a hint.
-                if password.is_empty() {
-                    if let Err(audit_err) = state
-                        .inv
-                        .audit(
-                            "admin",
-                            "server.push_deploy_key",
-                            Some(&server_id_str),
-                            Some(&serde_json::json!({
-                                "success": false,
-                                "server_id": &server_id_str,
-                                "method": "reference-key",
-                                "error": e.to_string(),
-                            })),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            target = "vpnctld::admin::server_push_deploy_key",
-                            server = %server_id_str,
-                            error = %audit_err,
-                            "audit row for server.push_deploy_key (reference-key failure) failed"
-                        );
-                    }
-                    return error_resp(
-                        StatusCode::BAD_GATEWAY,
-                        &format!(
-                            "push-deploy-key via reference key ({ref_key}) failed for \
-                             {server_id_str}: {e} — the reference key isn't authorised \
-                             on this server. Supply the root password below to fall back \
-                             to sshpass. If password auth is also disabled, the daemon \
-                             can't self-recover this server — use the hoster's console \
-                             to add the pubkey shown on /admin/settings."
-                        ),
-                    );
-                }
-                // password is non-empty → continue to sshpass path.
-                tracing::info!(
-                    target = "vpnctld::admin::server_push_deploy_key",
-                    server = %server_id_str,
-                    error = %e,
-                    "reference key failed; falling back to sshpass"
-                );
-            }
+        push_result = ssh
+            .exec_unprivileged(&push_cmd)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        if push_result.is_err() && !password.is_empty() {
+            method = "sshpass";
+            let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
+            push_result = crate::wizard_bootstrap::ssh_password_run(
+                &server.address,
+                server.ssh_port,
+                &ssh_user,
+                &password,
+                &known_hosts,
+                &push_cmd,
+            )
+            .await
+            .map(|_| ());
         }
+    } else {
+        let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
+        push_result = crate::wizard_bootstrap::ssh_password_run(
+            &server.address,
+            server.ssh_port,
+            &ssh_user,
+            &password,
+            &known_hosts,
+            &push_cmd,
+        )
+        .await
+        .map(|_| ());
     }
 
-    // ─── Path 2: sshpass + operator-typed password ────────────────
-    // (Credentials gate above already ensured password is non-empty
-    // when we get here — either initial state, or fall-through from
-    // reference-key failure with password supplied.)
+    // Do not persist a changed login until the daemon proves that its own
+    // deploy key works for that account. For non-root users `exec("true")`
+    // uses the transport's exact `sudo -n sh -c` primitive, so this also
+    // verifies the privilege contract needed by deploys and pollers.
+    let result =
+        match push_result {
+            Ok(()) => {
+                use vpnctl_core::SshTransport;
+                let verify = crate::ssh_subprocess::SubprocessSshTransport::new(
+                    server.address.clone(),
+                    ssh_user.clone(),
+                    key_path.to_path_buf(),
+                )
+                .port(server.ssh_port);
+                verify.exec("true").await.map(|_| ()).map_err(|e| {
+                    format!("deploy-key or passwordless-sudo verification failed: {e}")
+                })
+            }
+            Err(e) => Err(e),
+        };
 
-    // known_hosts path mirrors the wizard's default (and the
-    // daemon's `SubprocessSshTransport` default for subsequent
-    // pubkey-auth connects). Living in `/var/lib/vpnctl/.ssh/`
-    // keeps it daemon-owned.
-    let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
-
-    let result = crate::wizard_bootstrap::ssh_password_run(
-        &server.address,
-        server.ssh_port,
-        &server.ssh_user,
-        &password,
-        &known_hosts,
-        &push_cmd,
-    )
-    .await;
+    if result.is_ok() && ssh_user != server.ssh_user {
+        if let Err(e) = state
+            .inv
+            .update_server_ssh_user_audited(&sid, &server.ssh_user, &ssh_user, method)
+            .await
+        {
+            return internal_error(anyhow::Error::new(e));
+        }
+    }
 
     // Audit either way. Payload: server id, success, optional error.
     // Never the password (caller-owned secret); never the full sshpass
@@ -1539,12 +1504,14 @@ pub(crate) async fn server_push_deploy_key(
         Ok(_) => serde_json::json!({
             "success": true,
             "server_id": &server_id_str,
-            "method": "sshpass",
+            "method": method,
+            "ssh_user": &ssh_user,
         }),
         Err(e) => serde_json::json!({
             "success": false,
             "server_id": &server_id_str,
-            "method": "sshpass",
+            "method": method,
+            "ssh_user": &ssh_user,
             "error": e,
         }),
     };
