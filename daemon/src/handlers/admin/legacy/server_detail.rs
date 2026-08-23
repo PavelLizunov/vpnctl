@@ -4045,4 +4045,3 @@ pub(crate) async fn grant_protocol_enable(
 //  helpers themselves are file-private and the contracts are tiny;
 //  adding axum/maud scaffolding for them would dwarf the asserts.
 // ────────────────────────────────────────────────────────────────────────
-
