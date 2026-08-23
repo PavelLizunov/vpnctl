@@ -333,7 +333,7 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
         // rect is invisible (fill="transparent") but full plot
         // height for easy targeting.
         svg_inner.push_str(&format!(
-            r#"<g><title>{tooltip}</title><rect x="{x:.1}" y="{ht_y}" width="{w:.1}" height="{ht_h:.1}" fill="transparent"/></g>"#,
+            r#"<g><title>{tooltip}</title><rect x="{x:.1}" y="{ht_y}" width="{w:.1}" height="{ht_h:.1}" fill="transparent"/>"#,
             x = x_left,
             ht_y = pad_t,
             w = bar_w,

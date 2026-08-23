@@ -20,8 +20,8 @@ pub(crate) use self::traffic::{
     DEFAULT_TRAFFIC_THRESHOLD_PCT, live_vpn_stats_section, user_traffic_limit_section,
 };
 
+#[cfg(test)]
 pub(super) use self::origins::classify_reserved_ip;
 pub(super) use self::traffic::{
-    VPN_SPARKLINE_WINDOWS, VpnSparklineWindow, pick_vpn_sparkline_window, vpn_traffic_chart,
-    window_picker_section,
+    VpnSparklineWindow, pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
 };
