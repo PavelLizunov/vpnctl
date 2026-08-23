@@ -608,7 +608,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     "Выбери бумажную тему (фон) и акцентный цвет. Сохраняется в cookies; настраивается один раз.",
                 ))
             }
-            (tweaks_inline(&theme, &accent, lang))
+            (super::shell::tweaks_inline(&theme, &accent, lang))
 
             div.ed-rule {}
             div id="timezone-section" {

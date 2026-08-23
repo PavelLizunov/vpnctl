@@ -16,7 +16,12 @@ pub(crate) use self::user_sections::*;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod helper_tests {
-    use super::*;
+    use super::dashboard::dashboard_heavy_users;
+    use super::server_detail::compute_orphan_uuids;
+    use super::user_sections::{VpnSparklineWindow, classify_reserved_ip};
+    use crate::handlers::admin::helpers::{
+        enrich_destination_label, extract_ip_from_label, format_msk, format_msk_iso, humanize_bytes,
+    };
     use chrono::TimeZone;
 
     #[test]
