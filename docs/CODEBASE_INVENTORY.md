@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 233 (165 prod / 68 test)
-- **Total Rust LOC:** 121,936 (79,684 prod / 42,252 test)
+- **Total Rust LOC:** 121,898 (79,682 prod / 42,216 test)
 - **Database Migrations:** 48
 - **`daemon/src/app.rs` `.route(...)` Registrations:** 117
 
@@ -23,24 +23,24 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 6,620 (7) | 605 (2) | **7,225** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 5,620 (14) | 4,186 (11) | **9,806** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 520 (3) | 558 (3) | **1,078** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,352 (89) | 24,145 (18) | **69,497** |
-| **Total** | | | | **79,684 (165)** | **42,252 (68)** | **121,936** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,350 (89) | 24,109 (18) | **69,459** |
+| **Total** | | | | **79,682 (165)** | **42,216 (68)** | **121,898** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/user_detail.rs` | 3,449 | `daemon` | Test |
-| `daemon/tests/admin_smoke/server_detail.rs` | 3,228 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail.rs` | 3,445 | `daemon` | Test |
+| `daemon/tests/admin_smoke/server_detail.rs` | 3,224 | `daemon` | Test |
 | `daemon/src/health_monitor.rs` | 2,892 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/grants.rs` | 2,680 | `daemon` | Test |
-| `daemon/tests/admin_smoke/shell_nav.rs` | 2,414 | `daemon` | Test |
+| `daemon/tests/admin_smoke/grants.rs` | 2,677 | `daemon` | Test |
+| `daemon/tests/admin_smoke/shell_nav.rs` | 2,409 | `daemon` | Test |
 | `daemon/src/wizard_bootstrap.rs` | 2,215 | `daemon` | Prod |
 | `daemon/tests/vpn_router_endpoint.rs` | 1,969 | `daemon` | Test |
 | `daemon/src/handlers/admin/user_detail/render.rs` | 1,954 | `daemon` | Prod |
 | `daemon/src/app.rs` | 1,830 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/alerts_health.rs` | 1,685 | `daemon` | Test |
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 1,581 | `daemon` | Test |
+| `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 1,576 | `daemon` | Test |
 | `crates/inventory/tests/spec_vpn_stats.rs` | 1,544 | `crates/inventory` | Test |
 | `daemon/src/node_probe_poller.rs` | 1,483 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/servers.rs` | 1,454 | `crates/inventory` | Prod |
@@ -51,8 +51,8 @@
 | `crates/inventory/src/backup.rs` | 1,375 | `crates/inventory` | Prod |
 | `crates/inventory/src/migrate.rs` | 1,375 | `crates/inventory` | Prod |
 | `crates/core/src/lib.rs` | 1,272 | `crates/core` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,226 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/dashboard.rs` | 1,184 | `daemon` | Test |
+| `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,225 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/dashboard.rs` | 1,179 | `daemon` | Test |
 | `crates/inventory/src/sqlite/access.rs` | 1,169 | `crates/inventory` | Prod |
 | `daemon/src/alert_text.rs` | 1,163 | `daemon` | Prod |
 
