@@ -7038,6 +7038,10 @@ async fn admin_wizard_new_renders_form_with_required_fields() {
     // Both fields present, both required.
     assert!(html.contains(r#"name="address""#), "address field missing");
     assert!(
+        html.contains(r#"id="ssh_user" name="ssh_user" type="text" value="root""#),
+        "ssh_user field with root default missing"
+    );
+    assert!(
         html.contains(r#"name="root_password""#),
         "root_password field missing"
     );
@@ -7106,6 +7110,103 @@ async fn admin_wizard_submit_rejects_shell_injection_in_address() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "shell metacharacters in address must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_carries_debian_ssh_user_into_session() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=192.0.2.1&ssh_user=debian&root_password=pw&ssh_port=22",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    let session_id = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("vpnctl_wizard=");
+    assert_eq!(s.wizard.get(session_id).unwrap().ssh_user, "debian");
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_blank_ssh_user_defaults_to_root() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s.clone());
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=192.0.2.1&ssh_user=&root_password=pw&ssh_port=22",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie missing")
+        .to_str()
+        .unwrap();
+    let session_id = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("vpnctl_wizard=");
+    assert_eq!(s.wizard.get(session_id).unwrap().ssh_user, "root");
+}
+
+#[tokio::test]
+async fn admin_wizard_submit_rejects_invalid_ssh_user_400() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/new")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "address=192.0.2.1&ssh_user=debian%3Bsudo&root_password=pw",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .starts_with("vpnctl admin: invalid ssh_user")
     );
 }
 
@@ -7201,6 +7302,7 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
     let s = state(&dir).await;
     let session_id = s.wizard.insert(
         "vpn-de1.example.org".into(),
+        "root".into(),
         "r00tpwXYZ-distinct".into(),
         22,
     );
@@ -7220,11 +7322,12 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // Address echoed back; password MUST NOT be in the page.
+    // Address + selected user echo back; password MUST NOT be in the page.
     assert!(
         html.contains("vpn-de1.example.org"),
         "address must echo on step-2"
     );
+    assert!(html.contains("root"), "ssh user must echo on step-2");
     assert!(
         !html.contains("r00tpwXYZ-distinct"),
         "root password must NEVER appear in step-2 HTML"
@@ -7234,6 +7337,27 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
         html.contains("Add server · step 2 of 2"),
         "step indicator missing on step-2"
     );
+}
+
+#[tokio::test]
+async fn admin_wizard_step2_displays_selected_non_root_user_without_password() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let session_id = s.wizard.insert(
+        "vpn-de1.example.org".into(),
+        "debian".into(),
+        "PW_MUST_NOT_LEAK".into(),
+        22,
+    );
+    let app = router(s);
+    let html = fetch_html_with_cookie(
+        app,
+        "/admin/servers/new/step-2",
+        &format!("vpnctl_wizard={session_id}"),
+    )
+    .await;
+    assert!(html.contains("debian"));
+    assert!(!html.contains("PW_MUST_NOT_LEAK"));
 }
 
 #[tokio::test]
@@ -7307,7 +7431,9 @@ async fn admin_wizard_step2_rejects_bogus_cookie_400() {
 async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    let session_id = s.wizard.insert("198.51.100.42".into(), "pw".into(), 22);
+    let session_id = s
+        .wizard
+        .insert("198.51.100.42".into(), "root".into(), "pw".into(), 22);
     let app = router(s);
 
     let html = fetch_html_with_cookie(
@@ -7403,7 +7529,9 @@ async fn admin_wizard_sse_consumes_session_on_first_attach() {
     // start streaming events, the bootstrap's probe phase will fail
     // (RFC 5737 TEST-NET-1 doesn't route), but we only care here
     // that the session is GONE after the first attach.
-    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    let session_id = s
+        .wizard
+        .insert("198.51.100.1".into(), "root".into(), "pw".into(), 22);
     assert_eq!(s.wizard.len(), 1, "precondition: session present");
     let app = router(s.clone());
 
@@ -7438,7 +7566,9 @@ async fn admin_wizard_sse_consumes_session_on_first_attach() {
 async fn admin_wizard_sse_advertises_event_stream_content_type() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    let session_id = s
+        .wizard
+        .insert("198.51.100.1".into(), "root".into(), "pw".into(), 22);
     let app = router(s);
 
     let resp = app
@@ -7611,7 +7741,9 @@ async fn admin_wizard_sse_collision_appends_numeric_suffix() {
     };
     s.inv.add_server(&server).await.unwrap();
 
-    let session_id = s.wizard.insert("198.51.100.1".into(), "pw".into(), 22);
+    let session_id = s
+        .wizard
+        .insert("198.51.100.1".into(), "root".into(), "pw".into(), 22);
     let app = router(s);
     let resp = app
         .oneshot(
