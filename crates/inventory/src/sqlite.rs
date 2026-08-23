@@ -1541,6 +1541,51 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Update only the SSH login and record the mutation atomically.
+    pub async fn update_server_ssh_user_audited(
+        &self,
+        id: &ServerId,
+        old_user: &str,
+        new_user: &str,
+        method: &str,
+    ) -> Result<bool> {
+        if new_user == old_user {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE servers SET ssh_user = ?1,
+                                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?2 AND ssh_user = ?3",
+        )
+        .bind(new_user)
+        .bind(&id.0)
+        .bind(old_user)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "server '{}' SSH user changed concurrently",
+                id.0
+            )));
+        }
+        let payload = serde_json::json!({
+            "old_ssh_user": old_user,
+            "ssh_user": new_user,
+            "method": method,
+        });
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES ('admin', 'server.ssh_user.update', ?1, ?2)",
+        )
+        .bind(&id.0)
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn update_trusted_fingerprint(&self, id: &ServerId, fp: &str) -> Result<()> {
         // Defensive validation — a malicious or buggy caller could otherwise
         // store an empty / arbitrary value, after which every future connect
@@ -8456,6 +8501,32 @@ mod tests {
         assert_eq!(got.address, "1.2.3.4");
         assert_eq!(got.enabled_protocols.len(), 2);
         assert!(got.enabled_protocols.iter().any(|p| p.0 == "vless+reality"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ssh_user_update_and_audit_are_one_mutation() -> Result<()> {
+        let inv = fresh().await;
+        inv.add_server(&sample_server("ssh-user")).await?;
+        assert!(
+            inv.update_server_ssh_user_audited(
+                &ServerId("ssh-user".into()),
+                "root",
+                "debian",
+                "sshpass",
+            )
+            .await?
+        );
+        let server = inv.get_server(&ServerId("ssh-user".into())).await?.unwrap();
+        assert_eq!(server.ssh_user, "debian");
+        let audit = inv.audit_for_server("ssh-user", 10).await?;
+        assert!(audit.iter().any(|row| {
+            row.action == "server.ssh_user.update"
+                && row.payload.as_ref().is_some_and(|payload| {
+                    payload.get("old_ssh_user").and_then(|v| v.as_str()) == Some("root")
+                        && payload.get("ssh_user").and_then(|v| v.as_str()) == Some("debian")
+                })
+        }));
         Ok(())
     }
 
