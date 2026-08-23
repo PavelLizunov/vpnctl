@@ -2,6 +2,19 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Release path (musl) has no CI coverage
+
+The canonical release build (`just build-release`, static musl) was verified
+by hand for the FIRST time on 2026-08-23 (linux-worker: `musl-tools` +
+`cmake` + `rustup target add x86_64-unknown-linux-musl` → `static-pie`
+binary, ~3 min). CI never exercises it, so a dependency bump could silently
+break the only documented release path. Fix: add a (possibly advisory) CI job
+that installs musl-tools + cmake and runs
+`cargo build --release --target x86_64-unknown-linux-musl -p vpnctld -p vpnctl`
+so breakage surfaces at PR time. Note: the 2026-08-23 prod deploy shipped a
+same-distro `x86_64-unknown-linux-gnu` build (bookworm worker → bookworm
+host) — proven, but not the canonical static target.
+
 ## Documentation migration debt (post-CLAUDE.md audit, 2026-08-22)
 
 Items surfaced by the audit that moved the project from `CLAUDE.md` to

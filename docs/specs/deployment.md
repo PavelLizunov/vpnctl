@@ -27,7 +27,13 @@
 
 Build: static musl — `just build-release`
 (`cargo build --release --target x86_64-unknown-linux-musl`). The historical
-`cargo zigbuild …gnu.2.36` path is retired.
+`cargo zigbuild …gnu.2.36` path is retired. Musl verified 2026-08-23 on a
+bookworm build host with `musl-tools` + `cmake` installed and
+`rustup target add x86_64-unknown-linux-musl` (output: `static-pie`); those
+build-host prerequisites are NOT yet covered by CI (see BACKLOG.md). The
+2026-08-23 production update (`e34d657`) shipped a same-distro
+`x86_64-unknown-linux-gnu` build (bookworm worker → bookworm host) ahead of
+that verification.
 
 Deploy: `scripts/deploy.sh` on the prod host — builds (or accepts prebuilt)
 daemon + CLI, exports `VPNCTL_BUILD_SHA` before build so binaries report
