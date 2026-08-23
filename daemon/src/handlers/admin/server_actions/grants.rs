@@ -115,7 +115,7 @@ pub(crate) async fn server_revoke_user(
     // User-existence check — the grant twin always had it; without it
     // an unknown user 200-redirected as if revoked (audit 2026-06-10).
     match state.inv.get_user(&uid).await {
-        Ok(Some(_)) => {},
+        Ok(Some(_)) => {}
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }

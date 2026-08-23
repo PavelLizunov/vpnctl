@@ -77,8 +77,7 @@ pub(crate) fn compute_orphan_uuids(
 ) -> Vec<OrphanUuid> {
     // Inventory UUID set for THIS server = the resolved uuid of every
     // granted user. A node UUID present here is accounted-for.
-    let inventory_uuids: BTreeSet<&str> =
-        granted_users.iter().map(|u| u.uuid.as_str()).collect();
+    let inventory_uuids: BTreeSet<&str> = granted_users.iter().map(|u| u.uuid.as_str()).collect();
     // Reverse map from any KNOWN user's global uuid → user id, so an
     // orphan can still be named if it belongs to a user who simply
     // lost their grant (the dangerous revoke case the operator most

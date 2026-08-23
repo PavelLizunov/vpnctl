@@ -869,26 +869,23 @@ pub(super) fn server_detail_protocols_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::{K, t, tr};
-    let enabled: HashSet<&vpnctl_core::ProtocolId> =
-        server.enabled_protocols.iter().collect();
+    let enabled: HashSet<&vpnctl_core::ProtocolId> = server.enabled_protocols.iter().collect();
     let all_protocols = registry.protocol_ids();
     // Multi-kernel: protocol is "compatible" if ANY of the server's
     // declared kernels supports it. Annotation below tells the operator
     // WHICH kernel handles it (resolves "wireguard runs on amneziawg,
     // tuic on sing-box" disambiguation that matters once a node has
     // multiple kernels).
-    let kernel_supports_map: Vec<(
-        vpnctl_core::KernelId,
-        HashSet<vpnctl_core::ProtocolId>,
-    )> = server
-        .kernels
-        .iter()
-        .filter_map(|kid| {
-            registry
-                .kernel(kid)
-                .map(|k| (kid.clone(), k.supported_protocols().into_iter().collect()))
-        })
-        .collect();
+    let kernel_supports_map: Vec<(vpnctl_core::KernelId, HashSet<vpnctl_core::ProtocolId>)> =
+        server
+            .kernels
+            .iter()
+            .filter_map(|kid| {
+                registry
+                    .kernel(kid)
+                    .map(|k| (kid.clone(), k.supported_protocols().into_iter().collect()))
+            })
+            .collect();
     let kernel_supports: HashSet<vpnctl_core::ProtocolId> = kernel_supports_map
         .iter()
         .flat_map(|(_, sup)| sup.iter().cloned())
@@ -1092,10 +1089,7 @@ pub(crate) fn user_detail_per_protocol_grid(
     uid: &vpnctl_core::UserId,
     server: &vpnctl_core::Server,
     hidden_map: Option<&HashMap<vpnctl_core::ProtocolId, bool>>,
-    user_overrides: &HashMap<
-        (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
-        bool,
-    >,
+    user_overrides: &HashMap<(vpnctl_core::ServerId, vpnctl_core::ProtocolId), bool>,
     registry: &vpnctl_core::Registry,
     lang: crate::i18n::Locale,
 ) -> Markup {
