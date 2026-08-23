@@ -57,6 +57,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct WizardSession {
     pub address: String,
+    pub ssh_user: String,
     pub root_password: String,
     pub ssh_port: u16,
     /// Wall-clock instant the session was created. Used by `get` to
@@ -74,6 +75,7 @@ impl std::fmt::Debug for WizardSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WizardSession")
             .field("address", &self.address)
+            .field("ssh_user", &self.ssh_user)
             .field("root_password", &"<redacted>")
             .field("ssh_port", &self.ssh_port)
             .field("created", &self.created)
@@ -106,7 +108,13 @@ impl WizardStore {
     /// Insert a fresh session and return its id. The id is 32 bytes of
     /// crypto random, base64-url encoded (43 ASCII chars). Collisions
     /// are statistically impossible at homelab scale.
-    pub fn insert(&self, address: String, root_password: String, ssh_port: u16) -> String {
+    pub fn insert(
+        &self,
+        address: String,
+        ssh_user: String,
+        root_password: String,
+        ssh_port: u16,
+    ) -> String {
         let id = vpnctl_crypto::gen_password(32).unwrap_or_else(|_| {
             // gen_password's only failure mode is OS RNG starvation,
             // which on Linux means /dev/urandom is broken — at that
@@ -118,6 +126,7 @@ impl WizardStore {
         });
         let session = WizardSession {
             address,
+            ssh_user,
             root_password,
             ssh_port,
             created: Instant::now(),
@@ -227,6 +236,26 @@ pub fn validate_address(input: &str) -> Result<&str, &'static str> {
     Ok(trimmed)
 }
 
+/// Validate an SSH login name. The form handler supplies `root` when the
+/// optional field is blank. Linux account names used by common hosters fit
+/// this deliberately small character set.
+pub fn validate_ssh_user(input: &str) -> Result<&str, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("ssh_user is empty");
+    }
+    if trimmed.len() > 32 {
+        return Err("ssh_user is too long (>32 chars)");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err("ssh_user contains characters outside [A-Za-z0-9_-]");
+    }
+    Ok(trimmed)
+}
+
 /// Validate a root password. Returns `Err` on empty/oversize. We do
 /// NOT validate complexity — operators who type weak passwords here
 /// are bootstrapping the node, after which the wizard disables
@@ -265,7 +294,7 @@ mod tests {
     #[test]
     fn insert_then_get_roundtrips_payload() {
         let store = WizardStore::new();
-        let id = store.insert("198.51.100.42".into(), "hunter2".into(), 22);
+        let id = store.insert("198.51.100.42".into(), "root".into(), "hunter2".into(), 22);
         let s = store.get(&id).expect("session must be retrievable");
         assert_eq!(s.address, "198.51.100.42");
         assert_eq!(s.root_password, "hunter2");
@@ -281,6 +310,7 @@ mod tests {
         // `User` Debug impl in vpnctl-core.
         let session = WizardSession {
             address: "198.51.100.42".into(),
+            ssh_user: "root".into(),
             root_password: "PW_ROOT_MUST_NOT_LEAK".into(),
             ssh_port: 22,
             created: Instant::now(),
@@ -306,7 +336,7 @@ mod tests {
         // Cloudzy ships SSH on 2222 by default — the operator's
         // step-1 form field must round-trip through the session.
         let store = WizardStore::new();
-        let id = store.insert("104.194.156.93".into(), "pw".into(), 2222);
+        let id = store.insert("104.194.156.93".into(), "root".into(), "pw".into(), 2222);
         assert_eq!(store.get(&id).unwrap().ssh_port, 2222);
     }
 
@@ -319,7 +349,7 @@ mod tests {
     #[test]
     fn remove_drops_session() {
         let store = WizardStore::new();
-        let id = store.insert("a".into(), "b".into(), 22);
+        let id = store.insert("a".into(), "root".into(), "b".into(), 22);
         store.remove(&id);
         assert!(store.get(&id).is_none());
         assert_eq!(store.len(), 0);
@@ -335,7 +365,7 @@ mod tests {
         let store = WizardStore::new();
 
         // One fresh session (within TTL) + one backdated well past it.
-        let fresh = store.insert("fresh.example".into(), "fresh-pw".into(), 22);
+        let fresh = store.insert("fresh.example".into(), "root".into(), "fresh-pw".into(), 22);
         let stale_created = Instant::now()
             .checked_sub(SESSION_TTL + Duration::from_secs(1))
             .expect("test clock is far enough from boot to backdate by ~10 min");
@@ -343,6 +373,7 @@ mod tests {
             "stale-id",
             WizardSession {
                 address: "stale.example".into(),
+                ssh_user: "root".into(),
                 root_password: "stale-root-secret".into(),
                 ssh_port: 2222,
                 created: stale_created,
@@ -416,6 +447,21 @@ mod tests {
     #[test]
     fn validate_address_trims_whitespace() {
         assert_eq!(validate_address("  10.0.0.1  ").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn validate_ssh_user_accepts_common_hoster_accounts() {
+        assert_eq!(validate_ssh_user("root").unwrap(), "root");
+        assert_eq!(validate_ssh_user(" debian ").unwrap(), "debian");
+        assert_eq!(validate_ssh_user("ubuntu-24_04").unwrap(), "ubuntu-24_04");
+    }
+
+    #[test]
+    fn validate_ssh_user_rejects_empty_injection_and_oversize() {
+        assert!(validate_ssh_user("").is_err());
+        assert!(validate_ssh_user("debian; id").is_err());
+        assert!(validate_ssh_user("-oProxyCommand=x").is_err());
+        assert!(validate_ssh_user(&"a".repeat(33)).is_err());
     }
 
     #[test]
