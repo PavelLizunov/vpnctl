@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use vpnctl_inventory::SqliteInventory;
 
-use super::{dispatch_alerts, probe_one_server_with_registry, FailState};
+use super::{FailState, dispatch_alerts, probe_one_server_with_registry};
 
 /// Realistic homelab cadence for telemetry. Slower than clash-api
 /// (5 min) because node probe is "is the service alive + disk OK"
@@ -22,7 +22,7 @@ const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 /// [`crate::ssh_subprocess::SubprocessSshTransport`] which shells out
 /// to the system `/usr/bin/ssh` binary (no glibc-2.38 hazard).
 pub fn spawn_node_probe_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
-    use tokio::time::{interval, MissedTickBehavior};
+    use tokio::time::{MissedTickBehavior, interval};
 
     // `> 0` guard + warn-on-bad lives in `config::parse_positive_secs`:
     // `interval(Duration::from_secs(0))` panics → poller crash-loop.
