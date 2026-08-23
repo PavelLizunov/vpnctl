@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{SqliteInventory, VpnStatsDelta};
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{TuicV5, VlessReality};
 use vpnctld::{AppState, router};

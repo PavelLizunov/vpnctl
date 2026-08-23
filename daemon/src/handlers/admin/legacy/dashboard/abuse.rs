@@ -34,7 +34,7 @@ fn sharing_reason_label(
     }
 }
 
-pub(super) async fn load_likely_shared(
+pub(in crate::handlers::admin::legacy) async fn load_likely_shared(
     inv: &vpnctl_inventory::SqliteInventory,
 ) -> Vec<(vpnctl_core::UserId, crate::sharing_score::SharingScore)> {
     let mut rows: Vec<_> = inv
@@ -95,7 +95,7 @@ fn sharing_rows(
 /// the reasons that fired (strongest first: simultaneous IPs, impossible
 /// travel, per-day IPs, client-app spread, …). Renders nothing when no user
 /// reaches `FLAG_THRESHOLD` (quiet dashboard).
-pub(super) fn dashboard_abuse_summary(
+pub(in crate::handlers::admin::legacy) fn dashboard_abuse_summary(
     likely_shared: &[(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
     lang: crate::i18n::Locale,
 ) -> Markup {
@@ -138,7 +138,7 @@ pub(super) fn dashboard_abuse_summary(
     }
 }
 
-pub(super) fn sharing_review(
+pub(in crate::handlers::admin::legacy) fn sharing_review(
     all: &[(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
     query: &super::render::DashboardQuery,
     lang: crate::i18n::Locale,

@@ -14,9 +14,10 @@ use super::telemetry::{
     dashboard_heavy_users, dashboard_live_activity_from_rows, dashboard_vpn_activity,
 };
 use crate::AppState;
-use crate::handlers::admin::helpers::{
-    detail_tabs, internal_error, pick_vpn_sparkline_window, render_page, theme_accent_lang,
-    vpn_traffic_chart, window_picker_section,
+use crate::handlers::admin::helpers::{internal_error, render_page, theme_accent_lang};
+use crate::handlers::admin::legacy::server_detail::detail_tabs;
+use crate::handlers::admin::legacy::user_sections::{
+    pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
 };
 
 /// Aggregated counters used in the dashboard top-row metric tiles.

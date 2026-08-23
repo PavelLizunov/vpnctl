@@ -6,9 +6,9 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 233 (165 prod / 68 test)
-- **Total Rust LOC:** 121,941 (79,689 prod / 42,252 test)
+- **Total Rust LOC:** 121,936 (79,684 prod / 42,252 test)
 - **Database Migrations:** 48
-- **HTTP Route Registrations:** 117
+- **`daemon/src/app.rs` `.route(...)` Registrations:** 117
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 6,620 (7) | 605 (2) | **7,225** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 5,620 (14) | 4,186 (11) | **9,806** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 520 (3) | 558 (3) | **1,078** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,357 (89) | 24,145 (18) | **69,502** |
-| **Total** | | | | **79,689 (165)** | **42,252 (68)** | **121,941** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,352 (89) | 24,145 (18) | **69,497** |
+| **Total** | | | | **79,684 (165)** | **42,252 (68)** | **121,936** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -51,7 +51,7 @@
 | `crates/inventory/src/backup.rs` | 1,375 | `crates/inventory` | Prod |
 | `crates/inventory/src/migrate.rs` | 1,375 | `crates/inventory` | Prod |
 | `crates/core/src/lib.rs` | 1,272 | `crates/core` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,232 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,226 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,184 | `daemon` | Test |
 | `crates/inventory/src/sqlite/access.rs` | 1,169 | `crates/inventory` | Prod |
 | `daemon/src/alert_text.rs` | 1,163 | `daemon` | Prod |
@@ -109,7 +109,7 @@
 | `0047` | boosty sync lease | `crates/inventory/migrations/0047_boosty_sync_lease.sql` | 2 |
 | `0048` | server quality samples | `crates/inventory/migrations/0048_server_quality_samples.sql` | 30 |
 
-## HTTP Route Registrations (117)
+## `daemon/src/app.rs` `.route(...)` Registrations (117)
 
 | Method | Path | Handler |
 |---|---|---|

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use maud::{Markup, html};
 
-use crate::handlers::admin::helpers::fp_short;
-use crate::handlers::admin::servers::{kernel_priority, ordered_kernel_ids};
+use crate::handlers::admin::helpers::{kernel_priority, ordered_kernel_ids};
+use crate::handlers::admin::servers::fp_short;
 use crate::handlers::vpn_router::server_display_label;
 use crate::http_util::path_segment_encode;
 

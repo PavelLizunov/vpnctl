@@ -1,7 +1,7 @@
 use maud::{Markup, html};
 
-use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes, pct_label};
-use crate::handlers::admin::legacy::dashboard::{pct_color, sparkline_svg_scaled};
+use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
+use crate::handlers::admin::legacy::dashboard::{pct_color, pct_label, sparkline_svg_scaled};
 
 /// Phase H+ — rolling uptime SLO section. Three chips (24h / 7d /
 /// 30d) under the live-status hero. Reads `UptimeStat` values

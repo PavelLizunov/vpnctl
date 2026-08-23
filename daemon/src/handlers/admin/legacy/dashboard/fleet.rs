@@ -2,9 +2,11 @@ use maud::{Markup, html};
 
 use super::telemetry::humanize_age;
 use crate::handlers::admin::helpers::{
-    VpnSparklineWindow, fleet_majority_version, humanize_bytes, kernel_observations_of,
-    kernel_versions_inline, ordered_kernel_ids, sing_box_version_of, status_tile,
+    fleet_majority_version, humanize_bytes, kernel_observations_of, kernel_versions_inline,
+    ordered_kernel_ids, sing_box_version_of,
 };
+use crate::handlers::admin::legacy::server_detail::status_tile;
+use crate::handlers::admin::legacy::user_sections::VpnSparklineWindow;
 use crate::http_util::path_segment_encode;
 
 /// Parse a dotted version string (`"1.13.12"`, leading `v` tolerated)
@@ -53,7 +55,7 @@ fn kernel_version_is_current(
     }
 }
 
-pub(super) fn server_detail_kernel_inventory_section(
+pub(in crate::handlers::admin::legacy) fn server_detail_kernel_inventory_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
     latest: Option<&vpnctl_inventory::NodeHealthRow>,
@@ -150,7 +152,7 @@ pub(super) fn server_detail_kernel_inventory_section(
 /// `kernel_versions` is `(ServerId, Option<kernel_versions_json>)` —
 /// exactly the shape `kernel_versions_fleet()` (Q-4e) returns, so both
 /// call sites pass it straight through.
-pub(super) fn kernel_floor_rollup(
+pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
     kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
     lang: crate::i18n::Locale,
 ) -> Markup {
@@ -242,7 +244,7 @@ pub(super) fn kernel_floor_rollup(
 /// * `kernel_versions` — newest `kernel_versions_json` per server (the
 ///   sing-box version column).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn dashboard_fleet_table(
+pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     servers: &[vpnctl_core::Server],
     latest_health: &[(
         vpnctl_core::ServerId,
@@ -396,7 +398,7 @@ fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
 ///
 /// `coeffs` maps each server to its `usage_coefficient`; unknown
 /// servers default to 1.0.
-pub(super) fn dashboard_fleet_traffic_totals(
+pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
     rows: &[vpnctl_inventory::VpnStatsRow],
     coeffs: &std::collections::HashMap<vpnctl_core::ServerId, f64>,
     window: VpnSparklineWindow,
@@ -477,7 +479,7 @@ pub(super) fn dashboard_fleet_traffic_totals(
 /// in the eyebrow and a «full feed →» link to /admin/alerts. Replaces
 /// the PR-Dash dash#4 (kind, severity)-counts card. Quiet-dashboard
 /// contract kept — renders nothing when there are zero unacked alerts.
-pub(super) fn dashboard_health_feed(
+pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
     alerts: &[vpnctl_inventory::AdminAlert],
     unacked_total: u64,
     lang: crate::i18n::Locale,
@@ -555,7 +557,7 @@ fn quality_score_color(score: Option<u8>) -> &'static str {
     }
 }
 
-pub(super) fn dashboard_quality_ranking(
+pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
     quality: &[(
         vpnctl_core::ServerId,
         vpnctl_inventory::ServiceQualityScore,
@@ -609,7 +611,7 @@ pub(super) fn dashboard_quality_ranking(
     }
 }
 
-pub(super) fn server_detail_quality_section(
+pub(in crate::handlers::admin::legacy) fn server_detail_quality_section(
     q24: Option<&vpnctl_inventory::ServiceQualityScore>,
     q7: Option<&vpnctl_inventory::ServiceQualityScore>,
     history: &[vpnctl_inventory::ServiceQualitySample],
@@ -639,7 +641,7 @@ pub(super) fn server_detail_quality_section(
     }
 }
 
-pub(super) fn pct_color(pct: Option<u8>) -> &'static str {
+pub(in crate::handlers::admin::legacy) fn pct_color(pct: Option<u8>) -> &'static str {
     match pct {
         Some(p) if p >= 99 => "#2e7d32", // green
         Some(p) if p >= 95 => "#e6a23c", // amber
@@ -653,7 +655,7 @@ pub(super) fn pct_color(pct: Option<u8>) -> &'static str {
 /// vs decimal). `None → bilingual "— no data" / "— нет данных"` so
 /// the empty branch is visually distinct from `Some(0%)` (down-the-
 /// whole-window).
-pub(super) fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
+pub(in crate::handlers::admin::legacy) fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
     match pct {
         Some(p) => format!("{p}%"),
         None => crate::i18n::tr(lang, "— no data", "— нет данных").to_string(),
@@ -680,7 +682,7 @@ pub(super) fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
 /// Chip-click navigates to /admin/servers (list) — per-server drill-in
 /// lives there. Stable `data-fleet-uptime-pct` attribute for scrape
 /// targets + future SLO export.
-pub(super) fn dashboard_fleet_uptime(
+pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
     rows: &[(
         vpnctl_core::ServerId,
         [Option<vpnctl_inventory::UptimeStat>; 3],

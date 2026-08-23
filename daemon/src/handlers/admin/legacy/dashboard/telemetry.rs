@@ -1,15 +1,15 @@
 use maud::{Markup, html};
 
-use crate::handlers::admin::helpers::{
-    VpnSparklineWindow, format_msk, humanize_bytes, status_tile,
-};
+use crate::handlers::admin::helpers::{format_msk, humanize_bytes};
+use crate::handlers::admin::legacy::server_detail::status_tile;
+use crate::handlers::admin::legacy::user_sections::VpnSparklineWindow;
 use crate::http_util::path_segment_encode;
 
 /// Compact "how long ago" string for the last-probe column. Buckets to
 /// seconds / minutes / hours / days — the operator wants "is this
 /// stale?" at a glance, not millisecond precision. Negative durations
 /// (clock skew between probe write + render) clamp to «just now».
-pub(super) fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
+pub(in crate::handlers::admin::legacy) fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
     use crate::i18n::tr;
     let secs = d.num_seconds();
     if secs < 60 {
@@ -27,7 +27,7 @@ pub(super) fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> St
     format!("{}{}", days, tr(lang, "d ago", "д назад"))
 }
 
-pub(super) fn dashboard_live_activity_from_rows(
+pub(in crate::handlers::admin::legacy) fn dashboard_live_activity_from_rows(
     servers: &[vpnctl_core::Server],
     active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
     rows: &[vpnctl_inventory::VpnStatsRow],
@@ -104,7 +104,7 @@ pub(super) fn dashboard_live_activity_from_rows(
 /// would EVER appear). Empty-state copy points at the NM-11
 /// upstream limit so the operator knows why per-user attribution
 /// is zero today.
-pub(super) fn dashboard_vpn_activity(
+pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
     rows: &[(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)],
     window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
@@ -213,7 +213,7 @@ pub(super) fn dashboard_vpn_activity(
 /// Render the "heavy users · <window>" section on the dashboard.
 /// Sorted DESC by total bytes (upload + download). Empty list →
 /// explanatory empty-state explaining the polling prerequisite.
-pub(super) fn dashboard_heavy_users(
+pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
     rows: &[vpnctl_inventory::HeavyUser],
     window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
@@ -322,7 +322,7 @@ pub(super) fn dashboard_heavy_users(
 ///   callers that render their own max caption under the chart —
 ///   previously both rendered and disagreed by one (SVG truncated,
 ///   caption rounded: «max 51» inside, «max 52%» below).
-pub(super) fn sparkline_svg_scaled(
+pub(in crate::handlers::admin::legacy) fn sparkline_svg_scaled(
     values: &[f64],
     width: u32,
     height: u32,

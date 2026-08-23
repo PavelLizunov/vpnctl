@@ -4,10 +4,11 @@ use maud::{Markup, html};
 
 use super::telemetry::status_tile;
 use crate::handlers::admin::audit::{action_kind, summarize_audit_payload};
-use crate::handlers::admin::helpers::{
-    VpnSparklineWindow, format_msk_iso, humanize_bytes, window_picker_section,
-};
+use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
 use crate::handlers::admin::legacy::dashboard::sparkline_svg_scaled;
+use crate::handlers::admin::legacy::user_sections::{
+    VpnSparklineWindow, window_picker_section,
+};
 use crate::http_util::path_segment_encode;
 use crate::snapshot_cache::{
     ServerSnapshot, aggregate_by_destination, aggregate_by_source, network_breakdown,

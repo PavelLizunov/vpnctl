@@ -11,14 +11,15 @@ use super::telemetry::*;
 use super::types::*;
 use crate::AppState;
 use crate::handlers::admin::helpers::{
-    format_msk_iso, fp_short, humanize_bytes, internal_error, not_found, pick_vpn_sparkline_window,
-    render_page, theme_accent_lang,
+    format_msk_iso, humanize_bytes, internal_error, not_found, render_page, theme_accent_lang,
 };
 use crate::handlers::admin::legacy::dashboard::{
     humanize_age, kernel_floor_rollup, server_detail_kernel_inventory_section,
     server_detail_quality_section,
 };
-use crate::handlers::admin::servers::ordered_kernel_ids;
+use crate::handlers::admin::helpers::ordered_kernel_ids;
+use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
+use crate::handlers::admin::servers::fp_short;
 use crate::http_util::path_segment_encode;
 
 pub(super) async fn server_detail_render(

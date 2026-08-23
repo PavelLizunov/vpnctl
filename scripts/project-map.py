@@ -45,12 +45,16 @@ def get_tracked_files(repo_root: Path) -> List[str]:
     """Get all git-tracked files relative to repo root."""
     try:
         out = subprocess.check_output(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            ["git", "ls-files", "--cached"],
             cwd=repo_root,
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        return sorted([line.strip() for line in out.splitlines() if line.strip()])
+        return sorted(
+            line.strip()
+            for line in out.splitlines()
+            if line.strip() and (repo_root / line.strip()).is_file()
+        )
     except Exception:
         # Fallback to filesystem scan excluding VCS / build artifacts
         tracked = []
@@ -179,11 +183,8 @@ def scan_rust_loc(repo_root: Path, tracked_files: List[str], crates: List[Dict[s
 
     for rel_path in rs_files:
         full_path = repo_root / rel_path
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = len(f.readlines())
-        except Exception:
-            lines = 0
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = sum(1 for _ in f)
 
         # Match to crate
         matched_crate = None
@@ -221,11 +222,8 @@ def scan_migrations(repo_root: Path, tracked_files: List[str]) -> List[Dict[str,
     migrations = []
     for mf in migration_files:
         full_path = repo_root / mf
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = len(f.readlines())
-        except Exception:
-            lines = 0
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = sum(1 for _ in f)
 
         filename = os.path.basename(mf)
         match = re.match(r"^(\d+)_?(.*)\.sql$", filename)
@@ -246,7 +244,7 @@ def scan_migrations(repo_root: Path, tracked_files: List[str]) -> List[Dict[str,
 
 
 def scan_routes(repo_root: Path) -> List[Dict[str, str]]:
-    """Scan route registrations from daemon router definitions."""
+    """Scan literal `.route(...)` registrations from daemon/src/app.rs."""
     app_rs = repo_root / "daemon/src/app.rs"
     if not app_rs.exists():
         return []
@@ -329,7 +327,7 @@ def generate_project_map_markdown(
     out.append(f"- **Tracked Rust Files:** {total_rust_files} ({total_prod_files} prod / {total_test_files} test)")
     out.append(f"- **Total Rust LOC:** {total_rust_loc:,} ({total_prod_loc:,} prod / {total_test_loc:,} test)")
     out.append(f"- **Database Migrations:** {len(migrations)}")
-    out.append(f"- **HTTP Route Registrations:** {len(routes)}")
+    out.append(f"- **`daemon/src/app.rs` `.route(...)` Registrations:** {len(routes)}")
     out.append("")
 
     out.append("## Workspace Crates & Targets")
@@ -372,7 +370,7 @@ def generate_project_map_markdown(
         out.append(f"| `{m['version']}` | {m['name']} | `{m['file']}` | {m['lines']} |")
     out.append("")
 
-    out.append(f"## HTTP Route Registrations ({len(routes)})")
+    out.append(f"## `daemon/src/app.rs` `.route(...)` Registrations ({len(routes)})")
     out.append("")
     out.append("| Method | Path | Handler |")
     out.append("|---|---|---|")
@@ -395,16 +393,11 @@ def main() -> int:
         action="store_true",
         help="Emit generated inventory Markdown to stdout.",
     )
-    parser.add_argument(
-        "-o",
-        "--output",
-        default="docs/CODEBASE_INVENTORY.md",
-        help="Path to output markdown file (default: docs/CODEBASE_INVENTORY.md).",
-    )
     args = parser.parse_args()
 
     repo_root = find_repo_root()
-    output_path = (repo_root / args.output).resolve()
+    output_rel = "docs/CODEBASE_INVENTORY.md"
+    output_path = repo_root / output_rel
 
     tracked_files = get_tracked_files(repo_root)
     crates = get_workspace_crates(repo_root)
@@ -428,7 +421,7 @@ def main() -> int:
 
     if args.check:
         if not output_path.exists():
-            sys.stderr.write(f"Error: Output file {args.output} does not exist.\n")
+            sys.stderr.write(f"Error: Output file {output_rel} does not exist.\n")
             return 1
 
         current_content = output_path.read_text(encoding="utf-8")
@@ -436,20 +429,20 @@ def main() -> int:
             diff = difflib.unified_diff(
                 current_content.splitlines(keepends=True),
                 markdown.splitlines(keepends=True),
-                fromfile=f"a/{args.output}",
-                tofile=f"b/{args.output}",
+                fromfile=f"a/{output_rel}",
+                tofile=f"b/{output_rel}",
             )
-            sys.stderr.write(f"Error: {args.output} is out of date.\n")
+            sys.stderr.write(f"Error: {output_rel} is out of date.\n")
             sys.stderr.writelines(diff)
             sys.stderr.write(f"\nRun `just project-map` or `python3 {os.path.relpath(__file__, repo_root)}` to regenerate.\n")
             return 1
 
-        print(f"✔ {args.output} is up-to-date")
+        print(f"✔ {output_rel} is up-to-date")
         return 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")
-    print(f"✔ Generated {args.output}")
+    print(f"✔ Generated {output_rel}")
     return 0
 
 
