@@ -2,6 +2,37 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Documentation migration debt (post-CLAUDE.md audit, 2026-08-22)
+
+Items surfaced by the audit that moved the project from `CLAUDE.md` to
+`AGENTS.md` + `docs/specs/`:
+
+1. **Stale "web-deploy has no SSH" comments.** `daemon/src/handlers/admin/server_actions.rs:~334`
+   and `daemon/src/app.rs:~1129` still say the Deploy button waits for "a
+   working SSH path on bookworm-2.36", but SSH deploy shipped via
+   `SubprocessSshTransport` + `wizard_bootstrap::run_redeploy`
+   (`ensure_installed` + `apply_config`). Rewrite the comments to describe the
+   current pipeline.
+2. **`probeable()` ignores AmneziaWG.** `daemon/src/node_probe_poller.rs:55`
+   `TODO(amneziawg)`: the AmneziaWg kernel is registered, but node probing
+   only understands sing-box. Wire a per-kernel probe variant (`wg show`) or a
+   sibling `probeable_amneziawg`.
+3. **Subscription base URL hard-coded.** `daemon/src/handlers/admin/legacy.rs`
+   `ninitux_url()` hard-codes `https://ninitux.com/api/v1/app/config/<id>`
+   (deliberate cutover contract) with a TODO to promote to
+   `VPNCTLD_PUBLIC_SUBSCRIPTION_BASE_URL` env var for staging overrides.
+4. **Verify before declaring gaps closed.** (a) Fingerprint drift:
+   `check_fingerprint_drift` exists and fires `server.fingerprint.drift`, but
+   the README gap (TOFU host-key rotation surfacing as cryptic
+   `server.unreachable` + one-click «accept new») needs a full-path check.
+   (b) TLS cert provisioning: `sing_box::ensure_installed` generates
+   `cert.pem`/`key.pem`, but parity across ALL deploy paths (wizard, CLI,
+   redeploy) is unverified.
+5. **~50 historical references to `CLAUDE.md`** remain in code comments,
+   tests, scripts, and docs. They are provenance pointers; the content now
+   lives in `AGENTS.md` / `docs/specs/` and in git history. Optional cleanup:
+   retarget them, or leave as historical markers.
+
 ## v2ray stats → billing-grade per-user attribution (Go helper)
 
 **Status:** deferred (not needed now). Current clash-snapshot polling at 60 s
