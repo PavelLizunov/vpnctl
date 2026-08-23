@@ -1387,6 +1387,10 @@ async fn public_endpoints_carry_security_response_headers() {
         "nosniff"
     );
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
 
     let dir2 = TempDir::new().unwrap();
     let (state2, token2) = seed(&dir2).await;
@@ -1406,4 +1410,8 @@ async fn public_endpoints_carry_security_response_headers() {
         "nosniff"
     );
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
 }
