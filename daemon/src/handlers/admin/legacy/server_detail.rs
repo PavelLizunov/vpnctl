@@ -1,18 +1,14 @@
-use std::collections::HashSet;
-
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
 use super::super::audit::{action_kind, summarize_audit_payload};
 use super::super::helpers::*;
 use super::super::servers::*;
-use super::super::users::mask_secret;
 use super::*;
 use crate::AppState;
-use crate::http_util::{form_field, path_segment_encode};
-use vpnctl_core::humanize::format_size_bytes;
+use crate::http_util::path_segment_encode;
 // ────────────────────────────────────────────────────────────────────────
 //  Phase H chunk 3 — server detail page with live telemetry surface.
 //
