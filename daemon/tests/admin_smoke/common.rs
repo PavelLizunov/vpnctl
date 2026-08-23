@@ -12,7 +12,7 @@ use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{TuicV5, VlessReality};
-use vpnctld::{AppState, router};
+use vpnctld::AppState;
 
 pub(crate) async fn state(dir: &TempDir) -> AppState {
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))

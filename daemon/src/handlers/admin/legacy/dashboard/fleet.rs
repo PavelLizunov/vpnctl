@@ -655,7 +655,10 @@ pub(in crate::handlers::admin::legacy) fn pct_color(pct: Option<u8>) -> &'static
 /// vs decimal). `None → bilingual "— no data" / "— нет данных"` so
 /// the empty branch is visually distinct from `Some(0%)` (down-the-
 /// whole-window).
-pub(in crate::handlers::admin::legacy) fn pct_label(pct: Option<u8>, lang: crate::i18n::Locale) -> String {
+pub(in crate::handlers::admin::legacy) fn pct_label(
+    pct: Option<u8>,
+    lang: crate::i18n::Locale,
+) -> String {
     match pct {
         Some(p) => format!("{p}%"),
         None => crate::i18n::tr(lang, "— no data", "— нет данных").to_string(),

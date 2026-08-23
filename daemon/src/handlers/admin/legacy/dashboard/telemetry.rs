@@ -9,7 +9,10 @@ use crate::http_util::path_segment_encode;
 /// seconds / minutes / hours / days — the operator wants "is this
 /// stale?" at a glance, not millisecond precision. Negative durations
 /// (clock skew between probe write + render) clamp to «just now».
-pub(in crate::handlers::admin::legacy) fn humanize_age(d: chrono::Duration, lang: crate::i18n::Locale) -> String {
+pub(in crate::handlers::admin::legacy) fn humanize_age(
+    d: chrono::Duration,
+    lang: crate::i18n::Locale,
+) -> String {
     use crate::i18n::tr;
     let secs = d.num_seconds();
     if secs < 60 {

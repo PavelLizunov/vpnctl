@@ -10,7 +10,6 @@ mod telemetry;
 mod types;
 
 pub(crate) use self::config::user_detail_per_protocol_grid;
-pub(crate) use self::drift::compute_orphan_uuids;
 pub(crate) use self::grants::{grant_protocol_disable, grant_protocol_enable};
 pub(crate) use self::routes::{
     server_detail, server_detail_activity, server_detail_grants_tab, server_detail_protocols_tab,
