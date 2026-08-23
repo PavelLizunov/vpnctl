@@ -76,8 +76,10 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
   `server.fingerprint.changed` alert with one-click «accept new» would
   close the gap.
 
-See [`CLAUDE.md`](CLAUDE.md) for the full operational handbook,
-roadmap, methodology rules, and post-incident notes.
+See [`AGENTS.md`](AGENTS.md) for the agent contract and
+[`docs/specs/`](docs/specs/) for the standing contracts (architecture,
+workflow, deployment, compatibility, backups). Deferred work lives in
+[`BACKLOG.md`](BACKLOG.md); operational history lives in git.
 
 ## Architecture
 
