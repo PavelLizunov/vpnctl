@@ -603,14 +603,14 @@ async fn server_detail_render(
                         span.ed-stat__dot {}
                         (crate::i18n::tr(lang, "up", "работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
-                        (humanize_age(chrono::Utc::now() - h.ts, lang))
+                        (super::dashboard::humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else if h.sing_box_active == Some(false) {
                     span.ed-stat.ed-stat--failed {
                         span.ed-stat__dot {}
                         (crate::i18n::tr(lang, "down", "не работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
-                        (humanize_age(chrono::Utc::now() - h.ts, lang))
+                        (super::dashboard::humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else {
                     span.ed-stat.ed-stat--unknown {
@@ -1285,7 +1285,7 @@ pub(super) fn server_detail_uptime_section(
 
     let row = |label: &str, stat: Option<&vpnctl_inventory::UptimeStat>| -> Markup {
         let pct = stat.and_then(|s| s.uptime_pct);
-        let color = pct_color(pct);
+        let color = super::dashboard::pct_color(pct);
         let pct_text = pct_label(pct, lang);
         let row_count: u64 = stat.map(|s| s.total_rows).unwrap_or(0);
         let down_count: u64 = stat.map(|s| s.down_rows).unwrap_or(0);
@@ -1599,7 +1599,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "Disk %", "Диск %"))
                     }
-                    (sparkline_svg_scaled(&disk_pct_series, 280, 60, Some(100.0), false))
+                    (super::dashboard::sparkline_svg_scaled(&disk_pct_series, 280, 60, Some(100.0), false))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                         (tr(lang, "max ", "макс ")) (format!("{disk_max:.0}%"))
                         " · " (disk_pct_series.len()) " " (tr(lang, "samples", "точек"))
@@ -1609,7 +1609,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "Mem used %", "Память исп. %"))
                     }
-                    (sparkline_svg_scaled(&mem_used_pct_series, 280, 60, Some(100.0), false))
+                    (super::dashboard::sparkline_svg_scaled(&mem_used_pct_series, 280, 60, Some(100.0), false))
                     div style=(if mem_max > 70.0 { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
                         (tr(lang, "max ", "макс ")) (format!("{mem_max:.0}%"))
                         @if mem_max > 70.0 { " ⚠" }
@@ -1620,7 +1620,7 @@ fn server_detail_resource_trend_section(
                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.14em;" {
                         (tr(lang, "sing-box log MiB", "sing-box лог MiB"))
                     }
-                    (sparkline_svg_scaled(&log_mib_series, 280, 60, None, false))
+                    (super::dashboard::sparkline_svg_scaled(&log_mib_series, 280, 60, None, false))
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                         (tr(lang, "max ", "макс ")) (format!("{log_max:.0} MiB"))
                         " · " (log_mib_series.len()) " " (tr(lang, "samples", "точек"))
@@ -3644,7 +3644,7 @@ fn server_detail_traffic_section(
                 // R2: in-SVG label off — it printed raw bytes; the
                 // humanized caption below carries the peak.
                 @let series_max = series.iter().copied().fold(0.0_f64, f64::max);
-                (sparkline_svg_scaled(&series, 1160, 90, None, false))
+                (super::dashboard::sparkline_svg_scaled(&series, 1160, 90, None, false))
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                     (tr(lang, "max ", "макс ")) (humanize_bytes(series_max as u64))
                     (tr(lang, " per bucket", " на интервал"))

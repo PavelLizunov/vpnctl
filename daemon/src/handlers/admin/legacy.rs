@@ -1,20 +1,5 @@
 //! Admin UI legacy handlers — facade over thematic submodules.
 
-use std::collections::HashSet;
-
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Redirect, Response};
-use maud::{Markup, html};
-
-use super::audit::{action_kind, summarize_audit_payload};
-use super::helpers::*;
-use super::servers::*;
-use super::users::mask_secret;
-use crate::AppState;
-use crate::http_util::{form_field, path_segment_encode};
-use vpnctl_core::humanize::format_size_bytes;
-
 mod dashboard;
 mod deploy_sse;
 mod server_detail;
@@ -26,7 +11,6 @@ pub(crate) use self::dashboard::*;
 pub(crate) use self::deploy_sse::*;
 pub(crate) use self::server_detail::*;
 pub(crate) use self::settings::*;
-pub(crate) use self::shell::*;
 pub(crate) use self::user_sections::*;
 
 #[cfg(test)]

@@ -2095,7 +2095,7 @@ pub(crate) async fn live_vpn_stats_section(
                 // R2 2026-07-10: label_max off — the in-SVG label printed
                 // RAW BYTES («max 84028835»); the humanized caption below
                 // replaces it. Width matches the tables (was 720 ≈ half).
-                (sparkline_svg_scaled(&trend, 1160, 60, None, false))
+                (super::dashboard::sparkline_svg_scaled(&trend, 1160, 60, None, false))
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                     (tr(lang, "max ", "макс ")) (humanize_bytes(trend_max as u64))
                     (tr(lang, " per bucket", " на интервал"))
