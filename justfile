@@ -24,6 +24,14 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# Generate docs/CODEBASE_INVENTORY.md structural map
+project-map:
+    python3 scripts/project-map.py
+
+# Verify docs/CODEBASE_INVENTORY.md is up-to-date
+project-map-check:
+    python3 scripts/project-map.py --check
+
 # Security advisories
 audit:
     cargo audit
@@ -54,7 +62,7 @@ clean:
 
 # Full local CI sweep — run before pushing. `gc` runs first so a
 # bloated target/ is trimmed before the build gates rebuild it.
-ci: gc fmt-check clippy test deny
+ci: gc project-map-check fmt-check clippy test deny
     @echo "✔ all CI gates passed"
 
 # ─── Tools from 2026-05-18 security audit ──────────────────────────
