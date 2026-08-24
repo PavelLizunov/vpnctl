@@ -46,10 +46,12 @@ async fn raw_pool(path: &Path) -> sqlx::SqlitePool {
 /// Insert `node_health` row at `now - hours_ago h` with given sba
 /// (None → SQL NULL → "unknown"). Only ts + sba matter for uptime.
 async fn ins(pool: &sqlx::SqlitePool, sid: &str, sba: Option<bool>, hours_ago: i64) {
+    let sample_id = format!("uptime-{sid}-{hours_ago}-{}", vpnctl_crypto::gen_uuid());
     sqlx::query(
-        "INSERT INTO node_health (ts, server_id, sing_box_active)
-         VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1), ?2, ?3)",
+        "INSERT INTO node_health (sample_id, ts, server_id, sing_box_active)
+         VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2), ?3, ?4)",
     )
+    .bind(sample_id)
     .bind(format!("-{hours_ago} hours"))
     .bind(sid)
     .bind(sba.map(i64::from))
