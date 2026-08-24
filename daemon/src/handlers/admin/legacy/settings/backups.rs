@@ -40,11 +40,8 @@ pub(crate) fn settings_disaster_recovery_section(
     use crate::i18n::tr;
     let deploy_key = crate::app::deploy_key_path();
     let deploy_key_pub = crate::ssh_subprocess::public_key_path(&deploy_key);
-    let deploy_key_bundle_label = format!(
-        "{} · {}",
-        deploy_key.display(),
-        deploy_key_pub.display()
-    );
+    let deploy_key_bundle_label =
+        format!("{} · {}", deploy_key.display(), deploy_key_pub.display());
     // Format the last self-test: status chip + when + duration.
     // Pulled from audit_log payload, which is JSON; we don't
     // panic if the shape doesn't match — just show «(missing
