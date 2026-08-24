@@ -684,10 +684,7 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
             address: "203.0.113.22".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernels: vec![
-                KernelId("amneziawg".into()),
-                KernelId("sing-box".into()),
-            ],
+            kernels: vec![KernelId("amneziawg".into()), KernelId("sing-box".into())],
             // Empty enabled_protocols — the server-detail still lists
             // every protocol in the registry with [enable] buttons,
             // and the chip should render alongside the name.

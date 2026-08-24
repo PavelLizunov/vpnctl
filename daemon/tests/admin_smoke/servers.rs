@@ -794,16 +794,10 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
         address: "203.0.113.50".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernels: [
-            "sing-box",
-            "amneziawg",
-            "caddy",
-            "dns-tunnel",
-            "xray",
-        ]
-        .into_iter()
-        .map(|id| KernelId(id.into()))
-        .collect(),
+        kernels: ["sing-box", "amneziawg", "caddy", "dns-tunnel", "xray"]
+            .into_iter()
+            .map(|id| KernelId(id.into()))
+            .collect(),
         enabled_protocols: vec![],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),
@@ -848,14 +842,7 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
         .split_once("fleet-kernel-versions")
         .expect("fleet kernel-version section")
         .1;
-    let order = [
-        "sing-box",
-        "xray",
-        "amneziawg",
-        "caddy",
-        "dns-tunnel",
-    ]
-    .map(|kernel| {
+    let order = ["sing-box", "xray", "amneziawg", "caddy", "dns-tunnel"].map(|kernel| {
         fleet_versions
             .find(kernel)
             .expect("kernel in fleet version section")

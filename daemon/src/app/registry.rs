@@ -91,15 +91,9 @@ mod registry_drift_guard {
         .to_vec();
         want_protos.sort();
 
-        let mut want_kernels = [
-            "amneziawg",
-            "caddy",
-            "dns-tunnel",
-            "sing-box",
-            "xray",
-        ]
-        .map(String::from)
-        .to_vec();
+        let mut want_kernels = ["amneziawg", "caddy", "dns-tunnel", "sing-box", "xray"]
+            .map(String::from)
+            .to_vec();
         want_kernels.sort();
 
         assert_eq!(protos, want_protos, "daemon protocol registry drifted");

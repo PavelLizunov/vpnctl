@@ -72,7 +72,6 @@ pub async fn bootstrap_server_secrets(
         }
     }
 
-
     // AmneziaWG obfuscation params — per-server, keyed on the `amneziawg`
     // KERNEL (not the wireguard PROTOCOL): obfs is a property of the
     // AmneziaWG daemon. A future vanilla wg-quick kernel serving the same
