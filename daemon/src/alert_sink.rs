@@ -659,6 +659,32 @@ mod tests {
     }
 
     #[test]
+    fn local_invocation_edit_message_text_builds_valid_url_and_data() {
+        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let (_args, stdin) = s.build_curl_local_invocation(
+            "editMessageText",
+            r#"{"chat_id":"987","message_id":42,"text":"recovered"}"#,
+        );
+        let stdin_str = std::str::from_utf8(&stdin).unwrap();
+        assert_eq!(
+            stdin_str, "url = \"https://api.telegram.org/botTOK123/editMessageText\"\n",
+            "stdin must target editMessageText endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_text_rejects_non_numeric_message_id_synchronously() {
+        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let err = s.edit_text("not-a-number", "text").await.unwrap_err();
+        match err {
+            AlertSinkError::NonZeroExit { stderr, .. } => {
+                assert!(stderr.contains("non-numeric message_id"));
+            }
+            other => panic!("expected NonZeroExit, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn local_invocation_includes_proxy_when_set() {
         let s = TelegramSink::new(
             "TOK".into(),

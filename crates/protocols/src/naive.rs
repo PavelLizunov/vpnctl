@@ -85,7 +85,7 @@ const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b'?');
 
 /// Characters that must never appear in a `naive.domain` when it is woven
-/// into a CLIENT artefact. `\n`/`\r`/tab would forge extra lines into the
+/// into a CLIENT artefact or SERVER inbound. `\n`/`\r`/tab would forge extra lines into the
 /// newline-joined `/api/v1/app/config` base64 blob (see
 /// `daemon/src/handlers/vpn_router.rs::collect_naive_uris_for_user`) —
 /// turning a bad domain into an arbitrary-`vless://`-line injection — and
@@ -94,20 +94,19 @@ const FRAGMENT: &AsciiSet = &CONTROLS
 ///
 /// `naive.domain` is operator-set and NOT validated at the inventory layer
 /// (only the Caddy KERNEL guards the SERVER side — `crates/kernels/src/
-/// caddy.rs`); this is the matching guard for the CLIENT side. Fail-closed:
-/// a bad domain makes `share_link`/`client_config` return `Err`, which the
-/// ninitux handler logs + skips → the user keeps their vless, naive is just
-/// absent. Mirrors the kernel's `ILLEGAL` set, widened for URI context.
+/// caddy.rs`); this is the matching guard for the CLIENT and INBOUND sides. Fail-closed:
+/// a bad domain makes `share_link`/`client_config`/`server_inbound` return `Err`, which the
+/// caller logs + skips. Mirrors the kernel's `ILLEGAL` set, widened for URI context.
 const DOMAIN_ILLEGAL: &[char] = &['\n', '\r', '\t', ' ', '/', '?', '#', '@', '\\', '{', '}'];
 
-/// `RenderCtx::require("naive.domain")` + reject [`DOMAIN_ILLEGAL`].
-/// Single source of truth for "a domain safe to put in a client artefact",
-/// shared by `share_link` and `client_config`.
+/// `RenderCtx::require("naive.domain")` + reject empty/whitespace + reject [`DOMAIN_ILLEGAL`].
+/// Single source of truth for "a domain safe to put in naive artefacts",
+/// shared by `server_inbound`, `share_link` and `client_config`.
 fn checked_domain<'a>(ctx: &'a RenderCtx<'_>) -> Result<&'a str> {
     let domain = ctx.require("naive.domain")?;
-    if domain.contains(DOMAIN_ILLEGAL) {
+    if domain.trim().is_empty() || domain.contains(DOMAIN_ILLEGAL) {
         return Err(CoreError::Render(format!(
-            "naive.domain contains illegal characters: {domain:?}"
+            "naive.domain contains illegal characters or is empty: {domain:?}"
         )));
     }
     Ok(domain)
@@ -153,7 +152,7 @@ impl Protocol for Naive {
     /// Trojan/TUIC) so a half-provisioned user can't emit an empty
     /// credential line into the Caddyfile.
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
-        let domain = ctx.require("naive.domain")?;
+        let domain = checked_domain(ctx)?;
         let acme_email = ctx.or_default("naive.acme_email", "");
 
         let auth: Vec<_> = users
@@ -407,16 +406,56 @@ mod tests {
     }
 
     #[test]
-    fn client_artefacts_reject_space_and_uri_structural_domains() {
+    fn artefacts_reject_empty_and_whitespace_domain_across_inbound_client_link() {
         let s = server();
         let n = Naive::new();
-        for bad in ["a b.com", "x.com/path", "x.com@evil", "x.com?q", "x.com#f"] {
+        let u = user("alice", Some("pw"));
+        for bad_domain in ["", "   ", "\t", "\n", " \t \n "] {
+            let mut sec = HashMap::new();
+            sec.insert("naive.domain".into(), bad_domain.to_string());
+            let ctx = RenderCtx::new(&s, &sec);
+
+            let in_err = n
+                .server_inbound(&ctx, std::slice::from_ref(&u))
+                .unwrap_err();
+            assert!(
+                matches!(in_err, CoreError::Render(_)),
+                "server_inbound must return Render error for domain {bad_domain:?}, got {in_err:?}"
+            );
+
+            let cfg_err = n.client_config(&ctx, &u).unwrap_err();
+            assert!(
+                matches!(cfg_err, CoreError::Render(_)),
+                "client_config must return Render error for domain {bad_domain:?}, got {cfg_err:?}"
+            );
+
+            let link_err = n.share_link(&ctx, &u).unwrap_err();
+            assert!(
+                matches!(link_err, CoreError::Render(_)),
+                "share_link must return Render error for domain {bad_domain:?}, got {link_err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_inbound_rejects_illegal_domain() {
+        let s = server();
+        let n = Naive::new();
+        let u = user("alice", Some("pw"));
+        for bad in [
+            "a b.com",
+            "x.com/path",
+            "x.com@evil",
+            "x.com?q",
+            "x.com#f",
+            "x.com\ny.com",
+        ] {
             let mut sec = HashMap::new();
             sec.insert("naive.domain".into(), bad.to_string());
             let ctx = RenderCtx::new(&s, &sec);
             assert!(
-                n.share_link(&ctx, &user("alice", Some("pw"))).is_err(),
-                "share_link must reject domain {bad:?}"
+                n.server_inbound(&ctx, std::slice::from_ref(&u)).is_err(),
+                "server_inbound must reject domain {bad:?}"
             );
         }
     }

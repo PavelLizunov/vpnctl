@@ -214,7 +214,7 @@ impl SqliteInventory {
         // restores it. `disabled` is no longer a subscription-only soft mute.
         // `user_set_disabled_inner` kicks the redeploy on toggle.
         let rows = sqlx::query(
-            "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id
+            "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id, u.disabled
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1

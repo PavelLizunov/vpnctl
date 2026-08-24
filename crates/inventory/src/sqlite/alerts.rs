@@ -474,6 +474,29 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
+    /// Whether an open (unacknowledged) alert of `kind` currently exists
+    /// for `server_id`. Returns true if an unacked row exists, false otherwise.
+    pub async fn has_unacked_alert(
+        &self,
+        kind: &str,
+        server_id: Option<&ServerId>,
+    ) -> Result<bool> {
+        let server_id_str = server_id.map(|s| s.0.as_str());
+        let row: (i64,) = sqlx::query_as(
+            "SELECT EXISTS(
+                 SELECT 1 FROM admin_alerts
+                 WHERE kind = ?1
+                   AND ((?2 IS NULL AND server_id IS NULL) OR server_id = ?2)
+                   AND acked_at IS NULL
+             )",
+        )
+        .bind(kind)
+        .bind(server_id_str)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 != 0)
+    }
+
     /// Whether a condition alert was recorded after the latest recovery
     /// alert for the same scope, regardless of whether an operator already
     /// acknowledged that condition. Health-monitor recovery dispatch uses

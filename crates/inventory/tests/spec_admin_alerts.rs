@@ -632,3 +632,87 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .expect("boolean payload must refire after ack");
     assert_ne!(bool_id1, bool_id2);
 }
+
+// ─── has_unacked_alert ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+    inv.add_server(&srv("s2")).await.unwrap();
+    let s1 = sid("s1");
+    let s2 = sid("s2");
+
+    // Empty DB: no unacked alerts
+    assert!(
+        !inv.has_unacked_alert("server.quality.degraded", Some(&s1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.has_unacked_alert("server.quality.degraded", None)
+            .await
+            .unwrap()
+    );
+
+    // Insert alert for s1
+    let id1 = inv
+        .insert_alert_if_no_unacked(
+            "server.quality.degraded",
+            Some(&s1),
+            "warning",
+            "s1 bad",
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("insert s1 alert");
+
+    assert!(
+        inv.has_unacked_alert("server.quality.degraded", Some(&s1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.has_unacked_alert("server.quality.degraded", Some(&s2))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.has_unacked_alert("server.singbox.down", Some(&s1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.has_unacked_alert("server.quality.degraded", None)
+            .await
+            .unwrap()
+    );
+
+    // Ack s1 alert
+    assert!(inv.ack_alert(id1).await.unwrap());
+    assert!(
+        !inv.has_unacked_alert("server.quality.degraded", Some(&s1))
+            .await
+            .unwrap()
+    );
+
+    // Global alert (server_id = None)
+    let id_global = inv
+        .insert_alert_if_no_unacked("backup.failed", None, "critical", "backup err", None)
+        .await
+        .unwrap()
+        .expect("insert global alert");
+
+    assert!(inv.has_unacked_alert("backup.failed", None).await.unwrap());
+    assert!(
+        !inv.has_unacked_alert("backup.failed", Some(&s1))
+            .await
+            .unwrap()
+    );
+
+    // Ack global alert
+    assert!(inv.ack_alert(id_global).await.unwrap());
+    assert!(!inv.has_unacked_alert("backup.failed", None).await.unwrap());
+}

@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 pub(crate) fn resolve_db_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(p) = flag {
         if let Some(parent) = p.parent() {
-            ensure_dir(parent)?;
+            if !parent.as_os_str().is_empty() {
+                ensure_dir(parent)?;
+            }
         }
         return Ok(p);
     }
@@ -25,7 +27,7 @@ pub(crate) fn resolve_db_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> 
 }
 
 fn ensure_dir(p: &Path) -> anyhow::Result<()> {
-    if !p.exists() {
+    if !p.as_os_str().is_empty() && !p.exists() {
         std::fs::create_dir_all(p)?;
     }
     Ok(())
@@ -66,4 +68,35 @@ where
         t.add_row(r);
     }
     t
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_db_path_bare_relative_path_does_not_fail() {
+        // AUD-018 regression: bare filename like "inv.db" has parent ""
+        // which must not trigger create_dir_all("").
+        let p = PathBuf::from("inv.db");
+        let resolved = resolve_db_path(Some(p.clone())).expect("bare relative path must succeed");
+        assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn resolve_db_path_nested_relative_path_creates_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("nested").join("sub").join("inv.db");
+        assert!(!target.parent().unwrap().exists());
+        let resolved = resolve_db_path(Some(target.clone())).expect("nested path must succeed");
+        assert_eq!(resolved, target);
+        assert!(target.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn resolve_db_path_none_resolves_to_xdg_default() {
+        let resolved = resolve_db_path(None).expect("default resolution");
+        assert!(resolved.ends_with(Path::new("vpnctl").join("inv.db")));
+    }
 }

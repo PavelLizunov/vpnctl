@@ -12,6 +12,17 @@ pub(crate) async fn open(dir: &TempDir) -> SqliteInventory {
     SqliteInventory::open(&db_path(dir)).await.expect("open")
 }
 
+pub(crate) async fn raw_pool(dir: &TempDir) -> sqlx::SqlitePool {
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(dir).display()))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool
+}
+
 pub(crate) fn server(id: &str) -> Server {
     Server {
         id: ServerId(id.to_string()),

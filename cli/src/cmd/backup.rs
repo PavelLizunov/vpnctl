@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use crate::OutputFormat;
+use crate::ui;
 use vpnctl_core::humanize::format_size_bytes;
 use vpnctl_inventory::{SqliteInventory, list_snapshots, prune_snapshots, snapshot_now};
 
@@ -55,7 +56,7 @@ pub(crate) async fn run(
     let dir = backup_dir_from_env();
     match cmd {
         BackupCmd::Snapshot => {
-            let db_path = db_path_from_arg(db)?;
+            let db_path = ui::resolve_db_path(db)?;
             let inv = SqliteInventory::open(&db_path).await?;
             let snap = snapshot_now(&inv, &dir).await?;
             match output {
@@ -133,7 +134,7 @@ pub(crate) async fn run_restore(
     db: Option<PathBuf>,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let db_path = db_path_from_arg(db)?;
+    let db_path = ui::resolve_db_path(db)?;
     if !snapshot.exists() {
         anyhow::bail!("snapshot not found: {}", snapshot.display());
     }
@@ -169,13 +170,61 @@ fn backup_dir_from_env() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR))
 }
 
-/// Resolve the DB path: `--db` arg → `VPNCTL_DB` env (via clap's
-/// `global = true`) → production default `/var/lib/vpnctl/inv.db`.
-fn db_path_from_arg(arg: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    Ok(arg.unwrap_or_else(|| PathBuf::from("/var/lib/vpnctl/inv.db")))
-}
-
 // `format_size_bytes` moved to `vpnctl_core::humanize::format_size_bytes`
 // (2026-05-18). The «duplicated here because the daemon module isn't
 // a CLI dep» note is no longer true — both surfaces now share
 // `vpnctl-core`, which has zero tokio/sqlx baggage.
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn run_snapshot_and_restore_uses_resolved_db_path() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let backup_dir = dir.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // Seed an inventory
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        inv.add_user(&vpnctl_core::User {
+            id: vpnctl_core::UserId("alice".into()),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+        drop(inv);
+
+        // Run snapshot with custom db flag
+        let snap = vpnctl_inventory::snapshot_now(
+            &SqliteInventory::open(&db_path).await.unwrap(),
+            &backup_dir,
+        )
+        .await
+        .unwrap();
+        assert!(snap.exists());
+
+        // Test restore
+        let restored_db = dir.path().join("restored.db");
+        run_restore(snap, Some(restored_db.clone()), OutputFormat::Json)
+            .await
+            .unwrap();
+        assert!(restored_db.exists());
+
+        let restored_inv = SqliteInventory::open(&restored_db).await.unwrap();
+        let user = restored_inv
+            .get_user(&vpnctl_core::UserId("alice".into()))
+            .await
+            .unwrap();
+        assert!(user.is_some());
+    }
+}

@@ -37,7 +37,6 @@ struct QualityAlertState {
     low: HashMap<ServerId, u8>,
     high: HashMap<ServerId, u8>,
     degraded: HashMap<ServerId, bool>,
-    healthy_confirmed: HashMap<ServerId, bool>,
 }
 
 impl QualityAlertState {
@@ -45,13 +44,11 @@ impl QualityAlertState {
         let Some(score) = score else {
             self.low.insert(server_id.clone(), 0);
             self.high.insert(server_id.clone(), 0);
-            self.healthy_confirmed.insert(server_id.clone(), false);
             return QualityTransition::NoChange;
         };
         let is_degraded = self.degraded.get(server_id).copied().unwrap_or(false);
         if score < QUALITY_ALERT_LOW {
             self.high.insert(server_id.clone(), 0);
-            self.healthy_confirmed.insert(server_id.clone(), false);
             let low = self.low.entry(server_id.clone()).or_insert(0);
             *low = low.saturating_add(1);
             if *low >= QUALITY_ALERT_TICKS {
@@ -68,14 +65,8 @@ impl QualityAlertState {
             self.low.insert(server_id.clone(), 0);
             let high = self.high.entry(server_id.clone()).or_insert(0);
             *high = high.saturating_add(1);
-            let already_confirmed = self
-                .healthy_confirmed
-                .get(server_id)
-                .copied()
-                .unwrap_or(false);
-            if *high >= QUALITY_ALERT_TICKS && (is_degraded || !already_confirmed) {
+            if *high == QUALITY_ALERT_TICKS || (is_degraded && *high >= QUALITY_ALERT_TICKS) {
                 self.degraded.insert(server_id.clone(), false);
-                self.healthy_confirmed.insert(server_id.clone(), true);
                 QualityTransition::Recovered
             } else {
                 QualityTransition::NoChange
@@ -85,7 +76,6 @@ impl QualityAlertState {
             // recovery/failure does not count toward either edge.
             self.low.insert(server_id.clone(), 0);
             self.high.insert(server_id.clone(), 0);
-            self.healthy_confirmed.insert(server_id.clone(), false);
             QualityTransition::NoChange
         }
     }
@@ -94,7 +84,6 @@ impl QualityAlertState {
         self.low.retain(|id, _| live.contains(id));
         self.high.retain(|id, _| live.contains(id));
         self.degraded.retain(|id, _| live.contains(id));
-        self.healthy_confirmed.retain(|id, _| live.contains(id));
     }
 }
 
@@ -389,13 +378,52 @@ async fn dispatch_quality_alert(
             }
         }
         QualityTransition::Recovered => {
-            crate::node_probe_poller::auto_ack(
-                inv,
-                &server.id,
-                "server.quality.degraded",
-                "service-path score stayed above the recovery threshold",
-            )
-            .await;
+            let has_open = match inv
+                .has_unacked_alert("server.quality.degraded", Some(&server.id))
+                .await
+            {
+                Ok(open) => open,
+                Err(e) => {
+                    tracing::warn!(
+                        target = "vpnctld::quality",
+                        server = %server.id.0,
+                        error = %e,
+                        "could not query open quality alerts"
+                    );
+                    false
+                }
+            };
+            if has_open {
+                let subject = crate::node_probe_poller::server_subject(inv, &server.id).await;
+                let payload = serde_json::json!({
+                    "score": score.score,
+                    "availability_pct": score.availability_pct,
+                    "packet_loss_pct": score.packet_loss_pct,
+                    "p95_rtt_ms": score.p95_rtt_ms,
+                    "jitter_ms": score.jitter_ms,
+                    "samples": score.sample_count,
+                    "vantage": score.vantage,
+                    "low_threshold": QUALITY_ALERT_LOW,
+                    "recover_threshold": QUALITY_ALERT_RECOVER,
+                });
+                crate::node_probe_poller::recover_alert(
+                    inv,
+                    "server.quality.degraded",
+                    "server.quality.degraded",
+                    &subject,
+                    &payload,
+                    Some(&server.id),
+                    None,
+                )
+                .await;
+                crate::node_probe_poller::auto_ack(
+                    inv,
+                    &server.id,
+                    "server.quality.degraded",
+                    "service-path score stayed above the recovery threshold",
+                )
+                .await;
+            }
         }
         QualityTransition::NoChange => {}
     }
@@ -491,5 +519,404 @@ mod tests {
             })
         );
         assert_eq!(parse_ping_output("ping: operation not permitted"), None);
+    }
+
+    #[tokio::test]
+    async fn quality_recovery_dispatches_recovery_alert_and_auto_acks_in_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("de".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let mut state = QualityAlertState::default();
+        let bad_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(50.0),
+            packet_loss_pct: Some(40.0),
+            median_rtt_ms: Some(150),
+            p95_rtt_ms: Some(300),
+            jitter_ms: Some(25.0),
+            score: Some(30),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        dispatch_quality_alert(&inv, &server, &bad_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &bad_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &bad_score, &mut state).await;
+
+        let open = inv.recent_alerts(10, false).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].kind, "server.quality.degraded");
+        assert_eq!(open[0].severity, "warning");
+
+        let alert_id = open[0].id;
+        inv.set_alert_telegram_message_id(alert_id, "tg-msg-456")
+            .await
+            .unwrap();
+
+        let good_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(100.0),
+            packet_loss_pct: Some(0.0),
+            median_rtt_ms: Some(20),
+            p95_rtt_ms: Some(30),
+            jitter_ms: Some(1.0),
+            score: Some(85),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+
+        let open_after = inv.recent_alerts(10, false).await.unwrap();
+        assert!(
+            open_after.is_empty(),
+            "open alert should be auto-acknowledged on recovery"
+        );
+
+        let mid = inv
+            .latest_alert_message_id("server.quality.degraded", Some(&server.id))
+            .await
+            .unwrap();
+        assert_eq!(mid.as_deref(), Some("tg-msg-456"));
+
+        let audits = inv.recent_audit(20).await.unwrap();
+        assert!(
+            audits
+                .iter()
+                .any(|a| a.action == "alert.auto_ack" && a.target.as_deref() == Some("de")),
+            "audit log must contain alert.auto_ack for the recovered server"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_startup_emits_no_notification_or_recovery_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("de".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let mut state = QualityAlertState::default();
+        let good_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(100.0),
+            packet_loss_pct: Some(0.0),
+            median_rtt_ms: Some(20),
+            p95_rtt_ms: Some(30),
+            jitter_ms: Some(1.0),
+            score: Some(85),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        for _ in 0..5 {
+            dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        }
+
+        let all_alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert!(
+            all_alerts.is_empty(),
+            "healthy startup must produce zero alerts in inventory"
+        );
+
+        let audits = inv.recent_audit(20).await.unwrap();
+        assert!(
+            !audits
+                .iter()
+                .any(|a| a.action == "alert.auto_ack" || a.action == "alert.fire"),
+            "healthy startup must write no alert audit entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn hysteresis_recovery_without_open_alert_sends_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("de".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let mut state = QualityAlertState::default();
+        let hysteresis_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(80.0),
+            packet_loss_pct: Some(10.0),
+            median_rtt_ms: Some(50),
+            p95_rtt_ms: Some(80),
+            jitter_ms: Some(5.0),
+            score: Some(68),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+        let good_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(100.0),
+            packet_loss_pct: Some(0.0),
+            median_rtt_ms: Some(20),
+            p95_rtt_ms: Some(30),
+            jitter_ms: Some(1.0),
+            score: Some(85),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        dispatch_quality_alert(&inv, &server, &hysteresis_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &hysteresis_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+
+        let all_alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert!(
+            all_alerts.is_empty(),
+            "hysteresis without open alert must produce zero alert rows"
+        );
+        let audits = inv.recent_audit(20).await.unwrap();
+        assert!(
+            !audits.iter().any(|a| a.action == "alert.auto_ack"),
+            "hysteresis without open alert must not emit auto-ack audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn manually_acked_alert_recovery_sends_no_new_notification_or_auto_ack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("de".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let mut state = QualityAlertState::default();
+        let bad_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(50.0),
+            packet_loss_pct: Some(40.0),
+            median_rtt_ms: Some(150),
+            p95_rtt_ms: Some(300),
+            jitter_ms: Some(25.0),
+            score: Some(30),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        for _ in 0..3 {
+            dispatch_quality_alert(&inv, &server, &bad_score, &mut state).await;
+        }
+
+        let open = inv.recent_alerts(10, false).await.unwrap();
+        assert_eq!(open.len(), 1, "alert must fire and be open");
+        let alert_id = open[0].id;
+
+        // Operator manually acknowledges the open alert from Web UI
+        inv.ack_alert(alert_id).await.unwrap();
+        assert_eq!(inv.unacked_alert_count().await.unwrap(), 0);
+
+        let initial_all_alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert_eq!(initial_all_alerts.len(), 1);
+
+        let good_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(100.0),
+            packet_loss_pct: Some(0.0),
+            median_rtt_ms: Some(20),
+            p95_rtt_ms: Some(30),
+            jitter_ms: Some(1.0),
+            score: Some(85),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        for _ in 0..4 {
+            dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        }
+
+        // Must NOT insert any new recovery alert row (no new green push)
+        let final_all_alerts = inv.recent_alerts(10, true).await.unwrap();
+        assert_eq!(
+            final_all_alerts.len(),
+            1,
+            "manually acked alert recovery must NOT create a new alert row"
+        );
+
+        // Auto-ack audit was NOT written because no open alert existed
+        let audits = inv.recent_audit(20).await.unwrap();
+        assert!(
+            !audits.iter().any(|a| a.action == "alert.auto_ack"),
+            "no auto-ack audit should be logged for already manually-acked alert"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_with_open_alert_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("de".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        // Pre-seed an open unacked alert as if left by a prior process instance
+        let alert_id = inv
+            .insert_alert_if_no_unacked(
+                "server.quality.degraded",
+                Some(&server.id),
+                "warning",
+                "service-path quality degraded prior to restart",
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("should insert unacked alert");
+        inv.set_alert_telegram_message_id(alert_id, "tg-msg-restart-999")
+            .await
+            .unwrap();
+
+        assert_eq!(inv.unacked_alert_count().await.unwrap(), 1);
+
+        // Fresh in-memory state on daemon startup (is_degraded in memory is false)
+        let mut state = QualityAlertState::default();
+
+        let good_score = ServiceQualityScore {
+            window_hours: 24,
+            sample_count: 10,
+            min_samples: 3,
+            vantage: Some("RU-MOW".into()),
+            availability_pct: Some(100.0),
+            packet_loss_pct: Some(0.0),
+            median_rtt_ms: Some(20),
+            p95_rtt_ms: Some(30),
+            jitter_ms: Some(1.0),
+            score: Some(85),
+            control_availability_pct: None,
+            control_p95_rtt_ms: None,
+            control_score: None,
+            last_sample_at: None,
+        };
+
+        // 3 healthy ticks trigger recovery of the persisted open alert
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+        dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
+
+        let open_after = inv.recent_alerts(10, false).await.unwrap();
+        assert!(
+            open_after.is_empty(),
+            "persisted open alert must be auto-acknowledged upon healthy ticks after restart"
+        );
+
+        let mid = inv
+            .latest_alert_message_id("server.quality.degraded", Some(&server.id))
+            .await
+            .unwrap();
+        assert_eq!(mid.as_deref(), Some("tg-msg-restart-999"));
+
+        let audits = inv.recent_audit(20).await.unwrap();
+        assert!(
+            audits
+                .iter()
+                .any(|a| a.action == "alert.auto_ack" && a.target.as_deref() == Some("de")),
+            "audit log must contain alert.auto_ack for the recovered persisted alert"
+        );
     }
 }

@@ -9,7 +9,7 @@ use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 use super::amnezia::amneziawg_block;
 use super::helpers::{
     CLIENT_PRIVKEY_PLACEHOLDER, DEFAULT_SERVER_CIDR, FRAGMENT, WIREGUARD_PORT, is_valid_wg_pubkey,
-    listen_port,
+    listen_port, peer_octet_for,
 };
 use super::render::render_client_conf;
 
@@ -135,15 +135,11 @@ impl Protocol for WireGuard {
         let server_pub = ctx.require("wireguard.server_public_key")?;
         let listen_port: u16 = listen_port(ctx.secrets);
 
-        // Where THIS user lands in the /24. We can't know the index
-        // without the full users slice; use the user's pubkey as a
-        // tagging marker the kernel can cross-reference if it has the
-        // full peer list. Default to `.2/32` so a single-user
-        // standalone client doesn't need extra context.
-        // (For multi-user accuracy use `server_inbound`'s per-peer
-        // allowed_ips; client_config is per-user only and lacks the
-        // index.)
-        let client_cidr = "10.66.0.2/32";
+        // Where THIS user lands in the /24. Deterministically resolved via
+        // `peer_octet_for` from the user's position in `ctx.peers`
+        // (defaulting to `.2/32` when `ctx.peers` is empty).
+        let peer_octet = peer_octet_for(ctx, user)?;
+        let client_cidr = format!("10.66.0.{peer_octet}/32");
 
         // AmneziaWG sub-block. Emitted ONLY if the server has the
         // obfuscation params set — vanilla WireGuard servers don't,
@@ -185,8 +181,6 @@ impl Protocol for WireGuard {
         {
             map.insert("amneziawg".to_string(), a);
         }
-
-        let _ = user; // single-user client_config doesn't differentiate
 
         Ok(json!({
             "type": "wireguard",

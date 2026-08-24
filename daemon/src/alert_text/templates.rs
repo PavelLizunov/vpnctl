@@ -8,6 +8,9 @@ use super::formatting::{RenderedAlert, code, esc, icon_for, pick};
 fn u(p: &Value, k: &str) -> Option<u64> {
     p.get(k).and_then(Value::as_u64)
 }
+fn pf(p: &Value, k: &str) -> Option<f64> {
+    p.get(k).and_then(Value::as_f64)
+}
 fn ps<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
     p.get(k).and_then(Value::as_str)
 }
@@ -413,6 +416,78 @@ pub fn render_alert(
                 Some(pick(loc,
                     "If you reinstalled the node, re-pin the fingerprint on the server page. If not — that's a red flag, investigate.".into(),
                     "Если переустанавливал ноду — обнови отпечаток на странице сервера. Если нет — тревожный знак, проверь.".into())),
+            )
+        }
+        "server.quality.degraded" if severity == "info" => {
+            let score = u(payload, "score")
+                .map(|s| code(&format!("{s}/100")))
+                .unwrap_or_else(|| code("—"));
+            let loss = pf(payload, "packet_loss_pct")
+                .map(|l| code(&format!("{l:.1}%")))
+                .unwrap_or_default();
+            let p95 = u(payload, "p95_rtt_ms")
+                .map(|ms| code(&pick(loc, format!("{ms} ms"), format!("{ms} мс"))))
+                .unwrap_or_default();
+            (
+                pick(
+                    loc,
+                    format!("Service quality recovered — {subj}"),
+                    format!("Качество связи восстановилось — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!(
+                        "Service-path quality to {subj} is back to {score} (above recovery threshold). Loss {loss}, p95 latency {p95}."
+                    ),
+                    format!(
+                        "Качество service-path до ноды {subj} восстановилось до {score} (выше порога восстановления). Потери {loss}, p95-задержка {p95}."
+                    ),
+                ),
+                None,
+            )
+        }
+        "server.quality.degraded" => {
+            let score = u(payload, "score")
+                .map(|s| code(&format!("{s}/100")))
+                .unwrap_or_else(|| code("—"));
+            let thresh = u(payload, "low_threshold").unwrap_or(60);
+            let thresh_str = code(&format!("{thresh}/100"));
+            let avail = pf(payload, "availability_pct")
+                .map(|a| code(&format!("{a:.1}%")))
+                .unwrap_or_else(|| code("—"));
+            let loss = pf(payload, "packet_loss_pct")
+                .map(|l| code(&format!("{l:.1}%")))
+                .unwrap_or_else(|| code("—"));
+            let p95 = u(payload, "p95_rtt_ms")
+                .map(|ms| code(&pick(loc, format!("{ms} ms"), format!("{ms} мс"))))
+                .unwrap_or_else(|| code("—"));
+            let vantage = ps(payload, "vantage");
+            let vantage_en = vantage
+                .map(|v| format!(" from {}", code(v)))
+                .unwrap_or_default();
+            let vantage_ru = vantage
+                .map(|v| format!(" (источник: {})", code(v)))
+                .unwrap_or_default();
+            (
+                pick(
+                    loc,
+                    format!("Service quality degraded — {subj}"),
+                    format!("Качество связи деградировало — {subj}"),
+                ),
+                pick(
+                    loc,
+                    format!(
+                        "Service-path quality to {subj} dropped to {score}{vantage_en} (threshold {thresh_str}). Metrics: availability {avail}, loss {loss}, p95 latency {p95}."
+                    ),
+                    format!(
+                        "Качество service-path до ноды {subj} упало до {score}{vantage_ru} (порог {thresh_str}). Метрики: доступность {avail}, потери {loss}, p95-задержка {p95}."
+                    ),
+                ),
+                Some(pick(
+                    loc,
+                    "Check network connectivity or hoster route quality.".into(),
+                    "Проверь сетевую связность ноды или маршруты хостера.".into(),
+                )),
             )
         }
         "user.traffic_limit" => {
