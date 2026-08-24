@@ -10,8 +10,8 @@ use tempfile::TempDir;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
-use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, VlessXhttp, WireGuard};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox};
+use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, WireGuard};
 use vpnctld::router;
 
 use super::common::{
