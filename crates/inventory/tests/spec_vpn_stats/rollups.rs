@@ -241,3 +241,119 @@ async fn top_users_by_daily_traffic_ranks_by_weighted_bytes() {
     assert_eq!(top[1].user_id.0, "bob");
     assert_eq!(top[1].total_bytes, 1_000_000);
 }
+
+// AUD-013 regression: user_traffic_this_month_from_daily applies usage_coefficient
+// across multiple servers, preserving zero and default multiplier semantics.
+#[tokio::test]
+async fn user_traffic_this_month_from_daily_applies_multi_server_coefficients() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("s_double", 2.0))
+        .await
+        .unwrap();
+    inv.add_server(&server_coeff("s_half", 0.5)).await.unwrap();
+    inv.add_server(&server_coeff("s_default", 1.0))
+        .await
+        .unwrap();
+    inv.add_server(&server_coeff("s_zero", 0.0)).await.unwrap();
+
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+    inv.add_user(&user("zero_user")).await.unwrap();
+
+    // Alice on multiple servers:
+    // s_double:  600_000 up + 400_000 down = 1_000_000 raw -> 2_000_000 weighted
+    // s_half:    100_000 up + 300_000 down = 400_000 raw   -> 200_000 weighted
+    // s_default:  50_000 up +  50_000 down = 100_000 raw   -> 100_000 weighted
+    // s_zero:    250_000 up + 250_000 down = 500_000 raw   -> 0 weighted
+    inv.record_vpn_stats(
+        &ServerId("s_double".into()),
+        &[ud(Some("alice"), 600_000, 400_000, 1)],
+    )
+    .await
+    .unwrap();
+    inv.record_vpn_stats(
+        &ServerId("s_half".into()),
+        &[ud(Some("alice"), 100_000, 300_000, 1)],
+    )
+    .await
+    .unwrap();
+    inv.record_vpn_stats(
+        &ServerId("s_default".into()),
+        &[ud(Some("alice"), 50_000, 50_000, 1)],
+    )
+    .await
+    .unwrap();
+    inv.record_vpn_stats(
+        &ServerId("s_zero".into()),
+        &[ud(Some("alice"), 250_000, 250_000, 1)],
+    )
+    .await
+    .unwrap();
+
+    // zero_user with 0 bytes:
+    inv.record_vpn_stats(
+        &ServerId("s_default".into()),
+        &[ud(Some("zero_user"), 0, 0, 1)],
+    )
+    .await
+    .unwrap();
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let alice_total = inv
+        .user_traffic_this_month_from_daily(&UserId("alice".into()))
+        .await
+        .unwrap();
+    // 2_000_000 + 200_000 + 100_000 + 0 = 2_300_000
+    assert_eq!(alice_total, 2_300_000);
+
+    // Bob has no rows at all -> returns 0
+    let bob_total = inv
+        .user_traffic_this_month_from_daily(&UserId("bob".into()))
+        .await
+        .unwrap();
+    assert_eq!(bob_total, 0);
+
+    // zero_user has 0 byte rows -> returns 0
+    let zero_total = inv
+        .user_traffic_this_month_from_daily(&UserId("zero_user".into()))
+        .await
+        .unwrap();
+    assert_eq!(zero_total, 0);
+}
+
+// Planted mutation test: verifies that omitting usage_coefficient (e.g. raw SUM)
+// fails against weighted daily rollup monthly totals.
+#[tokio::test]
+async fn planted_mutation_monthly_daily_rollup_fails_if_unweighted() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    inv.record_vpn_stats(
+        &ServerId("double".into()),
+        &[ud(Some("alice"), 500_000, 500_000, 1)],
+    )
+    .await
+    .unwrap();
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+
+    let total = inv
+        .user_traffic_this_month_from_daily(&UserId("alice".into()))
+        .await
+        .unwrap();
+
+    let raw_unweighted_total = 1_000_000;
+    let expected_weighted_total = 2_000_000;
+
+    assert_eq!(total, expected_weighted_total);
+    assert_ne!(
+        total, raw_unweighted_total,
+        "planted mutation: unweighted daily monthly sum (1M) must not match weighted result (2M)"
+    );
+}

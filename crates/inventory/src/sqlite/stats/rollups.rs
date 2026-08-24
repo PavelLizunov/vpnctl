@@ -212,10 +212,17 @@ impl SqliteInventory {
     /// `user_traffic_this_month` for production use.
     pub async fn user_traffic_this_month_from_daily(&self, id: &UserId) -> Result<u64> {
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0) AS total
-             FROM vpn_user_daily
-             WHERE user_id = ?1
-               AND date >= strftime('%Y-%m-01', 'now')",
+            "SELECT CAST(
+                        COALESCE(
+                            SUM((d.upload_bytes + d.download_bytes)
+                                * COALESCE(sv.usage_coefficient, 1.0)),
+                            0
+                        ) AS INTEGER
+                    ) AS total
+             FROM vpn_user_daily d
+             JOIN servers sv ON sv.id = d.server_id
+             WHERE d.user_id = ?1
+               AND d.date >= strftime('%Y-%m-01', 'now')",
         )
         .bind(&id.0)
         .fetch_one(&self.pool)

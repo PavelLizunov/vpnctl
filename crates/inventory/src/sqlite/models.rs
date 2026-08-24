@@ -700,8 +700,14 @@ impl TelegramConfig {
     /// first; this is for rendering convenience).
     pub fn token_last4(&self) -> String {
         match &self.token {
-            Some(t) if t.len() >= 4 => t[t.len() - 4..].to_string(),
-            Some(t) => t.clone(),
+            Some(t) => {
+                let count = t.chars().count();
+                if count > 4 {
+                    t.chars().skip(count - 4).collect()
+                } else {
+                    t.clone()
+                }
+            }
             None => String::new(),
         }
     }
