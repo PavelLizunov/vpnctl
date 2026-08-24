@@ -325,21 +325,6 @@ pub(crate) async fn get_config(
     //   naive     — Caddy kernel; requires the `naive.domain` ACME secret.
     //   hysteria2 — sing-box (UDP/8444); Salamander obfs is auto-applied when
     //               its server secret is minted (the share-link mirrors it).
-    //   dns-tunnel — slipstream-over-НСДИ break-glass transport. Delivered
-    //               here, NOT in the sing-box envelope or the v2ray /sub
-    //               (`appears_in_sing_box_sub() == false`): a `dns-tunnel://`
-    //               line is unparseable to a generic sing-box/v2ray client
-    //               and would drop the whole config, so ONLY our custom
-    //               VPNRouter client — which reads this tolerant blob — ever
-    //               sees it. Gated on the operator-set `dns-tunnel:domain`
-    //               secret; the share-link also needs `dns-tunnel:fingerprint`
-    //               (a render-error there is logged + skipped per-server, same
-    //               failure-isolation as the others). No `pair=` — the tunnel
-    //               carries everything over its loopback VLESS, so there's no
-    //               co-located UDP sibling to pair with. The `dns-tunnel://`
-    //               line lands strictly after every vless, so a client build
-    //               without dns-tunnel support simply ignores the trailing
-    //               line and keeps every vless (forward-compatible rollout).
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
         ("hysteria2", "HY2", None),
@@ -350,7 +335,6 @@ pub(crate) async fn get_config(
         // the minted `vlessws.path` → a server missing it logs+skips
         // (failure-isolated), never dropping the user's vless.
         ("vless-ws", "WS", Some("vlessws.domain")),
-        ("dns-tunnel", "WL-BYPASS", Some("dns-tunnel:domain")),
     ];
     for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {
         let pid = vpnctl_core::ProtocolId((*pid_str).to_string());

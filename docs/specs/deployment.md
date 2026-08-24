@@ -59,17 +59,20 @@ with a curl. Before replacing: `sudo cp -a /opt/vpnctl/vpnctld
   `X-Real-IP` — so every proxy block targeting vpnctld must authoritatively
   `header_up X-Real-IP {client_addr}`, and the site config must strip any
   client-supplied `X-Real-IP` before routing.
-- **WgTurn decommission and node cleanup gate.** The WgTurn removal release
-  must **NOT** be deployed to production until legacy `wgturn.service` and
-  `wg-quick@wgturn-be` units are stopped, disabled, and removed on every
+- **WgTurn and DNS Tunnel decommission and node cleanup gate.** The WgTurn and
+  DNS Tunnel removal release must **NOT** be deployed to production until legacy
+  `wgturn.service`, `wg-quick@wgturn-be`, `dns-tunnel.service`, and
+  `dns-tunnel-singbox.service` units are stopped, disabled, and removed on every
   affected server via the hoster's console (never via SSH instructions,
   strictly adhering to the web-only / hoster console policy).
 - **Migration backup and rollback.** Before the daemon version containing
-  migration `0049_remove_wgturn.sql` starts, create and verify an inventory
-  snapshot using the standard backup procedure. Migration 0049 removes active
+  migrations `0049_remove_wgturn.sql` and `0050_remove_dns_tunnel.sql` starts,
+  create and verify an inventory snapshot using the standard backup procedure
+  (pre-0049 / pre-0050 verified snapshots). Migration 0050 removes active
   bindings (`server_protocols`, `server_kernels`, `grant_protocol_overrides`)
-  while intentionally retaining `wgturn:*` secrets for one transition release.
-  A rollback requires restoring the verified pre-0049 inventory snapshot and
+  while intentionally retaining `dns-tunnel:*` secrets (alongside retained
+  `wgturn:*` secrets from 0049) for one transition release. A rollback
+  requires restoring the verified pre-0050/pre-0049 inventory snapshot and
   restoring the previous node units/configuration through the hoster's console;
   retained secrets alone are not a complete rollback. Purging them requires a
   separate verified cleanup release after the transition settles.
@@ -81,12 +84,15 @@ with a curl. Before replacing: `sudo cp -a /opt/vpnctl/vpnctld
 - [ ] `systemctl is-active vpnctld`; health endpoint 200 with expected version.
 - [ ] Changed behavior exercised by a live request after restart.
 - [ ] Binary backup created before replacement.
-- [ ] Pre-0049 inventory snapshot created and `verify_snapshot` passed; restore
-      path and snapshot location recorded before daemon startup.
-- [ ] Pre-deploy cleanup verified: legacy `wgturn.service` and
-      `wg-quick@wgturn-be` stopped/disabled/removed on every affected server via
-      hoster console prior to daemon restart.
-- [ ] Inventory migration verified: active WgTurn bindings unbound, `wgturn:*`
-      secrets retained for rollback window, audit rows generated only on
-      mutation.
-- [ ] Follow-up `wgturn:*` secret purge tracked for subsequent verified cleanup.
+- [ ] Pre-0050 (and pre-0049) inventory snapshot created and `verify_snapshot`
+      passed; restore path and snapshot location recorded before daemon
+      startup.
+- [ ] Pre-deploy cleanup verified: legacy `wgturn.service`, `wg-quick@wgturn-be`,
+      `dns-tunnel.service`, and `dns-tunnel-singbox.service` stopped/disabled/removed
+      on every affected server via hoster console prior to daemon restart.
+- [ ] Inventory migration verified: active WgTurn and DNS Tunnel bindings
+      unbound, `wgturn:*` and `dns-tunnel:*` secrets retained for rollback
+      window, audit rows generated only on mutation (`protocol.remove_wgturn`,
+      `protocol.remove_dns_tunnel`).
+- [ ] Follow-up `wgturn:*` and `dns-tunnel:*` secret purge tracked for
+      subsequent verified cleanup.

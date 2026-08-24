@@ -42,7 +42,7 @@ fn appears_in_sing_box_sub_is_false() {
     // sing-box outbound. If the /sub handler doesn't skip it, the
     // whole envelope becomes unparseable and Hiddify / sing-box
     // drops every route (including the legit VLESS / TUIC ones).
-    // Pin the trait override (same contract as dns-tunnel).
+    // Pin the trait override.
     assert!(
         !WireGuard::new().appears_in_sing_box_sub(),
         "wireguard must opt OUT of the sing-box subscription"

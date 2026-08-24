@@ -5,7 +5,7 @@
 //!
 //! Every `Kernel::ensure_installed(ssh)` already carries the version-gated
 //! apt upgrade for that kernel (sing-box, amneziawg, content-aware
-//! caddy / dns-tunnel). Running JUST `ensure_installed` upgrades the
+//! caddy). Running JUST `ensure_installed` upgrades the
 //! on-disk binary and lets the package manager restart the service
 //! against the config that is ALREADY on the node — it never enters
 //! `apply_config`, so it never triggers the DG-1 pre-apply UUID-removal

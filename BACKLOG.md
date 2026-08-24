@@ -2,6 +2,21 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Purge retained WgTurn and DNS Tunnel secrets (post-transition release)
+
+**Status:** scheduled post-transition.
+
+Following the approved removal of WgTurn (`0049_remove_wgturn.sql`) and DNS Tunnel
+(`0050_remove_dns_tunnel.sql`), active bindings (`server_protocols`, `server_kernels`,
+`grant_protocol_overrides`) were removed while `wgturn:*` and `dns-tunnel:*` server secrets
+were intentionally retained in SQLite (`server_secrets` table) as rollback material for
+one transition release window.
+
+Once the transition release has settled in production across all nodes with legacy units
+(`wgturn.service`, `wg-quick@wgturn-be`, `dns-tunnel.service`, `dns-tunnel-singbox.service`)
+decommissioned via hoster console, schedule a separate verified migration to purge all
+`wgturn:%` and `dns-tunnel:%` rows from `server_secrets`.
+
 ## Release path (musl) has no CI coverage
 
 The canonical release build (`just build-release`, static musl) was verified

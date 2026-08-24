@@ -113,7 +113,7 @@ impl Kernel for Caddy {
                 // cache sha, so an operator who refreshes the cached binary
                 // (same path, patched bytes) gets it pushed WITHOUT first
                 // deleting the on-node copy by hand. A bare presence check
-                // would skip the refresh. Mirrors dns_tunnel::ensure_installed.
+                // would skip the refresh.
                 let digest = format!("{:x}", Sha256::digest(&bytes));
                 let node_sha = ssh
                     .exec("sha256sum /usr/local/bin/caddy 2>/dev/null | cut -d' ' -f1")

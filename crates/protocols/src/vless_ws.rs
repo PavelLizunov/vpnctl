@@ -19,8 +19,8 @@
 //! decoy site at `/`, and `reverse_proxy`s ONE secret path to a PLAINTEXT
 //! sing-box VLESS+ws inbound on `127.0.0.1`. The caddy kernel OWNS BOTH
 //! units (Caddyfile + loopback sing-box) via the `BUNDLE_DELIMITER` +
-//! second-systemd-unit pattern `dns_tunnel` already runs in prod — there
-//! is NO cross-kernel API and we don't invent one.
+//! second-systemd-unit pattern — there is NO cross-kernel API and we
+//! don't invent one.
 //!
 //! Like `naive`, [`Protocol::server_inbound`] returns a STABLE JSON
 //! ENVELOPE the caddy kernel deserialises (domain, acme_email, the front

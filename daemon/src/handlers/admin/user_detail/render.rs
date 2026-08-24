@@ -141,7 +141,7 @@ pub(crate) async fn user_detail_render(
     // (server_id, vpn://...) per WG-enabled granted server.
     let amnezia_links =
         collect_amnezia_links(&user, &servers, &secrets_per_server, &peers_per_server);
-    // Flow E — awg:// links for the operator's sing-box-lx client app.
+    // Flow F — awg:// links for the operator's sing-box-lx client app.
     // Only AmneziaWG-capable servers (obfs minted) yield a link.
     let awg_links = collect_awg_links(&user, &servers, &secrets_per_server, &peers_per_server);
     let sub_token = user.sub_token.clone();
@@ -181,17 +181,6 @@ pub(crate) async fn user_detail_render(
     let wg_capable_inventory: Vec<&vpnctl_core::ServerId> = all_servers
         .iter()
         .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wireguard"))
-        .map(|s| &s.id)
-        .collect();
-    // Sibling tally for dns-tunnel — same shape as wg_capable_granted
-    // / wg_capable_inventory. dns-tunnel is a non-sing-box
-    // two-process share-link (`appears_in_sing_box_sub() == false`,
-    // slipstream-client + loopback VLESS), so it never reaches the user
-    // through Flow A's /sub envelope. Drives the dedicated "Flow E — dns-tunnel"
-    // delivery card + its empty-state copy below the per-protocol grid.
-    let dns_tunnel_capable_granted: Vec<&vpnctl_core::ServerId> = servers
-        .iter()
-        .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "dns-tunnel"))
         .map(|s| &s.id)
         .collect();
 
@@ -1101,7 +1090,7 @@ pub(crate) async fn user_detail_render(
                             // one granted server runs the amneziawg kernel
                             // (obfs minted ⇒ a link was produced). Letter F:
                             // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
-                            // E=dns-tunnel, F=AmneziaWG awg://.
+                            // F=AmneziaWG awg://.
                             @if !awg_links.is_empty() {
                                 div {
                                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
@@ -1430,82 +1419,6 @@ pub(crate) async fn user_detail_render(
 
     }
     @if tab == UserTab::Delivery {
-            // Flow E — dns-tunnel (slipstream DNS-over-НСДИ last resort).
-            // A SEPARATE delivery card because:
-            //   * sing-box CAN'T parse `type: dns-tunnel` — the protocol is
-            //     filtered out of /sub (`appears_in_sing_box_sub() = false`),
-            //     so Flow A doesn't deliver it.
-            //   * the `dns-tunnel://` URL is consumed by a TWO-process client
-            //     bundle (slipstream-client local TCP listener + a sing-box
-            //     VLESS outbound → that listener), NOT a single sing-box
-            //     outbound URI — so it can't ride the JSON envelope or the
-            //     V2Ray base64 sub.
-            // The per-user `dns-tunnel://<…uuid=user.uuid…>` link is rendered
-            // by the generic `collect_share_links` (it iterates every enabled
-            // protocol and calls `share_link`, no `appears_in_sing_box_sub`
-            // filter — same as the CLI `vpnctl sub` path), so it already lands
-            // in the "Per-protocol share links" list below; this card lifts it
-            // into its own QR + consumption instructions.
-            // The card ONLY renders when at least one granted server runs the
-            // dns-tunnel protocol; sing-box-only users never see it.
-            @if !dns_tunnel_capable_granted.is_empty() {
-                div.ed-art-eyebrow style="margin-top: 24px;" {
-                    (crate::i18n::tr(lang, "Flow E — dns-tunnel (slipstream, last resort)", "Поток E — dns-tunnel (slipstream, последний резерв)"))
-                }
-                @let dnst_links: Vec<_> = share_links
-                    .iter()
-                    .filter(|(_, pid, _)| pid.0 == "dns-tunnel")
-                    .collect();
-                @if dnst_links.is_empty() {
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                        (crate::i18n::tr(lang, "Granted dns-tunnel servers ", "Выданные dns-tunnel-серверы "))
-                        @for (i, sid) in dns_tunnel_capable_granted.iter().enumerate() {
-                            @if i > 0 { ", " }
-                            span.ed-mono { (sid.0) }
-                        }
-                        (crate::i18n::tr(
-                            lang,
-                            " — but the share-link render failed. Most likely missing ",
-                            " — но рендер share-link провалился. Скорее всего нет ",
-                        ))
-                        span.ed-mono { "dns-tunnel:domain" }
-                        (crate::i18n::tr(lang, " or ", " или "))
-                        span.ed-mono { "dns-tunnel:fingerprint" }
-                        (crate::i18n::tr(
-                            lang,
-                            " server secret — set them via the server's secrets page.",
-                            " серверного секрета — задай их на странице секретов сервера.",
-                        ))
-                    }
-                } @else {
-                    @for (sid, _pid, link) in &dnst_links {
-                        div style="margin-bottom: 18px;" {
-                            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                "server " (sid.0)
-                                (crate::i18n::tr(lang, " · break-glass when everything else is blocked", " · break-glass когда всё остальное заблокировано"))
-                            }
-                            (share_link_card(link, &html! {
-                                (crate::i18n::tr(
-                                    lang,
-                                    "Two-process bundle: a local slipstream-client tunnels TCP-over-DNS to НСДИ resolvers, and a sing-box VLESS outbound points at that local listener. The link carries this user's own ",
-                                    "Двухпроцессный бандл: локальный slipstream-client тоннелирует TCP-over-DNS к НСДИ-резолверам, а sing-box VLESS-outbound смотрит на этот локальный listener. В ссылке — собственный ",
-                                ))
-                                span.ed-mono { "uuid" }
-                                (crate::i18n::tr(
-                                    lang,
-                                    " (the same one used for VLESS-REALITY), the tunnel domain, the multipath resolver list and the cert-pin fingerprint — nothing for the user to fill in. ",
-                                    " (тот же, что и для VLESS-REALITY), домен тоннеля, multipath-список резолверов и fingerprint-пин сертификата — пользователю ничего вводить не нужно. ",
-                                ))
-                                b { (crate::i18n::tr(
-                                    lang,
-                                    "Last-resort transport — position beside Flow A/B/C/D, not as a daily driver.",
-                                    "Транспорт последнего резерва — рядом с потоками A/B/C/D, не для повседневного использования.",
-                                )) }
-                            }))
-                        }
-                    }
-                }
-            }
 
             // Per-protocol share-links — only meaningful for granted servers.
             // ponytail: collapsed <details> — the Flow cards above already deliver

@@ -295,7 +295,7 @@ pub(crate) fn collect_amnezia_links(
 }
 
 /// Sibling of [`collect_amnezia_links`] — one `awg://` link per
-/// WG-enabled granted server for the user-detail Flow E card (the
+/// WG-enabled granted server for the user-detail Flow F card (the
 /// operator's sing-box-lx-based client app). Servers without minted
 /// AmneziaWG obfs (i.e. not running the `amneziawg` kernel) or a user
 /// without a server-generated private key cause `awg_share_link` to

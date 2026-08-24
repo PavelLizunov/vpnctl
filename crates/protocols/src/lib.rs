@@ -2,7 +2,6 @@
 //! Добавить новый = новый файл + строка регистрации в `cli`.
 
 mod anytls;
-mod dns_tunnel;
 mod hysteria2;
 mod naive;
 mod shadowsocks2022;
@@ -15,7 +14,6 @@ mod wg_addressing;
 mod wireguard;
 
 pub use anytls::{ANYTLS_PORT, AnyTls};
-pub use dns_tunnel::DnsTunnel;
 pub use hysteria2::Hysteria2;
 pub use naive::{NAIVE_PORT, Naive};
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};

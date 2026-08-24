@@ -382,8 +382,8 @@ pub(crate) async fn collect_extra_protocol_uris(
 ///
 /// The `awg://` line lands strictly AFTER every vless (and the other
 /// extras), so a client build without AmneziaWG support ignores the
-/// trailing line and keeps every vless (forward-compatible rollout, same
-/// posture as `dns-tunnel`). Failure-isolated: a server's render error is
+/// trailing line and keeps every vless (forward-compatible rollout).
+/// Failure-isolated: a server's render error is
 /// logged + skipped, never dropping a user's vless. Returns a Vec (never
 /// an error) for the same "serve what we have" contract.
 pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User) -> Vec<String> {

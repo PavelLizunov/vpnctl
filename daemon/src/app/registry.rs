@@ -8,10 +8,10 @@ use vpnctl_core::Registry;
 /// caller that needs the canonical protocol set) build the real registry
 /// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, Xray};
+    use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
     use vpnctl_protocols::{
-        AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-        VlessReality, VlessWs, VlessXhttp, WireGuard,
+        AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality, VlessWs,
+        VlessXhttp, WireGuard,
     };
 
     let mut reg = Registry::new();
@@ -20,10 +20,6 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // Caddy + forwardproxy@naive — serves the `naive` protocol with a
     // real masquerade website. MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(Caddy::new()))?;
-    // dns-tunnel — slipstream-rust DNS-over-НСДИ last-resort transport.
-    // Owns TWO units (slipstream-server UDP:53 + loopback VLESS sing-box).
-    // MUST stay in lockstep with cli/registry.rs.
-    reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
     // Xray-core — serves VLESS+Reality+xhttp on a standalone port
     // (9443/TCP), companion to sing-box-lx's client-side xhttp support.
     // MUST stay in lockstep with cli/registry.rs.
@@ -43,10 +39,6 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     // the daemon's /sub + ninitux render + admin dpi-chip silently drop
     // it. MUST stay in lockstep with cli/registry.rs.
     reg.register_protocol(Box::new(VlessWs::new()))?;
-    // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
-    // client → appears_in_sing_box_sub() is false. MUST stay in lockstep
-    // with cli/registry.rs.
-    reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
     // vless+xhttp — Xray-core-served xhttp transport, reuses the REALITY
     // keypair vless+reality already mints. MUST stay in lockstep with
     // cli/registry.rs.
@@ -76,7 +68,6 @@ mod registry_drift_guard {
 
         let mut want_protos = [
             "anytls",
-            "dns-tunnel",
             "hysteria2",
             "naive",
             "shadowsocks-2022",
@@ -91,7 +82,7 @@ mod registry_drift_guard {
         .to_vec();
         want_protos.sort();
 
-        let mut want_kernels = ["amneziawg", "caddy", "dns-tunnel", "sing-box", "xray"]
+        let mut want_kernels = ["amneziawg", "caddy", "sing-box", "xray"]
             .map(String::from)
             .to_vec();
         want_kernels.sort();
