@@ -3,9 +3,7 @@ use vpnctl_core::{CoreError, Protocol, RenderCtx, Result, User};
 
 /// Loopback port the sing-box VLESS+ws backend listens on (caddy's
 /// `reverse_proxy` upstream). Loopback-only + uniform across the fleet,
-/// so it's never in a firewall rule and never the public-facing port. A
-/// node running dns-tunnel (loopback :9001) and vless-ws (loopback :11443)
-/// doesn't conflict.
+/// so it's never in a firewall rule and never the public-facing port.
 pub(crate) const VLESSWS_BACKEND_PORT: u16 = 11443;
 
 /// On-node Caddyfile path (shared by the naive single-file path and the
@@ -18,8 +16,7 @@ pub(crate) const VLESSWS_UNIT: &str = "caddy-vlessws";
 /// so `apply_config` can `ufw allow` it without re-parsing the Caddyfile.
 pub(crate) const VLESSWS_DEPLOY_ENV: &str = "/etc/caddy/.vlessws-deploy.env";
 
-/// Multi-file bundle delimiter — identical framing to
-/// `crates/kernels/src/dns_tunnel.rs::BUNDLE_DELIMITER`. The vless-ws
+/// Multi-file bundle delimiter. The vless-ws
 /// `render_config` emits `Caddyfile` + sing-box JSON + the firewall meta
 /// in this shape; `apply_config` unpacks it. The naive render (a single
 /// Caddyfile starting with `# Rendered by vpnctl`) never begins with this
@@ -72,8 +69,7 @@ pub(crate) struct VlessWsUser {
 /// Render the vless-ws deploy BUNDLE: the Caddyfile (decoy `file_server` +
 /// `reverse_proxy` of the secret path → loopback sing-box) + the loopback
 /// sing-box ws config + a firewall-port meta file, in the
-/// `BUNDLE_DELIMITER` framing `apply_config` unpacks. Mirrors
-/// `dns_tunnel::render_config`'s two-file bundle.
+/// `BUNDLE_DELIMITER` framing `apply_config` unpacks.
 pub(crate) fn render_vlessws_bundle(
     ctx: &RenderCtx<'_>,
     users: &[User],
@@ -186,7 +182,7 @@ pub(crate) fn render_vlessws_bundle(
     // ── 3. Firewall meta (front port for apply_config's ufw) ──────────
     let meta = format!("VLESSWS_FRONT_PORT={}\n", env.front_port);
 
-    // ── Assemble the bundle (dns_tunnel framing) ──────────────────────
+    // ── Assemble the bundle ───────────────────────────────────────────
     let mut bundle = String::with_capacity(cf.len() + sb_json.len() + meta.len() + 256);
     for (path, body) in [
         (CADDYFILE_PATH, cf.as_str()),
@@ -408,9 +404,8 @@ pub(crate) fn caddy_state_machine_prologue(
 /// The bundle-unpack + atomic-swap + verify + ROLLBACK script run after the
 /// vless-ws deploy bundle has been uploaded to `…/.vlessws-bundle.new`.
 /// Two units: the loopback sing-box BACKEND (restarted FIRST so caddy's
-/// `reverse_proxy` upstream is up) and caddy itself. Mirrors
-/// `dns_tunnel::dns_tunnel_apply_script`'s snapshot/rollback discipline,
-/// plus a `caddy validate` before the swap and a wider (caddy ACME) poll.
+/// `reverse_proxy` upstream is up) and caddy itself. Snapshot/rollback
+/// discipline, plus a `caddy validate` before the swap and a wider (caddy ACME) poll.
 pub(crate) fn vlessws_apply_script() -> String {
     let prologue = caddy_state_machine_prologue(
         CADDYFILE_PATH,
@@ -424,7 +419,7 @@ pub(crate) fn vlessws_apply_script() -> String {
             BUNDLE=/etc/caddy/.vlessws-bundle.new
             test -f "$BUNDLE"
 
-            # Unpack the bundle (same framing as dns_tunnel). awk splits on
+            # Unpack the bundle. awk splits on
             # the marker line and writes each member to `<path>.new`.
             awk '
                 BEGIN {{ outfile = ""; }}

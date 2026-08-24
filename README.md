@@ -32,7 +32,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **11 protocols** × **5 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **10 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.85+**, edition **2024** · single static Linux x86_64 binary (glibc 2.36+) |
 
@@ -45,8 +45,8 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctl` CLI — server / user / grant / deploy / sub / status / migrate / bootstrap | ✅ |
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
-| Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `dns-tunnel` (slipstream last-resort), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `dns-tunnel`, `vless+xhttp` | ✅ (11 across 5 kernels) |
+| Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (10 across 4 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -88,8 +88,8 @@ the other:
 
 | Trait | Meaning | Examples |
 |---|---|---|
-| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `dns-tunnel`, `xray` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `dns-tunnel`, `vless+xhttp` |
+| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an
@@ -115,9 +115,8 @@ vpnctl/
 │   ├── ssh/              SshTransport trait + russh implementations
 │   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
 │   │                     anytls, trojan, naive, vless-ws,
-│   │                     dns-tunnel, vless+xhttp
-│   ├── kernels/          sing-box (full), amneziawg, caddy,
-│   │                     dns-tunnel, xray
+│   │                     vless+xhttp
+│   ├── kernels/          sing-box (full), amneziawg, caddy, xray
 │   ├── inventory/        SqliteInventory, migrations, audit_log
 │   └── boosty-bridge/    Boosty subscription → user reconcile/sync
 ├── cli/                  clap binary `vpnctl`
@@ -209,14 +208,13 @@ the configured bridge state from the inventory and does not contact Boosty.
 
 ### Binary provisioning
 
-Kernels that ship a prebuilt engine binary (the `dns-tunnel` slipstream
-relay, the `naive` Caddy build) install it from the control-node cache
-under `/var/lib/vpnctl/cache/`, uploaded to the node and **SHA256-verified**
-there before an atomic install. The install is **content-aware**: refresh
-the cached binary with a patched build and the next `vpnctl deploy`
-reinstalls it automatically when the cache binary's hash differs from the
-on-node copy — no manual on-node deletion needed. An unchanged cache binary
-is a no-op (idempotent).
+Kernels that ship a prebuilt engine binary (such as the `naive` Caddy build)
+install it from the control-node cache under `/var/lib/vpnctl/cache/`,
+uploaded to the node and **SHA256-verified** there before an atomic install.
+The install is **content-aware**: refresh the cached binary with a patched build
+and the next `vpnctl deploy` reinstalls it automatically when the cache
+binary's hash differs from the on-node copy — no manual on-node deletion needed.
+An unchanged cache binary is a no-op (idempotent).
 
 ## SSH integration tests
 

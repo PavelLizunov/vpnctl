@@ -41,7 +41,7 @@ impl SingBox {
 /// History: before the version gate the install was gated purely on
 /// PRESENCE (`if ! command -v sing-box`), so once ANY sing-box was on
 /// PATH `deploy` never upgraded it — the fleet drifted (de/is 1.13.7 vs
-/// cdn/nl 1.13.12). Same class as the caddy / dns-tunnel cache-binary
+/// cdn/nl 1.13.12). Same class as the caddy cache-binary
 /// presence gates. The floor is a MINIMUM, not an exact pin — we don't
 /// attempt exact-version apt pinning (SagerNet version strings are
 /// brittle), the repo candidate (≥ floor) is acceptable.

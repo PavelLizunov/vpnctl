@@ -204,7 +204,7 @@ pub(crate) fn qcompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
 
 /// AmneziaWG `awg://` share-link for the operator's sing-box-lx-based
 /// client app (Flow F — distinct from Flow B `wireguard://?conf=` and
-/// Flow C AmneziaVPN `vpn://`; E=dns-tunnel).
+/// Flow C AmneziaVPN `vpn://`).
 /// Operator-specified format:
 ///
 /// ```text

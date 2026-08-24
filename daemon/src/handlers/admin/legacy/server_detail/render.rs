@@ -183,7 +183,7 @@ pub(super) async fn server_detail_render(
     // Traffic accounting — NIC ground-truth (ALL protocols) vs the
     // sing-box part clash-api attributed vs the GAP between them. The
     // gap is the operator's headline: real traffic vpnctl can't yet
-    // break down per-user (naive/Caddy, dns-tunnel + overhead).
+    // break down per-user (naive/Caddy + overhead).
     let traffic = state
         .inv
         .server_traffic_breakdown(&sid, 24)

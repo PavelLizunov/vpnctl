@@ -125,7 +125,6 @@ pub(crate) fn caddy_present(probe_stdout: &str) -> bool {
 ///   means reinstall.
 ///
 /// Pure → unit-tested directly so an inverted branch can't slip past CI.
-/// Mirrors `dns_tunnel::slipstream_needs_reinstall`.
 pub(crate) fn caddy_needs_reinstall(cache_sha: &str, node_sha_stdout: &str) -> bool {
     node_sha_stdout.trim() != cache_sha
 }

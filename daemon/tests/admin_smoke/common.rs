@@ -46,10 +46,6 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::Naive::new()))
         .unwrap();
-    reg.register_kernel(Box::new(vpnctl_kernels::DnsTunnel::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(vpnctl_protocols::DnsTunnel::new()))
-        .unwrap();
     // Lockstep with `app.rs::build_registry` (PR #139 round-2 review):
     // xray kernel + vless-ws/vless+xhttp protocols were missing here, so
     // any future admin-level test touching those protocols (e.g. the
@@ -170,37 +166,6 @@ pub(crate) fn assert_summary_stat(html: &str, value: &str, label: &str) {
         html.contains(&needle),
         "summary stat '{value} {label}' not found (looked for {needle:?})"
     );
-}
-
-/// Seed a dns-tunnel server (with the share-link secrets) granted to one
-/// user; return the inventory ready for a user-detail render.
-pub(crate) async fn seed_dns_tunnel_server(
-    inv: &SqliteInventory,
-    server_id: &str,
-    granted_user: &str,
-) {
-    let sid = ServerId(server_id.into());
-    inv.add_server(&Server {
-        id: sid.clone(),
-        address: "203.0.113.9".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("dns-tunnel".into())],
-        enabled_protocols: vec![ProtocolId("dns-tunnel".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    })
-    .await
-    .unwrap();
-    inv.set_server_secret(&sid, "dns-tunnel:domain", "t.example.com")
-        .await
-        .unwrap();
-    inv.set_server_secret(&sid, "dns-tunnel:fingerprint", "47:1E:87:8F:3E:48:C8:1C")
-        .await
-        .unwrap();
-    inv.grant(&UserId(granted_user.into()), &sid).await.unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────────────

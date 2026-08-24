@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use vpnctl_core::{Kernel, KernelVersionPolicy};
-use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel, SingBox, Xray};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
 use vpnctl_ssh::MockTransport;
 
 type StatusCase<'a> = (Box<dyn Kernel>, Vec<&'a str>, &'a str, &'a str);
@@ -30,15 +30,6 @@ async fn every_current_kernel_reports_an_active_installed_version() {
             ],
             "/usr/local/bin/caddy version 2>/dev/null | awk '{print $1; exit}'",
             "v2.11.4",
-        ),
-        (
-            Box::new(DnsTunnel::new()),
-            vec![
-                "systemctl is-active dns-tunnel 2>/dev/null || true",
-                "systemctl is-active dns-tunnel-singbox 2>/dev/null || true",
-            ],
-            "slipstream-server --version 2>/dev/null | awk '{print $NF; exit}'",
-            "v0.1.0",
         ),
         (
             Box::new(Xray::new()),
@@ -80,13 +71,6 @@ async fn every_current_kernel_reports_inactive_without_turning_it_into_transport
             ],
         ),
         (
-            Box::new(DnsTunnel::new()),
-            vec![
-                "systemctl is-active dns-tunnel 2>/dev/null || true",
-                "systemctl is-active dns-tunnel-singbox 2>/dev/null || true",
-            ],
-        ),
-        (
             Box::new(Xray::new()),
             vec!["systemctl is-active xray 2>/dev/null || true"],
         ),
@@ -116,11 +100,6 @@ fn every_current_kernel_exposes_its_managed_floor_or_pin() {
             "1.0.20210913",
         ),
         (Box::new(Caddy::new()), KernelVersionPolicy::Pin, "v2.11.4"),
-        (
-            Box::new(DnsTunnel::new()),
-            KernelVersionPolicy::Pin,
-            "v0.1.0",
-        ),
         (Box::new(Xray::new()), KernelVersionPolicy::Pin, "v26.3.27"),
     ];
 

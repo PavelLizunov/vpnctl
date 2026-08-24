@@ -5,15 +5,15 @@
 //! sing-box has no server-side xhttp inbound — sing-box-lx's xhttp/AWG
 //! additions are CLIENT-only (see plans/xray-xhttp.md §2). Xray-core
 //! (XTLS/Xray-core) is the only daemon that serves xhttp server-side.
-//! Different daemon ⇒ different Kernel, same split as amneziawg / caddy /
-//! dns-tunnel vs sing-box.
+//! Different daemon ⇒ different Kernel, same split as amneziawg / caddy
+//! vs sing-box.
 //!
 //! ## Install — prebuilt GitHub-release static binary (NOT apt, NOT an
 //! on-node build)
 //!
 //! `XTLS/Xray-core/releases/download/<tag>/Xray-linux-<arch>.zip`. A
 //! single static binary (no CGO), small enough (~20 MB) that curl-on-node
-//! is fine — unlike caddy/dns-tunnel's Go builds, there's no on-node-build
+//! is fine — unlike caddy's Go build, there's no on-node-build
 //! RAM pressure to work around with a control-host cache. Installed to
 //! `/usr/local/bin/xray` + a hardened `xray.service` unit + config at
 //! `/usr/local/etc/xray/config.json`.

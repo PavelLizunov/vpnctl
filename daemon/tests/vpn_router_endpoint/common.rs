@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
-use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, VlessXhttp, WireGuard};
+use vpnctl_protocols::{Hysteria2, Naive, VlessReality, VlessXhttp, WireGuard};
 use vpnctld::AppState;
 
 pub(crate) const TEST_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
@@ -22,8 +22,6 @@ pub(crate) const ALT_DEVICE_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
 pub(crate) const NAIVE_DEVICE_ID: &str = "b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6";
 pub(crate) const HY2_DEVICE_ID: &str = "c1c2c3c4c5c6c7c8c9c0c1c2c3c4c5c6";
 pub(crate) const PAIR_DEVICE_ID: &str = "d1d2d3d4d5d6d7d8d9d0d1d2d3d4d5d6";
-pub(crate) const DNST_DEVICE_ID: &str = "c1c2c3c4c5c6c7c8c9c0c1c2c3c4c5c6";
-pub(crate) const DNST_FP: &str = "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
 pub(crate) const AWG_DEVICE_ID: &str = "0123456789abcdef0123456789abcdef";
 pub(crate) const XHTTP_DEVICE_ID: &str = "abcdef0123456789abcdef0123456789";
 
@@ -407,85 +405,6 @@ pub(crate) async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
     inv.grant(&user.id, &ServerId("cdn".into())).await.unwrap();
 
     let (state, _w) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
-    state
-}
-
-/// Seed a vless server `de` + a dns-tunnel server `tun`
-/// (sing-box+dns-tunnel kernels, `dns-tunnel` enabled, domain +
-/// fingerprint provisioned), with a user granted on BOTH.
-pub(crate) async fn seed_state_with_dns_tunnel(dir: &TempDir) -> AppState {
-    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
-        .await
-        .unwrap();
-    let mut reg = Registry::new();
-    reg.register_kernel(Box::new(SingBox::new())).unwrap();
-    reg.register_kernel(Box::new(vpnctl_kernels::DnsTunnel::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(VlessReality::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(DnsTunnel::new())).unwrap();
-
-    let de = Server {
-        id: ServerId("de".into()),
-        address: "de.example.com".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("sing-box".into())],
-        enabled_protocols: vec![ProtocolId("vless+reality".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    inv.add_server(&de).await.unwrap();
-    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
-        .await
-        .unwrap();
-    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
-        .await
-        .unwrap();
-
-    let tun = Server {
-        id: ServerId("tun".into()),
-        address: "tun.example.com".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("dns-tunnel".into())],
-        enabled_protocols: vec![ProtocolId("dns-tunnel".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    inv.add_server(&tun).await.unwrap();
-    inv.set_server_secret(&tun.id, "dns-tunnel:domain", "tunnel.example.org")
-        .await
-        .unwrap();
-    inv.set_server_secret(&tun.id, "dns-tunnel:fingerprint", DNST_FP)
-        .await
-        .unwrap();
-    inv.set_server_display_name(&tun.id, Some("Iceland"))
-        .await
-        .unwrap();
-
-    let user = User {
-        id: UserId("tester-1".into()),
-        uuid: "11111111-2222-3333-4444-555555555555".into(),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        sub_token: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    };
-    inv.add_user(&user).await.unwrap();
-    inv.set_vpn_router_device_id(&user.id, DNST_DEVICE_ID)
-        .await
-        .unwrap();
-    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
-    inv.grant(&user.id, &ServerId("tun".into())).await.unwrap();
-
-    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
     state
 }
 

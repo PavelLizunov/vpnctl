@@ -3,22 +3,18 @@
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use tempfile::TempDir;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::{AmneziaWg, Caddy, SingBox};
-use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, WireGuard};
+use vpnctl_protocols::{Hysteria2, Naive, VlessReality, WireGuard};
 use vpnctld::router;
 
 use super::common::{
-    AWG_DEVICE_ID, DNST_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID,
-    get, seed_hy2_opts, seed_state_with_awg, seed_state_with_dns_tunnel, seed_state_with_hy2,
-    seed_state_with_naive, seed_state_with_paired_node, seed_state_with_xhttp, subscription_lines,
-    subscription_lines_for_ua,
+    AWG_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID, seed_hy2_opts,
+    seed_state_with_awg, seed_state_with_hy2, seed_state_with_naive, seed_state_with_paired_node,
+    seed_state_with_xhttp, subscription_lines, subscription_lines_for_ua,
 };
 
 /// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
@@ -529,204 +525,6 @@ async fn vpn_router_paired_node_without_optin_has_no_pair() {
     assert!(
         lines.iter().any(|l| l.starts_with("hysteria2://")),
         "hy2 still renders: {lines:?}"
-    );
-}
-
-/// A dns-tunnel-granted user gets a `dns-tunnel://` URI in the blob, AFTER
-/// every vless line, fragment carrying the operator's server label. No
-/// `pair=` (no co-located UDP sibling).
-#[tokio::test]
-async fn vpn_router_dns_tunnel_uri_appended_after_all_vless() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_dns_tunnel(&dir).await;
-    let lines = subscription_lines(router(state), DNST_DEVICE_ID).await;
-
-    assert_eq!(lines.len(), 2, "expected 1 vless + 1 dns-tunnel: {lines:?}");
-    assert!(
-        lines[0].starts_with("vless://"),
-        "vless must be first: {lines:?}"
-    );
-    let dnst = lines.last().unwrap();
-    assert!(
-        dnst.starts_with("dns-tunnel://"),
-        "dns-tunnel must be last: {lines:?}"
-    );
-    // Operator label surfaces in the fragment, like vless/naive. The
-    // `WL-BYPASS` tag (whitelist-bypass — the break-glass transport)
-    // uses a hyphen so it stays a single token (no space) for any
-    // client-side fragment parser; the hyphen is unreserved in
-    // NINITUX_QUOTE so it is NOT percent-encoded.
-    assert!(
-        dnst.ends_with("#Iceland%20WL-BYPASS%20~tester-1"),
-        "dns-tunnel fragment must carry the server display label: {dnst}"
-    );
-    // No co-located UDP sibling → no pairing tag.
-    assert!(
-        !dnst.contains("pair="),
-        "dns-tunnel must not carry a pair param: {dnst}"
-    );
-    // Two-pass order guard: every vless precedes the dns-tunnel line.
-    let first_dnst = lines
-        .iter()
-        .position(|l| l.starts_with("dns-tunnel://"))
-        .unwrap();
-    let last_vless = lines
-        .iter()
-        .rposition(|l| l.starts_with("vless://"))
-        .unwrap();
-    assert!(
-        first_dnst > last_vless,
-        "every vless precedes the dns-tunnel line: {lines:?}"
-    );
-}
-
-/// The dns-tunnel line is delivered ONLY to the custom VPNRouter blob — it
-/// must NEVER reach a GENERIC client via the `/sub/<token>` endpoint: not in
-/// the sing-box JSON envelope (default UA) nor the v2ray base64 list (v2ray
-/// UA). A `dns-tunnel://` line would make a generic client choke; the blob
-/// IS the custom channel by design.
-#[tokio::test]
-async fn vpn_router_dns_tunnel_absent_from_generic_sub_channels() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_dns_tunnel(&dir).await;
-    let token = state
-        .inv
-        .get_user(&UserId("tester-1".into()))
-        .await
-        .unwrap()
-        .unwrap()
-        .sub_token
-        .unwrap();
-
-    // Default UA → sing-box JSON envelope.
-    let (status, body, _ct) =
-        get(router(state.clone()), &format!("/sub/{token}"), "okhttp/4").await;
-    assert_eq!(status, StatusCode::OK);
-    let envelope = String::from_utf8(body).unwrap();
-    assert!(
-        !envelope.contains("dns-tunnel"),
-        "dns-tunnel must never enter the sing-box JSON envelope: {envelope}"
-    );
-
-    // v2ray UA → base64 list of share-links; decode and check the scheme.
-    let (status, body, _ct) = get(router(state), &format!("/sub/{token}"), "v2rayN/6.62").await;
-    assert_eq!(status, StatusCode::OK);
-    let decoded =
-        String::from_utf8(BASE64_STANDARD.decode(&body).unwrap_or_default()).unwrap_or_default();
-    assert!(
-        !decoded.contains("dns-tunnel://"),
-        "dns-tunnel:// must never enter the v2ray base64 sub: {decoded}"
-    );
-}
-
-/// Kill-switch parity: hiding dns-tunnel on the server (NM-10) drops it from
-/// the blob on the next request, vless untouched.
-#[tokio::test]
-async fn vpn_router_hidden_dns_tunnel_excluded_vless_intact() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_dns_tunnel(&dir).await;
-    state
-        .inv
-        .set_server_protocol_hidden(
-            &ServerId("tun".into()),
-            &ProtocolId("dns-tunnel".into()),
-            true,
-        )
-        .await
-        .unwrap();
-    let lines = subscription_lines(router(state), DNST_DEVICE_ID).await;
-    assert!(
-        !lines.iter().any(|l| l.starts_with("dns-tunnel://")),
-        "hidden dns-tunnel must be excluded: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|l| l.starts_with("vless://")),
-        "vless must remain after hiding dns-tunnel: {lines:?}"
-    );
-}
-
-/// A dns-tunnel server provisioned with the domain secret but NO fingerprint
-/// yet (half-configured) must NOT abort the blob — the share-link render
-/// fails, that server is skipped, vless survives. Built inline so the
-/// fingerprint is absent from the start (there is no secret-delete API).
-#[tokio::test]
-async fn vpn_router_dns_tunnel_missing_fingerprint_skips_server_keeps_vless() {
-    let dir = TempDir::new().unwrap();
-    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
-        .await
-        .unwrap();
-    let mut reg = Registry::new();
-    reg.register_kernel(Box::new(SingBox::new())).unwrap();
-    reg.register_kernel(Box::new(vpnctl_kernels::DnsTunnel::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(VlessReality::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(DnsTunnel::new())).unwrap();
-
-    let de = Server {
-        id: ServerId("de".into()),
-        address: "de.example.com".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("sing-box".into())],
-        enabled_protocols: vec![ProtocolId("vless+reality".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    inv.add_server(&de).await.unwrap();
-    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
-        .await
-        .unwrap();
-    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
-        .await
-        .unwrap();
-
-    // dns-tunnel server with domain ONLY — fingerprint never set.
-    let tun = Server {
-        id: ServerId("tun".into()),
-        address: "tun.example.com".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("dns-tunnel".into())],
-        enabled_protocols: vec![ProtocolId("dns-tunnel".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    inv.add_server(&tun).await.unwrap();
-    inv.set_server_secret(&tun.id, "dns-tunnel:domain", "tunnel.example.org")
-        .await
-        .unwrap();
-
-    let user = User {
-        id: UserId("tester-1".into()),
-        uuid: "11111111-2222-3333-4444-555555555555".into(),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        sub_token: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    };
-    inv.add_user(&user).await.unwrap();
-    inv.set_vpn_router_device_id(&user.id, DNST_DEVICE_ID)
-        .await
-        .unwrap();
-    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
-    inv.grant(&user.id, &ServerId("tun".into())).await.unwrap();
-    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
-
-    let lines = subscription_lines(router(state), DNST_DEVICE_ID).await;
-    assert!(
-        lines.iter().any(|l| l.starts_with("vless://")),
-        "vless must survive a half-configured dns-tunnel server: {lines:?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.starts_with("dns-tunnel://")),
-        "a fingerprint-less dns-tunnel server must be skipped: {lines:?}"
     );
 }
 

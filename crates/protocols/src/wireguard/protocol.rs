@@ -64,8 +64,7 @@ impl Protocol for WireGuard {
         // If this slips into the /sub envelope, sing-box / Hiddify sees
         // an unknown outbound shape and drops EVERY route (including the
         // working VLESS / TUIC ones). WireGuard is delivered via its own
-        // `wg://` share link + `.conf` download. Hard `false`, same as
-        // dns-tunnel.
+        // `wg://` share link + `.conf` download. Hard `false`.
         false
     }
 

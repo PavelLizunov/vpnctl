@@ -1,5 +1,7 @@
 # dns-tunnel server-side investigation — 2026-06-11
 
+> **Status:** DEPRECATED & REMOVED (2026-08-24). The `dns-tunnel` protocol and kernel have been removed from the active codebase via migration `0050_remove_dns_tunnel.sql`. Legacy `dns-tunnel.service` and `dns-tunnel-singbox.service` units are decommissioned via hoster console. `dns-tunnel:*` server secrets are retained in SQLite during the transition release for rollback safety and scheduled for later purge. This document is preserved for historical context.
+
 Server-side diagnosis that motivated the two hardening changes in
 `feat/dns-tunnel-auth-and-idle` (authoritative endpoint in the share-link
 + slipstream `--idle-timeout-seconds` bump).

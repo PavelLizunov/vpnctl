@@ -547,8 +547,8 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     /// unrecognised `type` makes the entire config invalid** and the
     /// client either refuses to start OR silently drops the route.
     ///
-    /// Protocols that ARE NOT sing-box-native (e.g. wireguard or
-    /// dns-tunnel — delivered via dedicated client configs / share links
+    /// Protocols that ARE NOT sing-box-native (e.g. wireguard —
+    /// delivered via dedicated client configs / share links
     /// rather than the sing-box sub) MUST override this to
     /// `false`. The sub handler then skips them when assembling the
     /// sing-box config, but they still appear in the per-protocol
@@ -885,8 +885,8 @@ impl Registry {
                         "port conflict on {transport}/{port}: protocols '{prev}' and \
                          '{pid}' both bind it on server '{}'. Move one of them to a \
                          different port via its per-server `*.listen_port` secret \
-                         (vless.listen_port, vlessws.listen_port, wireguard.listen_port, \
-                         dns-tunnel:listen_port) or to a dedicated node.",
+                         (vless.listen_port, vlessws.listen_port, wireguard.listen_port) \
+                         or to a dedicated node.",
                         server.id
                     )));
                 }

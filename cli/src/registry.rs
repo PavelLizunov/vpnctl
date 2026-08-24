@@ -2,10 +2,10 @@
 //! `registry` subcommand and (in v0.2 Phase 3b) `deploy` will pull from here.
 
 use vpnctl_core::Registry;
-use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, Xray};
+use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
 use vpnctl_protocols::{
-    AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-    VlessReality, VlessWs, VlessXhttp, WireGuard,
+    AnyTls, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5, VlessReality, VlessWs, VlessXhttp,
+    WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -24,15 +24,6 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // Caddy. Binds 80+443 → a naive node must not also run a 443-TCP
     // sing-box protocol. Secrets: `naive.domain`, `naive.acme_email`.
     reg.register_kernel(Box::new(Caddy::new()))?;
-    // dns-tunnel — slipstream-rust DNS-over-НСДИ last-resort transport
-    // (4th fallback after VLESS-REALITY / TUIC / NAIVE). Owns TWO units:
-    // `dns-tunnel` (slipstream-server UDP:53) + `dns-tunnel-singbox`
-    // (loopback-only TLS-less VLESS on 127.0.0.1:9001). Binary is a
-    // prebuilt amd64 cache (≥2 GB RAM build → no on-node build). Secrets:
-    // `dns-tunnel:domain`, `dns-tunnel:loopback_uuid`,
-    // `dns-tunnel:fingerprint`, `dns-tunnel:resolvers` (opt),
-    // `dns-tunnel:engine` (opt).
-    reg.register_kernel(Box::new(DnsTunnelKernel::new()))?;
     // Xray-core — see crates/kernels/src/xray.rs module doc-comment.
     reg.register_kernel(Box::new(Xray::new()))?;
 
@@ -67,13 +58,6 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // Server params `vlessws.domain` / `vlessws.acme_email` /
     // `vlessws.listen_port`; `vlessws.path` auto-minted.
     reg.register_protocol(Box::new(VlessWs::new()))?;
-    // dns-tunnel — companion stub to the dns-tunnel kernel. Two-process
-    // client (slipstream-client + loopback VLESS), so
-    // `appears_in_sing_box_sub()` is false; `share_link` emits the
-    // `dns-tunnel://` bundle (domain + resolvers + cert fp pin + the
-    // user's per-user `User.uuid`, same one used for VLESS-REALITY). DPI
-    // risk Moderate (last-resort; НСДИ is monitored).
-    reg.register_protocol(Box::new(DnsTunnelProtocol::new()))?;
     // vless+xhttp — see crates/protocols/src/vless_xhttp.rs.
     reg.register_protocol(Box::new(VlessXhttp::new()))?;
 
