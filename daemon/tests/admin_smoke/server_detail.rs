@@ -381,6 +381,10 @@ async fn server_detail_renders_push_deploy_key_section() {
         "form must POST to the push-key route"
     );
     assert!(
+        html.contains(r#"name="ssh_user""#) && html.contains(r#"value="root""#),
+        "form must include the current SSH user"
+    );
+    assert!(
         html.contains(r#"name="root_password""#),
         "form must include the password input"
     );
@@ -414,6 +418,42 @@ async fn server_push_deploy_key_404s_for_unknown_server() {
         text.contains("no such server 'no-such'"),
         "must surface the unknown-server message"
     );
+}
+
+#[tokio::test]
+async fn server_push_deploy_key_rejects_invalid_ssh_user_before_connecting() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&vpnctl_core::Server {
+            id: vpnctl_core::ServerId("stg-user".into()),
+            address: "1.2.3.4".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    let app = router(st);
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/stg-user/push-deploy-key")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("ssh_user=debian%3Bsudo&root_password=hunter2"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

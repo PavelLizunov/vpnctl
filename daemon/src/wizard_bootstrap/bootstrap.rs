@@ -90,22 +90,43 @@ async fn bootstrap_pipeline(
     // ── 1. SSH probe (password auth) ──────────────────────────────
     send_step!(
         "probe",
-        "ssh root@{}:{} with supplied password…",
+        "ssh {}@{}:{} with supplied password…",
+        plan.ssh_user,
         plan.address,
         plan.ssh_port
     );
     match ssh_password_run(
         &plan.address,
         plan.ssh_port,
-        "root",
+        &plan.ssh_user,
         &plan.root_password,
         &plan.known_hosts_path,
         "true",
     )
     .await
     {
-        Ok(_) => send_step!("probe", "ok — root login confirmed."),
-        Err(e) => fail!("probe", "{e}. Re-check IP, port and root password."),
+        Ok(_) => send_step!("probe", "ok — {} login confirmed.", plan.ssh_user),
+        Err(e) => fail!("probe", "{e}. Re-check IP, port, SSH user and password."),
+    }
+    if plan.ssh_user != "root" {
+        send_step!("probe", "checking passwordless sudo for {}…", plan.ssh_user);
+        match ssh_password_run(
+            &plan.address,
+            plan.ssh_port,
+            &plan.ssh_user,
+            &plan.root_password,
+            &plan.known_hosts_path,
+            "sudo -n sh -c true",
+        )
+        .await
+        {
+            Ok(_) => send_step!("probe", "ok — passwordless sudo confirmed."),
+            Err(e) => fail!(
+                "probe",
+                "{e}. User '{}' needs passwordless sudo to manage the server.",
+                plan.ssh_user
+            ),
+        }
     }
 
     // ── 2. ssh-keyscan + fingerprint ──────────────────────────────
@@ -157,7 +178,7 @@ async fn bootstrap_pipeline(
     match ssh_password_run(
         &plan.address,
         plan.ssh_port,
-        "root",
+        &plan.ssh_user,
         &plan.root_password,
         &plan.known_hosts_path,
         &push_cmd,
@@ -175,7 +196,7 @@ async fn bootstrap_pipeline(
     );
     let ssh = SubprocessSshTransport::new(
         plan.address.clone(),
-        "root".to_string(),
+        plan.ssh_user.clone(),
         plan.deploy_key_path.clone(),
     )
     .port(plan.ssh_port)
@@ -221,7 +242,7 @@ async fn bootstrap_pipeline(
         id: ServerId(plan.server_id.clone()),
         address: plan.address.clone(),
         ssh_port: plan.ssh_port,
-        ssh_user: "root".into(),
+        ssh_user: plan.ssh_user.clone(),
         kernels: vec![kernel_id.clone()],
         enabled_protocols: default_protocols.clone(),
         trusted_host_fingerprint: Some(fingerprint.clone()),
@@ -245,6 +266,7 @@ async fn bootstrap_pipeline(
             Some(&plan.server_id),
             Some(&serde_json::json!({
                 "address": plan.address,
+                "ssh_user": plan.ssh_user,
                 "ssh_port": plan.ssh_port,
                 "kernels": ["sing-box"],
                 "protocols": default_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),

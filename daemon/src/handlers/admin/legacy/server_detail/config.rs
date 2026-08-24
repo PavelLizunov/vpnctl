@@ -201,8 +201,16 @@ pub(super) fn server_detail_push_deploy_key_section(
              action=(format!("/admin/servers/{sid_enc}/push-deploy-key"))
              style="margin: 0 0 14px;" {
             div style="display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; max-width: 560px;" {
+                label for="setup_ssh_user" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    (tr(lang, "ssh user", "ssh пользователь"))
+                }
+                input id="setup_ssh_user" type="text" name="ssh_user"
+                      value=(server.ssh_user)
+                      autocomplete="username" autocapitalize="none" spellcheck="false"
+                      pattern="[A-Za-z0-9_-]+" maxlength="32"
+                      style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "root password", "root-пароль"))
+                    (tr(lang, "ssh password", "ssh-пароль"))
                 }
                 // R2: short placeholder (the old sentence truncated
                 // mid-word in the 400px field); full rules in `title`.

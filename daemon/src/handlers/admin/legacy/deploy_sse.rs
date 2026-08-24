@@ -70,7 +70,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
             (tr(lang, " and the ", " и ")) em { (tr(lang, "root password", "root-пароль")) }
         }
         p.ed-art-deck {
-            (tr(lang, "The daemon will SSH in as ", "Демон зайдёт по SSH как ")) span.ed-mono { "root" }
+            (tr(lang, "The daemon will SSH in as the user below", "Демон зайдёт по SSH под указанным ниже пользователем"))
             // Honest copy (review 2026-06-04): the pipeline pushes the
             // key, installs fail2ban + sing-box and applies the config —
             // it does NOT create a non-root user or harden sshd_config
@@ -111,9 +111,27 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 }
             }
             div style="display: flex; flex-direction: column; gap: 4px;" {
+                label for="ssh_user"
+                      style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
+                    (tr(lang, "ssh user (default root)", "ssh пользователь (по умолчанию root)"))
+                }
+                input id="ssh_user" name="ssh_user" type="text" value="root"
+                      autocomplete="username" autocapitalize="none" spellcheck="false"
+                      pattern="[A-Za-z0-9_-]+" maxlength="32"
+                      title=(tr(lang, "Examples: root, debian, ubuntu", "Примеры: root, debian, ubuntu"))
+                      style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); max-width: 240px;";
+                p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {
+                    (tr(
+                        lang,
+                        "For non-root users, passwordless sudo is required. Bahnhof commonly provides debian.",
+                        "Для пользователя не root нужен беспарольный sudo. Bahnhof часто выдаёт пользователя debian.",
+                    ))
+                }
+            }
+            div style="display: flex; flex-direction: column; gap: 4px;" {
                 label for="root_password"
                       style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                    (tr(lang, "root password", "root-пароль"))
+                    (tr(lang, "ssh password", "ssh-пароль"))
                 }
                 input id="root_password" name="root_password" type="password" required="required"
                       autocomplete="new-password"
@@ -180,6 +198,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
 /// browser refresh lands on step 2, not a duplicate POST).
 pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: String) -> Response {
     let address_raw = form_field(&body, "address").unwrap_or_default();
+    let user_raw = form_field(&body, "ssh_user").unwrap_or_default();
     let password_raw = form_field(&body, "root_password").unwrap_or_default();
     let port_raw = form_field(&body, "ssh_port").unwrap_or_default();
 
@@ -188,6 +207,15 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
         Err(why) => {
             return bad_request(&format!("invalid address — {why}"));
         }
+    };
+    let user_candidate = if user_raw.trim().is_empty() {
+        "root"
+    } else {
+        user_raw.trim()
+    };
+    let ssh_user = match crate::wizard::validate_ssh_user(user_candidate) {
+        Ok(s) => s.to_string(),
+        Err(why) => return bad_request(&format!("invalid ssh_user — {why}")),
     };
     if let Err(why) = crate::wizard::validate_password(&password_raw) {
         return bad_request(&format!("invalid root password — {why}"));
@@ -214,7 +242,9 @@ pub(crate) async fn wizard_new_submit(State(state): State<AppState>, body: Strin
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
-    let session_id = state.wizard.insert(address, password_raw, ssh_port);
+    let session_id = state
+        .wizard
+        .insert(address, ssh_user, password_raw, ssh_port);
 
     // Cookie scope: only the wizard endpoints. Path=/admin/servers/new
     // means the browser doesn't ship the session id to /admin/users,
@@ -287,11 +317,11 @@ pub(crate) async fn wizard_step2_stub(
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "SSHes in with the root password once, installs the deploy key, discards the password, installs kernels, mints secrets, deploys, probes. Don't close this tab — the live log attaches once; the bootstrap finishes server-side either way and the result lands on the server's detail page + audit timeline.",
-                "Заходит по SSH с root-паролем один раз, ставит deploy-ключ, забывает пароль, ставит ядра, чеканит секреты, деплоит, пробит. Не закрывай вкладку — живой лог подключается один раз; bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
+                "SSHes in with the supplied user and password once, installs the deploy key, discards the password, installs kernels, mints secrets, deploys, probes. Non-root users are elevated with passwordless sudo. Don't close this tab — the live log attaches once; the bootstrap finishes server-side either way and the result lands on the server's detail page + audit timeline.",
+                "Заходит по SSH под указанным пользователем и паролем один раз, ставит deploy-ключ, забывает пароль, ставит ядра, чеканит секреты, деплоит, пробит. Пользователь не root повышается через беспарольный sudo. Не закрывай вкладку — живой лог подключается один раз; bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
             )) { "ⓘ" }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (session.address) ":" (session.ssh_port) " · root " (crate::i18n::tr(lang, "· password used once", "· пароль одноразово"))
+                (session.address) ":" (session.ssh_port) " · " (session.ssh_user) " " (crate::i18n::tr(lang, "· password used once", "· пароль одноразово"))
             }
         }
 
@@ -301,7 +331,7 @@ pub(crate) async fn wizard_step2_stub(
                 table.ed-feed style="margin: 8px 0 16px;" {
                     tbody {
                         tr { td.ed-grid__mut style="width: 90px;" { "host" } td { (session.address) ":" (session.ssh_port) } }
-                        tr { td.ed-grid__mut { "ssh user" } td { "root · " span.ed-grid__mut { (crate::i18n::tr(lang, "password used once", "пароль одноразово")) } } }
+                        tr { td.ed-grid__mut { "ssh user" } td { (session.ssh_user) " · " span.ed-grid__mut { (crate::i18n::tr(lang, "password used once", "пароль одноразово")) } } }
                         tr { td.ed-grid__mut { "kernels" } td.ed-grid__sm { "sing-box" } }
                     }
                 }
@@ -416,6 +446,7 @@ pub(crate) async fn wizard_step2_sse(
     let plan = crate::wizard_bootstrap::BootstrapPlan {
         server_id,
         address: session.address,
+        ssh_user: session.ssh_user,
         ssh_port: session.ssh_port,
         root_password: session.root_password,
         deploy_key_path: std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH),

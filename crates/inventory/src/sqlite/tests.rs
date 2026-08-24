@@ -470,6 +470,32 @@ async fn server_roundtrip() -> Result<()> {
 }
 
 #[tokio::test]
+async fn ssh_user_update_and_audit_are_one_mutation() -> Result<()> {
+    let inv = fresh().await;
+    inv.add_server(&sample_server("ssh-user")).await?;
+    assert!(
+        inv.update_server_ssh_user_audited(
+            &ServerId("ssh-user".into()),
+            "root",
+            "debian",
+            "sshpass",
+        )
+        .await?
+    );
+    let server = inv.get_server(&ServerId("ssh-user".into())).await?.unwrap();
+    assert_eq!(server.ssh_user, "debian");
+    let audit = inv.audit_for_server("ssh-user", 10).await?;
+    assert!(audit.iter().any(|row| {
+        row.action == "server.ssh_user.update"
+            && row.payload.as_ref().is_some_and(|payload| {
+                payload.get("old_ssh_user").and_then(|v| v.as_str()) == Some("root")
+                    && payload.get("ssh_user").and_then(|v| v.as_str()) == Some("debian")
+            })
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicate_server_returns_already_exists() -> Result<()> {
     let inv = fresh().await;
     inv.add_server(&sample_server("dup")).await?;

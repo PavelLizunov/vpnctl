@@ -13,8 +13,10 @@ pub struct BootstrapPlan {
     /// IPv4, IPv6 or hostname. Already validated by
     /// `crate::wizard::validate_address`.
     pub address: String,
-    /// `root@<addr>` port. Defaults to 22 — overridden when the
-    /// step-1 form's optional port field is non-empty.
+    /// SSH login selected in step 1 (`root` by default).
+    pub ssh_user: String,
+    /// SSH port. Defaults to 22 — overridden when the step-1 form's
+    /// optional port field is non-empty.
     pub ssh_port: u16,
     /// Root password — used ONCE to push the deploy pubkey, then
     /// every subsequent step uses key auth.

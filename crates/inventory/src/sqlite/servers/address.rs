@@ -359,6 +359,51 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Update only the SSH login and record the mutation atomically.
+    pub async fn update_server_ssh_user_audited(
+        &self,
+        id: &ServerId,
+        old_user: &str,
+        new_user: &str,
+        method: &str,
+    ) -> Result<bool> {
+        if new_user == old_user {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE servers SET ssh_user = ?1,
+                                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?2 AND ssh_user = ?3",
+        )
+        .bind(new_user)
+        .bind(&id.0)
+        .bind(old_user)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "server '{}' SSH user changed concurrently",
+                id.0
+            )));
+        }
+        let payload = serde_json::json!({
+            "old_ssh_user": old_user,
+            "ssh_user": new_user,
+            "method": method,
+        });
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES ('admin', 'server.ssh_user.update', ?1, ?2)",
+        )
+        .bind(&id.0)
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn update_trusted_fingerprint(&self, id: &ServerId, fp: &str) -> Result<()> {
         // Defensive validation — a malicious or buggy caller could otherwise
         // store an empty / arbitrary value, after which every future connect

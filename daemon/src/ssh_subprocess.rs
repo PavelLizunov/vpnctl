@@ -94,7 +94,8 @@ fn default_ssh_timeout() -> Duration {
 pub struct SubprocessSshTransport {
     /// Destination IP or hostname.
     host: String,
-    /// SSH user (typically `root` for nodes vpnctld manages).
+    /// SSH management user. Non-root users are elevated through `sudo -n`
+    /// for every managed-node operation.
     user: String,
     /// TCP port the destination's sshd listens on.
     port: u16,
@@ -149,6 +150,17 @@ impl SubprocessSshTransport {
         self
     }
 
+    fn privileged_command(&self, command: &str) -> String {
+        if self.user == "root" {
+            command.to_string()
+        } else {
+            format!(
+                "sudo -n sh -c {}",
+                vpnctl_core::shell::single_quote(command)
+            )
+        }
+    }
+
     /// Build the canonical `ssh` argv for this transport, ending with
     /// the remote command. Split into its own function so tests can
     /// assert the produced argv without running `ssh`.
@@ -198,6 +210,19 @@ impl SubprocessSshTransport {
     /// secrets out of argv.
     pub async fn exec_with_stdin(&self, remote_cmd: &str, stdin_bytes: Vec<u8>) -> Result<Vec<u8>> {
         self.run(remote_cmd.to_string(), Some(stdin_bytes)).await
+    }
+
+    /// Execute a command as the SSH login itself, without the managed-node
+    /// sudo wrapper. Used only for per-user home operations such as installing
+    /// vpnctld's deploy key into that user's `~/.ssh/authorized_keys`.
+    pub async fn exec_unprivileged(&self, remote_cmd: &str) -> Result<String> {
+        let bytes = self.run(remote_cmd.to_string(), None).await?;
+        String::from_utf8(bytes).map_err(|e| {
+            CoreError::Transport(format!(
+                "ssh {}@{}:{} non-UTF-8 stdout: {e}",
+                self.user, self.host, self.port
+            ))
+        })
     }
 
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
@@ -333,7 +358,7 @@ fn run_child_with_timeout(
 #[async_trait]
 impl SshTransport for SubprocessSshTransport {
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let bytes = self.run(cmd.to_string(), None).await?;
+        let bytes = self.run(self.privileged_command(cmd), None).await?;
         String::from_utf8(bytes).map_err(|e| {
             CoreError::Transport(format!(
                 "ssh {}@{}:{} non-UTF-8 stdout: {e}",
@@ -353,7 +378,7 @@ impl SshTransport for SubprocessSshTransport {
             )));
         }
         let b64 = B64_STANDARD.encode(content);
-        let remote_cmd = format!("set -eu; base64 -d > '{path}'");
+        let remote_cmd = self.privileged_command(&format!("set -eu; base64 -d > '{path}'"));
         self.run(remote_cmd, Some(b64.into_bytes())).await?;
         Ok(())
     }
@@ -364,7 +389,7 @@ impl SshTransport for SubprocessSshTransport {
                 "read_file: path with single quote not supported: {path:?}"
             )));
         }
-        let remote_cmd = format!("base64 < '{path}'");
+        let remote_cmd = self.privileged_command(&format!("base64 < '{path}'"));
         let bytes = self.run(remote_cmd, None).await?;
         let b64 = String::from_utf8(bytes).map_err(|e| {
             CoreError::Transport(format!(
@@ -514,6 +539,29 @@ mod tests {
             .position(|a| a == "uname -a")
             .expect("remote cmd");
         assert!(user_host < cmd_pos);
+    }
+
+    #[test]
+    fn root_commands_are_not_wrapped_in_sudo() {
+        assert_eq!(make_transport().privileged_command("id -u"), "id -u");
+    }
+
+    #[test]
+    fn non_root_commands_use_passwordless_sudo_with_shell_quoting() {
+        let t =
+            SubprocessSshTransport::new("203.0.113.7", "debian", PathBuf::from("/tmp/test-key"));
+        assert_eq!(
+            t.privileged_command("printf '%s' \"$HOME\""),
+            "sudo -n sh -c 'printf '\\''%s'\\'' \"$HOME\"'"
+        );
+    }
+
+    #[test]
+    fn unprivileged_command_is_not_wrapped_in_sudo() {
+        let t =
+            SubprocessSshTransport::new("203.0.113.7", "debian", PathBuf::from("/tmp/test-key"));
+        let args = t.build_ssh_args("mkdir -p ~/.ssh");
+        assert_eq!(args.last().map(String::as_str), Some("mkdir -p ~/.ssh"));
     }
 
     #[test]

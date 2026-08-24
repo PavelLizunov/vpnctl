@@ -31,6 +31,7 @@ fn bootstrap_plan_constructible_outside_handler() {
     let plan = BootstrapPlan {
         server_id: "vps-test".into(),
         address: "203.0.113.7".into(),
+        ssh_user: "debian".into(),
         ssh_port: 22,
         root_password: "redacted".into(),
         deploy_key_path: PathBuf::from("/tmp/k"),
