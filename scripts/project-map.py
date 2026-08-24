@@ -48,14 +48,22 @@ def get_tracked_files(repo_root: Path) -> list[str]:
 
 def get_workspace_crates(repo_root: Path) -> list[dict[str, Any]]:
     """Query workspace packages and targets via cargo metadata."""
-    res = subprocess.run(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    data = json.loads(res.stdout)
+    try:
+        res = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError:
+        raise SystemExit("error: cargo is required to generate the project map") from None
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.stderr.strip() or "error: cargo metadata failed") from None
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"error: invalid cargo metadata JSON: {error}") from None
     crates: list[dict[str, Any]] = []
 
     for pkg in data.get("packages", []):
