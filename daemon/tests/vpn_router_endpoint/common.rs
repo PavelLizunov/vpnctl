@@ -23,8 +23,7 @@ pub(crate) const NAIVE_DEVICE_ID: &str = "b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6";
 pub(crate) const HY2_DEVICE_ID: &str = "c1c2c3c4c5c6c7c8c9c0c1c2c3c4c5c6";
 pub(crate) const PAIR_DEVICE_ID: &str = "d1d2d3d4d5d6d7d8d9d0d1d2d3d4d5d6";
 pub(crate) const DNST_DEVICE_ID: &str = "c1c2c3c4c5c6c7c8c9c0c1c2c3c4c5c6";
-pub(crate) const DNST_FP: &str =
-    "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
+pub(crate) const DNST_FP: &str = "47:1E:87:8F:3E:48:C8:1C:5F:BF:30:2E:B8:A8:3A:05:72:0D:B9:77:A2:11:81:09:E6:E5:EF:92:C4:66:7B:92";
 pub(crate) const AWG_DEVICE_ID: &str = "0123456789abcdef0123456789abcdef";
 pub(crate) const XHTTP_DEVICE_ID: &str = "abcdef0123456789abcdef0123456789";
 

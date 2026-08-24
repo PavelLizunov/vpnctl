@@ -15,10 +15,10 @@ use vpnctl_protocols::{DnsTunnel, Hysteria2, Naive, VlessReality, VlessXhttp, Wi
 use vpnctld::router;
 
 use super::common::{
-    AWG_DEVICE_ID, DNST_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID,
-    XHTTP_DEVICE_ID, get, seed_hy2_opts, seed_state_with_awg, seed_state_with_dns_tunnel,
-    seed_state_with_hy2, seed_state_with_naive, seed_state_with_paired_node,
-    seed_state_with_xhttp, subscription_lines, subscription_lines_for_ua,
+    AWG_DEVICE_ID, DNST_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID,
+    get, seed_hy2_opts, seed_state_with_awg, seed_state_with_dns_tunnel, seed_state_with_hy2,
+    seed_state_with_naive, seed_state_with_paired_node, seed_state_with_xhttp, subscription_lines,
+    subscription_lines_for_ua,
 };
 
 /// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
