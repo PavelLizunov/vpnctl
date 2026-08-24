@@ -261,12 +261,18 @@ impl Protocol for Hysteria2 {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
+        let pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint a Hysteria2 client config",
+                user.id.0
+            ))
+        })?;
         let mut out = json!({
             "type": "hysteria2",
             "tag": "hy2-out",
             "server": ctx.server.address,
             "server_port": 8444,
-            "password": user.tuic_password.clone().unwrap_or_default(),
+            "password": pw,
             "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
         });
         // Mirror the server-side obfs config — without it the client

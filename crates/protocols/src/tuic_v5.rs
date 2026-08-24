@@ -1,7 +1,7 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
-use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
+use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Userinfo-safe set: everything that has a structural meaning in
 /// `<userinfo>@<host>` of an authority component (RFC 3986 §3.2.1).
@@ -86,13 +86,19 @@ impl Protocol for TuicV5 {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
+        let pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint a TUIC client config",
+                user.id.0
+            ))
+        })?;
         Ok(json!({
             "type": "tuic",
             "tag": "tuic-out",
             "server": ctx.server.address,
             "server_port": 8443,
             "uuid": user.uuid,
-            "password": user.tuic_password.clone().unwrap_or_default(),
+            "password": pw,
             "congestion_control": "bbr",
             "udp_relay_mode": "native",
             "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
@@ -100,11 +106,16 @@ impl Protocol for TuicV5 {
     }
 
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
-        let raw_pw = user.tuic_password.clone().unwrap_or_default();
+        let raw_pw = user.tuic_password.as_deref().ok_or_else(|| {
+            CoreError::Render(format!(
+                "user '{}' has no tuic_password — cannot mint a TUIC link",
+                user.id.0
+            ))
+        })?;
         // Both UUID and password sit inside the userinfo segment, where `:`,
         // `@`, `/`, and space would corrupt parsing. Name sits in the fragment.
         let uuid = utf8_percent_encode(&user.uuid, USERINFO);
-        let pw = utf8_percent_encode(&raw_pw, USERINFO);
+        let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         Ok(format!(
             "tuic://{uuid}:{pw}@{addr}:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#{name}",
@@ -113,5 +124,129 @@ impl Protocol for TuicV5 {
             addr = host_for_url(&ctx.server.address),
             name = name,
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use vpnctl_core::{Server, ServerId, UserId};
+
+    fn server() -> Server {
+        Server {
+            id: ServerId("node-1".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![ProtocolId("tuic-v5".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    fn user(name: &str, pw: Option<&str>) -> User {
+        User {
+            id: UserId(name.into()),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: pw.map(str::to_string),
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn server_inbound_skips_users_without_tuic_password() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let users = [
+            user("alice", Some("pw-alice")),
+            user("nopw", None),
+            user("bob", Some("pw-bob")),
+        ];
+        let v = TuicV5::new().server_inbound(&ctx, &users).unwrap();
+        let arr = v
+            .get("users")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(arr.len(), 2, "user without tuic_password must be omitted");
+        let names: Vec<&str> = arr
+            .iter()
+            .filter_map(|u| u.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(names, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn client_config_happy_path() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let u = user("alice", Some("pw-alice"));
+        let v = TuicV5::new().client_config(&ctx, &u).unwrap();
+        assert_eq!(
+            v.get("type").and_then(serde_json::Value::as_str),
+            Some("tuic")
+        );
+        assert_eq!(
+            v.get("tag").and_then(serde_json::Value::as_str),
+            Some("tuic-out")
+        );
+        assert_eq!(
+            v.get("server").and_then(serde_json::Value::as_str),
+            Some("203.0.113.7")
+        );
+        assert_eq!(
+            v.get("server_port").and_then(serde_json::Value::as_u64),
+            Some(8443)
+        );
+        assert_eq!(
+            v.get("uuid").and_then(serde_json::Value::as_str),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            v.get("password").and_then(serde_json::Value::as_str),
+            Some("pw-alice")
+        );
+    }
+
+    #[test]
+    fn client_config_missing_password_returns_render_error() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let u = user("alice", None);
+        let err = TuicV5::new().client_config(&ctx, &u).unwrap_err();
+        match err {
+            CoreError::Render(msg) => {
+                assert!(msg.contains("alice"));
+                assert!(msg.contains("tuic_password"));
+            }
+            other => panic!("expected CoreError::Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn share_link_missing_password_returns_render_error() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let u = user("alice", None);
+        let err = TuicV5::new().share_link(&ctx, &u).unwrap_err();
+        match err {
+            CoreError::Render(msg) => {
+                assert!(msg.contains("alice"));
+                assert!(msg.contains("tuic_password"));
+            }
+            other => panic!("expected CoreError::Render, got {other:?}"),
+        }
     }
 }

@@ -140,7 +140,7 @@ fn server_inbound_happy_path_full_shape() {
         .server_inbound(&ctx, &[user("alice"), user("bob")])
         .unwrap();
 
-    assert_eq!(v["listen"].as_str(), Some("0.0.0.0"));
+    assert_eq!(v["listen"].as_str(), Some("::"));
     assert_eq!(v["port"].as_u64(), Some(9443));
     assert_eq!(v["protocol"].as_str(), Some("vless"));
 
@@ -175,6 +175,19 @@ fn server_inbound_happy_path_full_shape() {
     assert_eq!(
         reality["shortIds"].as_array().unwrap().as_slice(),
         &[serde_json::Value::String(SHORT_ID.into())]
+    );
+}
+
+#[test]
+fn server_inbound_listens_on_dual_stack_ipv6() {
+    let s = srv();
+    let sec = secrets();
+    let ctx = RenderCtx::new(&s, &sec);
+    let v = VlessXhttp::new().server_inbound(&ctx, &[]).unwrap();
+    assert_eq!(
+        v["listen"].as_str(),
+        Some("::"),
+        "inbound listen must be dual-stack '::' to accept both IPv4 and IPv6 traffic"
     );
 }
 

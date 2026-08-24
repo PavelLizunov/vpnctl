@@ -350,6 +350,46 @@ fn tuic_userinfo_percent_encodes_colon_in_password_byte_equal() {
     );
 }
 
+#[test]
+fn tuic_missing_password_is_error() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", None);
+    let res = TuicV5::new().share_link(&ctx, &u);
+    assert!(
+        res.is_err(),
+        "expected Err when tuic_password is absent; got {res:?}",
+    );
+    match res {
+        Err(vpnctl_core::CoreError::Render(msg)) => {
+            assert!(msg.contains("alice"));
+            assert!(msg.contains("tuic_password"));
+        }
+        other => panic!("expected CoreError::Render, got {other:?}"),
+    }
+}
+
+#[test]
+fn tuic_client_config_missing_password_is_error() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice", None);
+    let res = TuicV5::new().client_config(&ctx, &u);
+    assert!(
+        res.is_err(),
+        "expected Err when tuic_password is absent; got {res:?}",
+    );
+    match res {
+        Err(vpnctl_core::CoreError::Render(msg)) => {
+            assert!(msg.contains("alice"));
+            assert!(msg.contains("tuic_password"));
+        }
+        other => panic!("expected CoreError::Render, got {other:?}"),
+    }
+}
+
 // ── Hysteria2 ───────────────────────────────────────────────────────────
 
 #[test]

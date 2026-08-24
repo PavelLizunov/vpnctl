@@ -391,3 +391,87 @@ async fn token_last4_returns_empty_string_when_token_none() {
     };
     assert_eq!(cfg.token_last4(), "", "None token must yield empty string");
 }
+
+// 14. Non-ASCII long token: return last 4 unicode chars without byte-slicing panic.
+#[tokio::test]
+async fn token_last4_handles_non_ascii_long_token() {
+    let cfg = TelegramConfig {
+        token: Some("123тест".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg.token_last4(),
+        "тест",
+        "must return last 4 unicode chars from mixed/non-ascii token"
+    );
+
+    let cfg_emoji = TelegramConfig {
+        token: Some("bot_secret_🦀🎉🔥🚀".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg_emoji.token_last4(),
+        "🦀🎉🔥🚀",
+        "must correctly extract last 4 multi-byte emoji characters"
+    );
+}
+
+// 15. Non-ASCII short token (< 4 chars): return whole token, no panic.
+#[tokio::test]
+async fn token_last4_handles_non_ascii_short_token() {
+    let cfg_cjk = TelegramConfig {
+        token: Some("абв".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg_cjk.token_last4(),
+        "абв",
+        "short multi-byte token must return whole token"
+    );
+
+    let cfg_emoji = TelegramConfig {
+        token: Some("🦀".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg_emoji.token_last4(),
+        "🦀",
+        "single multi-byte character must return whole token"
+    );
+}
+
+// 16. Non-ASCII exact 4 chars: return whole token.
+#[tokio::test]
+async fn token_last4_handles_non_ascii_exact_four_chars() {
+    let cfg = TelegramConfig {
+        token: Some("тест".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg.token_last4(),
+        "тест",
+        "exact 4-char non-ascii token must return all 4 chars"
+    );
+
+    let cfg_emoji = TelegramConfig {
+        token: Some("🦀🎉🔥🚀".into()),
+        chat_id: None,
+        proxy_via_server_id: None,
+        language: None,
+    };
+    assert_eq!(
+        cfg_emoji.token_last4(),
+        "🦀🎉🔥🚀",
+        "exact 4 emoji token must return all 4 chars"
+    );
+}

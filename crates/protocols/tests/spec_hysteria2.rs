@@ -188,13 +188,17 @@ fn h3_client_config_basic_fields() {
 }
 
 #[test]
-fn h3_client_config_password_defaults_to_empty_when_absent() {
+fn h3_client_config_user_without_password_returns_error() {
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", None);
-    let v = Hysteria2::new().client_config(&ctx, &u).unwrap();
-    assert_eq!(v.get("password").and_then(Value::as_str), Some(""));
+    let err = Hysteria2::new().client_config(&ctx, &u).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Render") && msg.contains("alice"),
+        "expected Render error naming user; got {msg}"
+    );
 }
 
 #[test]

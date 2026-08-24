@@ -206,7 +206,7 @@ impl Protocol for VlessXhttp {
             .collect();
 
         Ok(json!({
-            "listen": "0.0.0.0",
+            "listen": "::",
             "port": VLESS_XHTTP_PORT,
             "protocol": "vless",
             "settings": {
