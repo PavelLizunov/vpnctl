@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 290 (222 prod / 68 test)
-- **Total Rust LOC:** 113,936 (76,588 prod / 37,348 test)
+- **Tracked Rust Files:** 312 (234 prod / 78 test)
+- **Total Rust LOC:** 122,261 (80,009 prod / 42,252 test)
 - **Database Migrations:** 48
 - **`daemon/src/app.rs` `.route(...)` Registrations:** 0
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,836 (5) | 0 (0) | **1,836** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 331 (1) | 400 (2) | **731** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 30 tests | 12,743 (46) | 9,958 (30) | **22,701** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 5,475 (7) | 605 (2) | **6,080** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,539 (14) | 4,186 (11) | **8,725** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 30 tests | 12,743 (46) | 11,507 (34) | **24,250** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 6,637 (10) | 605 (2) | **7,242** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 5,658 (19) | 4,186 (11) | **9,844** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 520 (3) | 558 (3) | **1,078** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 44,355 (120) | 20,771 (18) | **65,126** |
-| **Total** | | | | **76,588 (222)** | **37,348 (68)** | **113,936** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,495 (124) | 24,126 (24) | **69,621** |
+| **Total** | | | | **80,009 (234)** | **42,252 (78)** | **122,261** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -48,13 +48,13 @@
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,058 | `daemon` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
+| `daemon/tests/vpn_router_endpoint/protocols.rs` | 988 | `daemon` | Test |
 | `crates/kernels/src/amnezia_wg.rs` | 954 | `crates/kernels` | Prod |
 | `daemon/src/node_probe.rs` | 944 | `daemon` | Prod |
 | `crates/protocols/src/dns_tunnel.rs` | 936 | `crates/protocols` | Prod |
 | `daemon/src/handlers/admin/legacy/deploy_sse.rs` | 914 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/servers.rs` | 897 | `daemon` | Test |
 | `daemon/src/handlers/admin/user_actions.rs` | 883 | `daemon` | Prod |
-| `daemon/src/handlers/auth.rs` | 874 | `daemon` | Prod |
 
 ## Database Migrations (48)
 
