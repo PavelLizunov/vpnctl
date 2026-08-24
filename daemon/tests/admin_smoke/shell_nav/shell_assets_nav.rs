@@ -573,7 +573,6 @@ async fn admin_audit_pagination_links_render_correctly() {
 /// embedded comma + double-quote.
 #[tokio::test]
 async fn admin_audit_csv_export_returns_well_formed_csv() {
-    use http_body_util::BodyExt;
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv

@@ -177,9 +177,9 @@ def scan_migrations(repo_root: Path, tracked_files: list[str]) -> list[dict[str,
 
 
 def scan_routes(repo_root: Path) -> list[dict[str, str]]:
-    """Scan literal `.route(...)` registrations from daemon/src/app.rs."""
-    app_rs = repo_root / "daemon/src/app.rs"
-    text = app_rs.read_text(encoding="utf-8")
+    """Scan literal `.route(...)` registrations from the app routes module."""
+    routes_rs = repo_root / "daemon/src/app/routes.rs"
+    text = routes_rs.read_text(encoding="utf-8")
     routes: list[dict[str, str]] = []
 
     pos = 0
@@ -257,7 +257,7 @@ def generate_project_map_markdown(
         f"- **Tracked Rust Files:** {total_rust_files} ({total_prod_files} prod / {total_test_files} test)",
         f"- **Total Rust LOC:** {total_rust_loc:,} ({total_prod_loc:,} prod / {total_test_loc:,} test)",
         f"- **Database Migrations:** {len(migrations)}",
-        f"- **`daemon/src/app.rs` `.route(...)` Registrations:** {len(routes)}",
+        f"- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** {len(routes)}",
         "",
         "## Workspace Crates & Targets",
         "",
@@ -300,7 +300,7 @@ def generate_project_map_markdown(
         out.append(f"| `{m['version']}` | {m['name']} | `{m['file']}` | {m['lines']} |")
     out.append("")
 
-    out.append(f"## `daemon/src/app.rs` `.route(...)` Registrations ({len(routes)})")
+    out.append(f"## `daemon/src/app/routes.rs` `.route(...)` Registrations ({len(routes)})")
     out.append("")
     out.append("| Method | Path | Handler |")
     out.append("|---|---|---|")
