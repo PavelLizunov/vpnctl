@@ -25,6 +25,8 @@ fn row(
     log_b: Option<u64>,
 ) -> NodeHealthRow {
     NodeHealthRow {
+        sample_seq: None,
+        sample_id: None,
         ts: Utc.with_ymd_and_hms(2026, 5, 17, 22, 0, 0).unwrap()
             - chrono::Duration::minutes(mins_ago),
         server_id: ServerId("test".into()),
@@ -689,6 +691,219 @@ async fn scan_once_skips_orphan_recovery_boundary_without_condition_history() {
 }
 
 #[tokio::test]
+async fn scan_once_fires_repeated_service_down_without_recovery_history() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("srv-down-repeat");
+    inv.add_server(&server).await.unwrap();
+
+    // 1st outage: true -> false. Alert fires.
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once(&inv).await.unwrap();
+    let alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].kind, "server.singbox.down");
+    assert!(inv.ack_alert(alerts[0].id).await.unwrap());
+
+    // Service becomes active again, but no recovery alert was recorded
+    // (e.g. sing-box restarted outside or daemon missed the transition).
+    record_singbox_health(&inv, &server.id, true).await;
+
+    // 2nd outage: true -> false. Edge-triggered event must fire again
+    // and not be suppressed by historical condition checks (AUD-021).
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once(&inv).await.unwrap();
+    let history = inv.recent_alerts(10, true).await.unwrap();
+    let down_alerts: Vec<_> = history
+        .iter()
+        .filter(|a| a.kind == "server.singbox.down")
+        .collect();
+    assert_eq!(
+        down_alerts.len(),
+        2,
+        "second outage must fire despite lack of recovery row"
+    );
+}
+
+#[tokio::test]
+async fn scan_once_fires_repeated_disk_pressure_without_recovery_history() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("srv-disk-repeat");
+    inv.add_server(&server).await.unwrap();
+
+    // First disk pressure: 80% -> 92% (>= 90%).
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        Some(80),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        Some(92),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    scan_once(&inv).await.unwrap();
+
+    let alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].kind, "server.disk.pressure");
+    assert!(inv.ack_alert(alerts[0].id).await.unwrap());
+
+    // Disk drops to 87% (does not trigger recovery because hysteresis < 85%).
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        Some(87),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Disk rises to 95% (87% -> 95%). Edge-triggered disk pressure must fire again (AUD-021).
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        Some(95),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    scan_once(&inv).await.unwrap();
+
+    let history = inv.recent_alerts(10, true).await.unwrap();
+    let disk_alerts: Vec<_> = history
+        .iter()
+        .filter(|a| a.kind == "server.disk.pressure")
+        .collect();
+    assert_eq!(
+        disk_alerts.len(),
+        2,
+        "second disk pressure must fire without recovery row"
+    );
+}
+
+#[tokio::test]
+async fn scan_once_fires_restart_alert_with_prior_down_history() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("srv-restart");
+    inv.add_server(&server).await.unwrap();
+
+    // Prior down alert exists and was acknowledged
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once(&inv).await.unwrap();
+    let alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].kind, "server.singbox.down");
+    assert!(inv.ack_alert(alerts[0].id).await.unwrap());
+
+    // Monotonic NRestarts increases: 2 -> 4 while active = true
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(4),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    scan_once(&inv).await.unwrap();
+
+    let history = inv.recent_alerts(10, true).await.unwrap();
+    let restart_alert = history
+        .iter()
+        .find(|a| a.kind == "server.singbox.restarted")
+        .expect("restart alert must fire even with prior down history");
+    assert_eq!(restart_alert.severity, "warning");
+}
+
+#[tokio::test]
 async fn check_user_traffic_limits_skips_users_under_threshold() {
     let (_dir, inv) = fresh_inv().await;
     inv.add_user(&user_with_id("u")).await.unwrap();
@@ -930,6 +1145,48 @@ fn pin_is_present_true_on_genuine_single_key_match() {
 }
 
 #[test]
+fn pin_is_present_accepts_equivalent_variants() {
+    let canonical = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let padded = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4=";
+    let url_safe = "SHA256:Jl4XlKj9_e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let url_safe_padded = "SHA256:Jl4XlKj9_e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4=";
+
+    // Canonical pin vs variants in served keys
+    assert!(pin_is_present(canonical, &[padded.to_string()]));
+    assert!(pin_is_present(canonical, &[url_safe.to_string()]));
+    assert!(pin_is_present(canonical, &[url_safe_padded.to_string()]));
+
+    // Padded pin vs canonical / url-safe served keys
+    assert!(pin_is_present(padded, &[canonical.to_string()]));
+    assert!(pin_is_present(padded, &[url_safe.to_string()]));
+
+    // URL-safe pin vs canonical / padded served keys
+    assert!(pin_is_present(url_safe, &[canonical.to_string()]));
+    assert!(pin_is_present(url_safe_padded, &[canonical.to_string()]));
+}
+
+#[test]
+fn pin_is_present_rejects_real_mismatch_even_with_variants() {
+    let pin_a = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let served_b_canonical = "SHA256:szQm1QS8dN6awI29eG1hLbKah/156RmJV1EpNFqlNwc";
+    let served_b_padded = "SHA256:szQm1QS8dN6awI29eG1hLbKah/156RmJV1EpNFqlNwc=";
+    let served_b_url_safe = "SHA256:szQm1QS8dN6awI29eG1hLbKah_156RmJV1EpNFqlNwc";
+
+    assert!(!pin_is_present(pin_a, &[served_b_canonical.to_string()]));
+    assert!(!pin_is_present(pin_a, &[served_b_padded.to_string()]));
+    assert!(!pin_is_present(pin_a, &[served_b_url_safe.to_string()]));
+}
+
+#[test]
+fn pin_is_present_rejects_malformed_fingerprints() {
+    let valid = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    assert!(!pin_is_present(valid, &["not-a-fingerprint".to_string()]));
+    assert!(!pin_is_present("not-a-fingerprint", &[valid.to_string()]));
+    assert!(!pin_is_present(valid, &["MD5:aa:bb:cc".to_string()]));
+    assert!(!pin_is_present("MD5:aa:bb:cc", &[valid.to_string()]));
+}
+
+#[test]
 fn decide_drift_matched_when_a_later_scan_returns_the_pin() {
     // The kg 2026-06-06 sequence: attempt 1 was a partial scan
     // that returned only the rsa key (pin absent), attempt 2
@@ -957,6 +1214,48 @@ fn decide_drift_inconclusive_when_every_scan_failed() {
     assert_eq!(
         decide_drift("SHA256:whatever", &attempts),
         DriftDecision::Inconclusive
+    );
+}
+
+#[test]
+fn decide_drift_matched_when_observed_contains_padded_equivalent() {
+    let pinned = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let padded = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4=";
+    let attempts = vec![Some(vec![padded.to_string()])];
+    assert_eq!(decide_drift(pinned, &attempts), DriftDecision::Matched);
+}
+
+#[test]
+fn decide_drift_matched_when_observed_contains_url_safe_equivalent() {
+    let pinned = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let url_safe = "SHA256:Jl4XlKj9_e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let attempts = vec![Some(vec![url_safe.to_string()])];
+    assert_eq!(decide_drift(pinned, &attempts), DriftDecision::Matched);
+}
+
+#[test]
+fn decide_drift_matched_when_pinned_is_url_safe_and_observed_is_canonical() {
+    let pinned = "SHA256:Jl4XlKj9_e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4=";
+    let canonical = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let attempts = vec![Some(vec![canonical.to_string()])];
+    assert_eq!(decide_drift(pinned, &attempts), DriftDecision::Matched);
+}
+
+#[test]
+fn decide_drift_unions_observed_keys_deduplicating_equivalent_variants() {
+    let pinned = "SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOL";
+    let new_canonical = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let new_padded = "SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4=";
+    let new_url_safe = "SHA256:Jl4XlKj9_e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4";
+    let attempts = vec![
+        Some(vec![new_canonical.to_string()]),
+        Some(vec![new_padded.to_string(), new_url_safe.to_string()]),
+    ];
+    assert_eq!(
+        decide_drift(pinned, &attempts),
+        DriftDecision::Drift {
+            observed: vec![new_canonical.to_string()]
+        }
     );
 }
 
@@ -1224,4 +1523,107 @@ fn remediation_requires_a_verified_healthy_probe() {
     assert!(!Remediation::StartFail2ban.verified_by(&probe));
     assert!(!Remediation::CleanDisk.verified_by(&probe));
     assert!(!Remediation::RotateSingboxLog.verified_by(&probe));
+}
+
+#[tokio::test]
+async fn scan_once_ack_then_rescan_identical_pair_does_not_reopen() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("srv-ack-rescan");
+    inv.add_server(&server).await.unwrap();
+
+    // Outage pair (sample 1 up, sample 2 down)
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, false).await;
+
+    scan_once(&inv).await.unwrap();
+    let unacked = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(unacked.len(), 1);
+    assert_eq!(unacked[0].kind, "server.singbox.down");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(unacked[0].payload_json.as_deref().unwrap()).unwrap();
+    let src_ev = payload
+        .get("_source_event")
+        .and_then(|v| v.as_str())
+        .expect("alert payload must carry _source_event string");
+    let parts: Vec<&str> = src_ev.split(':').collect();
+    assert_eq!(parts.len(), 2);
+    assert!(!parts[0].is_empty());
+    assert!(!parts[1].is_empty());
+    assert_ne!(parts[0], parts[1]);
+
+    // Operator acknowledges the alert
+    assert!(inv.ack_alert(unacked[0].id).await.unwrap());
+    assert_eq!(inv.unacked_alert_count().await.unwrap(), 0);
+
+    // Rescan on the exact same sample pair
+    scan_once(&inv).await.unwrap();
+    assert_eq!(
+        inv.unacked_alert_count().await.unwrap(),
+        0,
+        "rescan of identical sample pair must not reopen acknowledged alert"
+    );
+    let all_alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(
+        all_alerts.len(),
+        1,
+        "history must retain only the single acknowledged alert"
+    );
+}
+
+#[tokio::test]
+async fn scan_once_new_recovery_down_pair_reopens_alert() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("srv-reopen-pair");
+    inv.add_server(&server).await.unwrap();
+
+    // 1st outage: true -> false
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once(&inv).await.unwrap();
+
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    let first_payload: serde_json::Value =
+        serde_json::from_str(alerts[0].payload_json.as_deref().unwrap()).unwrap();
+    let first_src_ev = first_payload["_source_event"].as_str().unwrap().to_string();
+    assert!(inv.ack_alert(alerts[0].id).await.unwrap());
+
+    // Service recovers: false -> true
+    record_singbox_health(&inv, &server.id, true).await;
+    scan_once(&inv).await.unwrap();
+
+    // 2nd outage: true -> false (new sample_id pair)
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once(&inv).await.unwrap();
+
+    let unacked = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(
+        unacked.len(),
+        1,
+        "new outage pair must reopen an unacked alert"
+    );
+    assert_eq!(unacked[0].kind, "server.singbox.down");
+    let second_payload: serde_json::Value =
+        serde_json::from_str(unacked[0].payload_json.as_deref().unwrap()).unwrap();
+    let second_src_ev = second_payload["_source_event"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        first_src_ev, second_src_ev,
+        "distinct sample transitions must have distinct _source_event"
+    );
+
+    let history = inv.recent_alerts(10, true).await.unwrap();
+    let down_alerts: Vec<_> = history
+        .iter()
+        .filter(|a| a.kind == "server.singbox.down")
+        .collect();
+    assert_eq!(
+        down_alerts.len(),
+        2,
+        "history must have both distinct down alerts"
+    );
+    assert_ne!(down_alerts[0].id, down_alerts[1].id);
 }

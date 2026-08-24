@@ -85,15 +85,14 @@ pub(crate) async fn probe_one_server_with_registry(
         return ProbeOutcome::Skipped;
     }
 
-    let key_path = std::env::var("VPNCTLD_DEPLOY_KEY")
-        .unwrap_or_else(|_| "/var/lib/vpnctl/.ssh/id_ed25519".to_string());
-    if !std::path::Path::new(&key_path).exists() {
+    let key_path = crate::app::deploy_key_path();
+    if !key_path.exists() {
         // Pre-deploy: same as clash_poller, log once per tick at info
         // (operator can grep) without spamming at warn.
         tracing::info!(
             target = "vpnctld::node_probe",
             server = %server.id.0,
-            key = %key_path,
+            key = %key_path.display(),
             "skipping: deploy SSH key not yet on the homelab host"
         );
         return ProbeOutcome::NoDeployKey;
@@ -102,7 +101,7 @@ pub(crate) async fn probe_one_server_with_registry(
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
-        std::path::PathBuf::from(&key_path),
+        key_path,
     )
     .port(server.ssh_port);
 

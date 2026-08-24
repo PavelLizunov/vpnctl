@@ -124,7 +124,7 @@ pub(crate) async fn server_deploy(
     // sing-box restart. Aggregate result is captured in the audit
     // payload (`ssh_kernels_pushed`, `ssh_errors`).
     use crate::ssh_subprocess::SubprocessSshTransport;
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
     let mut ssh_errors: Vec<String> = Vec::new();
     let mut total_config_bytes: usize = 0;
@@ -360,8 +360,8 @@ pub(crate) async fn server_push_deploy_key(
 
     // Read the daemon's deploy pubkey from disk. Same path the
     // Settings page surfaces + the wizard's BootstrapPlan uses.
-    let key_path = std::path::Path::new(crate::app::DEFAULT_DEPLOY_KEY_PATH);
-    let pubkey = match crate::ssh_subprocess::read_public_key(key_path) {
+    let key_path = crate::app::deploy_key_path();
+    let pubkey = match crate::ssh_subprocess::read_public_key(&key_path) {
         Ok(p) => p,
         Err(e) => {
             return error_resp(
@@ -369,7 +369,7 @@ pub(crate) async fn server_push_deploy_key(
                 &format!(
                     "deploy pubkey unreadable at {}: {e}. \
                      Check /admin/settings (Deploy SSH key section) for the root cause.",
-                    key_path.with_extension("pub").display()
+                    crate::ssh_subprocess::public_key_path(&key_path).display()
                 ),
             );
         }
@@ -521,5 +521,65 @@ pub(crate) async fn server_push_deploy_key(
                  configured port (check /admin/servers/{server_id_str})."
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use std::sync::Arc;
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
+
+    #[tokio::test]
+    async fn server_push_deploy_key_reports_exact_dotted_pubkey_path_on_missing_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let registry = Arc::new(crate::app::build_registry().unwrap());
+        let (state, _handle) = crate::app::make_app_state_for_tests(inv.clone(), registry);
+
+        let server = Server {
+            id: ServerId("node-1".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+
+        let key_path = crate::app::deploy_key_path();
+        let expected_pub = crate::ssh_subprocess::public_key_path(&key_path);
+
+        let resp = server_push_deploy_key(
+            Path("node-1".into()),
+            State(state),
+            "root_password=hunter2".into(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body_bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        let expected_prefix = format!(
+            "vpnctl admin: deploy pubkey unreadable at {}:",
+            expected_pub.display()
+        );
+        assert!(
+            body_str.contains(&expected_prefix),
+            "expected body containing '{expected_prefix}', got: '{body_str}'"
+        );
+        assert!(
+            body_str.contains("Check /admin/settings (Deploy SSH key section) for the root cause."),
+            "expected settings hint in '{body_str}'"
+        );
     }
 }

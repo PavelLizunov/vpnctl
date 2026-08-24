@@ -385,16 +385,15 @@ async fn poll_one_server(
         return;
     }
 
-    let key_path = std::env::var("VPNCTLD_DEPLOY_KEY")
-        .unwrap_or_else(|_| "/var/lib/vpnctl/.ssh/id_ed25519".to_string());
-    if !std::path::Path::new(&key_path).exists() {
+    let key_path = crate::app::deploy_key_path();
+    if !key_path.exists() {
         // Pre-deploy: SSH key not yet provisioned on the homelab
         // host. Log once at info per tick per server so the
         // operator can grep for it; don't spam at warn.
         tracing::info!(
             target = "vpnctld::poller",
             server = %server.id.0,
-            key = %key_path,
+            key = %key_path.display(),
             "skipping: deploy SSH key not yet on the homelab host"
         );
         return;
@@ -409,7 +408,7 @@ async fn poll_one_server(
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
-        std::path::PathBuf::from(&key_path),
+        key_path,
     )
     .port(server.ssh_port);
 

@@ -685,7 +685,7 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
             if !flipped.is_empty() {
                 let inv = state.inv.clone();
                 let registry = std::sync::Arc::clone(&state.registry);
-                let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+                let key = crate::app::deploy_key_path();
                 tokio::spawn(async move {
                     crate::boosty_sync_poller::deploy_flipped_users(
                         &inv,
@@ -803,7 +803,7 @@ pub(crate) async fn boosty_disable(
         }
         let inv = state.inv.clone();
         let registry = std::sync::Arc::clone(&state.registry);
-        let key = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+        let key = crate::app::deploy_key_path();
         let users = vec![user.clone()];
         tokio::spawn(async move {
             crate::boosty_sync_poller::deploy_flipped_users(

@@ -435,3 +435,56 @@ fn deploy_all_terminal_error_on_partial_failure() {
         other => panic!("expected Error terminal, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn run_bootstrap_fails_with_exact_dotted_pubkey_path_when_missing() {
+    use tokio_stream::StreamExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let registry = Arc::new(crate::app::build_registry().unwrap());
+    let dotted_key = dir.path().join("deploy.id.key");
+    let plan = BootstrapPlan {
+        server_id: "test-node".into(),
+        address: "203.0.113.7".into(),
+        ssh_user: "debian".into(),
+        ssh_port: 22,
+        root_password: "dummy".into(),
+        deploy_key_path: dotted_key.clone(),
+        known_hosts_path: dir.path().join("known_hosts"),
+    };
+    let mut stream = Box::pin(run_bootstrap(plan, inv, registry));
+
+    let step = stream.next().await.expect("expected step event");
+    match step {
+        BootstrapEvent::Step { phase, message } => {
+            assert_eq!(phase, "setup");
+            assert!(message.contains("loading vpnctld deploy pubkey"));
+        }
+        other => panic!("expected setup Step event, got {other:?}"),
+    }
+
+    let err = stream.next().await.expect("expected error event");
+    let expected_pub_path = dir.path().join("deploy.id.key.pub");
+    match err {
+        BootstrapEvent::Error { phase, message } => {
+            assert_eq!(phase, "setup");
+            let expected_prefix = format!("can't read {}:", expected_pub_path.display());
+            assert!(
+                message.starts_with(&expected_prefix),
+                "expected message starting with '{expected_prefix}', got: '{message}'"
+            );
+            assert!(
+                message.contains("Re-check daemon's deploy key (see /admin/settings)."),
+                "expected remediation hint in '{message}'"
+            );
+            assert!(
+                !message.contains("deploy.id.pub"),
+                "dotted path must not be truncated to deploy.id.pub: '{message}'"
+            );
+        }
+        other => panic!("expected setup Error event, got {other:?}"),
+    }
+}

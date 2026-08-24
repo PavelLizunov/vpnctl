@@ -441,6 +441,36 @@ async fn migration_0033_adds_column_and_audit_index() -> Result<()> {
     Ok(())
 }
 
+// 0051: node_health must have stable identity and monotonic sequence columns.
+#[tokio::test]
+async fn migration_0051_adds_stable_identity_constraints() -> Result<()> {
+    let inv = fresh().await;
+    let cols: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT name, notnull, pk FROM pragma_table_info('node_health') \
+         WHERE name IN ('sample_seq', 'sample_id') ORDER BY name",
+    )
+    .fetch_all(inv.pool())
+    .await?;
+    assert_eq!(
+        cols,
+        vec![("sample_id".into(), 1, 0), ("sample_seq".into(), 0, 1)],
+        "0051 must add sample_id NOT NULL and sample_seq primary key"
+    );
+
+    let idx: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'index' AND name = 'idx_node_health_sample_id'",
+    )
+    .fetch_optional(inv.pool())
+    .await?;
+    assert_eq!(
+        idx.map(|r| r.0).as_deref(),
+        Some("idx_node_health_sample_id"),
+        "0051 must create idx_node_health_sample_id unique index"
+    );
+    Ok(())
+}
+
 // open() must set synchronous=NORMAL (1). FULL (2) is the SQLite
 // default and was stalling unrelated writers under WAL checkpoint
 // pressure; NORMAL is WAL-safe. A connection drawn from the pool must
@@ -1151,5 +1181,194 @@ async fn session_observe_skips_unknown_user() -> Result<()> {
         1,
         "the known user's session must land"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn insert_alert_if_no_unacked_source_event_and_ordinary_semantics() -> Result<()> {
+    let inv = fresh().await;
+    let srv = ServerId("srv1".into());
+    inv.add_server(&sample_server("srv1")).await?;
+
+    // 1. Ordinary caller without _source_event
+    let id1 = inv
+        .insert_alert_if_no_unacked("ordinary.down", Some(&srv), "warning", "down 1", None)
+        .await?
+        .expect("first ordinary alert must insert");
+    assert!(id1 > 0);
+
+    // Duplicate unacked ordinary alert -> suppressed
+    let dup = inv
+        .insert_alert_if_no_unacked("ordinary.down", Some(&srv), "warning", "down 1 dup", None)
+        .await?;
+    assert_eq!(dup, None);
+
+    // Ack ordinary alert
+    assert!(inv.ack_alert(id1).await?);
+
+    // After ack, ordinary alert refires legitimately
+    let id2 = inv
+        .insert_alert_if_no_unacked("ordinary.down", Some(&srv), "warning", "down 2", None)
+        .await?
+        .expect("ordinary alert must refire after ack");
+    assert_ne!(id1, id2);
+
+    // 2. Alert with _source_event
+    let payload_ev1 = serde_json::json!({"_source_event": "10:11"}).to_string();
+    let id3 = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&srv),
+            "critical",
+            "down sample 10->11",
+            Some(&payload_ev1),
+        )
+        .await?
+        .expect("first source-event alert must insert");
+    assert!(id3 > 0);
+
+    // Duplicate unacked before ack -> suppressed
+    let dup_ev1 = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&srv),
+            "critical",
+            "down sample 10->11 duplicate",
+            Some(&payload_ev1),
+        )
+        .await?;
+    assert_eq!(dup_ev1, None);
+
+    // Ack the source-event alert
+    assert!(inv.ack_alert(id3).await?);
+
+    // Rescan / resubmit of SAME source event after ack -> still suppressed across all history
+    let rescan_same = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&srv),
+            "critical",
+            "down sample 10->11 rescan",
+            Some(&payload_ev1),
+        )
+        .await?;
+    assert_eq!(
+        rescan_same, None,
+        "rescan of identical source event must not reopen"
+    );
+
+    // New source event -> reopens and inserts
+    let payload_ev2 = serde_json::json!({"_source_event": "12:13"}).to_string();
+    let id4 = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&srv),
+            "critical",
+            "down sample 12->13 new",
+            Some(&payload_ev2),
+        )
+        .await?
+        .expect("new source event must reopen");
+    assert_ne!(id3, id4);
+
+    // 3. Numeric _source_event payload (uses ordinary unacked-only semantics)
+    let payload_num = serde_json::json!({"_source_event": 42}).to_string();
+    let id_num1 = inv
+        .insert_alert_if_no_unacked(
+            "metric.spike",
+            Some(&srv),
+            "warning",
+            "spike 42",
+            Some(&payload_num),
+        )
+        .await?
+        .expect("first numeric alert must insert");
+    let dup_num = inv
+        .insert_alert_if_no_unacked(
+            "metric.spike",
+            Some(&srv),
+            "warning",
+            "spike 42 dup",
+            Some(&payload_num),
+        )
+        .await?;
+    assert_eq!(dup_num, None);
+    assert!(inv.ack_alert(id_num1).await?);
+    // Refires after ack because non-string _source_event does not dedupe historically
+    let id_num2 = inv
+        .insert_alert_if_no_unacked(
+            "metric.spike",
+            Some(&srv),
+            "warning",
+            "spike 42 refire",
+            Some(&payload_num),
+        )
+        .await?
+        .expect("numeric payload must refire after ack");
+    assert_ne!(id_num1, id_num2);
+
+    // 4. Boolean _source_event payload (uses ordinary unacked-only semantics)
+    let payload_bool = serde_json::json!({"_source_event": true}).to_string();
+    let id_bool1 = inv
+        .insert_alert_if_no_unacked(
+            "state.flag",
+            Some(&srv),
+            "warning",
+            "flag true",
+            Some(&payload_bool),
+        )
+        .await?
+        .expect("first bool alert must insert");
+    let dup_bool = inv
+        .insert_alert_if_no_unacked(
+            "state.flag",
+            Some(&srv),
+            "warning",
+            "flag true dup",
+            Some(&payload_bool),
+        )
+        .await?;
+    assert_eq!(dup_bool, None);
+    assert!(inv.ack_alert(id_bool1).await?);
+    // Refires after ack
+    let id_bool2 = inv
+        .insert_alert_if_no_unacked(
+            "state.flag",
+            Some(&srv),
+            "warning",
+            "flag true refire",
+            Some(&payload_bool),
+        )
+        .await?
+        .expect("bool payload must refire after ack");
+    assert_ne!(id_bool1, id_bool2);
+
+    // 5. Global alert (server_id = None) with string _source_event historical dedupe
+    let global_ev1 = serde_json::json!({"_source_event": "global-err-1"}).to_string();
+    let id_g1 = inv
+        .insert_alert_if_no_unacked(
+            "global.down",
+            None,
+            "critical",
+            "global down 1",
+            Some(&global_ev1),
+        )
+        .await?
+        .expect("first global alert with string _source_event must insert");
+    assert!(inv.ack_alert(id_g1).await?);
+    let dup_g1 = inv
+        .insert_alert_if_no_unacked(
+            "global.down",
+            None,
+            "critical",
+            "global down 1 rescan",
+            Some(&global_ev1),
+        )
+        .await?;
+    assert_eq!(
+        dup_g1, None,
+        "global alert with identical string _source_event must not reopen after ack"
+    );
+
     Ok(())
 }

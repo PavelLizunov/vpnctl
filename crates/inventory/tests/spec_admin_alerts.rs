@@ -388,3 +388,247 @@ async fn telegram_message_id_round_trip_and_recovery_lookup() {
         None
     );
 }
+
+// 14. Global vs server-scoped latest_alert_message_id isolation:
+//     server_id = None must match ONLY global (server_id IS NULL) alerts,
+//     and server_id = Some(id) must match ONLY that specific server.
+#[tokio::test]
+async fn latest_alert_message_id_global_vs_server_scoped_isolation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("de")).await.unwrap();
+    inv.add_server(&srv("fi")).await.unwrap();
+    let de = sid("de");
+    let fi = sid("fi");
+
+    // Case 1: Only server-scoped alert exists with a message id.
+    // A query for a global alert (server_id = None) must NOT match the server alert.
+    let srv_id = fire(&inv, "disk.pressure", Some(&de))
+        .await
+        .expect("server alert insert");
+    inv.set_alert_telegram_message_id(srv_id, "msg-de-1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", None)
+            .await
+            .unwrap(),
+        None,
+        "global lookup must not see server-scoped alert"
+    );
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", Some(&de))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("msg-de-1")
+    );
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", Some(&fi))
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Case 2: Global alert added afterwards with a newer message id.
+    // Global lookup matches global alert; server lookup matches server alert.
+    let global_id = fire(&inv, "disk.pressure", None)
+        .await
+        .expect("global alert insert");
+    inv.set_alert_telegram_message_id(global_id, "msg-global-1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("msg-global-1"),
+        "global lookup must find the global alert message id"
+    );
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", Some(&de))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("msg-de-1"),
+        "server lookup must still find server alert despite newer global alert"
+    );
+    assert_eq!(
+        inv.latest_alert_message_id("disk.pressure", Some(&fi))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+// 15. _source_event string payload historical dedupe across ack:
+//     A string _source_event deduplicates historically even after the alert is acked.
+#[tokio::test]
+async fn source_event_string_dedupes_historically_across_ack() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+    let s1 = sid("s1");
+
+    let payload_ev1 = serde_json::json!({"_source_event": "evt-alpha"}).to_string();
+    let id1 = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&s1),
+            "critical",
+            "down evt-alpha",
+            Some(&payload_ev1),
+        )
+        .await
+        .unwrap()
+        .expect("first insert with string _source_event");
+    assert!(id1 > 0);
+
+    // Unacked duplicate is suppressed.
+    let dup = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&s1),
+            "critical",
+            "down evt-alpha retry",
+            Some(&payload_ev1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dup, None);
+
+    // Ack the first alert.
+    assert!(inv.ack_alert(id1).await.unwrap());
+
+    // Rescan / resubmit of SAME source event after ack is STILL suppressed across history.
+    let rescan = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&s1),
+            "critical",
+            "down evt-alpha rescan",
+            Some(&payload_ev1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rescan, None,
+        "identical string _source_event must not reopen after ack"
+    );
+
+    // New string source event reopens and inserts.
+    let payload_ev2 = serde_json::json!({"_source_event": "evt-beta"}).to_string();
+    let id2 = inv
+        .insert_alert_if_no_unacked(
+            "health.down",
+            Some(&s1),
+            "critical",
+            "down evt-beta",
+            Some(&payload_ev2),
+        )
+        .await
+        .unwrap()
+        .expect("different string _source_event must insert");
+    assert_ne!(id1, id2);
+}
+
+// 16. Non-string _source_event (numeric / boolean) uses ordinary unacked-only semantics:
+//     Numeric and boolean payloads dedupe while unacked, but refire legitimately after ack.
+#[tokio::test]
+async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+    let s1 = sid("s1");
+
+    // --- Numeric payload ---
+    let num_payload = serde_json::json!({"_source_event": 42}).to_string();
+    let num_id1 = inv
+        .insert_alert_if_no_unacked(
+            "numeric.event",
+            Some(&s1),
+            "warning",
+            "num 1",
+            Some(&num_payload),
+        )
+        .await
+        .unwrap()
+        .expect("first numeric payload insert");
+
+    // Unacked duplicate is suppressed.
+    let num_dup = inv
+        .insert_alert_if_no_unacked(
+            "numeric.event",
+            Some(&s1),
+            "warning",
+            "num dup",
+            Some(&num_payload),
+        )
+        .await
+        .unwrap();
+    assert_eq!(num_dup, None);
+
+    // Ack numeric alert.
+    assert!(inv.ack_alert(num_id1).await.unwrap());
+
+    // After ack, re-firing with the SAME numeric payload succeeds (ordinary unacked semantics).
+    let num_id2 = inv
+        .insert_alert_if_no_unacked(
+            "numeric.event",
+            Some(&s1),
+            "warning",
+            "num 2",
+            Some(&num_payload),
+        )
+        .await
+        .unwrap()
+        .expect("numeric payload must refire after ack");
+    assert_ne!(num_id1, num_id2);
+
+    // --- Boolean payload ---
+    let bool_payload = serde_json::json!({"_source_event": true}).to_string();
+    let bool_id1 = inv
+        .insert_alert_if_no_unacked(
+            "bool.event",
+            Some(&s1),
+            "warning",
+            "bool 1",
+            Some(&bool_payload),
+        )
+        .await
+        .unwrap()
+        .expect("first bool payload insert");
+
+    // Unacked duplicate is suppressed.
+    let bool_dup = inv
+        .insert_alert_if_no_unacked(
+            "bool.event",
+            Some(&s1),
+            "warning",
+            "bool dup",
+            Some(&bool_payload),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bool_dup, None);
+
+    // Ack boolean alert.
+    assert!(inv.ack_alert(bool_id1).await.unwrap());
+
+    // After ack, re-firing with the SAME boolean payload succeeds (ordinary unacked semantics).
+    let bool_id2 = inv
+        .insert_alert_if_no_unacked(
+            "bool.event",
+            Some(&s1),
+            "warning",
+            "bool 2",
+            Some(&bool_payload),
+        )
+        .await
+        .unwrap()
+        .expect("boolean payload must refire after ack");
+    assert_ne!(bool_id1, bool_id2);
+}

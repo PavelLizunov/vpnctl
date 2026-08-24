@@ -92,7 +92,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
                 Some(p) => p,
                 None => crate::cmd::deploy::default_key_path()?,
             };
-            key_path.with_extension("pub")
+            crate::key_path::public_key_path(&key_path)
         }
     };
     let pubkey_text = std::fs::read_to_string(&pub_path)

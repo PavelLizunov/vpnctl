@@ -66,9 +66,28 @@ impl std::fmt::Debug for AppState {
 }
 
 /// Default deploy-key path for vpnctld. Matches the path the
-/// `/admin/settings` page surfaces + the path the clash-api poller
-/// reads via `VPNCTLD_DEPLOY_KEY` env (which still wins if set).
+/// `/admin/settings` page surfaces + the path poller/deploy tasks
+/// read via `VPNCTLD_DEPLOY_KEY` env (which wins if set).
 pub const DEFAULT_DEPLOY_KEY_PATH: &str = "/var/lib/vpnctl/.ssh/id_ed25519";
+
+/// Pure core of [`deploy_key_path`]: resolve deploy-key path given the
+/// optional raw environment variable value (`None` = unset).
+///
+/// Pure so it is unit-testable without touching the process environment.
+pub fn resolve_deploy_key_path(raw: Option<&str>) -> std::path::PathBuf {
+    match raw {
+        Some(val) if !val.trim().is_empty() => std::path::PathBuf::from(val.trim()),
+        _ => std::path::PathBuf::from(DEFAULT_DEPLOY_KEY_PATH),
+    }
+}
+
+/// Central resolver for vpnctld's deploy SSH key path.
+///
+/// Honors the `VPNCTLD_DEPLOY_KEY` environment variable when non-empty,
+/// otherwise falls back to [`DEFAULT_DEPLOY_KEY_PATH`].
+pub fn deploy_key_path() -> std::path::PathBuf {
+    resolve_deploy_key_path(std::env::var("VPNCTLD_DEPLOY_KEY").ok().as_deref())
+}
 
 /// Default backup directory for vpnctld. Surfaced in the Settings page's
 /// Backups section. Same value as `vpnctl_inventory::DEFAULT_BACKUP_DIR`
@@ -81,13 +100,13 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     let registry = Arc::new(build_registry()?);
 
     // Auto-bootstrap vpnctld's deploy SSH key on first start.
-    // Generates an ed25519 keypair at `/var/lib/vpnctl/.ssh/id_ed25519`
+    // Generates an ed25519 keypair at the resolved deploy key path
     // via the system `ssh-keygen` binary (no Rust crypto deps).
     // Idempotent — re-call when the key already exists is a no-op.
     // The public half is surfaced in the admin Settings page so the
     // operator can paste it into each VPN node's authorized_keys.
     // After that, every web-deploy / poller call is fully self-service.
-    let deploy_key_path = std::path::PathBuf::from(DEFAULT_DEPLOY_KEY_PATH);
+    let deploy_key_path = deploy_key_path();
     if let Err(e) = crate::ssh_subprocess::ensure_deploy_key(&deploy_key_path).await {
         tracing::warn!(
             target = "vpnctld::startup",
@@ -309,4 +328,56 @@ pub fn make_app_state_with_rate_limiter(
         },
         handle,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_deploy_key_path_defaults_when_unset() {
+        assert_eq!(
+            resolve_deploy_key_path(None),
+            PathBuf::from(DEFAULT_DEPLOY_KEY_PATH)
+        );
+    }
+
+    #[test]
+    fn resolve_deploy_key_path_defaults_when_empty() {
+        assert_eq!(
+            resolve_deploy_key_path(Some("")),
+            PathBuf::from(DEFAULT_DEPLOY_KEY_PATH)
+        );
+    }
+
+    #[test]
+    fn resolve_deploy_key_path_defaults_when_whitespace_only() {
+        assert_eq!(
+            resolve_deploy_key_path(Some("   \t \n ")),
+            PathBuf::from(DEFAULT_DEPLOY_KEY_PATH)
+        );
+    }
+
+    #[test]
+    fn resolve_deploy_key_path_honors_custom_override() {
+        assert_eq!(
+            resolve_deploy_key_path(Some("/etc/vpnctl/custom_id_ed25519")),
+            PathBuf::from("/etc/vpnctl/custom_id_ed25519")
+        );
+    }
+
+    #[test]
+    fn resolve_deploy_key_path_trims_whitespace() {
+        assert_eq!(
+            resolve_deploy_key_path(Some("  /custom/key/path  ")),
+            PathBuf::from("/custom/key/path")
+        );
+    }
+
+    #[test]
+    fn deploy_key_path_matches_pure_resolver() {
+        let expected = resolve_deploy_key_path(std::env::var("VPNCTLD_DEPLOY_KEY").ok().as_deref());
+        assert_eq!(deploy_key_path(), expected);
+    }
 }

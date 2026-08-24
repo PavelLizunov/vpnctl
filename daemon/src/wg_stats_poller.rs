@@ -32,7 +32,6 @@
 //! clash-poller's record-raw-filter-on-read contract.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use vpnctl_core::{SshTransport, UserId};
 use vpnctl_inventory::{SqliteInventory, VpnStatsDelta};
 
@@ -156,13 +155,12 @@ async fn poll_one_wg_server(
     pubkey_to_user: &HashMap<String, UserId>,
     byte_state: &mut ByteState,
 ) {
-    let key_path = std::env::var("VPNCTLD_DEPLOY_KEY")
-        .unwrap_or_else(|_| "/var/lib/vpnctl/.ssh/id_ed25519".to_string());
-    if !Path::new(&key_path).exists() {
+    let key_path = crate::app::deploy_key_path();
+    if !key_path.exists() {
         tracing::info!(
             target = "vpnctld::wg_poller",
             server = %server.id.0,
-            key = %key_path,
+            key = %key_path.display(),
             "skipping: deploy SSH key not yet on the homelab host"
         );
         return;
@@ -171,7 +169,7 @@ async fn poll_one_wg_server(
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
-        std::path::PathBuf::from(&key_path),
+        key_path,
     )
     .port(server.ssh_port);
 

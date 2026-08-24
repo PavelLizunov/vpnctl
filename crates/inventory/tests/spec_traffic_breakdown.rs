@@ -57,6 +57,7 @@ async fn rec_nic(inv: &SqliteInventory, sid: &ServerId, iface: &str, rx: u64, tx
     )
     .await
     .expect("record_node_health");
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
 }
 
 // ─── sum_nic_deltas (pure) ───────────────────────────────────────────

@@ -37,6 +37,8 @@ pub fn sum_nic_deltas(readings: &[(String, u64, u64)]) -> (u64, u64) {
 
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
+    let sample_seq: Option<i64> = r.try_get("sample_seq").ok();
+    let sample_id: Option<String> = r.try_get("sample_id").ok();
     let ts_s: String = r.try_get("ts")?;
     let ts = DateTime::parse_from_rfc3339(&ts_s)
         .map(|d| d.with_timezone(&Utc))
@@ -59,6 +61,8 @@ fn row_to_node_health(r: sqlx::sqlite::SqliteRow) -> Result<NodeHealthRow> {
     let nic_tx: Option<i64> = r.try_get("nic_tx_bytes")?;
     let nrestarts: Option<i64> = r.try_get("sing_box_nrestarts")?;
     Ok(NodeHealthRow {
+        sample_seq,
+        sample_id,
         ts,
         server_id: ServerId(server_id),
         sing_box_active: sb_i.map(|n| n != 0),
@@ -162,20 +166,22 @@ impl SqliteInventory {
         nic_tx_bytes: Option<u64>,
         sing_box_nrestarts: Option<u64>,
     ) -> Result<()> {
+        let sample_id = vpnctl_crypto::gen_uuid();
         // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
         let f2b = fail2ban_active.map(i64::from);
         sqlx::query(
             "INSERT INTO node_health
-             (ts, server_id, sing_box_active, fail2ban_active,
+             (sample_id, ts, server_id, sing_box_active, fail2ban_active,
               disk_used_mib, disk_total_mib,
               mem_available_mib, mem_total_mib,
               load_1min_x100, listening_ports_json, sing_box_log_bytes,
               kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
               sing_box_nrestarts)
-             VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
+        .bind(sample_id)
         .bind(&server_id.0)
         .bind(sb)
         .bind(f2b)
@@ -204,7 +210,7 @@ impl SqliteInventory {
         since_hours: u32,
     ) -> Result<Vec<NodeHealthRow>> {
         let rows = sqlx::query(
-            "SELECT ts, server_id, sing_box_active, fail2ban_active,
+            "SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
@@ -213,7 +219,7 @@ impl SqliteInventory {
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
-             ORDER BY ts DESC",
+             ORDER BY ts DESC, sample_seq DESC",
         )
         .bind(&server_id.0)
         .bind(format!("-{since_hours} hours"))
@@ -228,7 +234,7 @@ impl SqliteInventory {
     /// pull a whole 24h Vec just to read the first element.
     pub async fn latest_node_health(&self, server_id: &ServerId) -> Result<Option<NodeHealthRow>> {
         let row_opt = sqlx::query(
-            "SELECT ts, server_id, sing_box_active, fail2ban_active,
+            "SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
                     disk_used_mib, disk_total_mib,
                     mem_available_mib, mem_total_mib,
                     load_1min_x100, listening_ports_json, sing_box_log_bytes,
@@ -236,7 +242,7 @@ impl SqliteInventory {
                     sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
-             ORDER BY ts DESC, rowid DESC
+             ORDER BY ts DESC, sample_seq DESC
              LIMIT 1",
         )
         .bind(&server_id.0)
@@ -271,7 +277,7 @@ impl SqliteInventory {
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
                AND nic_rx_bytes IS NOT NULL AND nic_tx_bytes IS NOT NULL
-             ORDER BY ts ASC, rowid ASC",
+             ORDER BY ts ASC, sample_seq ASC",
         )
         .bind(&server_id.0)
         .bind(format!("-{since_hours} hours"))

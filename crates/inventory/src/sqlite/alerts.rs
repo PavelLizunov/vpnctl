@@ -262,7 +262,7 @@ impl SqliteInventory {
         let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT telegram_message_id FROM admin_alerts
              WHERE kind = ?1
-               AND (?2 IS NULL OR server_id = ?2)
+               AND ((?2 IS NULL AND server_id IS NULL) OR server_id = ?2)
                AND telegram_message_id IS NOT NULL
              ORDER BY id DESC
              LIMIT 1",
@@ -349,16 +349,27 @@ impl SqliteInventory {
         payload_json: Option<&str>,
     ) -> Result<Option<i64>> {
         let server_id_str = server_id.map(|s| s.0.as_str());
+        let source_event: Option<String> = payload_json.and_then(|raw| {
+            let val: serde_json::Value = serde_json::from_str(raw).ok()?;
+            val.get("_source_event")?.as_str().map(str::to_string)
+        });
         let res = sqlx::query(
             "INSERT OR IGNORE INTO admin_alerts
                  (kind, server_id, severity, summary, payload_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             SELECT ?1, ?2, ?3, ?4, ?5
+             WHERE (?6 IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM admin_alerts
+                 WHERE kind = ?1
+                   AND ((?2 IS NULL AND server_id IS NULL) OR server_id = ?2)
+                   AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$._source_event') ELSE NULL END = ?6
+             ))",
         )
         .bind(kind)
         .bind(server_id_str)
         .bind(severity)
         .bind(summary)
         .bind(payload_json)
+        .bind(source_event.as_deref())
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 1 {

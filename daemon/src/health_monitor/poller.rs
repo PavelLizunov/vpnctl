@@ -85,24 +85,14 @@ async fn scan_once_inner(
         // (prev, cur) = (rows[1], rows[0]).
         let cur = &rows[0];
         let prev = &rows[1];
-        for ev in diff_rows(prev, cur) {
-            if let Some(plan) = Remediation::for_kind(ev.kind) {
-                match inv
-                    .has_condition_since_recovery(ev.kind, plan.recovery_kind(), Some(&server.id))
-                    .await
-                {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            target = "vpnctld::health_monitor",
-                            server = %server.id.0,
-                            error = %e,
-                            kind = ev.kind,
-                            "could not determine auto-remediation spell state"
-                        );
-                        continue;
-                    }
+        for mut ev in diff_rows(prev, cur) {
+            if let (Some(p_id), Some(c_id)) = (prev.sample_id.as_deref(), cur.sample_id.as_deref())
+            {
+                if let serde_json::Value::Object(ref mut map) = ev.payload {
+                    map.insert(
+                        "_source_event".to_string(),
+                        serde_json::json!(format!("{p_id}:{c_id}")),
+                    );
                 }
             }
             // A level-trigger catches a daemon that starts while the log

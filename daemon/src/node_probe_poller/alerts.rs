@@ -616,12 +616,11 @@ pub async fn build_alert_sink(
         match inv.list_servers().await {
             Ok(servers) => {
                 if let Some(server) = servers.iter().find(|s| s.id == server_id) {
-                    let key_path = std::env::var("VPNCTLD_DEPLOY_KEY")
-                        .unwrap_or_else(|_| crate::app::DEFAULT_DEPLOY_KEY_PATH.to_string());
+                    let key_path = crate::app::deploy_key_path();
                     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
                         server.address.clone(),
                         server.ssh_user.clone(),
-                        std::path::PathBuf::from(&key_path),
+                        key_path,
                     )
                     .port(server.ssh_port);
                     sink = sink.with_via_ssh(ssh);
