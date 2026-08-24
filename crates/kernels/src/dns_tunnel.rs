@@ -315,10 +315,8 @@ RELAY_UNIT_EOF
 
         # ── Backend unit: loopback-only TLS-less VLESS sing-box. ──────
         # Restarted FIRST by apply_config so the relay's forward-target
-        # is reachable on boot. Resolves the absolute path to the sing-box
-        # binary dynamically (e.g. /usr/local/bin/sing-box or /usr/bin/sing-box)
-        # so custom or standard PATH locations are executed accurately.
-        SB_BIN=$(command -v sing-box 2>/dev/null || echo /usr/bin/sing-box)
+        # is reachable on boot. Uses fixed canonical /usr/bin/sing-box
+        # provisioned by SingBox::ensure_installed.
         cat > /etc/systemd/system/{backend}.service <<BACKEND_UNIT_EOF
 [Unit]
 Description=sing-box VLESS inbound for DNS tunnel (loopback :9001) — vpnctl-managed
@@ -327,7 +325,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$SB_BIN run -c {sb_config}
+ExecStart=/usr/bin/sing-box run -c {sb_config}
 Restart=on-failure
 RestartSec=3
 
@@ -357,30 +355,12 @@ impl DnsTunnel {
     pub fn new() -> Self {
         Self
     }
-}
 
-#[async_trait]
-impl Kernel for DnsTunnel {
-    fn id(&self) -> KernelId {
-        KernelId("dns-tunnel".to_string())
-    }
-
-    fn supported_protocols(&self) -> Vec<ProtocolId> {
-        // LOAD-BEARING: a kernel with an empty supported_protocols() is
-        // silently NEVER configured/started (deploy + admin both
-        // `if protocols_for_k.is_empty() { continue; }`). The dns-tunnel
-        // wire shape is exactly one protocol.
-        vec![ProtocolId("dns-tunnel".to_string())]
-    }
-
-    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
-        Some(KernelVersionRequirement {
-            policy: KernelVersionPolicy::Pin,
-            value: SLIPSTREAM_VERSION,
-        })
-    }
-
-    async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
+    pub(crate) async fn ensure_installed_with_cache(
+        &self,
+        ssh: &dyn SshTransport,
+        cache: &std::path::Path,
+    ) -> Result<()> {
         // ── 1. Read the cache binary FIRST (NO on-node build fallback). ──
         // slipstream-rust needs ≥2 GB RAM to build (Rust LTO +
         // picoquic/C); the target box has 960 MB. So unlike caddy
@@ -391,8 +371,7 @@ impl Kernel for DnsTunnel {
         // sha256 is what the content-aware reinstall decision compares
         // the on-node binary against (and it's the integrity digest fed
         // to `sha256sum -c` on the transfer).
-        let cache = slipstream_cache_path();
-        let bytes = match std::fs::read(&cache) {
+        let bytes = match std::fs::read(cache) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CoreError::Render(format!(
@@ -413,8 +392,9 @@ impl Kernel for DnsTunnel {
 
         // ── 2. Ensure sing-box backend is installed. ──────────────────
         // dns-tunnel uses sing-box as its loopback backend (dns-tunnel-singbox.service).
-        // If sing-box is absent, provision it using the canonical sing-box setup script.
+        // If sing-box is absent or below floor, provision it using the canonical sing-box setup script.
         crate::SingBox::new().ensure_installed(ssh).await?;
+        ssh.exec("test -x /usr/bin/sing-box").await?;
 
         // Content-aware idempotency probe: the on-node binary's sha256
         // (empty when absent).
@@ -484,6 +464,33 @@ impl Kernel for DnsTunnel {
             .await?;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Kernel for DnsTunnel {
+    fn id(&self) -> KernelId {
+        KernelId("dns-tunnel".to_string())
+    }
+
+    fn supported_protocols(&self) -> Vec<ProtocolId> {
+        // LOAD-BEARING: a kernel with an empty supported_protocols() is
+        // silently NEVER configured/started (deploy + admin both
+        // `if protocols_for_k.is_empty() { continue; }`). The dns-tunnel
+        // wire shape is exactly one protocol.
+        vec![ProtocolId("dns-tunnel".to_string())]
+    }
+
+    fn version_requirement(&self) -> Option<KernelVersionRequirement> {
+        Some(KernelVersionRequirement {
+            policy: KernelVersionPolicy::Pin,
+            value: SLIPSTREAM_VERSION,
+        })
+    }
+
+    async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
+        self.ensure_installed_with_cache(ssh, &slipstream_cache_path())
+            .await
     }
 
     fn render_config(
@@ -1447,143 +1454,235 @@ mod tests {
     }
 
     #[test]
-    fn runtime_provision_script_resolves_singbox_executable_path() {
+    fn runtime_provision_script_backend_unit_uses_fixed_usr_bin_sing_box() {
         let script = runtime_provision_script();
         assert!(
-            script.contains("SB_BIN=$(command -v sing-box 2>/dev/null || echo /usr/bin/sing-box)"),
-            "runtime provision script must dynamically resolve sing-box binary via command -v: {script}"
+            script.contains("ExecStart=/usr/bin/sing-box run -c /etc/dns-tunnel/tunnel-sb.json"),
+            "backend unit must use fixed /usr/bin/sing-box in ExecStart: {script}"
         );
         assert!(
-            script.contains("ExecStart=$SB_BIN run -c /etc/dns-tunnel/tunnel-sb.json"),
-            "backend unit must use the resolved $SB_BIN in ExecStart: {script}"
+            !script.contains("command -v sing-box"),
+            "misleading arbitrary PATH resolution for sing-box must be gone: {script}"
+        );
+        assert!(
+            !script.contains("$SB_BIN"),
+            "dynamic $SB_BIN variable must be gone: {script}"
         );
     }
 
-    #[test]
-    fn runtime_provision_script_handles_usr_local_bin_only_and_exact_exec_start() {
-        let script = runtime_provision_script();
-        assert!(
-            script.contains("SB_BIN=$(command -v sing-box 2>/dev/null || echo /usr/bin/sing-box)"),
-            "runtime_provision_script must resolve sing-box path: {script}"
-        );
+    #[derive(Debug, Default)]
+    struct MockEnsureInstalledSsh {
+        commands: std::sync::Mutex<Vec<String>>,
+        uploads: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        arch: String,
+        singbox_installed: std::sync::atomic::AtomicBool,
+        fail_singbox_setup: bool,
+        fail_singbox_assert: bool,
+    }
 
-        let run_snippet = |mock_singbox_path: Option<&str>| -> String {
-            let command_mock = match mock_singbox_path {
-                Some(p) => format!(
-                    r#"command() {{ if [ "$1" = "-v" ] && [ "$2" = "sing-box" ]; then echo "{p}"; return 0; fi; return 1; }}"#
-                ),
-                None => r#"command() { return 1; }"#.to_string(),
-            };
-            let test_script = format!(
-                r#"
-                set -eu
-                TMP_UNIT=$(mktemp)
-                trap 'rm -f "$TMP_UNIT"' EXIT
-                {command_mock}
-                SB_BIN=$(command -v sing-box 2>/dev/null || echo /usr/bin/sing-box)
-                cat > "$TMP_UNIT" <<BACKEND_UNIT_EOF
-[Unit]
-Description=sing-box VLESS inbound for DNS tunnel (loopback :9001) — vpnctl-managed
-After=network-online.target
-Wants=network-online.target
+    #[async_trait]
+    impl SshTransport for MockEnsureInstalledSsh {
+        async fn exec(&self, cmd: &str) -> Result<String> {
+            self.commands.lock().unwrap().push(cmd.to_string());
+            // sing-box setup script contains dpkg-query check for sing-box
+            if cmd.contains("dpkg-query") && cmd.contains("sing-box") {
+                if self.fail_singbox_setup {
+                    return Err(CoreError::Transport("sing-box setup failed".into()));
+                }
+                self.singbox_installed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(String::new());
+            }
+            if cmd.trim() == "test -x /usr/bin/sing-box" {
+                if self.fail_singbox_assert
+                    || !self
+                        .singbox_installed
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(CoreError::Transport(
+                        "test -x /usr/bin/sing-box: file not found".into(),
+                    ));
+                }
+                return Ok(String::new());
+            }
+            if cmd.contains("sha256sum /usr/local/bin/slipstream-server") {
+                return Ok(String::new());
+            }
+            if cmd.trim() == "uname -m" {
+                return Ok(self.arch.clone());
+            }
+            if cmd.contains("sha256sum -c") {
+                return Ok(String::new());
+            }
+            if cmd.contains("install -d -m 0750 /etc/dns-tunnel") {
+                return Ok(String::new());
+            }
+            if cmd.contains("systemctl is-active --quiet dns-tunnel") {
+                return Ok(String::new());
+            }
+            Ok(String::new())
+        }
 
-[Service]
-Type=simple
-ExecStart=$SB_BIN run -c /etc/dns-tunnel/tunnel-sb.json
-Restart=on-failure
-RestartSec=3
+        async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
+            self.uploads
+                .lock()
+                .unwrap()
+                .push((path.to_string(), content.to_vec()));
+            Ok(())
+        }
 
-[Install]
-WantedBy=multi-user.target
-BACKEND_UNIT_EOF
-                cat "$TMP_UNIT"
-                "#
-            );
-            let out = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&test_script)
-                .output()
-                .expect("failed to run test script");
-            assert!(out.status.success(), "shell execution failed: {:?}", out);
-            String::from_utf8_lossy(&out.stdout).to_string()
+        async fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_installed_provisions_singbox_package_and_asserts_usr_bin_sing_box() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("vpnctl-test-slipstream-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let cache_file = temp_dir.join("slipstream-bin");
+        std::fs::write(&cache_file, b"dummy-slipstream-binary-content").unwrap();
+
+        let ssh = MockEnsureInstalledSsh {
+            arch: "x86_64".into(),
+            ..Default::default()
         };
 
-        // 1. /usr/local/bin-only scenario: sing-box resolved to /usr/local/bin/sing-box
-        let unit_usr_local = run_snippet(Some("/usr/local/bin/sing-box"));
+        let result = DnsTunnel::new()
+            .ensure_installed_with_cache(&ssh, &cache_file)
+            .await;
         assert!(
-            unit_usr_local.contains(
-                "ExecStart=/usr/local/bin/sing-box run -c /etc/dns-tunnel/tunnel-sb.json"
-            ),
-            "ExecStart must use /usr/local/bin/sing-box when sing-box is only in /usr/local/bin:\n{unit_usr_local}"
+            result.is_ok(),
+            "ensure_installed failed: {:?}",
+            result.err()
         );
 
-        // 2. Canonical /usr/bin scenario: sing-box resolved to /usr/bin/sing-box
-        let unit_usr = run_snippet(Some("/usr/bin/sing-box"));
+        let cmds = ssh.commands.lock().unwrap();
+        // 1. SingBox::ensure_installed script was executed (contains dpkg-query sing-box)
         assert!(
-            unit_usr.contains("ExecStart=/usr/bin/sing-box run -c /etc/dns-tunnel/tunnel-sb.json"),
-            "ExecStart must use /usr/bin/sing-box when sing-box is in /usr/bin:\n{unit_usr}"
+            cmds.iter()
+                .any(|c| c.contains("dpkg-query") && c.contains("sing-box")),
+            "SingBox setup script must be executed during ensure_installed"
+        );
+        // 2. test -x /usr/bin/sing-box was asserted via SSH
+        assert!(
+            cmds.iter().any(|c| c.trim() == "test -x /usr/bin/sing-box"),
+            "must assert test -x /usr/bin/sing-box via SSH after SingBox::ensure_installed"
+        );
+        // Ordering: SingBox setup must precede test -x assertion, which must precede runtime provisioning
+        let sb_pos = cmds
+            .iter()
+            .position(|c| c.contains("dpkg-query") && c.contains("sing-box"))
+            .unwrap();
+        let assert_pos = cmds
+            .iter()
+            .position(|c| c.trim() == "test -x /usr/bin/sing-box")
+            .unwrap();
+        let prov_pos = cmds
+            .iter()
+            .position(|c| c.contains("install -d -m 0750 /etc/dns-tunnel"))
+            .unwrap();
+        assert!(
+            sb_pos < assert_pos,
+            "SingBox setup must precede test -x assertion"
+        );
+        assert!(
+            assert_pos < prov_pos,
+            "test -x assertion must precede runtime provisioning"
         );
 
-        // 3. Fallback scenario (sing-box not found via command -v)
-        let unit_fallback = run_snippet(None);
-        assert!(
-            unit_fallback
-                .contains("ExecStart=/usr/bin/sing-box run -c /etc/dns-tunnel/tunnel-sb.json"),
-            "ExecStart must fall back to /usr/bin/sing-box:\n{unit_fallback}"
-        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    #[test]
-    fn runtime_provision_script_usr_local_bin_only_end_to_end() {
-        let script = runtime_provision_script();
-        let test_script = format!(
-            r#"
-            set -eu
-            TMP_DIR=$(mktemp -d)
-            trap 'rm -rf "$TMP_DIR"' EXIT
-            mkdir -p "$TMP_DIR/systemd" "$TMP_DIR/run"
+    #[tokio::test]
+    async fn ensure_installed_fails_loudly_when_singbox_executable_assertion_fails() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "vpnctl-test-slipstream-fail-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let cache_file = temp_dir.join("slipstream-bin");
+        std::fs::write(&cache_file, b"dummy-slipstream-binary-content").unwrap();
 
-            # Mock external commands to isolate filesystem writes
-            install() {{ :; }}
-            id() {{ return 0; }}
-            useradd() {{ :; }}
-            systemctl() {{ :; }}
-            command() {{
-                if [ "$1" = "-v" ]; then
-                    if [ "$2" = "sing-box" ]; then
-                        echo "/usr/local/bin/sing-box"
-                        return 0
-                    elif [ "$2" = "/usr/local/bin/slipstream-server" ]; then
-                        return 0
-                    fi
-                fi
-                return 1
-            }}
+        let ssh = MockEnsureInstalledSsh {
+            arch: "x86_64".into(),
+            fail_singbox_assert: true,
+            ..Default::default()
+        };
 
-            # Run modified script redirecting /etc/systemd/system to TMP_DIR/systemd
-            EVAL_SCRIPT=$(cat <<'EOF'
-{script}
-EOF
-)
-            EVAL_SCRIPT=$(echo "$EVAL_SCRIPT" | sed "s|/etc/systemd/system/|$TMP_DIR/systemd/|g")
-            eval "$EVAL_SCRIPT"
-
-            cat "$TMP_DIR/systemd/dns-tunnel-singbox.service"
-            "#
-        );
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&test_script)
-            .output()
-            .expect("failed to execute test script for runtime_provision_script");
-        assert!(out.status.success(), "script failed: {:?}", out);
-        let generated_unit = String::from_utf8_lossy(&out.stdout);
+        let result = DnsTunnel::new()
+            .ensure_installed_with_cache(&ssh, &cache_file)
+            .await;
         assert!(
-            generated_unit.contains(
-                "ExecStart=/usr/local/bin/sing-box run -c /etc/dns-tunnel/tunnel-sb.json"
-            ),
-            "dns-tunnel-singbox.service ExecStart must resolve to /usr/local/bin/sing-box when sing-box is only in /usr/local/bin:\n{generated_unit}"
+            result.is_err(),
+            "ensure_installed must fail when test -x /usr/bin/sing-box fails"
         );
+
+        let cmds = ssh.commands.lock().unwrap();
+        // Runtime provisioning script must NOT have run
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.contains("install -d -m 0750 /etc/dns-tunnel")),
+            "runtime provisioning must NOT run if /usr/bin/sing-box assertion fails"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn ensure_installed_fails_when_singbox_setup_fails() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "vpnctl-test-slipstream-sb-fail-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let cache_file = temp_dir.join("slipstream-bin");
+        std::fs::write(&cache_file, b"dummy-slipstream-binary-content").unwrap();
+
+        let ssh = MockEnsureInstalledSsh {
+            arch: "x86_64".into(),
+            fail_singbox_setup: true,
+            ..Default::default()
+        };
+
+        let result = DnsTunnel::new()
+            .ensure_installed_with_cache(&ssh, &cache_file)
+            .await;
+        assert!(
+            result.is_err(),
+            "ensure_installed must fail when sing-box setup script fails"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn ensure_installed_fails_on_non_amd64_arch() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "vpnctl-test-slipstream-arch-fail-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let cache_file = temp_dir.join("slipstream-bin");
+        std::fs::write(&cache_file, b"dummy-slipstream-binary-content").unwrap();
+
+        let ssh = MockEnsureInstalledSsh {
+            arch: "aarch64".into(),
+            ..Default::default()
+        };
+
+        let result = DnsTunnel::new()
+            .ensure_installed_with_cache(&ssh, &cache_file)
+            .await;
+        let err = result.expect_err("ensure_installed must fail on non-amd64");
+        assert!(
+            err.to_string().contains("amd64-only"),
+            "error message must explain amd64 requirement: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

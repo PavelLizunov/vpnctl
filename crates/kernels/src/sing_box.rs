@@ -59,8 +59,9 @@ const SING_BOX_MIN_VERSION: &str = "1.13.18";
 /// static raw string. The composed script can be asserted directly in
 /// tests (`SING_BOX_SETUP_SCRIPT.as_str()` yields `&str`).
 static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box is
-    // ABSENT or its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
+    // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box package
+    // state is not 'install ok installed', /usr/bin/sing-box is absent, or
+    // its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
     // The node has dpkg, so `dpkg --compare-versions` does the comparison.
     // `$CUR` is quoted (it can be empty if `sing-box version` ever changes
     // its output) — an empty CUR compares LOWER than any real floor, so
@@ -73,10 +74,14 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
     set -eu
     export DEBIAN_FRONTEND=noninteractive
     NEED=0
-    if ! command -v sing-box >/dev/null 2>&1; then
+    REINSTALL=0
+    if [ "$(dpkg-query -W -f='${{Status}}' sing-box 2>/dev/null || true)" != "install ok installed" ]; then
         NEED=1
+    elif [ ! -x /usr/bin/sing-box ]; then
+        NEED=1
+        REINSTALL=1
     else
-        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
         # Upgrade when the installed version is BELOW the declared floor.
         dpkg --compare-versions "$CUR" ge "{min}" || NEED=1
     fi
@@ -97,23 +102,15 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
         echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
             > /etc/apt/sources.list.d/sagernet.list
         apt-get update -qq
-        apt-get install -y sing-box
-        # Post-install floor verification. `CUR` above is read from the
-        # RUNNING binary on PATH, which the apt install may NOT have
-        # changed: (a) a manually-installed /usr/local/bin/sing-box ahead
-        # of /usr/bin on PATH shadows the apt binary — PATH still resolves
-        # the stale one, so the gate stays unsatisfied and EVERY deploy
-        # re-runs apt forever (never converges); (b) MIN bumped past the
-        # SagerNet channel candidate — apt installs an older-than-MIN
-        # version and the deploy would otherwise report success while the
-        # floor is unreachable. Re-read the version that PATH now resolves
-        # and abort LOUD if it's STILL below MIN — a clear abort beats
-        # silent churn / shadow-install. (set -eu is active; the explicit
-        # `|| {{ … exit 1; }}` keeps the failing compare from being a bare
-        # non-zero that trips set -e before we print the diagnostic.)
-        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        if [ "$REINSTALL" = 1 ]; then
+            apt-get install -y --reinstall sing-box
+        else
+            apt-get install -y sing-box
+        fi
+        # Post-install floor verification on canonical /usr/bin/sing-box.
+        CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
         dpkg --compare-versions "$CUR" ge "{min}" || {{
-            echo "sing-box still <{min} after install (have '$CUR') — floor unreachable from this repo, or a non-apt binary shadows PATH at $(command -v sing-box)" >&2
+            echo "sing-box still <{min} after install (have '$CUR') — floor unreachable from this repo" >&2
             exit 1
         }}
     fi
@@ -259,7 +256,7 @@ F2B
     done
     [ "$(systemctl is-active fail2ban)" = "active" ] \
         || { journalctl -u fail2ban -n 20 >&2; exit 1; }
-    command -v sing-box  # final assertion — fails the exec on regression
+    test -x /usr/bin/sing-box  # final assertion — fails the exec on regression
     command -v logrotate
     command -v fail2ban-client
 "#;
@@ -457,7 +454,7 @@ impl Kernel for SingBox {
             .trim()
             .eq("active");
         let version = ssh
-            .exec("sing-box version 2>/dev/null | awk '/version/{print $3; exit}'")
+            .exec("/usr/bin/sing-box version 2>/dev/null | awk '/version/{print $3; exit}'")
             .await
             .ok()
             .map(|v| v.trim().to_string())
@@ -503,7 +500,7 @@ fn sing_box_apply_script() -> &'static str {
     // прошлым-рабочим конфигом.
     r#"
             set -eu
-            sing-box check -c /etc/sing-box/config.json.new
+            /usr/bin/sing-box check -c /etc/sing-box/config.json.new
             # Snapshot the current live config so a runtime-failed restart
             # can roll back. Only if a live config exists (first deploy has
             # none); -a preserves owner/mode.
@@ -1258,14 +1255,31 @@ mod tests {
         assert!(s.contains("set -eu"), "fail-fast shell flags");
     }
 
-    /// The sing-box install must be gated on a MINIMUM VERSION, not on
-    /// bare presence. Before this gate, `if ! command -v sing-box` wrapped
+    /// The sing-box install must be gated on canonical package state AND MINIMUM VERSION,
+    /// not on bare presence or arbitrary PATH. Before this gate, `if ! command -v sing-box` wrapped
     /// the apt install directly, so once ANY sing-box was on PATH `deploy`
     /// never upgraded it (fleet skew: de/is 1.13.7 vs cdn/nl 1.13.12).
+    /// Now, BOTH `dpkg-query sing-box == install ok installed` AND `/usr/bin/sing-box >= MIN`
+    /// are required; a manual /usr/local/bin binary must not skip apt.
     /// Companion to `setup_script_retains_install_log_and_logrotate_steps`.
     #[test]
     fn sing_box_setup_script_gates_install_on_min_version() {
         let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // Canonical dpkg package status check + /usr/bin/sing-box executable check:
+        assert!(
+            s.contains(r#"[ "$(dpkg-query -W -f='${Status}' sing-box 2>/dev/null || true)" != "install ok installed" ]"#),
+            "gate must require exact dpkg-query status 'install ok installed' for sing-box: {s}"
+        );
+        assert!(
+            s.contains("[ ! -x /usr/bin/sing-box ]"),
+            "gate must check for /usr/bin/sing-box executable: {s}"
+        );
+        assert!(
+            s.contains(
+                "CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{print $3; exit}')"
+            ),
+            "version read must explicitly target /usr/bin/sing-box: {s}"
+        );
         // The version comparison is present and uses the node's dpkg.
         assert!(
             s.contains("dpkg --compare-versions"),
@@ -1286,13 +1300,19 @@ mod tests {
         // absence proves the apt path is no longer skipped whenever any
         // sing-box is on PATH.
         assert!(
-            !s.contains("if ! command -v sing-box >/dev/null; then"),
+            !s.contains("if ! command -v sing-box"),
             "the bare-presence-only install gate must be gone: {s}"
         );
-        // The apt install is now reached via the version-aware NEED gate.
+        // The apt install is reached via the version-aware NEED gate, and a
+        // package that claims installed while /usr/bin is missing is repaired
+        // with an explicit reinstall rather than an apt no-op.
         assert!(
             s.contains(r#"if [ "$NEED" = 1 ]; then"#),
             "apt install must be reached via the version-aware NEED gate: {s}"
+        );
+        assert!(
+            s.contains("REINSTALL=1") && s.contains("apt-get install -y --reinstall sing-box"),
+            "missing canonical binary must force package reinstall: {s}"
         );
         // The SagerNet repo/key setup and the final assertion are retained.
         assert!(
@@ -1303,19 +1323,154 @@ mod tests {
             "SagerNet repo setup + apt install must be retained inside the gate: {s}"
         );
         assert!(
-            s.contains("command -v sing-box  # final assertion"),
-            "the final `command -v sing-box` assertion must remain: {s}"
+            s.contains("test -x /usr/bin/sing-box  # final assertion"),
+            "the final `test -x /usr/bin/sing-box` assertion must remain: {s}"
         );
     }
 
-    /// After the apt install, the script must RE-VERIFY that the version
-    /// PATH now resolves actually satisfies the floor — otherwise two
-    /// silent failure modes survive: (a) a non-apt /usr/local/bin/sing-box
-    /// shadowing PATH keeps `CUR < MIN` forever → apt re-runs EVERY deploy
-    /// and never converges; (b) MIN bumped past the SagerNet candidate →
-    /// apt installs an older-than-MIN version and the deploy reports
-    /// success while the floor is unreachable. The fix re-reads the
-    /// version and aborts loud (`exit 1`) when it's still below MIN.
+    /// Comprehensive evaluation of the SingBox setup gate shell logic:
+    /// 1. Package installed + /usr/bin/sing-box >= floor -> SKIPPED (NEED=0)
+    /// 2. Manual /usr/local/bin present on PATH but package missing -> TRIGGERED (NEED=1, apt NOT skipped)
+    /// 3. Package installed but /usr/bin/sing-box missing -> TRIGGERED (NEED=1)
+    /// 4. Package installed but /usr/bin/sing-box below floor -> TRIGGERED (NEED=1)
+    /// 5. Package half-installed / broken status -> TRIGGERED (NEED=1)
+    #[test]
+    fn sing_box_setup_script_gate_evaluation() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        assert!(s.contains("dpkg-query -W -f='${Status}' sing-box"));
+
+        let gate_block = s
+            .lines()
+            .skip_while(|line| !line.contains("dpkg-query -W -f='${Status}' sing-box"))
+            .take_while(|line| !line.trim().starts_with("if [ \"$NEED\" = 1 ]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let run_gate = |pkg_status: &str, usr_bin_exists: bool, usr_bin_ver: &str| -> String {
+            let temp_dir =
+                std::env::temp_dir().join(format!("vpnctl-test-gate-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let mock_bin = temp_dir.join("sing-box");
+            if usr_bin_exists {
+                let script = format!(
+                    "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo \"sing-box version {usr_bin_ver}\"; exit 0; fi\nexit 0\n"
+                );
+                std::fs::write(&mock_bin, script).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+            } else {
+                let _ = std::fs::remove_file(&mock_bin);
+            }
+
+            let mut gate_code = gate_block.clone();
+            gate_code = gate_code.replace("/usr/bin/sing-box", &mock_bin.to_string_lossy());
+
+            let test_script = format!(
+                r#"
+                dpkg() {{
+                    if [ "$1" = "--compare-versions" ]; then
+                        v1="$2"
+                        op="$3"
+                        v2="$4"
+                        if [ "$v1" = "$v2" ]; then return 0; fi
+                        awk -v v1="$v1" -v v2="$v2" 'BEGIN {{
+                            n1 = split(v1, a1, /[.-]/);
+                            n2 = split(v2, a2, /[.-]/);
+                            n = (n1 > n2 ? n1 : n2);
+                            for (i = 1; i <= n; i++) {{
+                                d1 = (i <= n1 ? a1[i] + 0 : 0);
+                                d2 = (i <= n2 ? a2[i] + 0 : 0);
+                                if (d1 > d2) exit 0;
+                                if (d1 < d2) exit 1;
+                            }}
+                            exit 0;
+                        }}'
+                        return $?
+                    fi
+                    return 1
+                }}
+                dpkg-query() {{
+                    for arg in "$@"; do
+                        if [ "$arg" = "sing-box" ]; then
+                            if [ -n "{pkg_status}" ]; then echo -n "{pkg_status}"; return 0; else return 1; fi
+                        fi
+                    done
+                    return 1
+                }}
+                NEED=0
+                {gate_code}
+                if [ "$NEED" = 1 ]; then
+                    echo "TRIGGERED"
+                else
+                    echo "SKIPPED"
+                fi
+                "#,
+                pkg_status = pkg_status,
+                gate_code = gate_code,
+            );
+
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&test_script)
+                .output()
+                .expect("failed to execute gate evaluation");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // 1. Both package installed ok and /usr/bin/sing-box at floor -> SKIPPED (idempotent)
+        assert_eq!(
+            run_gate("install ok installed", true, SING_BOX_MIN_VERSION),
+            "SKIPPED",
+            "installed package at min version must skip apt"
+        );
+        // Above floor -> SKIPPED
+        assert_eq!(
+            run_gate("install ok installed", true, "1.14.0"),
+            "SKIPPED",
+            "installed package above min version must skip apt"
+        );
+
+        // 2. Manual /usr/local/bin scenario (package not installed in dpkg) -> TRIGGERED
+        assert_eq!(
+            run_gate("", true, "1.14.0"),
+            "TRIGGERED",
+            "unregistered package state must trigger apt even if executable exists"
+        );
+
+        // 3. Package registered but /usr/bin/sing-box missing -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok installed", false, ""),
+            "TRIGGERED",
+            "missing /usr/bin/sing-box must trigger apt"
+        );
+
+        // 4. Package registered but /usr/bin/sing-box below floor -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok installed", true, "1.13.7"),
+            "TRIGGERED",
+            "installed package below floor version must trigger apt upgrade"
+        );
+
+        // 5. Half-installed / config-files package state -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok half-installed", true, "1.14.0"),
+            "TRIGGERED",
+            "half-installed package state must trigger apt"
+        );
+        assert_eq!(
+            run_gate("deinstall ok config-files", true, "1.14.0"),
+            "TRIGGERED",
+            "config-files package state must trigger apt"
+        );
+    }
+
+    /// After the apt install, the script must RE-VERIFY that /usr/bin/sing-box
+    /// satisfies the floor — failing loud (`exit 1`) when it's still below MIN.
     /// Companion to `sing_box_setup_script_gates_install_on_min_version`.
     #[test]
     fn sing_box_setup_script_verifies_floor_after_install() {
@@ -1345,11 +1500,13 @@ mod tests {
             tail.contains("exit 1"),
             "a failed post-install floor check must abort the deploy with exit 1: {s}"
         );
-        // The diagnostic names the unreachable-floor + shadowed-PATH causes
-        // and points at the resolved binary path.
         assert!(
-            s.contains("floor unreachable") && s.contains("command -v sing-box)"),
-            "the abort diagnostic must explain the floor-unreachable / shadowed-PATH causes: {s}"
+            tail.contains("/usr/bin/sing-box version"),
+            "the re-check must specifically test /usr/bin/sing-box: {s}"
+        );
+        assert!(
+            s.contains("floor unreachable from this repo"),
+            "the abort diagnostic must explain the floor-unreachable cause: {s}"
         );
     }
 
