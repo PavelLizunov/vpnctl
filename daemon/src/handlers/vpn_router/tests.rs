@@ -162,7 +162,7 @@ fn render_vless_uri_post_rename_fragment_format() {
     // re-added at the front of the query string. See doc-comment
     // on `render_vless_uri` for the full rationale.
     // 2026-06-16 DPI-evasion: `fp=randomized` (was `fp=chrome`).
-    let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=randomized&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision#Germany%20VLESS%20~tester-1";
+    let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=randomized&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1";
     assert_eq!(got, expected, "vless URI fragment drifted");
 }
 
