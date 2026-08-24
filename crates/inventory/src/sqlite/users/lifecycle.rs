@@ -1,6 +1,6 @@
 use super::crud::row_to_user;
-use crate::sqlite::base::{Result, SqliteInventory, SqliteInventoryError, escape_like};
-use crate::sqlite::models::UserLifecycle;
+use crate::sqlite::base::{SqliteInventory, escape_like};
+use crate::sqlite::models::{Result, SqliteInventoryError, UserLifecycle};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use vpnctl_core::{ServerId, User, UserId};

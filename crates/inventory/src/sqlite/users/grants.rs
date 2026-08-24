@@ -1,4 +1,5 @@
-use crate::sqlite::base::{Result, SqliteInventory, SqliteInventoryError};
+use crate::sqlite::base::SqliteInventory;
+use crate::sqlite::models::{Result, SqliteInventoryError};
 use crate::sqlite::users::crud::row_to_user;
 use chrono::{DateTime, Utc};
 use sqlx::Row;

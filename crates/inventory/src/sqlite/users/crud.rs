@@ -1,4 +1,5 @@
-use crate::sqlite::base::{Result, SqliteInventory, SqliteInventoryError, map_unique};
+use crate::sqlite::base::{SqliteInventory, map_unique};
+use crate::sqlite::models::{Result, SqliteInventoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use vpnctl_core::{User, UserId};

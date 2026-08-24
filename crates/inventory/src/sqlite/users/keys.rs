@@ -1,6 +1,7 @@
 use super::crud::row_to_user;
 use super::grants::find_effective_uuid_conflict;
-use crate::sqlite::base::{Result, SqliteInventory, SqliteInventoryError, map_unique};
+use crate::sqlite::base::{SqliteInventory, map_unique};
+use crate::sqlite::models::{Result, SqliteInventoryError};
 use sqlx::Row;
 use vpnctl_core::{ServerId, User, UserId};
 
