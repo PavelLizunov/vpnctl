@@ -13,7 +13,7 @@ async fn every_current_kernel_reports_an_active_installed_version() {
         (
             Box::new(SingBox::new()),
             vec!["systemctl is-active sing-box 2>/dev/null || true"],
-            "sing-box version 2>/dev/null | awk '/version/{print $3; exit}'",
+            "/usr/bin/sing-box version 2>/dev/null | awk '/version/{print $3; exit}'",
             "1.13.18",
         ),
         (
@@ -24,7 +24,10 @@ async fn every_current_kernel_reports_an_active_installed_version() {
         ),
         (
             Box::new(Caddy::new()),
-            vec!["systemctl is-active caddy 2>/dev/null || true"],
+            vec![
+                "systemctl is-active caddy 2>/dev/null || true",
+                "if [ -f /etc/caddy/vlessws-singbox.json ] || systemctl is-active --quiet caddy-vlessws 2>/dev/null || systemctl is-enabled --quiet caddy-vlessws 2>/dev/null; then systemctl is-active --quiet caddy-vlessws 2>/dev/null && echo active || echo inactive; else echo absent; fi",
+            ],
             "/usr/local/bin/caddy version 2>/dev/null | awk '{print $1; exit}'",
             "v2.11.4",
         ),
@@ -71,7 +74,10 @@ async fn every_current_kernel_reports_inactive_without_turning_it_into_transport
         ),
         (
             Box::new(Caddy::new()),
-            vec!["systemctl is-active caddy 2>/dev/null || true"],
+            vec![
+                "systemctl is-active caddy 2>/dev/null || true",
+                "if [ -f /etc/caddy/vlessws-singbox.json ] || systemctl is-active --quiet caddy-vlessws 2>/dev/null || systemctl is-enabled --quiet caddy-vlessws 2>/dev/null; then systemctl is-active --quiet caddy-vlessws 2>/dev/null && echo active || echo inactive; else echo absent; fi",
+            ],
         ),
         (
             Box::new(DnsTunnel::new()),

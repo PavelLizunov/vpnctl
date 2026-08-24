@@ -60,7 +60,8 @@ use vpnctl_core::{
 
 use self::builder::{
     CADDY_RESTART_IF_ACTIVE, CADDY_VERSION, caddy_build_script, caddy_cache_path,
-    caddy_needs_reinstall, caddy_present, caddy_runtime_provision_script,
+    caddy_needs_reinstall, caddy_present, caddy_restart_command, caddy_runtime_provision_script,
+    caddy_vlessws_status_command,
 };
 use self::render::{
     BUNDLE_DELIMITER, naive_apply_script, render_naive_config, render_vlessws_bundle,
@@ -226,21 +227,31 @@ impl Kernel for Caddy {
             return Ok(());
         }
         ssh.upload("/etc/caddy/Caddyfile.new", config).await?;
-        ssh.exec(naive_apply_script()).await?;
+        ssh.exec(&naive_apply_script()).await?;
         Ok(())
     }
 
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()> {
-        ssh.exec("systemctl restart caddy").await?;
+        ssh.exec(&caddy_restart_command()).await?;
         Ok(())
     }
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
-        let active = ssh
+        let caddy_active = ssh
             .exec("systemctl is-active caddy 2>/dev/null || true")
             .await?
             .trim()
             .eq("active");
+        let active = if caddy_active {
+            let probe = ssh
+                .exec(&caddy_vlessws_status_command())
+                .await?
+                .trim()
+                .to_string();
+            probe == "active" || probe == "absent"
+        } else {
+            false
+        };
         let version = ssh
             .exec("/usr/local/bin/caddy version 2>/dev/null | awk '{print $1; exit}'")
             .await

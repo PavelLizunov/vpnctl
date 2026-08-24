@@ -25,6 +25,31 @@ pub(crate) const FORWARDPROXY_PIN: &str = "d62c80d3dd2c";
 pub(crate) const CADDY_RESTART_IF_ACTIVE: &str =
     "if systemctl is-active --quiet caddy; then systemctl restart caddy; fi";
 
+/// Minimal restart command for the caddy kernel. Restarts the managed
+/// `caddy-vlessws` backend unit FIRST if it exists/active/enabled (so caddy's
+/// `reverse_proxy` upstream is ready), then restarts `caddy`. On Naive-only
+/// deployments where the backend is absent, skips the backend without error.
+pub(crate) fn caddy_restart_command() -> String {
+    format!(
+        "if [ -f {sb_config} ] || systemctl is-active --quiet {vlessws_unit} 2>/dev/null || systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then systemctl restart {vlessws_unit}; fi && systemctl restart caddy",
+        sb_config = VLESSWS_SINGBOX_CONFIG,
+        vlessws_unit = VLESSWS_UNIT,
+    )
+}
+
+/// Status probe command for the managed `caddy-vlessws` backend unit.
+/// Outputs:
+/// - `active` if the backend is managed and active
+/// - `inactive` if the backend is managed (config exists or unit enabled/active) but down
+/// - `absent` if the backend is not part of this deployment (Naive-only)
+pub(crate) fn caddy_vlessws_status_command() -> String {
+    format!(
+        "if [ -f {sb_config} ] || systemctl is-active --quiet {vlessws_unit} 2>/dev/null || systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then systemctl is-active --quiet {vlessws_unit} 2>/dev/null && echo active || echo inactive; else echo absent; fi",
+        sb_config = VLESSWS_SINGBOX_CONFIG,
+        vlessws_unit = VLESSWS_UNIT,
+    )
+}
+
 /// The masquerade site served to unauthenticated probes. Constant
 /// (no per-deploy state), so it's provisioned once in `ensure_installed`
 /// rather than re-rendered every `apply_config`.

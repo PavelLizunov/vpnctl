@@ -59,8 +59,9 @@ const SING_BOX_MIN_VERSION: &str = "1.13.18";
 /// static raw string. The composed script can be asserted directly in
 /// tests (`SING_BOX_SETUP_SCRIPT.as_str()` yields `&str`).
 static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box is
-    // ABSENT or its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
+    // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box package
+    // state is not 'install ok installed', /usr/bin/sing-box is absent, or
+    // its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
     // The node has dpkg, so `dpkg --compare-versions` does the comparison.
     // `$CUR` is quoted (it can be empty if `sing-box version` ever changes
     // its output) — an empty CUR compares LOWER than any real floor, so
@@ -73,10 +74,14 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
     set -eu
     export DEBIAN_FRONTEND=noninteractive
     NEED=0
-    if ! command -v sing-box >/dev/null 2>&1; then
+    REINSTALL=0
+    if [ "$(dpkg-query -W -f='${{Status}}' sing-box 2>/dev/null || true)" != "install ok installed" ]; then
         NEED=1
+    elif [ ! -x /usr/bin/sing-box ]; then
+        NEED=1
+        REINSTALL=1
     else
-        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
         # Upgrade when the installed version is BELOW the declared floor.
         dpkg --compare-versions "$CUR" ge "{min}" || NEED=1
     fi
@@ -85,28 +90,27 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
         apt-get install -y --no-install-recommends \
             curl gpg ca-certificates
         install -d -m 0755 /usr/share/keyrings
+        KEYRING_TMP="/usr/share/keyrings/sagernet.gpg.tmp.$$"
+        trap 'rm -f "$KEYRING_TMP"' EXIT
         curl -fsSL https://sing-box.app/gpg.key \
-            | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
+            | gpg --dearmor --yes -o "$KEYRING_TMP"
+        test -s "$KEYRING_TMP"
+        gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+        chmod 0644 "$KEYRING_TMP"
+        mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg
+        trap - EXIT
         echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
             > /etc/apt/sources.list.d/sagernet.list
         apt-get update -qq
-        apt-get install -y sing-box
-        # Post-install floor verification. `CUR` above is read from the
-        # RUNNING binary on PATH, which the apt install may NOT have
-        # changed: (a) a manually-installed /usr/local/bin/sing-box ahead
-        # of /usr/bin on PATH shadows the apt binary — PATH still resolves
-        # the stale one, so the gate stays unsatisfied and EVERY deploy
-        # re-runs apt forever (never converges); (b) MIN bumped past the
-        # SagerNet channel candidate — apt installs an older-than-MIN
-        # version and the deploy would otherwise report success while the
-        # floor is unreachable. Re-read the version that PATH now resolves
-        # and abort LOUD if it's STILL below MIN — a clear abort beats
-        # silent churn / shadow-install. (set -eu is active; the explicit
-        # `|| {{ … exit 1; }}` keeps the failing compare from being a bare
-        # non-zero that trips set -e before we print the diagnostic.)
-        CUR=$(sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
+        if [ "$REINSTALL" = 1 ]; then
+            apt-get install -y --reinstall sing-box
+        else
+            apt-get install -y sing-box
+        fi
+        # Post-install floor verification on canonical /usr/bin/sing-box.
+        CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{{print $3; exit}}')
         dpkg --compare-versions "$CUR" ge "{min}" || {{
-            echo "sing-box still <{min} after install (have '$CUR') — floor unreachable from this repo, or a non-apt binary shadows PATH at $(command -v sing-box)" >&2
+            echo "sing-box still <{min} after install (have '$CUR') — floor unreachable from this repo" >&2
             exit 1
         }}
     fi
@@ -201,12 +205,19 @@ LR
     # runs the sing-box kernel today; a kernel-independent bootstrap home
     # for host-hardening is the longer-term fix for amneziawg/caddy-only
     # nodes — same orthogonality note as the cert provisioning above.)
-    if ! command -v fail2ban-client >/dev/null 2>&1; then
+    #
+    # Gate on BOTH fail2ban and python3-systemd: a node where fail2ban is
+    # missing/half-installed or python3-systemd is missing (e.g. installed with
+    # --no-install-recommends or prior to Debian 12 journald requirements) must
+    # run apt-get to install/repair before fail2ban restarts with backend=systemd.
+    # Package detection requires exact status 'install ok installed' for both.
+    if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ] \
+        || [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]; then
         # `apt-get update` here too: the sing-box block above only runs it
         # when sing-box is ABSENT, so on a re-deploy (sing-box present,
-        # fail2ban absent) the cache could be stale → 'Unable to locate'.
+        # fail2ban or python3-systemd absent) the cache could be stale → 'Unable to locate'.
         apt-get update -qq
-        apt-get install -y --no-install-recommends fail2ban
+        apt-get install -y --no-install-recommends fail2ban python3-systemd
     fi
     # Bind the ban action to the EFFECTIVE sshd listen port (a node may
     # set a custom Port via a systemd drop-in / -p, not just sshd_config).
@@ -245,7 +256,7 @@ F2B
     done
     [ "$(systemctl is-active fail2ban)" = "active" ] \
         || { journalctl -u fail2ban -n 20 >&2; exit 1; }
-    command -v sing-box  # final assertion — fails the exec on regression
+    test -x /usr/bin/sing-box  # final assertion — fails the exec on regression
     command -v logrotate
     command -v fail2ban-client
 "#;
@@ -443,7 +454,7 @@ impl Kernel for SingBox {
             .trim()
             .eq("active");
         let version = ssh
-            .exec("sing-box version 2>/dev/null | awk '/version/{print $3; exit}'")
+            .exec("/usr/bin/sing-box version 2>/dev/null | awk '/version/{print $3; exit}'")
             .await
             .ok()
             .map(|v| v.trim().to_string())
@@ -489,7 +500,7 @@ fn sing_box_apply_script() -> &'static str {
     // прошлым-рабочим конфигом.
     r#"
             set -eu
-            sing-box check -c /etc/sing-box/config.json.new
+            /usr/bin/sing-box check -c /etc/sing-box/config.json.new
             # Snapshot the current live config so a runtime-failed restart
             # can roll back. Only if a live config exists (first deploy has
             # none); -a preserves owner/mode.
@@ -752,8 +763,12 @@ mod tests {
     fn setup_script_installs_and_configures_fail2ban() {
         let s = SING_BOX_SETUP_SCRIPT.as_str();
         assert!(
-            s.contains("--no-install-recommends fail2ban"),
-            "fail2ban package install missing"
+            s.contains("--no-install-recommends fail2ban python3-systemd"),
+            "fail2ban and python3-systemd package install missing"
+        );
+        assert!(
+            s.contains("python3-systemd"),
+            "python3-systemd package install missing"
         );
         assert!(
             s.contains("/etc/fail2ban/jail.local"),
@@ -784,6 +799,395 @@ mod tests {
             s.contains("command -v fail2ban-client"),
             "final assertion must verify fail2ban-client present"
         );
+    }
+
+    /// Package detection must check exact status 'install ok installed' via
+    /// `dpkg-query -W -f='${Status}'` for BOTH fail2ban and python3-systemd.
+    /// If EITHER package is missing, half-installed, or not exact 'install ok installed',
+    /// apt-get must be triggered to install/repair the node.
+    #[test]
+    fn setup_script_package_detection_uses_exact_dpkg_query_status() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // The gate MUST check fail2ban and python3-systemd status via exact dpkg-query.
+        assert!(
+            s.contains(r#"dpkg-query -W -f='${Status}' fail2ban"#),
+            "fail2ban gate must check fail2ban status via dpkg-query: {s}"
+        );
+        assert!(
+            s.contains(r#"dpkg-query -W -f='${Status}' python3-systemd"#),
+            "fail2ban gate must check python3-systemd status via dpkg-query: {s}"
+        );
+        assert!(
+            s.contains("\"install ok installed\""),
+            "gate must require exact 'install ok installed' status: {s}"
+        );
+        // The old bare-presence / dpkg -s checks must NOT be present.
+        assert!(
+            !s.contains("command -v fail2ban-client >/dev/null 2>&1 ||"),
+            "bare command -v fail2ban-client gate must be gone: {s}"
+        );
+        assert!(
+            !s.contains("dpkg -s python3-systemd"),
+            "bare dpkg -s python3-systemd check must be gone: {s}"
+        );
+        // Disjunction: enters install block if EITHER status is not 'install ok installed'.
+        assert!(
+            s.contains(r#"[ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ]"#)
+                && s.contains(r#"[ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]"#),
+            "gate must check both fail2ban and python3-systemd status against 'install ok installed': {s}"
+        );
+
+        // Test shell evaluation of the gate against various installation states:
+        let gate_block = s
+            .lines()
+            .skip_while(|line| !line.contains("dpkg-query -W -f='${Status}' fail2ban"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let run_gate = |f2b_status: &str, py3_status: &str| -> String {
+            let test_script = format!(
+                r#"
+                dpkg-query() {{
+                    pkg="$3"
+                    if [ "$pkg" = "fail2ban" ]; then
+                        if [ -n "{f2b_status}" ]; then echo -n "{f2b_status}"; return 0; else return 1; fi
+                    elif [ "$pkg" = "python3-systemd" ]; then
+                        if [ -n "{py3_status}" ]; then echo -n "{py3_status}"; return 0; else return 1; fi
+                    fi
+                    return 1
+                }}
+                {gate_block}
+                    echo "TRIGGERED"
+                else
+                    echo "SKIPPED"
+                fi
+                "#
+            );
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&test_script)
+                .output()
+                .expect("failed to execute bash for gate evaluation test");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Fully installed: SKIPPED (idempotent / minimal)
+        assert_eq!(
+            run_gate("install ok installed", "install ok installed"),
+            "SKIPPED",
+            "both installed ok must skip apt"
+        );
+        // Partial install (fail2ban installed, python3-systemd missing): MUST trigger install/repair
+        assert_eq!(
+            run_gate("install ok installed", ""),
+            "TRIGGERED",
+            "partial-installed state (fail2ban installed, python3-systemd missing) must trigger install"
+        );
+        // Fresh install (both missing): MUST trigger install
+        assert_eq!(
+            run_gate("", ""),
+            "TRIGGERED",
+            "fresh state (both missing) must trigger install"
+        );
+        // Stale package state (fail2ban missing, python3-systemd installed): MUST trigger install
+        assert_eq!(
+            run_gate("", "install ok installed"),
+            "TRIGGERED",
+            "fail2ban missing state must trigger install"
+        );
+        // Half-installed fail2ban: MUST trigger install
+        assert_eq!(
+            run_gate("install ok half-installed", "install ok installed"),
+            "TRIGGERED",
+            "half-installed fail2ban must trigger install"
+        );
+        // Deinstall config-files state: MUST trigger install
+        assert_eq!(
+            run_gate("deinstall ok config-files", "install ok installed"),
+            "TRIGGERED",
+            "config-files fail2ban must trigger install"
+        );
+        // Half-configured python3-systemd: MUST trigger install
+        assert_eq!(
+            run_gate("install ok installed", "install ok half-configured"),
+            "TRIGGERED",
+            "half-configured python3-systemd must trigger install"
+        );
+    }
+
+    /// Planted reversal test: proves that modifying package detection conditions
+    /// (e.g. conjunction `&&` instead of disjunction `||`, equality `=` instead of `!=`)
+    /// alters the branch behavior and fails the contract.
+    #[test]
+    fn planted_reversal_package_detection_gate() {
+        // Planted reversal 1: Conjunction instead of disjunction (&& instead of ||)
+        // If gate used &&, a node with fail2ban installed but python3-systemd missing
+        // would be SKIPPED instead of repaired.
+        let conjunctive_gate = r#"
+            if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ] \
+                && [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]; then
+        "#;
+        let test_script = format!(
+            r#"
+            dpkg-query() {{
+                pkg="$3"
+                if [ "$pkg" = "fail2ban" ]; then echo -n "install ok installed"; return 0; fi
+                if [ "$pkg" = "python3-systemd" ]; then return 1; fi
+                return 1
+            }}
+            {conjunctive_gate}
+                echo "TRIGGERED"
+            else
+                echo "SKIPPED"
+            fi
+            "#
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&test_script)
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            result, "SKIPPED",
+            "planted conjunction must produce SKIPPED on partial install (reversal proof)"
+        );
+
+        // Planted reversal 2: Equality `=` instead of `!=`
+        // If gate checked =, a fully installed node would be TRIGGERED forever (loss of idempotency).
+        let equality_gate = r#"
+            if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" = "install ok installed" ] \
+                || [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" = "install ok installed" ]; then
+        "#;
+        let test_script = format!(
+            r#"
+            dpkg-query() {{
+                echo -n "install ok installed"; return 0;
+            }}
+            {equality_gate}
+                echo "TRIGGERED"
+            else
+                echo "SKIPPED"
+            fi
+            "#
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&test_script)
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            result, "TRIGGERED",
+            "planted equality must produce TRIGGERED on fully installed node (reversal proof)"
+        );
+    }
+
+    /// Atomic GPG keyring provisioning test:
+    /// 1. Downloads / dearmors to a temporary file in the same directory `/usr/share/keyrings`.
+    /// 2. Sets an EXIT cleanup trap to remove the temporary file on error.
+    /// 3. Validates that the dearmored key is non-empty (`test -s`) and parses as a valid keyring (`gpg --no-default-keyring --keyring ... --list-keys`).
+    /// 4. Sets mode 0644 on the temporary file.
+    /// 5. Atomically renames (`mv`) the temporary file over `/usr/share/keyrings/sagernet.gpg`.
+    /// 6. Cleans up the trap (`trap - EXIT`).
+    #[test]
+    fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+
+        // Must create keyrings directory first.
+        assert!(
+            s.contains("install -d -m 0755 /usr/share/keyrings"),
+            "keyrings dir creation missing: {s}"
+        );
+
+        // Temp file definition under the same directory.
+        assert!(
+            s.contains(r#"KEYRING_TMP="/usr/share/keyrings/sagernet.gpg.tmp"#),
+            "temp file must be under /usr/share/keyrings: {s}"
+        );
+
+        // Cleanup trap registered.
+        assert!(
+            s.contains(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#),
+            "cleanup trap for KEYRING_TMP missing: {s}"
+        );
+
+        // Download & dearmor into temp file (not directly into live file).
+        assert!(
+            s.contains(r#"curl -fsSL https://sing-box.app/gpg.key"#)
+                && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#),
+            "gpg dearmor must write to KEYRING_TMP: {s}"
+        );
+        assert!(
+            !s.contains("gpg --dearmor --yes -o /usr/share/keyrings/sagernet.gpg"),
+            "must not directly dearmor into live keyring: {s}"
+        );
+
+        // Validation: non-empty check.
+        assert!(
+            s.contains(r#"test -s "$KEYRING_TMP""#),
+            "must validate KEYRING_TMP is non-empty: {s}"
+        );
+
+        // Validation: keyring parse check via gpg.
+        assert!(
+            s.contains(
+                r#"gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1"#
+            ),
+            "must validate KEYRING_TMP parses as a valid keyring: {s}"
+        );
+
+        // Permissions: chmod 0644 before mv.
+        assert!(
+            s.contains(r#"chmod 0644 "$KEYRING_TMP""#),
+            "must chmod 0644 KEYRING_TMP: {s}"
+        );
+
+        // Atomic move to live keyring.
+        assert!(
+            s.contains(r#"mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg"#),
+            "must atomically move KEYRING_TMP over live keyring: {s}"
+        );
+
+        // Trap disarmed after successful move.
+        assert!(
+            s.contains("trap - EXIT"),
+            "must disarm trap after successful atomic move: {s}"
+        );
+
+        // Order assertions:
+        let trap_pos = s
+            .find(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#)
+            .expect("trap pos");
+        let curl_pos = s
+            .find("curl -fsSL https://sing-box.app/gpg.key")
+            .expect("curl pos");
+        let test_s_pos = s.find(r#"test -s "$KEYRING_TMP""#).expect("test -s pos");
+        let gpg_val_pos = s
+            .find(r#"gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys"#)
+            .expect("gpg val pos");
+        let chmod_pos = s.find(r#"chmod 0644 "$KEYRING_TMP""#).expect("chmod pos");
+        let mv_pos = s
+            .find(r#"mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg"#)
+            .expect("mv pos");
+        let untrap_pos = s.find("trap - EXIT").expect("untrap pos");
+
+        assert!(trap_pos < curl_pos, "trap must be set BEFORE download");
+        assert!(
+            curl_pos < test_s_pos,
+            "download must come before non-empty test"
+        );
+        assert!(
+            test_s_pos < gpg_val_pos,
+            "non-empty test must come before gpg parse test"
+        );
+        assert!(
+            gpg_val_pos < chmod_pos,
+            "gpg parse validation must come before chmod"
+        );
+        assert!(chmod_pos < mv_pos, "chmod must come before atomic mv");
+        assert!(mv_pos < untrap_pos, "atomic mv must come before untrap");
+    }
+
+    /// Planted reversal test for GPG keyring atomic provisioning:
+    /// Proves that failure at each step (download failure, empty file, corrupt keyring parse)
+    /// causes the script to abort under `set -e`, triggers the trap cleanup, and leaves no
+    /// half-written/invalid keyring in place.
+    #[test]
+    fn planted_reversal_gpg_keyring_transactional_failure_modes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("vpnctl-test-keyring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let live_keyring = temp_dir.join("sagernet.gpg");
+        // Pre-create an existing live keyring with dummy content to verify it is NOT corrupted on failure.
+        std::fs::write(&live_keyring, b"original-valid-keyring").unwrap();
+
+        // 1. Planted reversal: empty download output fails validation, trap cleans up tmp, live keyring unchanged.
+        let script_empty = format!(
+            r#"
+            set -eu
+            KEYRING_TMP="{temp_dir}/sagernet.gpg.tmp.$$"
+            trap 'rm -f "$KEYRING_TMP"' EXIT
+            touch "$KEYRING_TMP" # simulate empty download
+            test -s "$KEYRING_TMP"
+            gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+            chmod 0644 "$KEYRING_TMP"
+            mv "$KEYRING_TMP" "{live}"
+            trap - EXIT
+            "#,
+            temp_dir = temp_dir.display(),
+            live = live_keyring.display()
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script_empty)
+            .output()
+            .unwrap();
+
+        assert!(!out.status.success(), "empty file must fail execution");
+        assert_eq!(
+            std::fs::read(&live_keyring).unwrap(),
+            b"original-valid-keyring",
+            "live keyring must remain untouched on empty download failure"
+        );
+
+        // Verify tmp file was cleaned up by the trap.
+        let leftover_tmp = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(
+            !leftover_tmp,
+            "cleanup trap must remove temporary file on failure"
+        );
+
+        // 2. Planted reversal: corrupt non-keyring data fails gpg keyring parse check, trap cleans up.
+        let script_corrupt = format!(
+            r#"
+            set -eu
+            KEYRING_TMP="{temp_dir}/sagernet.gpg.tmp.$$"
+            trap 'rm -f "$KEYRING_TMP"' EXIT
+            echo "corrupt non-keyring data" > "$KEYRING_TMP"
+            test -s "$KEYRING_TMP"
+            gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+            chmod 0644 "$KEYRING_TMP"
+            mv "$KEYRING_TMP" "{live}"
+            trap - EXIT
+            "#,
+            temp_dir = temp_dir.display(),
+            live = live_keyring.display()
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script_corrupt)
+            .output()
+            .unwrap();
+
+        assert!(
+            !out.status.success(),
+            "corrupt keyring parse must fail execution"
+        );
+        assert_eq!(
+            std::fs::read(&live_keyring).unwrap(),
+            b"original-valid-keyring",
+            "live keyring must remain untouched on corrupt keyring parse failure"
+        );
+
+        let leftover_tmp = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(
+            !leftover_tmp,
+            "cleanup trap must remove temporary file on failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -851,14 +1255,31 @@ mod tests {
         assert!(s.contains("set -eu"), "fail-fast shell flags");
     }
 
-    /// The sing-box install must be gated on a MINIMUM VERSION, not on
-    /// bare presence. Before this gate, `if ! command -v sing-box` wrapped
+    /// The sing-box install must be gated on canonical package state AND MINIMUM VERSION,
+    /// not on bare presence or arbitrary PATH. Before this gate, `if ! command -v sing-box` wrapped
     /// the apt install directly, so once ANY sing-box was on PATH `deploy`
     /// never upgraded it (fleet skew: de/is 1.13.7 vs cdn/nl 1.13.12).
+    /// Now, BOTH `dpkg-query sing-box == install ok installed` AND `/usr/bin/sing-box >= MIN`
+    /// are required; a manual /usr/local/bin binary must not skip apt.
     /// Companion to `setup_script_retains_install_log_and_logrotate_steps`.
     #[test]
     fn sing_box_setup_script_gates_install_on_min_version() {
         let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // Canonical dpkg package status check + /usr/bin/sing-box executable check:
+        assert!(
+            s.contains(r#"[ "$(dpkg-query -W -f='${Status}' sing-box 2>/dev/null || true)" != "install ok installed" ]"#),
+            "gate must require exact dpkg-query status 'install ok installed' for sing-box: {s}"
+        );
+        assert!(
+            s.contains("[ ! -x /usr/bin/sing-box ]"),
+            "gate must check for /usr/bin/sing-box executable: {s}"
+        );
+        assert!(
+            s.contains(
+                "CUR=$(/usr/bin/sing-box version 2>/dev/null | awk '/version/{print $3; exit}')"
+            ),
+            "version read must explicitly target /usr/bin/sing-box: {s}"
+        );
         // The version comparison is present and uses the node's dpkg.
         assert!(
             s.contains("dpkg --compare-versions"),
@@ -879,35 +1300,177 @@ mod tests {
         // absence proves the apt path is no longer skipped whenever any
         // sing-box is on PATH.
         assert!(
-            !s.contains("if ! command -v sing-box >/dev/null; then"),
+            !s.contains("if ! command -v sing-box"),
             "the bare-presence-only install gate must be gone: {s}"
         );
-        // The apt install is now reached via the version-aware NEED gate.
+        // The apt install is reached via the version-aware NEED gate, and a
+        // package that claims installed while /usr/bin is missing is repaired
+        // with an explicit reinstall rather than an apt no-op.
         assert!(
             s.contains(r#"if [ "$NEED" = 1 ]; then"#),
             "apt install must be reached via the version-aware NEED gate: {s}"
         );
+        assert!(
+            s.contains("REINSTALL=1") && s.contains("apt-get install -y --reinstall sing-box"),
+            "missing canonical binary must force package reinstall: {s}"
+        );
         // The SagerNet repo/key setup and the final assertion are retained.
         assert!(
             s.contains("https://sing-box.app/gpg.key")
+                && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#)
                 && s.contains("deb.sagernet.org")
                 && s.contains("apt-get install -y sing-box"),
             "SagerNet repo setup + apt install must be retained inside the gate: {s}"
         );
         assert!(
-            s.contains("command -v sing-box  # final assertion"),
-            "the final `command -v sing-box` assertion must remain: {s}"
+            s.contains("test -x /usr/bin/sing-box  # final assertion"),
+            "the final `test -x /usr/bin/sing-box` assertion must remain: {s}"
         );
     }
 
-    /// After the apt install, the script must RE-VERIFY that the version
-    /// PATH now resolves actually satisfies the floor — otherwise two
-    /// silent failure modes survive: (a) a non-apt /usr/local/bin/sing-box
-    /// shadowing PATH keeps `CUR < MIN` forever → apt re-runs EVERY deploy
-    /// and never converges; (b) MIN bumped past the SagerNet candidate →
-    /// apt installs an older-than-MIN version and the deploy reports
-    /// success while the floor is unreachable. The fix re-reads the
-    /// version and aborts loud (`exit 1`) when it's still below MIN.
+    /// Comprehensive evaluation of the SingBox setup gate shell logic:
+    /// 1. Package installed + /usr/bin/sing-box >= floor -> SKIPPED (NEED=0)
+    /// 2. Manual /usr/local/bin present on PATH but package missing -> TRIGGERED (NEED=1, apt NOT skipped)
+    /// 3. Package installed but /usr/bin/sing-box missing -> TRIGGERED (NEED=1)
+    /// 4. Package installed but /usr/bin/sing-box below floor -> TRIGGERED (NEED=1)
+    /// 5. Package half-installed / broken status -> TRIGGERED (NEED=1)
+    #[test]
+    fn sing_box_setup_script_gate_evaluation() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        assert!(s.contains("dpkg-query -W -f='${Status}' sing-box"));
+
+        let gate_block = s
+            .lines()
+            .skip_while(|line| !line.contains("dpkg-query -W -f='${Status}' sing-box"))
+            .take_while(|line| !line.trim().starts_with("if [ \"$NEED\" = 1 ]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let run_gate = |pkg_status: &str, usr_bin_exists: bool, usr_bin_ver: &str| -> String {
+            let temp_dir =
+                std::env::temp_dir().join(format!("vpnctl-test-gate-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let mock_bin = temp_dir.join("sing-box");
+            if usr_bin_exists {
+                let script = format!(
+                    "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo \"sing-box version {usr_bin_ver}\"; exit 0; fi\nexit 0\n"
+                );
+                std::fs::write(&mock_bin, script).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+            } else {
+                let _ = std::fs::remove_file(&mock_bin);
+            }
+
+            let mut gate_code = gate_block.clone();
+            gate_code = gate_code.replace("/usr/bin/sing-box", &mock_bin.to_string_lossy());
+
+            let test_script = format!(
+                r#"
+                dpkg() {{
+                    if [ "$1" = "--compare-versions" ]; then
+                        v1="$2"
+                        op="$3"
+                        v2="$4"
+                        if [ "$v1" = "$v2" ]; then return 0; fi
+                        awk -v v1="$v1" -v v2="$v2" 'BEGIN {{
+                            n1 = split(v1, a1, /[.-]/);
+                            n2 = split(v2, a2, /[.-]/);
+                            n = (n1 > n2 ? n1 : n2);
+                            for (i = 1; i <= n; i++) {{
+                                d1 = (i <= n1 ? a1[i] + 0 : 0);
+                                d2 = (i <= n2 ? a2[i] + 0 : 0);
+                                if (d1 > d2) exit 0;
+                                if (d1 < d2) exit 1;
+                            }}
+                            exit 0;
+                        }}'
+                        return $?
+                    fi
+                    return 1
+                }}
+                dpkg-query() {{
+                    for arg in "$@"; do
+                        if [ "$arg" = "sing-box" ]; then
+                            if [ -n "{pkg_status}" ]; then echo -n "{pkg_status}"; return 0; else return 1; fi
+                        fi
+                    done
+                    return 1
+                }}
+                NEED=0
+                {gate_code}
+                if [ "$NEED" = 1 ]; then
+                    echo "TRIGGERED"
+                else
+                    echo "SKIPPED"
+                fi
+                "#,
+                pkg_status = pkg_status,
+                gate_code = gate_code,
+            );
+
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&test_script)
+                .output()
+                .expect("failed to execute gate evaluation");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // 1. Both package installed ok and /usr/bin/sing-box at floor -> SKIPPED (idempotent)
+        assert_eq!(
+            run_gate("install ok installed", true, SING_BOX_MIN_VERSION),
+            "SKIPPED",
+            "installed package at min version must skip apt"
+        );
+        // Above floor -> SKIPPED
+        assert_eq!(
+            run_gate("install ok installed", true, "1.14.0"),
+            "SKIPPED",
+            "installed package above min version must skip apt"
+        );
+
+        // 2. Manual /usr/local/bin scenario (package not installed in dpkg) -> TRIGGERED
+        assert_eq!(
+            run_gate("", true, "1.14.0"),
+            "TRIGGERED",
+            "unregistered package state must trigger apt even if executable exists"
+        );
+
+        // 3. Package registered but /usr/bin/sing-box missing -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok installed", false, ""),
+            "TRIGGERED",
+            "missing /usr/bin/sing-box must trigger apt"
+        );
+
+        // 4. Package registered but /usr/bin/sing-box below floor -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok installed", true, "1.13.7"),
+            "TRIGGERED",
+            "installed package below floor version must trigger apt upgrade"
+        );
+
+        // 5. Half-installed / config-files package state -> TRIGGERED
+        assert_eq!(
+            run_gate("install ok half-installed", true, "1.14.0"),
+            "TRIGGERED",
+            "half-installed package state must trigger apt"
+        );
+        assert_eq!(
+            run_gate("deinstall ok config-files", true, "1.14.0"),
+            "TRIGGERED",
+            "config-files package state must trigger apt"
+        );
+    }
+
+    /// After the apt install, the script must RE-VERIFY that /usr/bin/sing-box
+    /// satisfies the floor — failing loud (`exit 1`) when it's still below MIN.
     /// Companion to `sing_box_setup_script_gates_install_on_min_version`.
     #[test]
     fn sing_box_setup_script_verifies_floor_after_install() {
@@ -937,11 +1500,13 @@ mod tests {
             tail.contains("exit 1"),
             "a failed post-install floor check must abort the deploy with exit 1: {s}"
         );
-        // The diagnostic names the unreachable-floor + shadowed-PATH causes
-        // and points at the resolved binary path.
         assert!(
-            s.contains("floor unreachable") && s.contains("command -v sing-box)"),
-            "the abort diagnostic must explain the floor-unreachable / shadowed-PATH causes: {s}"
+            tail.contains("/usr/bin/sing-box version"),
+            "the re-check must specifically test /usr/bin/sing-box: {s}"
+        );
+        assert!(
+            s.contains("floor unreachable from this repo"),
+            "the abort diagnostic must explain the floor-unreachable cause: {s}"
         );
     }
 
