@@ -117,7 +117,7 @@ pub(super) async fn load_drift_live(
     use crate::ssh_subprocess::SubprocessSshTransport;
     use vpnctl_core::SshTransport;
 
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let transport = SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),

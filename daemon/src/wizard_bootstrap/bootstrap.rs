@@ -83,7 +83,7 @@ async fn bootstrap_pipeline(
         Err(e) => fail!(
             "setup",
             "can't read {}: {e}. Re-check daemon's deploy key (see /admin/settings).",
-            plan.deploy_key_path.with_extension("pub").display()
+            crate::ssh_subprocess::public_key_path(&plan.deploy_key_path).display()
         ),
     };
 

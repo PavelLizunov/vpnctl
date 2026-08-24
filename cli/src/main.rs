@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 mod cmd;
+mod key_path;
 mod registry;
 mod ui;
 

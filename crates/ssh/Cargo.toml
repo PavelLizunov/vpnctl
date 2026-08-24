@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 vpnctl-core = { path = "../core" }
+vpnctl-host-fingerprint = { path = "../host-fingerprint" }
 async-trait = { workspace = true }
 
 # Real SSH transport.

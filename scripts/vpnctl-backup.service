@@ -10,6 +10,8 @@ After=vpnctld.service
 Type=oneshot
 User=user
 Group=user
+# Reads VPNCTLD_* (e.g. VPNCTLD_DEPLOY_KEY). Optional if file doesn't exist yet.
+EnvironmentFile=-/etc/vpnctl/vpnctld.env
 # The script is read-only on the production state EXCEPT the durable
 # backup dir: it snapshots → archives → age-encrypts → writes the final
 # .tar.zst.age to /var/lib/vpnctl/backups (BACKUP_DIR) → scp off-host.

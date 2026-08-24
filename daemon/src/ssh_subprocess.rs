@@ -263,6 +263,10 @@ fn run_child_with_timeout(
     label: &str,
 ) -> Result<Vec<u8>> {
     use std::io::{Read, Write};
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
+    let deadline = Instant::now() + timeout;
 
     if stdin_bytes.is_some() {
         cmd.stdin(Stdio::piped());
@@ -271,9 +275,22 @@ fn run_child_with_timeout(
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     let mut child = cmd
         .spawn()
         .map_err(|e| CoreError::Transport(format!("spawning ssh {label}: {e}")))?;
+
+    let pid = child.id();
+    let kill_and_reap = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
+            .status();
+        let _ = child.kill();
+        let _ = child.wait();
+    };
 
     // Drain pipes on threads spawned up front (before writing stdin) so
     // neither direction can dead-lock on a full pipe buffer.
@@ -294,49 +311,67 @@ fn run_child_with_timeout(
         buf
     });
 
-    if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
-        if let Err(e) = sin.write_all(&bytes) {
-            // Broken pipe (remote closed stdin / ssh died mid-write).
-            // Mirror the other error paths: kill + reap the child and join
-            // the reader threads so we never leak the child or detach the
-            // readers on this early return.
+    let mut in_writer = if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
+        Some(std::thread::spawn(move || {
+            let res = sin.write_all(&bytes);
             drop(sin);
-            let _ = child.kill();
-            let _ = child.wait();
+            res
+        }))
+    } else {
+        None
+    };
+
+    // Poll for exit until the deadline. 10 ms cadence: low latency, negligible CPU.
+    let status = loop {
+        if Instant::now() >= deadline {
+            kill_and_reap(&mut child);
             let _ = out_reader.join();
             let _ = err_reader.join();
+            if let Some(w) = in_writer {
+                let _ = w.join();
+            }
             return Err(CoreError::Transport(format!(
-                "ssh stdin write {label}: {e}"
+                "ssh {label} timed out after {timeout:?} (remote command killed)"
             )));
         }
-        drop(sin); // EOF → the remote command proceeds
-    }
 
-    // Poll for exit until the deadline. 50 ms cadence: ≤50 ms post-exit
-    // latency, ~20 wakeups/sec while the slow apt step runs — negligible.
-    let deadline = Instant::now() + timeout;
-    let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if Instant::now() >= deadline {
-                    // Hard timeout: kill + reap. Reader threads EOF once
-                    // the child's pipe write-ends close after the kill.
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
-                    return Err(CoreError::Transport(format!(
-                        "ssh {label} timed out after {timeout:?} (remote command killed)"
-                    )));
+                if let Some(ref w) = in_writer {
+                    if w.is_finished() {
+                        if let Some(w) = in_writer.take() {
+                            match w.join() {
+                                Ok(Err(e)) => {
+                                    kill_and_reap(&mut child);
+                                    let _ = out_reader.join();
+                                    let _ = err_reader.join();
+                                    return Err(CoreError::Transport(format!(
+                                        "ssh stdin write {label}: {e}"
+                                    )));
+                                }
+                                Err(_) => {
+                                    kill_and_reap(&mut child);
+                                    let _ = out_reader.join();
+                                    let _ = err_reader.join();
+                                    return Err(CoreError::Transport(format!(
+                                        "ssh stdin write {label}: writer thread panicked"
+                                    )));
+                                }
+                                Ok(Ok(())) => {}
+                            }
+                        }
+                    }
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap(&mut child);
                 let _ = out_reader.join();
                 let _ = err_reader.join();
+                if let Some(w) = in_writer {
+                    let _ = w.join();
+                }
                 return Err(CoreError::Transport(format!("ssh wait {label}: {e}")));
             }
         }
@@ -344,6 +379,31 @@ fn run_child_with_timeout(
 
     let stdout = out_reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
+
+    if let Some(w) = in_writer {
+        match w.join() {
+            Ok(Err(e)) => {
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&stderr);
+                    return Err(CoreError::Transport(format!(
+                        "ssh {label} exit={:?} stderr={}",
+                        status.code(),
+                        stderr.trim()
+                    )));
+                }
+                return Err(CoreError::Transport(format!(
+                    "ssh stdin write {label}: {e}"
+                )));
+            }
+            Err(_) => {
+                return Err(CoreError::Transport(format!(
+                    "ssh stdin write {label}: writer thread panicked"
+                )));
+            }
+            Ok(Ok(())) => {}
+        }
+    }
+
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
         return Err(CoreError::Transport(format!(
@@ -502,11 +562,23 @@ fn ensure_deploy_key_sync(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Resolve the public-key path (`<private_path>.pub`) corresponding to
+/// a private key.
+///
+/// Appends `.pub` to the complete path rather than replacing the extension
+/// (`with_extension`), so dotted private keys (e.g. `id.key`) correctly
+/// resolve to `id.key.pub` matching OpenSSH / `ssh-keygen` conventions.
+pub(crate) fn public_key_path(private_path: &Path) -> PathBuf {
+    let mut pub_path = private_path.as_os_str().to_os_string();
+    pub_path.push(".pub");
+    PathBuf::from(pub_path)
+}
+
 /// Read the public-key file (`<path>.pub`) so the admin UI can
 /// surface it for the operator to copy into each node's
 /// `authorized_keys`. Sync read — small file, not worth async.
 pub fn read_public_key(private_path: &Path) -> std::io::Result<String> {
-    let pub_path = private_path.with_extension("pub");
+    let pub_path = public_key_path(private_path);
     let raw = std::fs::read_to_string(&pub_path)?;
     Ok(raw.trim_end().to_string())
 }
@@ -682,6 +754,47 @@ mod tests {
         assert_eq!(out.len(), 200_000);
     }
 
+    #[test]
+    fn child_accepts_pipe_never_reads_large_stdin_timeout_kills_and_reaps() {
+        // The child process opens stdin as a pipe (Stdio::piped()) but never reads
+        // from it, while we attempt to write 2 MiB (> 64 KiB pipe buffer).
+        // Without the deadline covering stdin write, the writer would block indefinitely.
+        // The hard timeout must fire, kill and reap the child quickly, and ensure
+        // no orphan process is left running.
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("child-survived");
+        let sentinel_s = sentinel.to_string_lossy().into_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("sleep 2; touch '{sentinel_s}'"));
+        let big = vec![b'x'; 2 * 1024 * 1024]; // ≫ 64 KiB pipe buffer
+
+        let start = Instant::now();
+        let res =
+            run_child_with_timeout(cmd, Some(big), Duration::from_millis(200), "root@node:22");
+        let elapsed = start.elapsed();
+
+        assert!(
+            res.is_err(),
+            "hung child with unread large stdin must time out"
+        );
+        let err_msg = format!("{:?}", res.unwrap_err());
+        assert!(
+            err_msg.contains("timed out"),
+            "error must indicate timeout, got: {err_msg}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "child not killed promptly on stdin pipe block: {elapsed:?}"
+        );
+
+        // Wait well past the child's sleep to verify it was reaped and not left running
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(
+            !sentinel.exists(),
+            "child must be killed on timeout, not left running to touch sentinel"
+        );
+    }
+
     #[tokio::test]
     async fn upload_rejects_path_with_single_quote() {
         let err = make_transport()
@@ -717,9 +830,61 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("id_ed25519");
         ensure_deploy_key(&key).await.unwrap();
-        let first = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let first = read_public_key(&key).unwrap();
         ensure_deploy_key(&key).await.unwrap();
-        let second = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let second = read_public_key(&key).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn read_public_key_no_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let priv_key = dir.path().join("id_ed25519");
+        let pub_key = dir.path().join("id_ed25519.pub");
+        std::fs::write(&pub_key, "ssh-ed25519 AAAAC3NzaC1yc2E test@node\n").unwrap();
+
+        let content = read_public_key(&priv_key).unwrap();
+        assert_eq!(content, "ssh-ed25519 AAAAC3NzaC1yc2E test@node");
+    }
+
+    #[test]
+    fn read_public_key_dotted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let priv_key = dir.path().join("id.key");
+        let pub_key = dir.path().join("id.key.pub");
+        let wrong_pub = dir.path().join("id.pub");
+        std::fs::write(&pub_key, "ssh-ed25519 AAAAC3NzaC1yc2E test@node\n").unwrap();
+        std::fs::write(&wrong_pub, "wrong key content\n").unwrap();
+
+        let content = read_public_key(&priv_key).unwrap();
+        assert_eq!(content, "ssh-ed25519 AAAAC3NzaC1yc2E test@node");
+    }
+
+    #[test]
+    fn public_key_path_appends_pub_for_standard_and_dotted_paths() {
+        assert_eq!(
+            public_key_path(Path::new("/etc/vpnctl/id_ed25519")),
+            PathBuf::from("/etc/vpnctl/id_ed25519.pub")
+        );
+        assert_eq!(
+            public_key_path(Path::new("/var/lib/vpnctl/id.key")),
+            PathBuf::from("/var/lib/vpnctl/id.key.pub")
+        );
+        assert_eq!(
+            public_key_path(Path::new("custom.deploy.key")),
+            PathBuf::from("custom.deploy.key.pub")
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_deploy_key_creates_key_with_dotted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id.key.custom");
+        assert!(!key.exists());
+        ensure_deploy_key(&key).await.unwrap();
+        assert!(key.exists());
+        let pub_txt = read_public_key(&key).unwrap();
+        assert!(pub_txt.starts_with("ssh-ed25519 "));
+        assert!(pub_txt.contains("vpnctld-deploy"));
     }
 }

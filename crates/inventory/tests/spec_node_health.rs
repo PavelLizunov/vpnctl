@@ -592,6 +592,7 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
     );
 
     // Row WITHOUT versions (partial probe / old node) → stays NULL.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     rec(
         &inv,
         "s1",
@@ -658,6 +659,7 @@ async fn sing_box_nrestarts_roundtrips_and_nullable() {
     );
 
     // Row WITHOUT a reading (rec helper passes None) → stays NULL, NOT 0.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     rec(
         &inv,
         "s1",
@@ -680,5 +682,352 @@ async fn sing_box_nrestarts_roundtrips_and_nullable() {
     assert_eq!(
         latest.sing_box_nrestarts, None,
         "a probe with no NRestarts reading persists NULL, not zero"
+    );
+}
+
+// 15. New writes mint valid UUID sample_id; recent/latest expose it.
+#[tokio::test]
+async fn sample_id_roundtrips_as_valid_uuid_and_orders_consistently() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        Some(true),
+        Some(1),
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        Some(true),
+        Some(2),
+        Some(20),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let rows = inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let sid0 = rows[0].sample_id.as_deref().expect("sample_id populated");
+    let sid1 = rows[1].sample_id.as_deref().expect("sample_id populated");
+    assert!(
+        vpnctl_crypto::is_valid_uuid(sid0),
+        "new sample_id must be valid UUID: {sid0}"
+    );
+    assert!(
+        vpnctl_crypto::is_valid_uuid(sid1),
+        "new sample_id must be valid UUID: {sid1}"
+    );
+    assert_ne!(sid0, sid1, "distinct writes must have distinct sample IDs");
+
+    let latest = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .expect("latest row");
+    assert_eq!(latest.sample_id.as_deref(), Some(sid0));
+}
+
+// 16. Migration 0051 backfills legacy rows deterministically with stable legacy IDs
+//     and enforces unique index constraint.
+#[tokio::test]
+async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
+    use std::path::Path;
+    use std::str::FromStr;
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("migration_test.db");
+
+    // Apply migrations up to 0050 into a temporary migration folder
+    let migrations_temp_dir = TempDir::new().unwrap();
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&src_dir).unwrap().filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".sql") && name.as_str() < "0051" {
+            std::fs::copy(entry.path(), migrations_temp_dir.path().join(&name)).unwrap();
+        }
+    }
+
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(db_path.to_str().unwrap())
+        .unwrap()
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .unwrap();
+
+    let migrator = sqlx::migrate::Migrator::new(migrations_temp_dir.path())
+        .await
+        .unwrap();
+    migrator.run(&pool).await.unwrap();
+
+    // Insert server and legacy node_health rows without sample_id
+    sqlx::query("INSERT INTO servers (id, address, ssh_port, ssh_user, hoster) VALUES ('s1', '1.1.1.1', 22, 'root', 'generic')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO node_health (ts, server_id, sing_box_active, disk_used_mib)
+         VALUES ('2026-01-01T00:00:00.000Z', 's1', 1, 10),
+                ('2026-01-01T00:10:00.000Z', 's1', 1, 20)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Apply migration 0051
+    let m51_sql = std::fs::read_to_string(src_dir.join("0051_node_health_sample_id.sql")).unwrap();
+    sqlx::raw_sql(&m51_sql).execute(&pool).await.unwrap();
+
+    // Check backfilled sample IDs
+    let sample_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT sample_id FROM node_health ORDER BY ts ASC")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(sample_ids.len(), 2);
+    assert!(
+        sample_ids[0].0.starts_with("legacy-"),
+        "backfill must prefix legacy-: {}",
+        sample_ids[0].0
+    );
+    assert!(
+        sample_ids[1].0.starts_with("legacy-"),
+        "backfill must prefix legacy-: {}",
+        sample_ids[1].0
+    );
+    assert_ne!(
+        sample_ids[0].0, sample_ids[1].0,
+        "legacy IDs must be distinct"
+    );
+
+    // Omitting sample_id must fail the NOT NULL constraint.
+    let null_err = sqlx::query(
+        "INSERT INTO node_health (ts, server_id) VALUES ('2026-01-01T00:15:00.000Z', 's1')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(null_err.is_err(), "sample_id must be required by schema");
+
+    // Inserting a duplicate sample_id must fail unique constraint
+    let dup_err = sqlx::query(
+        "INSERT INTO node_health (sample_id, ts, server_id) VALUES (?1, '2026-01-01T00:20:00.000Z', 's1')",
+    )
+    .bind(&sample_ids[0].0)
+    .execute(&pool)
+    .await;
+    assert!(
+        dup_err.is_err(),
+        "duplicate sample_id must be rejected by unique index"
+    );
+
+    pool.close().await;
+}
+
+// 17. Sample IDs persist and stay unchanged across SQLite VACUUM.
+#[tokio::test]
+async fn sample_ids_persist_across_vacuum() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    for i in 1..=5 {
+        rec(
+            &inv,
+            "s1",
+            Some(true),
+            Some(true),
+            Some(i * 10),
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+
+    let before_rows = inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    assert_eq!(before_rows.len(), 5);
+    let before_ids: Vec<String> = before_rows
+        .iter()
+        .map(|r| r.sample_id.clone().unwrap())
+        .collect();
+
+    // Run VACUUM via a raw pool
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::raw_sql("VACUUM;").execute(&pool).await.unwrap();
+    pool.close().await;
+
+    let after_rows = inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    assert_eq!(after_rows.len(), 5);
+    let after_ids: Vec<String> = after_rows
+        .iter()
+        .map(|r| r.sample_id.clone().unwrap())
+        .collect();
+
+    assert_eq!(
+        before_ids, after_ids,
+        "sample IDs and ordering must be completely stable across VACUUM"
+    );
+}
+
+// 18. Sample IDs persist across VACUUM INTO / backup restore.
+#[tokio::test]
+async fn sample_ids_persist_across_vacuum_into_and_restore() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    for i in 1..=3 {
+        rec(
+            &inv,
+            "s1",
+            Some(true),
+            Some(true),
+            Some(i * 50),
+            Some(500),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+
+    let orig_rows = inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    let orig_ids: Vec<String> = orig_rows
+        .iter()
+        .map(|r| r.sample_id.clone().unwrap())
+        .collect();
+
+    let backup_path = dir.path().join("backup_restore.db");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("VACUUM INTO '{}';", backup_path.to_str().unwrap()))
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // Open restored DB
+    let restored_inv = SqliteInventory::open(&backup_path).await.unwrap();
+    let restored_rows = restored_inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    let restored_ids: Vec<String> = restored_rows
+        .iter()
+        .map(|r| r.sample_id.clone().unwrap())
+        .collect();
+
+    assert_eq!(
+        orig_ids, restored_ids,
+        "restored database must preserve identical sample IDs"
+    );
+}
+
+// 19. Retention deletion / new inserts cannot reuse old sample IDs.
+#[tokio::test]
+async fn sample_ids_retention_deletion_and_new_inserts_cannot_reuse() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        Some(true),
+        Some(10),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let r1 = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let sid1 = r1.sample_id.expect("sample_id 1");
+
+    // Purge all rows
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    inv.purge_node_health_older_than(0).await.unwrap();
+    let empty_rows = inv
+        .recent_node_health_for_server(&ServerId("s1".into()), 24)
+        .await
+        .unwrap();
+    assert!(empty_rows.is_empty());
+
+    // Insert new row
+    rec(
+        &inv,
+        "s1",
+        Some(true),
+        Some(true),
+        Some(20),
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let r2 = inv
+        .latest_node_health(&ServerId("s1".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let sid2 = r2.sample_id.expect("sample_id 2");
+
+    assert_ne!(
+        sid1, sid2,
+        "new insert after deletion cannot reuse deleted sample_id"
     );
 }

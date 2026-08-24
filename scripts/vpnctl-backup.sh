@@ -81,8 +81,8 @@ set -euo pipefail
 DB_PATH=${DB_PATH:-/var/lib/vpnctl/inv.db}
 ENV_FILE=${ENV_FILE:-/etc/vpnctl/vpnctld.env}
 ASSETS_DIR=${ASSETS_DIR:-/opt/vpnctl/assets}
-DEPLOY_KEY=${DEPLOY_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}
-DEPLOY_KEY_PUB=${DEPLOY_KEY_PUB:-/var/lib/vpnctl/.ssh/id_ed25519.pub}
+DEPLOY_KEY=${DEPLOY_KEY:-${VPNCTLD_DEPLOY_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}}
+DEPLOY_KEY_PUB=${DEPLOY_KEY_PUB:-${DEPLOY_KEY}.pub}
 DEPLOY_KNOWN_HOSTS=${DEPLOY_KNOWN_HOSTS:-/var/lib/vpnctl/.ssh/known_hosts}
 RECIPIENT_FILE=${RECIPIENT_FILE:-/etc/vpnctl/backup-recipient.txt}
 GEOIP_DIR=${GEOIP_DIR:-/var/lib/vpnctl/geoip}
@@ -106,7 +106,7 @@ BACKUP_DIR=${BACKUP_DIR:-/var/lib/vpnctl/backups}
 OFFSITE_HOST=${OFFSITE_HOST:-root@93.95.226.167}
 OFFSITE_PORT=${OFFSITE_PORT:-22}
 OFFSITE_DIR=${OFFSITE_DIR:-/root/vpnctl-backups}
-OFFSITE_KEY=${OFFSITE_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}
+OFFSITE_KEY=${OFFSITE_KEY:-$DEPLOY_KEY}
 # Off-site retention is LONGER than primary — when off-site is
 # needed, primary 207 is presumed gone, so we want as deep a
 # history as the off-site disk tolerates.

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -28,7 +27,7 @@ pub(crate) fn spawn_user_servers_redeploy(
     }
     let inv = state.inv.clone();
     let registry = Arc::clone(&state.registry);
-    let key_path = PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let server_ids: Vec<String> = servers.iter().map(|s| s.id.0.clone()).collect();
     // Server-side bulk triggers target a SERVER; keep them out of the
     // `user.*` audit namespace so user-timeline filters don't surface

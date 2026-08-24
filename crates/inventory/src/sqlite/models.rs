@@ -545,6 +545,10 @@ pub struct VpnStatsDelta {
 /// metrics instead of throwing the whole row away.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeHealthRow {
+    #[serde(default)]
+    pub sample_seq: Option<i64>,
+    #[serde(default)]
+    pub sample_id: Option<String>,
     pub ts: DateTime<Utc>,
     pub server_id: ServerId,
     pub sing_box_active: Option<bool>,

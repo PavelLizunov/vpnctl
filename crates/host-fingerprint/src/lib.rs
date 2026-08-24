@@ -124,6 +124,51 @@ pub fn validate_shape(fp: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'='))
 }
 
+/// Canonicalize an SSH SHA-256 host fingerprint into standard unpadded form
+/// (`SHA256:<43-char-standard-base64>`).
+///
+/// Accepts canonical unpadded (`43` base64 chars), padded (`44` chars ending in `=`),
+/// and URL-safe (`-_` alphabet) representations already accepted by [`validate_shape`].
+/// Returns `None` if the input is malformed or does not match a valid SHA-256 fingerprint shape.
+pub fn canonicalize_sha256(fp: &str) -> Option<String> {
+    let rest = fp.strip_prefix("SHA256:")?;
+    let body = match rest.len() {
+        43 => rest,
+        44 if rest.ends_with('=') => &rest[..43],
+        _ => return None,
+    };
+    let mut normalized = String::with_capacity(7 + 43);
+    normalized.push_str("SHA256:");
+    for b in body.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => normalized.push(b as char),
+            b'-' => normalized.push('+'),
+            b'_' => normalized.push('/'),
+            _ => return None,
+        }
+    }
+    Some(normalized)
+}
+
+/// Normalize an SSH SHA-256 host fingerprint (alias for [`canonicalize_sha256`]).
+#[inline]
+pub fn normalize_sha256(fp: &str) -> Option<String> {
+    canonicalize_sha256(fp)
+}
+
+/// Compare two SSH SHA-256 host fingerprints for equivalence after canonicalization.
+///
+/// Accepts any valid representation accepted by [`validate_shape`] (standard unpadded,
+/// padded with `=`, and URL-safe `-_` alphabet). Returns `true` if both inputs are valid
+/// and produce the exact same canonical `SHA256:...` fingerprint. Returns `false` if
+/// either fingerprint is malformed or if they represent different host keys.
+pub fn fingerprints_match(expected: &str, observed: &str) -> bool {
+    match (canonicalize_sha256(expected), canonicalize_sha256(observed)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Fetch the SHA256 host fingerprint of `<host>:<port>` via
 /// `ssh-keyscan` piped into `ssh-keygen -lf -`.
 ///

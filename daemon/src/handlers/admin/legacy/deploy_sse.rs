@@ -449,7 +449,7 @@ pub(crate) async fn wizard_step2_sse(
         ssh_user: session.ssh_user,
         ssh_port: session.ssh_port,
         root_password: session.root_password,
-        deploy_key_path: std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH),
+        deploy_key_path: crate::app::deploy_key_path(),
         known_hosts_path: std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts"),
     };
 
@@ -546,7 +546,7 @@ pub(crate) async fn server_deploy_sse(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let raw = crate::wizard_bootstrap::run_redeploy(
         server,
         state.inv.clone(),
@@ -678,7 +678,7 @@ fn deploy_servers_sse_response(state: &AppState, servers: Vec<vpnctl_core::Serve
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let raw = crate::wizard_bootstrap::run_deploy_all(
         servers,
         state.inv.clone(),
@@ -755,7 +755,7 @@ pub(crate) async fn server_update_kernels_sse(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let raw = crate::wizard_bootstrap::run_update_kernels(
         server,
         state.inv.clone(),
@@ -819,7 +819,7 @@ pub(crate) async fn servers_update_kernels_all_sse(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let key_path = std::path::PathBuf::from(crate::app::DEFAULT_DEPLOY_KEY_PATH);
+    let key_path = crate::app::deploy_key_path();
     let raw = crate::wizard_bootstrap::run_update_kernels_all(
         servers,
         state.inv.clone(),

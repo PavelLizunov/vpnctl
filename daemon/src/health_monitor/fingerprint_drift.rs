@@ -235,15 +235,19 @@ pub async fn check_fingerprint_drift(
     Ok(())
 }
 
-/// True if the pinned fingerprint is among the set of fingerprints the
-/// server currently serves. The drift check fires only when this is
-/// false — i.e. the pinned key is no longer one of the host's keys.
-/// Robust to a single `ssh-keyscan` returning a different key TYPE
+/// True if the pinned fingerprint is canonically equivalent to any of the
+/// fingerprints the server currently serves. The drift check fires only
+/// when this is false — i.e. the pinned key is no longer one of the host's keys.
+/// Robust to equivalent representations (padded vs unpadded, standard vs
+/// URL-safe base64) via [`vpnctl_host_fingerprint::fingerprints_match`]
+/// as well as a single `ssh-keyscan` returning a different key TYPE
 /// than the one originally pinned (the `kg` 2026-06-06 false positive:
 /// a scan that returned only the rsa key tripped a drift against the
 /// ed25519 pin).
 pub(crate) fn pin_is_present(pinned: &str, observed: &[String]) -> bool {
-    observed.iter().any(|fp| fp.as_str() == pinned)
+    observed
+        .iter()
+        .any(|fp| vpnctl_host_fingerprint::fingerprints_match(pinned, fp))
 }
 
 /// Outcome of evaluating one server's host-key scans against its pin.
@@ -287,7 +291,9 @@ pub(crate) fn decide_drift(pinned: &str, attempts: &[Option<Vec<String>>]) -> Dr
             return DriftDecision::Matched;
         }
         for k in keys {
-            if !observed.contains(k) {
+            if !observed.iter().any(|existing| {
+                vpnctl_host_fingerprint::fingerprints_match(existing, k) || existing == k
+            }) {
                 observed.push(k.clone());
             }
         }

@@ -10,7 +10,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use vpnctl_host_fingerprint::{
-    Error, build_keyscan_args, extract_sha256_token, pick_key_line, validate_shape,
+    Error, build_keyscan_args, canonicalize_sha256, extract_sha256_token, fingerprints_match,
+    normalize_sha256, pick_key_line, validate_shape,
 };
 
 // ─── validate_shape ──────────────────────────────────────────────
@@ -280,4 +281,129 @@ fn error_display_quotes_output_on_no_fingerprint_token() {
     };
     let msg = e.to_string();
     assert!(msg.contains("garbage"), "expected output in error: {msg}");
+}
+
+// ─── canonicalize_sha256 & normalize_sha256 ───────────────────────
+
+#[test]
+fn canonicalize_accepts_canonical_unpadded_sha256() {
+    let raw = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    assert_eq!(canonicalize_sha256(raw), Some(raw.to_string()));
+    assert_eq!(normalize_sha256(raw), Some(raw.to_string()));
+}
+
+#[test]
+fn canonicalize_accepts_padded_sha256_and_strips_padding() {
+    let padded = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4=";
+    let expected = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    assert_eq!(canonicalize_sha256(padded), Some(expected.to_string()));
+    assert_eq!(normalize_sha256(padded), Some(expected.to_string()));
+}
+
+#[test]
+fn canonicalize_accepts_url_safe_and_replaces_alphabet() {
+    let url_safe = "SHA256:-cuHezsjR805tS_zcSG25H1InN2OHqpzIJlTmCDctS4";
+    let expected = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    assert_eq!(canonicalize_sha256(url_safe), Some(expected.to_string()));
+    assert_eq!(normalize_sha256(url_safe), Some(expected.to_string()));
+}
+
+#[test]
+fn canonicalize_accepts_url_safe_padded() {
+    let url_safe_padded = "SHA256:-cuHezsjR805tS_zcSG25H1InN2OHqpzIJlTmCDctS4=";
+    let expected = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    assert_eq!(
+        canonicalize_sha256(url_safe_padded),
+        Some(expected.to_string())
+    );
+    assert_eq!(
+        normalize_sha256(url_safe_padded),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn canonicalize_rejects_malformed_inputs() {
+    assert_eq!(canonicalize_sha256(""), None);
+    assert_eq!(canonicalize_sha256("SHA256:"), None);
+    assert_eq!(
+        canonicalize_sha256("MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"),
+        None
+    );
+    assert_eq!(
+        canonicalize_sha256("+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"),
+        None
+    );
+    // Too short (42 chars body)
+    assert_eq!(
+        canonicalize_sha256(&format!("SHA256:{}", "A".repeat(42))),
+        None
+    );
+    // Too long (45 chars body)
+    assert_eq!(
+        canonicalize_sha256(&format!("SHA256:{}", "A".repeat(45))),
+        None
+    );
+    // 44 chars not ending in '='
+    assert_eq!(
+        canonicalize_sha256(&format!("SHA256:{}", "A".repeat(44))),
+        None
+    );
+    // 43 chars containing '='
+    assert_eq!(
+        canonicalize_sha256(&format!("SHA256:{}=", "A".repeat(42))),
+        None
+    );
+    // Invalid characters
+    assert_eq!(
+        canonicalize_sha256("SHA256:!!cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"),
+        None
+    );
+    assert_eq!(
+        canonicalize_sha256("SHA256: cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"),
+        None
+    );
+}
+
+// ─── fingerprints_match ──────────────────────────────────────────
+
+#[test]
+fn fingerprints_match_accepts_equivalent_variants() {
+    let canonical = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    let padded = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4=";
+    let url_safe = "SHA256:-cuHezsjR805tS_zcSG25H1InN2OHqpzIJlTmCDctS4";
+    let url_safe_padded = "SHA256:-cuHezsjR805tS_zcSG25H1InN2OHqpzIJlTmCDctS4=";
+
+    assert!(fingerprints_match(canonical, canonical));
+    assert!(fingerprints_match(canonical, padded));
+    assert!(fingerprints_match(padded, canonical));
+    assert!(fingerprints_match(canonical, url_safe));
+    assert!(fingerprints_match(url_safe, canonical));
+    assert!(fingerprints_match(canonical, url_safe_padded));
+    assert!(fingerprints_match(url_safe_padded, canonical));
+    assert!(fingerprints_match(padded, url_safe));
+    assert!(fingerprints_match(url_safe, padded));
+    assert!(fingerprints_match(padded, url_safe_padded));
+    assert!(fingerprints_match(url_safe_padded, padded));
+    assert!(fingerprints_match(url_safe, url_safe_padded));
+}
+
+#[test]
+fn fingerprints_match_rejects_different_keys() {
+    let key_a = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    let key_b = "SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+    assert!(!fingerprints_match(key_a, key_b));
+    assert!(!fingerprints_match(key_b, key_a));
+}
+
+#[test]
+fn fingerprints_match_rejects_malformed_inputs() {
+    let valid = "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4";
+    assert!(!fingerprints_match(valid, "not-a-fingerprint"));
+    assert!(!fingerprints_match("not-a-fingerprint", valid));
+    assert!(!fingerprints_match(valid, ""));
+    assert!(!fingerprints_match("", valid));
+    assert!(!fingerprints_match("MD5:aa:bb:cc", valid));
+    assert!(!fingerprints_match(valid, "SHA256:"));
+    assert!(!fingerprints_match("SHA256:invalid!", "SHA256:invalid!"));
 }
