@@ -446,7 +446,7 @@ async fn migration_0033_adds_column_and_audit_index() -> Result<()> {
 async fn migration_0051_adds_stable_identity_constraints() -> Result<()> {
     let inv = fresh().await;
     let cols: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT name, notnull, pk FROM pragma_table_info('node_health') \
+        "SELECT name, \"notnull\", pk FROM pragma_table_info('node_health') \
          WHERE name IN ('sample_seq', 'sample_id') ORDER BY name",
     )
     .fetch_all(inv.pool())
