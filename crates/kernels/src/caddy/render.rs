@@ -294,6 +294,117 @@ pub(crate) fn render_naive_config(
     Ok(out.into_bytes())
 }
 
+pub(crate) fn caddy_state_machine_prologue(
+    caddyfile: &str,
+    sb_config: &str,
+    deploy_env: &str,
+    vlessws_unit: &str,
+) -> String {
+    format!(
+        r#"
+            # Snapshot live configs and deploy env before swapping.
+            # Snapshot cp failures must abort immediately under set -e before
+            # the swap (no || true / error swallowing on existing configs).
+            HAD_CADDYFILE_PREV=0
+            if [ -f {caddyfile} ]; then
+                cp -a {caddyfile} {caddyfile}.bak
+                HAD_CADDYFILE_PREV=1
+            fi
+
+            HAD_SB_PREV=0
+            if [ -f {sb_config} ]; then
+                cp -a {sb_config} {sb_config}.bak
+                HAD_SB_PREV=1
+            fi
+
+            HAD_DEPLOY_ENV_PREV=0
+            if [ -f {deploy_env} ]; then
+                cp -a {deploy_env} {deploy_env}.bak
+                HAD_DEPLOY_ENV_PREV=1
+            fi
+
+            # Record pre-deploy enablement and active states before mutations.
+            HAD_CADDY_ENABLED=0
+            if systemctl is-enabled --quiet caddy 2>/dev/null; then
+                HAD_CADDY_ENABLED=1
+            fi
+            HAD_CADDY_ACTIVE=0
+            if systemctl is-active --quiet caddy 2>/dev/null; then
+                HAD_CADDY_ACTIVE=1
+            fi
+
+            HAD_VLESSWS_ENABLED=0
+            if systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then
+                HAD_VLESSWS_ENABLED=1
+            fi
+            HAD_VLESSWS_ACTIVE=0
+            if systemctl is-active --quiet {vlessws_unit} 2>/dev/null; then
+                HAD_VLESSWS_ACTIVE=1
+            fi
+
+            # Common non-recursive recovery state machine for post-first-swap failures.
+            _in_recover=0
+            recover() {{
+                set +e
+                [ "$_in_recover" = 1 ] && return 1
+                _in_recover=1
+                _failed="${{1:-}}"
+                if [ -n "$_failed" ]; then
+                    echo "$_failed did not become active. Last 20 log lines:" >&2
+                    journalctl -u "$_failed" --no-pager -n 20 >&2 || true
+                fi
+                if [ "$HAD_CADDYFILE_PREV" = 1 ] && [ -f {caddyfile}.bak ]; then
+                    echo "rolling back Caddyfile to previous config" >&2
+                    mv {caddyfile}.bak {caddyfile} || true
+                else
+                    echo "no previous Caddyfile — removing failed deploy" >&2
+                    rm -f {caddyfile} || true
+                    rm -f {caddyfile}.bak || true
+                fi
+                if [ "$HAD_SB_PREV" = 1 ] && [ -f {sb_config}.bak ]; then
+                    echo "rolling back backend config to previous config" >&2
+                    mv {sb_config}.bak {sb_config} || true
+                else
+                    echo "no previous backend config — removing failed deploy" >&2
+                    rm -f {sb_config} || true
+                    rm -f {sb_config}.bak || true
+                fi
+                if [ "$HAD_DEPLOY_ENV_PREV" = 1 ] && [ -f {deploy_env}.bak ]; then
+                    mv {deploy_env}.bak {deploy_env} || true
+                else
+                    rm -f {deploy_env} || true
+                    rm -f {deploy_env}.bak || true
+                fi
+                if [ "$HAD_VLESSWS_ENABLED" = 1 ]; then
+                    systemctl enable {vlessws_unit} >/dev/null 2>&1 || true
+                else
+                    systemctl disable {vlessws_unit} >/dev/null 2>&1 || true
+                fi
+                if [ "$HAD_VLESSWS_ACTIVE" = 1 ]; then
+                    systemctl restart {vlessws_unit} || true
+                else
+                    systemctl stop {vlessws_unit} || true
+                fi
+                if [ "$HAD_CADDY_ENABLED" = 1 ]; then
+                    systemctl enable caddy >/dev/null 2>&1 || true
+                else
+                    systemctl disable caddy >/dev/null 2>&1 || true
+                fi
+                if [ "$HAD_CADDY_ACTIVE" = 1 ]; then
+                    systemctl reload-or-restart caddy || true
+                else
+                    systemctl stop caddy || true
+                fi
+                exit 1
+            }}
+        "#,
+        caddyfile = caddyfile,
+        sb_config = sb_config,
+        deploy_env = deploy_env,
+        vlessws_unit = vlessws_unit,
+    )
+}
+
 /// The bundle-unpack + atomic-swap + verify + ROLLBACK script run after the
 /// vless-ws deploy bundle has been uploaded to `…/.vlessws-bundle.new`.
 /// Two units: the loopback sing-box BACKEND (restarted FIRST so caddy's
@@ -301,6 +412,12 @@ pub(crate) fn render_naive_config(
 /// `dns_tunnel::dns_tunnel_apply_script`'s snapshot/rollback discipline,
 /// plus a `caddy validate` before the swap and a wider (caddy ACME) poll.
 pub(crate) fn vlessws_apply_script() -> String {
+    let prologue = caddy_state_machine_prologue(
+        CADDYFILE_PATH,
+        VLESSWS_SINGBOX_CONFIG,
+        VLESSWS_DEPLOY_ENV,
+        VLESSWS_UNIT,
+    );
     format!(
         r#"
             set -eu
@@ -327,23 +444,17 @@ pub(crate) fn vlessws_apply_script() -> String {
             # Validate the NEW Caddyfile BEFORE swapping (a bad Caddyfile
             # must never take down the running edge).
             /usr/local/bin/caddy validate --config {caddyfile}.new
-
-            # Snapshot live configs for rollback (guarded on existence —
-            # first deploy has none; -a preserves owner/mode).
-            for f in {caddyfile} {sb_config}; do
-                [ -f "$f" ] && cp -a "$f" "$f.bak" || true
-            done
-
-            # Atomic swaps + perms.
-            mv {caddyfile}.new {caddyfile}
-            chown caddy:caddy {caddyfile}
-            chmod 0644 {caddyfile}
-            mv {sb_config}.new {sb_config}
-            chown root:root {sb_config}
-            chmod 0644 {sb_config}
-            mv {deploy_env}.new {deploy_env}
-            chmod 0644 {deploy_env}
-            rm -f "$BUNDLE"
+{prologue}
+            # Atomic swaps + perms. Every post-first-swap fallible filesystem command routes via || recover "".
+            mv {caddyfile}.new {caddyfile} || recover ""
+            chown caddy:caddy {caddyfile} || recover ""
+            chmod 0644 {caddyfile} || recover ""
+            mv {sb_config}.new {sb_config} || recover ""
+            chown root:root {sb_config} || recover ""
+            chmod 0644 {sb_config} || recover ""
+            mv {deploy_env}.new {deploy_env} || recover ""
+            chmod 0644 {deploy_env} || recover ""
+            rm -f "$BUNDLE" || recover ""
 
             # Firewall: open ACME :80 + the operator-chosen front port
             # (best-effort; a host without ufw is a clean no-op). The front
@@ -358,88 +469,96 @@ pub(crate) fn vlessws_apply_script() -> String {
 
             # Restart the BACKEND (loopback sing-box) FIRST so caddy's
             # reverse_proxy upstream is reachable when caddy reloads.
-            systemctl enable {vlessws_unit} >/dev/null 2>&1 || true
-            systemctl restart {vlessws_unit}
-            systemctl enable caddy >/dev/null 2>&1 || true
-            systemctl reload-or-restart caddy
+            systemctl enable {vlessws_unit} >/dev/null 2>&1 || recover "{vlessws_unit}"
+            systemctl restart {vlessws_unit} || recover "{vlessws_unit}"
 
-            # Poll BOTH units. caddy's first ACME issue can take ~20 s, so
-            # 15x2 s. On ANY unit failing, roll BOTH configs back + restart
-            # both (backend-first), returning the node to last-good instead
-            # of crash-looping. Each restore step `|| true`-guarded so the
-            # branch always reaches `exit 1`.
+            systemctl enable caddy >/dev/null 2>&1 || recover "caddy"
+            systemctl reload-or-restart caddy || recover "caddy"
+
+            # Poll BOTH units. caddy's first ACME issue can take ~20 s, so 15x2 s.
             for s in {vlessws_unit} caddy; do
                 ok=0
                 for i in $(seq 1 15); do
-                    [ "$(systemctl is-active "$s" 2>/dev/null || true)" = active ] && {{ ok=1; break; }}
+                    state=$(systemctl is-active "$s" 2>/dev/null || true)
+                    if [ "$state" = "active" ]; then
+                        ok=1
+                        break
+                    fi
                     sleep 2
                 done
                 if [ "$ok" != 1 ]; then
-                    echo "$s did not become active. Last 20 log lines:" >&2
-                    journalctl -u "$s" --no-pager -n 20 >&2 || true
-                    [ -f {caddyfile}.bak ] && mv {caddyfile}.bak {caddyfile} || true
-                    [ -f {sb_config}.bak ] && mv {sb_config}.bak {sb_config} || true
-                    systemctl restart {vlessws_unit} || true
-                    systemctl reload-or-restart caddy || true
-                    exit 1
+                    recover "$s"
                 fi
             done
 
-            # Both up — drop the transient snapshots.
-            rm -f {caddyfile}.bak {sb_config}.bak
+            # Both units up — drop transient snapshots best-effort (never fatal / never recover).
+            rm -f {caddyfile}.bak || true
+            rm -f {sb_config}.bak || true
+            rm -f {deploy_env}.bak || true
         "#,
         caddyfile = CADDYFILE_PATH,
         sb_config = VLESSWS_SINGBOX_CONFIG,
         deploy_env = VLESSWS_DEPLOY_ENV,
         vlessws_unit = VLESSWS_UNIT,
+        prologue = prologue,
     )
 }
 
-/// Snapshot → validate → swap → restart → poll → restore/restart
-/// script for the single-Caddyfile (naive) apply path. Same rollback
-/// discipline as `vlessws_apply_script` and the sing-box/amnezia_wg
-/// apply scripts.
-pub(crate) fn naive_apply_script() -> &'static str {
-    r#"
+/// Snapshot → validate → swap → restart/reload → poll → retire stale VLESS-WS backend/configs on success / restore on failure
+/// script for the single-Caddyfile (naive) apply path.
+pub(crate) fn naive_apply_script() -> String {
+    let prologue = caddy_state_machine_prologue(
+        CADDYFILE_PATH,
+        VLESSWS_SINGBOX_CONFIG,
+        VLESSWS_DEPLOY_ENV,
+        VLESSWS_UNIT,
+    );
+    format!(
+        r#"
             set -eu
-            /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile.new
 
-            HAD_PREV=0
-            if [ -f /etc/caddy/Caddyfile ]; then
-                HAD_PREV=1
-                cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
-            fi
+            # Validate the NEW Caddyfile BEFORE swapping.
+            /usr/local/bin/caddy validate --config {caddyfile}.new
+{prologue}
+            # Atomic swap + perms. Every post-first-swap fallible filesystem command routes via || recover "".
+            mv {caddyfile}.new {caddyfile} || recover ""
+            chown caddy:caddy {caddyfile} || recover ""
+            chmod 0644 {caddyfile} || recover ""
 
-            mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
-            chown caddy:caddy /etc/caddy/Caddyfile
-            chmod 0644 /etc/caddy/Caddyfile
+            # Enable and reload-or-restart caddy.
+            systemctl enable caddy >/dev/null 2>&1 || recover "caddy"
+            systemctl reload-or-restart caddy || recover "caddy"
 
-            systemctl enable caddy >/dev/null 2>&1 || true
-            systemctl reload-or-restart caddy
-
-            for i in $(seq 1 10); do
-                state=$(systemctl is-active caddy || true)
+            # Poll caddy active state.
+            ok=0
+            for i in $(seq 1 15); do
+                state=$(systemctl is-active caddy 2>/dev/null || true)
                 if [ "$state" = "active" ]; then
-                    rm -f /etc/caddy/Caddyfile.bak
-                    exit 0
+                    ok=1
+                    break
                 fi
-                sleep 3
+                sleep 2
             done
-
-            echo "caddy did not become active. Last 20 log lines:" >&2
-            journalctl -u caddy --no-pager -n 20 >&2 || true
-            if [ "$HAD_PREV" = 1 ] && [ -f /etc/caddy/Caddyfile.bak ]; then
-                echo "rolling back to previous Caddyfile" >&2
-                mv /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile || true
-                chown caddy:caddy /etc/caddy/Caddyfile || true
-                chmod 0644 /etc/caddy/Caddyfile || true
-                systemctl reload-or-restart caddy || true
-            else
-                echo "no previous Caddyfile — removing failed deploy" >&2
-                systemctl stop caddy || true
-                systemctl disable caddy || true
-                rm -f /etc/caddy/Caddyfile
+            if [ "$ok" != 1 ]; then
+                recover "caddy"
             fi
-            exit 1
-    "#
+
+            # Retire stale VLESS-WS backend only after Caddy is active.
+            # Stop, disable, and live artifact deletion are checked and route to recover while snapshots exist.
+            if [ "$HAD_VLESSWS_ACTIVE" = 1 ] || [ "$HAD_VLESSWS_ENABLED" = 1 ] || [ -f {sb_config} ] || [ -f {sb_config}.bak ] || systemctl is-active --quiet {vlessws_unit} 2>/dev/null || systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then
+                systemctl stop {vlessws_unit} || recover "{vlessws_unit}"
+                systemctl disable {vlessws_unit} || recover "{vlessws_unit}"
+            fi
+            rm -f {sb_config} || recover ""
+            rm -f {deploy_env} || recover ""
+            rm -f {sb_config}.bak || true
+            rm -f {deploy_env}.bak || true
+            rm -f {caddyfile}.bak || true
+        "#,
+        caddyfile = CADDYFILE_PATH,
+        sb_config = VLESSWS_SINGBOX_CONFIG,
+        deploy_env = VLESSWS_DEPLOY_ENV,
+        vlessws_unit = VLESSWS_UNIT,
+        prologue = prologue,
+    )
 }

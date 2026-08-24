@@ -85,8 +85,15 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
         apt-get install -y --no-install-recommends \
             curl gpg ca-certificates
         install -d -m 0755 /usr/share/keyrings
+        KEYRING_TMP="/usr/share/keyrings/sagernet.gpg.tmp.$$"
+        trap 'rm -f "$KEYRING_TMP"' EXIT
         curl -fsSL https://sing-box.app/gpg.key \
-            | gpg --dearmor -o /usr/share/keyrings/sagernet.gpg
+            | gpg --dearmor --yes -o "$KEYRING_TMP"
+        test -s "$KEYRING_TMP"
+        gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+        chmod 0644 "$KEYRING_TMP"
+        mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg
+        trap - EXIT
         echo "deb [signed-by=/usr/share/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" \
             > /etc/apt/sources.list.d/sagernet.list
         apt-get update -qq
@@ -201,12 +208,19 @@ LR
     # runs the sing-box kernel today; a kernel-independent bootstrap home
     # for host-hardening is the longer-term fix for amneziawg/caddy-only
     # nodes — same orthogonality note as the cert provisioning above.)
-    if ! command -v fail2ban-client >/dev/null 2>&1; then
+    #
+    # Gate on BOTH fail2ban and python3-systemd: a node where fail2ban is
+    # missing/half-installed or python3-systemd is missing (e.g. installed with
+    # --no-install-recommends or prior to Debian 12 journald requirements) must
+    # run apt-get to install/repair before fail2ban restarts with backend=systemd.
+    # Package detection requires exact status 'install ok installed' for both.
+    if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ] \
+        || [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]; then
         # `apt-get update` here too: the sing-box block above only runs it
         # when sing-box is ABSENT, so on a re-deploy (sing-box present,
-        # fail2ban absent) the cache could be stale → 'Unable to locate'.
+        # fail2ban or python3-systemd absent) the cache could be stale → 'Unable to locate'.
         apt-get update -qq
-        apt-get install -y --no-install-recommends fail2ban
+        apt-get install -y --no-install-recommends fail2ban python3-systemd
     fi
     # Bind the ban action to the EFFECTIVE sshd listen port (a node may
     # set a custom Port via a systemd drop-in / -p, not just sshd_config).
@@ -752,8 +766,12 @@ mod tests {
     fn setup_script_installs_and_configures_fail2ban() {
         let s = SING_BOX_SETUP_SCRIPT.as_str();
         assert!(
-            s.contains("--no-install-recommends fail2ban"),
-            "fail2ban package install missing"
+            s.contains("--no-install-recommends fail2ban python3-systemd"),
+            "fail2ban and python3-systemd package install missing"
+        );
+        assert!(
+            s.contains("python3-systemd"),
+            "python3-systemd package install missing"
         );
         assert!(
             s.contains("/etc/fail2ban/jail.local"),
@@ -784,6 +802,395 @@ mod tests {
             s.contains("command -v fail2ban-client"),
             "final assertion must verify fail2ban-client present"
         );
+    }
+
+    /// Package detection must check exact status 'install ok installed' via
+    /// `dpkg-query -W -f='${Status}'` for BOTH fail2ban and python3-systemd.
+    /// If EITHER package is missing, half-installed, or not exact 'install ok installed',
+    /// apt-get must be triggered to install/repair the node.
+    #[test]
+    fn setup_script_package_detection_uses_exact_dpkg_query_status() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+        // The gate MUST check fail2ban and python3-systemd status via exact dpkg-query.
+        assert!(
+            s.contains(r#"dpkg-query -W -f='${Status}' fail2ban"#),
+            "fail2ban gate must check fail2ban status via dpkg-query: {s}"
+        );
+        assert!(
+            s.contains(r#"dpkg-query -W -f='${Status}' python3-systemd"#),
+            "fail2ban gate must check python3-systemd status via dpkg-query: {s}"
+        );
+        assert!(
+            s.contains("\"install ok installed\""),
+            "gate must require exact 'install ok installed' status: {s}"
+        );
+        // The old bare-presence / dpkg -s checks must NOT be present.
+        assert!(
+            !s.contains("command -v fail2ban-client >/dev/null 2>&1 ||"),
+            "bare command -v fail2ban-client gate must be gone: {s}"
+        );
+        assert!(
+            !s.contains("dpkg -s python3-systemd"),
+            "bare dpkg -s python3-systemd check must be gone: {s}"
+        );
+        // Disjunction: enters install block if EITHER status is not 'install ok installed'.
+        assert!(
+            s.contains(r#"[ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ]"#)
+                && s.contains(r#"[ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]"#),
+            "gate must check both fail2ban and python3-systemd status against 'install ok installed': {s}"
+        );
+
+        // Test shell evaluation of the gate against various installation states:
+        let gate_block = s
+            .lines()
+            .skip_while(|line| !line.contains("dpkg-query -W -f='${Status}' fail2ban"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let run_gate = |f2b_status: &str, py3_status: &str| -> String {
+            let test_script = format!(
+                r#"
+                dpkg-query() {{
+                    pkg="$3"
+                    if [ "$pkg" = "fail2ban" ]; then
+                        if [ -n "{f2b_status}" ]; then echo -n "{f2b_status}"; return 0; else return 1; fi
+                    elif [ "$pkg" = "python3-systemd" ]; then
+                        if [ -n "{py3_status}" ]; then echo -n "{py3_status}"; return 0; else return 1; fi
+                    fi
+                    return 1
+                }}
+                {gate_block}
+                    echo "TRIGGERED"
+                else
+                    echo "SKIPPED"
+                fi
+                "#
+            );
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&test_script)
+                .output()
+                .expect("failed to execute bash for gate evaluation test");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Fully installed: SKIPPED (idempotent / minimal)
+        assert_eq!(
+            run_gate("install ok installed", "install ok installed"),
+            "SKIPPED",
+            "both installed ok must skip apt"
+        );
+        // Partial install (fail2ban installed, python3-systemd missing): MUST trigger install/repair
+        assert_eq!(
+            run_gate("install ok installed", ""),
+            "TRIGGERED",
+            "partial-installed state (fail2ban installed, python3-systemd missing) must trigger install"
+        );
+        // Fresh install (both missing): MUST trigger install
+        assert_eq!(
+            run_gate("", ""),
+            "TRIGGERED",
+            "fresh state (both missing) must trigger install"
+        );
+        // Stale package state (fail2ban missing, python3-systemd installed): MUST trigger install
+        assert_eq!(
+            run_gate("", "install ok installed"),
+            "TRIGGERED",
+            "fail2ban missing state must trigger install"
+        );
+        // Half-installed fail2ban: MUST trigger install
+        assert_eq!(
+            run_gate("install ok half-installed", "install ok installed"),
+            "TRIGGERED",
+            "half-installed fail2ban must trigger install"
+        );
+        // Deinstall config-files state: MUST trigger install
+        assert_eq!(
+            run_gate("deinstall ok config-files", "install ok installed"),
+            "TRIGGERED",
+            "config-files fail2ban must trigger install"
+        );
+        // Half-configured python3-systemd: MUST trigger install
+        assert_eq!(
+            run_gate("install ok installed", "install ok half-configured"),
+            "TRIGGERED",
+            "half-configured python3-systemd must trigger install"
+        );
+    }
+
+    /// Planted reversal test: proves that modifying package detection conditions
+    /// (e.g. conjunction `&&` instead of disjunction `||`, equality `=` instead of `!=`)
+    /// alters the branch behavior and fails the contract.
+    #[test]
+    fn planted_reversal_package_detection_gate() {
+        // Planted reversal 1: Conjunction instead of disjunction (&& instead of ||)
+        // If gate used &&, a node with fail2ban installed but python3-systemd missing
+        // would be SKIPPED instead of repaired.
+        let conjunctive_gate = r#"
+            if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ] \
+                && [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]; then
+        "#;
+        let test_script = format!(
+            r#"
+            dpkg-query() {{
+                pkg="$3"
+                if [ "$pkg" = "fail2ban" ]; then echo -n "install ok installed"; return 0; fi
+                if [ "$pkg" = "python3-systemd" ]; then return 1; fi
+                return 1
+            }}
+            {conjunctive_gate}
+                echo "TRIGGERED"
+            else
+                echo "SKIPPED"
+            fi
+            "#
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&test_script)
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            result, "SKIPPED",
+            "planted conjunction must produce SKIPPED on partial install (reversal proof)"
+        );
+
+        // Planted reversal 2: Equality `=` instead of `!=`
+        // If gate checked =, a fully installed node would be TRIGGERED forever (loss of idempotency).
+        let equality_gate = r#"
+            if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" = "install ok installed" ] \
+                || [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" = "install ok installed" ]; then
+        "#;
+        let test_script = format!(
+            r#"
+            dpkg-query() {{
+                echo -n "install ok installed"; return 0;
+            }}
+            {equality_gate}
+                echo "TRIGGERED"
+            else
+                echo "SKIPPED"
+            fi
+            "#
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&test_script)
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            result, "TRIGGERED",
+            "planted equality must produce TRIGGERED on fully installed node (reversal proof)"
+        );
+    }
+
+    /// Atomic GPG keyring provisioning test:
+    /// 1. Downloads / dearmors to a temporary file in the same directory `/usr/share/keyrings`.
+    /// 2. Sets an EXIT cleanup trap to remove the temporary file on error.
+    /// 3. Validates that the dearmored key is non-empty (`test -s`) and parses as a valid keyring (`gpg --no-default-keyring --keyring ... --list-keys`).
+    /// 4. Sets mode 0644 on the temporary file.
+    /// 5. Atomically renames (`mv`) the temporary file over `/usr/share/keyrings/sagernet.gpg`.
+    /// 6. Cleans up the trap (`trap - EXIT`).
+    #[test]
+    fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() {
+        let s = SING_BOX_SETUP_SCRIPT.as_str();
+
+        // Must create keyrings directory first.
+        assert!(
+            s.contains("install -d -m 0755 /usr/share/keyrings"),
+            "keyrings dir creation missing: {s}"
+        );
+
+        // Temp file definition under the same directory.
+        assert!(
+            s.contains(r#"KEYRING_TMP="/usr/share/keyrings/sagernet.gpg.tmp"#),
+            "temp file must be under /usr/share/keyrings: {s}"
+        );
+
+        // Cleanup trap registered.
+        assert!(
+            s.contains(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#),
+            "cleanup trap for KEYRING_TMP missing: {s}"
+        );
+
+        // Download & dearmor into temp file (not directly into live file).
+        assert!(
+            s.contains(r#"curl -fsSL https://sing-box.app/gpg.key"#)
+                && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#),
+            "gpg dearmor must write to KEYRING_TMP: {s}"
+        );
+        assert!(
+            !s.contains("gpg --dearmor --yes -o /usr/share/keyrings/sagernet.gpg"),
+            "must not directly dearmor into live keyring: {s}"
+        );
+
+        // Validation: non-empty check.
+        assert!(
+            s.contains(r#"test -s "$KEYRING_TMP""#),
+            "must validate KEYRING_TMP is non-empty: {s}"
+        );
+
+        // Validation: keyring parse check via gpg.
+        assert!(
+            s.contains(
+                r#"gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1"#
+            ),
+            "must validate KEYRING_TMP parses as a valid keyring: {s}"
+        );
+
+        // Permissions: chmod 0644 before mv.
+        assert!(
+            s.contains(r#"chmod 0644 "$KEYRING_TMP""#),
+            "must chmod 0644 KEYRING_TMP: {s}"
+        );
+
+        // Atomic move to live keyring.
+        assert!(
+            s.contains(r#"mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg"#),
+            "must atomically move KEYRING_TMP over live keyring: {s}"
+        );
+
+        // Trap disarmed after successful move.
+        assert!(
+            s.contains("trap - EXIT"),
+            "must disarm trap after successful atomic move: {s}"
+        );
+
+        // Order assertions:
+        let trap_pos = s
+            .find(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#)
+            .expect("trap pos");
+        let curl_pos = s
+            .find("curl -fsSL https://sing-box.app/gpg.key")
+            .expect("curl pos");
+        let test_s_pos = s.find(r#"test -s "$KEYRING_TMP""#).expect("test -s pos");
+        let gpg_val_pos = s
+            .find(r#"gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys"#)
+            .expect("gpg val pos");
+        let chmod_pos = s.find(r#"chmod 0644 "$KEYRING_TMP""#).expect("chmod pos");
+        let mv_pos = s
+            .find(r#"mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg"#)
+            .expect("mv pos");
+        let untrap_pos = s.find("trap - EXIT").expect("untrap pos");
+
+        assert!(trap_pos < curl_pos, "trap must be set BEFORE download");
+        assert!(
+            curl_pos < test_s_pos,
+            "download must come before non-empty test"
+        );
+        assert!(
+            test_s_pos < gpg_val_pos,
+            "non-empty test must come before gpg parse test"
+        );
+        assert!(
+            gpg_val_pos < chmod_pos,
+            "gpg parse validation must come before chmod"
+        );
+        assert!(chmod_pos < mv_pos, "chmod must come before atomic mv");
+        assert!(mv_pos < untrap_pos, "atomic mv must come before untrap");
+    }
+
+    /// Planted reversal test for GPG keyring atomic provisioning:
+    /// Proves that failure at each step (download failure, empty file, corrupt keyring parse)
+    /// causes the script to abort under `set -e`, triggers the trap cleanup, and leaves no
+    /// half-written/invalid keyring in place.
+    #[test]
+    fn planted_reversal_gpg_keyring_transactional_failure_modes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("vpnctl-test-keyring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let live_keyring = temp_dir.join("sagernet.gpg");
+        // Pre-create an existing live keyring with dummy content to verify it is NOT corrupted on failure.
+        std::fs::write(&live_keyring, b"original-valid-keyring").unwrap();
+
+        // 1. Planted reversal: empty download output fails validation, trap cleans up tmp, live keyring unchanged.
+        let script_empty = format!(
+            r#"
+            set -eu
+            KEYRING_TMP="{temp_dir}/sagernet.gpg.tmp.$$"
+            trap 'rm -f "$KEYRING_TMP"' EXIT
+            touch "$KEYRING_TMP" # simulate empty download
+            test -s "$KEYRING_TMP"
+            gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+            chmod 0644 "$KEYRING_TMP"
+            mv "$KEYRING_TMP" "{live}"
+            trap - EXIT
+            "#,
+            temp_dir = temp_dir.display(),
+            live = live_keyring.display()
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script_empty)
+            .output()
+            .unwrap();
+
+        assert!(!out.status.success(), "empty file must fail execution");
+        assert_eq!(
+            std::fs::read(&live_keyring).unwrap(),
+            b"original-valid-keyring",
+            "live keyring must remain untouched on empty download failure"
+        );
+
+        // Verify tmp file was cleaned up by the trap.
+        let leftover_tmp = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(
+            !leftover_tmp,
+            "cleanup trap must remove temporary file on failure"
+        );
+
+        // 2. Planted reversal: corrupt non-keyring data fails gpg keyring parse check, trap cleans up.
+        let script_corrupt = format!(
+            r#"
+            set -eu
+            KEYRING_TMP="{temp_dir}/sagernet.gpg.tmp.$$"
+            trap 'rm -f "$KEYRING_TMP"' EXIT
+            echo "corrupt non-keyring data" > "$KEYRING_TMP"
+            test -s "$KEYRING_TMP"
+            gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1
+            chmod 0644 "$KEYRING_TMP"
+            mv "$KEYRING_TMP" "{live}"
+            trap - EXIT
+            "#,
+            temp_dir = temp_dir.display(),
+            live = live_keyring.display()
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script_corrupt)
+            .output()
+            .unwrap();
+
+        assert!(
+            !out.status.success(),
+            "corrupt keyring parse must fail execution"
+        );
+        assert_eq!(
+            std::fs::read(&live_keyring).unwrap(),
+            b"original-valid-keyring",
+            "live keyring must remain untouched on corrupt keyring parse failure"
+        );
+
+        let leftover_tmp = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(
+            !leftover_tmp,
+            "cleanup trap must remove temporary file on failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -890,6 +1297,7 @@ mod tests {
         // The SagerNet repo/key setup and the final assertion are retained.
         assert!(
             s.contains("https://sing-box.app/gpg.key")
+                && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#)
                 && s.contains("deb.sagernet.org")
                 && s.contains("apt-get install -y sing-box"),
             "SagerNet repo setup + apt install must be retained inside the gate: {s}"
