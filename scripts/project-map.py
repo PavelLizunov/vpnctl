@@ -16,135 +16,75 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tomllib
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 
 def find_repo_root() -> Path:
-    """Resolve repository root directory."""
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if out:
-            return Path(out).resolve()
-    except Exception:
-        pass
-    # Fallback based on script location
-    return Path(__file__).resolve().parent.parent
+    """Resolve repository root directory using git."""
+    out = subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"],
+        text=True,
+    ).strip()
+    return Path(out).resolve()
 
 
-def get_tracked_files(repo_root: Path) -> List[str]:
+def get_tracked_files(repo_root: Path) -> list[str]:
     """Get all git-tracked files relative to repo root."""
-    try:
-        out = subprocess.check_output(
-            ["git", "ls-files", "--cached"],
-            cwd=repo_root,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return sorted(
-            line.strip()
-            for line in out.splitlines()
-            if line.strip() and (repo_root / line.strip()).is_file()
-        )
-    except Exception:
-        # Fallback to filesystem scan excluding VCS / build artifacts
-        tracked = []
-        for root, dirs, files in os.walk(repo_root):
-            dirs[:] = [d for d in dirs if d not in {".git", "target", ".cargo", "node_modules"}]
-            for f in files:
-                rel = os.path.relpath(os.path.join(root, f), repo_root)
-                tracked.append(rel)
-        return sorted(tracked)
+    out = subprocess.check_output(
+        ["git", "ls-files", "--cached"],
+        cwd=repo_root,
+        text=True,
+    )
+    return sorted(
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and (repo_root / line.strip()).is_file()
+    )
 
 
-def get_workspace_crates(repo_root: Path) -> List[Dict[str, Any]]:
-    """Query cargo metadata or fallback to Cargo.toml parsing."""
-    crates: List[Dict[str, Any]] = []
+def get_workspace_crates(repo_root: Path) -> list[dict[str, Any]]:
+    """Query workspace packages and targets via cargo metadata."""
+    res = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(res.stdout)
+    crates: list[dict[str, Any]] = []
 
-    # Try cargo metadata first
-    try:
-        res = subprocess.run(
-            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        data = json.loads(res.stdout)
-        for pkg in data.get("packages", []):
-            manifest_path = Path(pkg["manifest_path"]).resolve()
-            rel_manifest = manifest_path.relative_to(repo_root)
-            crate_path = str(rel_manifest.parent)
-            if crate_path == ".":
-                crate_path = ""
+    for pkg in data.get("packages", []):
+        manifest_path = Path(pkg["manifest_path"]).resolve()
+        rel_manifest = manifest_path.relative_to(repo_root)
+        crate_path = str(rel_manifest.parent)
+        if crate_path == ".":
+            crate_path = ""
 
-            targets_info = []
-            for tgt in pkg.get("targets", []):
-                kinds = tgt.get("kind", [])
-                kind_name = kinds[0] if kinds else "unknown"
-                targets_info.append({
-                    "name": tgt.get("name", ""),
-                    "kind": kind_name,
-                    "src_path": tgt.get("src_path", ""),
-                })
+        targets_info = [
+            {
+                "name": tgt.get("name", ""),
+                "kind": (tgt.get("kind", []) or ["unknown"])[0],
+                "src_path": tgt.get("src_path", ""),
+            }
+            for tgt in pkg.get("targets", [])
+        ]
 
-            crates.append({
-                "name": pkg["name"],
-                "version": pkg["version"],
-                "path": crate_path,
-                "targets": targets_info,
-            })
-    except Exception:
-        # Fallback to direct Cargo.toml parsing
-        root_toml_path = repo_root / "Cargo.toml"
-        if root_toml_path.exists():
-            with open(root_toml_path, "rb") as f:
-                root_toml = tomllib.load(f)
-            ws = root_toml.get("workspace", {})
-            members = ws.get("members", [])
-            ws_pkg_ver = ws.get("package", {}).get("version", "0.0.0")
-
-            for member in members:
-                cpath = repo_root / member / "Cargo.toml"
-                if not cpath.exists():
-                    continue
-                with open(cpath, "rb") as cf:
-                    cdata = tomllib.load(cf)
-                pkg = cdata.get("package", {})
-                name = pkg.get("name", member)
-                ver = pkg.get("version", ws_pkg_ver)
-                if isinstance(ver, dict) and ver.get("workspace"):
-                    ver = ws_pkg_ver
-
-                targets_info = []
-                mdir = repo_root / member
-                if (mdir / "src" / "lib.rs").exists():
-                    targets_info.append({"name": name.replace("-", "_"), "kind": "lib", "src_path": str(mdir / "src" / "lib.rs")})
-                if (mdir / "src" / "main.rs").exists():
-                    targets_info.append({"name": name, "kind": "bin", "src_path": str(mdir / "src" / "main.rs")})
-                for test_file in sorted((mdir / "tests").glob("*.rs") if (mdir / "tests").exists() else []):
-                    targets_info.append({"name": test_file.stem, "kind": "test", "src_path": str(test_file)})
-
-                crates.append({
-                    "name": name,
-                    "version": ver,
-                    "path": member,
-                    "targets": targets_info,
-                })
+        crates.append({
+            "name": pkg["name"],
+            "version": pkg["version"],
+            "path": crate_path,
+            "targets": targets_info,
+        })
 
     return sorted(crates, key=lambda x: x["path"])
 
 
-def summarize_targets(targets: List[Dict[str, Any]]) -> str:
+def summarize_targets(targets: list[dict[str, Any]]) -> str:
     """Format targets list into a concise summary string."""
     kinds = [t.get("kind", "") for t in targets]
     has_lib = "lib" in kinds
@@ -153,7 +93,7 @@ def summarize_targets(targets: List[Dict[str, Any]]) -> str:
     example_count = sum(1 for k in kinds if k == "example")
     bench_count = sum(1 for k in kinds if k == "bench")
 
-    parts = []
+    parts: list[str] = []
     if has_lib:
         parts.append("lib")
     if bin_count == 1:
@@ -172,11 +112,15 @@ def summarize_targets(targets: List[Dict[str, Any]]) -> str:
     return ", ".join(parts) if parts else "none"
 
 
-def scan_rust_loc(repo_root: Path, tracked_files: List[str], crates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, int]]]:
+def scan_rust_loc(
+    repo_root: Path,
+    tracked_files: list[str],
+    crates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
     """Scan tracked Rust files, count lines, and associate with crates."""
     rs_files = [f for f in tracked_files if f.endswith(".rs")]
-    file_records = []
-    crate_stats: Dict[str, Dict[str, int]] = {
+    file_records: list[dict[str, Any]] = []
+    crate_stats: dict[str, dict[str, int]] = {
         c["path"]: {"prod_loc": 0, "prod_files": 0, "test_loc": 0, "test_files": 0}
         for c in crates
     }
@@ -186,7 +130,6 @@ def scan_rust_loc(repo_root: Path, tracked_files: List[str], crates: List[Dict[s
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             lines = sum(1 for _ in f)
 
-        # Match to crate
         matched_crate = None
         for c in crates:
             cpath = c["path"]
@@ -195,7 +138,6 @@ def scan_rust_loc(repo_root: Path, tracked_files: List[str], crates: List[Dict[s
                 break
 
         is_test = "/tests/" in rel_path or rel_path.endswith("_test.rs") or rel_path.endswith("_tests.rs")
-
         file_records.append({
             "path": rel_path,
             "lines": lines,
@@ -204,36 +146,27 @@ def scan_rust_loc(repo_root: Path, tracked_files: List[str], crates: List[Dict[s
         })
 
         if matched_crate and matched_crate in crate_stats:
-            if is_test:
-                crate_stats[matched_crate]["test_loc"] += lines
-                crate_stats[matched_crate]["test_files"] += 1
-            else:
-                crate_stats[matched_crate]["prod_loc"] += lines
-                crate_stats[matched_crate]["prod_files"] += 1
+            prefix = "test" if is_test else "prod"
+            crate_stats[matched_crate][f"{prefix}_loc"] += lines
+            crate_stats[matched_crate][f"{prefix}_files"] += 1
 
     return file_records, crate_stats
 
 
-def scan_migrations(repo_root: Path, tracked_files: List[str]) -> List[Dict[str, Any]]:
+def scan_migrations(repo_root: Path, tracked_files: list[str]) -> list[dict[str, Any]]:
     """Scan SQLite migration files in crates/inventory/migrations/."""
     migration_files = sorted(
-        [f for f in tracked_files if f.startswith("crates/inventory/migrations/") and f.endswith(".sql")]
+        f for f in tracked_files if f.startswith("crates/inventory/migrations/") and f.endswith(".sql")
     )
-    migrations = []
+    migrations: list[dict[str, Any]] = []
     for mf in migration_files:
         full_path = repo_root / mf
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             lines = sum(1 for _ in f)
 
-        filename = os.path.basename(mf)
+        filename = Path(mf).name
         match = re.match(r"^(\d+)_?(.*)\.sql$", filename)
-        if match:
-            num = match.group(1)
-            name = match.group(2).replace("_", " ")
-        else:
-            num = "-"
-            name = filename
-
+        num, name = (match.group(1), match.group(2).replace("_", " ")) if match else ("-", filename)
         migrations.append({
             "version": num,
             "name": name,
@@ -243,14 +176,11 @@ def scan_migrations(repo_root: Path, tracked_files: List[str]) -> List[Dict[str,
     return migrations
 
 
-def scan_routes(repo_root: Path) -> List[Dict[str, str]]:
+def scan_routes(repo_root: Path) -> list[dict[str, str]]:
     """Scan literal `.route(...)` registrations from daemon/src/app.rs."""
     app_rs = repo_root / "daemon/src/app.rs"
-    if not app_rs.exists():
-        return []
-
-    text = app_rs.read_text(encoding="utf-8", errors="replace")
-    routes: List[Dict[str, str]] = []
+    text = app_rs.read_text(encoding="utf-8")
+    routes: list[dict[str, str]] = []
 
     pos = 0
     while True:
@@ -301,12 +231,12 @@ def scan_routes(repo_root: Path) -> List[Dict[str, str]]:
 
 def generate_project_map_markdown(
     repo_root: Path,
-    tracked_files: List[str],
-    crates: List[Dict[str, Any]],
-    file_records: List[Dict[str, Any]],
-    crate_stats: Dict[str, Dict[str, int]],
-    migrations: List[Dict[str, Any]],
-    routes: List[Dict[str, str]],
+    tracked_files: list[str],
+    crates: list[dict[str, Any]],
+    file_records: list[dict[str, Any]],
+    crate_stats: dict[str, dict[str, int]],
+    migrations: list[dict[str, Any]],
+    routes: list[dict[str, str]],
 ) -> str:
     """Render deterministic Markdown project map."""
     total_prod_loc = sum(cs["prod_loc"] for cs in crate_stats.values())
@@ -316,24 +246,24 @@ def generate_project_map_markdown(
     total_rust_loc = total_prod_loc + total_test_loc
     total_rust_files = total_prod_files + total_test_files
 
-    out: List[str] = []
-    out.append("# Codebase Inventory & Project Map")
-    out.append("")
-    out.append("<!-- Generated deterministically by scripts/project-map.py. Do not edit directly. -->")
-    out.append("")
-    out.append("## Overview")
-    out.append("")
-    out.append(f"- **Workspace Crates:** {len(crates)}")
-    out.append(f"- **Tracked Rust Files:** {total_rust_files} ({total_prod_files} prod / {total_test_files} test)")
-    out.append(f"- **Total Rust LOC:** {total_rust_loc:,} ({total_prod_loc:,} prod / {total_test_loc:,} test)")
-    out.append(f"- **Database Migrations:** {len(migrations)}")
-    out.append(f"- **`daemon/src/app.rs` `.route(...)` Registrations:** {len(routes)}")
-    out.append("")
-
-    out.append("## Workspace Crates & Targets")
-    out.append("")
-    out.append("| Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |")
-    out.append("|---|---|---|---|---|---|---|")
+    out: list[str] = [
+        "# Codebase Inventory & Project Map",
+        "",
+        "<!-- Generated deterministically by scripts/project-map.py. Do not edit directly. -->",
+        "",
+        "## Overview",
+        "",
+        f"- **Workspace Crates:** {len(crates)}",
+        f"- **Tracked Rust Files:** {total_rust_files} ({total_prod_files} prod / {total_test_files} test)",
+        f"- **Total Rust LOC:** {total_rust_loc:,} ({total_prod_loc:,} prod / {total_test_loc:,} test)",
+        f"- **Database Migrations:** {len(migrations)}",
+        f"- **`daemon/src/app.rs` `.route(...)` Registrations:** {len(routes)}",
+        "",
+        "## Workspace Crates & Targets",
+        "",
+        "| Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |",
+        "|---|---|---|---|---|---|---|",
+    ]
 
     for c in crates:
         cpath = c["path"]
@@ -434,7 +364,8 @@ def main() -> int:
             )
             sys.stderr.write(f"Error: {output_rel} is out of date.\n")
             sys.stderr.writelines(diff)
-            sys.stderr.write(f"\nRun `just project-map` or `python3 {os.path.relpath(__file__, repo_root)}` to regenerate.\n")
+            rel_script = Path(__file__).resolve().relative_to(repo_root)
+            sys.stderr.write(f"\nRun `just project-map` or `python3 {rel_script}` to regenerate.\n")
             return 1
 
         print(f"✔ {output_rel} is up-to-date")
