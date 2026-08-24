@@ -21,6 +21,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: project map is current
+        run: python3 scripts/project-map.py --check
       - run: cargo check --workspace --all-targets
 
   fmt:

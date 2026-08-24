@@ -1,331 +1,232 @@
-# vpnctl codebase inventory — 2026-05-17 (overnight burst)
+# Codebase Inventory & Project Map
 
-Generated as part of the overnight burst per Pavel: «проанализировал
-всю кодовую база, расписал какой элемент сколько LOC занимает,
-расписал каждую фичу и ее флов, записал артефакты».
+<!-- Generated deterministically by scripts/project-map.py. Do not edit directly. -->
 
-Snapshot commit: `aef1c6b` (HEAD after the burst). Workspace tests
-green: **149 admin_smoke + 102 vpnctld unit + 38 inventory spec + ~50
-protocol/ssh/wizard unit suites = ~500 tests** across the workspace.
+## Overview
 
-## Lines of code (production + tests)
+- **Workspace Crates:** 10
+- **Tracked Rust Files:** 331 (234 prod / 97 test)
+- **Total Rust LOC:** 122,651 (80,209 prod / 42,442 test)
+- **Database Migrations:** 48
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 117
 
-### By crate
+## Workspace Crates & Targets
 
-| Path | LOC | Files | Role |
+| Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
+|---|---|---|---|---|---|---|
+| `vpnctl` | `cli` | 0.9.0 | bin | 5,024 (19) | 0 (0) | **5,024** |
+| `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,339 (6) | 870 (2) | **2,209** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,836 (5) | 0 (0) | **1,836** |
+| `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
+| `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 331 (1) | 400 (2) | **731** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 30 tests | 12,814 (46) | 11,507 (34) | **24,321** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 6,637 (10) | 605 (2) | **7,242** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 5,658 (19) | 4,186 (11) | **9,844** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 520 (3) | 558 (3) | **1,078** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,624 (124) | 24,316 (43) | **69,940** |
+| **Total** | | | | **80,209 (234)** | **42,442 (97)** | **122,651** |
+
+## Largest Rust Modules (Top 25)
+
+| File | LOC | Crate | Role |
 |---|---|---|---|
-| `crates/core` | 511 | 1 | Types + traits + `Registry` (THE architectural seam — every kernel and protocol plugs in here). |
-| `crates/crypto` | 192 | 1 | UUID v4, x25519 keypair (REALITY + WG), short-id, password gen. |
-| `crates/ssh` | 1 103 | 6 | `SshTransport` trait + `russh` impl + `MockTransport` for tests. |
-| `crates/protocols` | 4 139 | 14 | 7 protocols × ~600 LOC each + helpers (`vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`). |
-| `crates/kernels` | 824 | 3 | `sing-box` kernel (install + render + apply); `amneziawg` kernel. |
-| `crates/inventory` | 7 425 | 14 | SQLite store + 11 migrations + audit log + sub-access log + traffic stats + node-health + admin-alerts + bash migration planner + backup/restore. |
-| `cli` | 2 411 | 15 | `vpnctl` binary: 14 subcommands (server, user, grant, revoke, deploy, status, sub, bootstrap, render, backup, restore, migrate, uuid, registry). |
-| `daemon` | 20 180 | 24 | `vpnctld` binary: admin UI + /sub/<token> + /api/v1 + 4 background pollers (retention, clash-api, node-probe, health-monitor, backup-scheduler, rate-limit-cleanup). |
-| **Total** | **36 852** | 99 | |
+| `daemon/src/handlers/admin/user_detail/render.rs` | 1,954 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 1,576 | `daemon` | Test |
+| `crates/kernels/src/sing_box.rs` | 1,403 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,310 | `daemon` | Test |
+| `crates/core/src/lib.rs` | 1,272 | `crates/core` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,233 | `daemon` | Prod |
+| `daemon/src/health_monitor/tests.rs` | 1,227 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/dashboard.rs` | 1,179 | `daemon` | Test |
+| `crates/inventory/src/sqlite/tests.rs` | 1,155 | `crates/inventory` | Prod |
+| `crates/kernels/src/dns_tunnel.rs` | 1,116 | `crates/kernels` | Prod |
+| `crates/kernels/src/wgturn.rs` | 1,096 | `crates/kernels` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,058 | `daemon` | Prod |
+| `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
+| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,003 | `daemon` | Test |
+| `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
+| `daemon/tests/vpn_router_endpoint/protocols.rs` | 988 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 965 | `daemon` | Test |
+| `crates/kernels/src/amnezia_wg.rs` | 954 | `crates/kernels` | Prod |
+| `daemon/src/handlers/admin/legacy/deploy_sse.rs` | 945 | `daemon` | Prod |
+| `daemon/src/node_probe.rs` | 944 | `daemon` | Prod |
+| `crates/protocols/src/dns_tunnel.rs` | 936 | `crates/protocols` | Prod |
+| `daemon/tests/admin_smoke/servers.rs` | 897 | `daemon` | Test |
+| `daemon/src/handlers/admin/user_actions.rs` | 883 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 877 | `daemon` | Test |
 
-### By daemon module (hottest)
+## Database Migrations (48)
 
-| File | LOC | Purpose |
-|---|---|---|
-| `daemon/src/handlers/admin.rs` | 6 361 | Every `/admin/*` GET/POST + shell + nav + 30+ helper functions for sections. |
-| `daemon/src/wizard_bootstrap.rs` | 1 073 | Phase E 9-phase SSE-streamed add-server pipeline (push key → harden SSH → install fail2ban → install sing-box → render config → restart → prove live). |
-| `daemon/src/app.rs` | 797 | Router + AppState + 5 background-task spawners + admin-router wiring. |
-| `daemon/src/clash_poller.rs` | 580 | Track-3 — diff engine + per-server poller for sing-box clash-api. |
-| `daemon/src/health_monitor.rs` | 540 | **Phase G** — diff_rows pure function (8 detection rules + hysteresis) + scan_once + spawn loop. |
-| `daemon/src/node_probe.rs` | 479 | Phase H chunk 1 — single-script SSH probe + tagged-line parser. |
-| `daemon/src/rate_limit.rs` | 451 | Track-2 — token bucket per (IP, sub-token) + persistent bans + cleanup. |
-| `daemon/src/clash_api.rs` | 394 | Clash-api types + parser + `SshClashClient`. |
-| `daemon/src/ssh_subprocess.rs` | 386 | **Path C** — wraps `/usr/bin/ssh` via `std::process::Command` + `spawn_blocking` (avoids glibc 2.38 dep that crash-loops vpnctld on bookworm). |
-| `daemon/src/node_probe_poller.rs` | 254 | **Phase H chunk 4** — periodic probe-and-INSERT runtime. |
-
-### Tests
-
-| Suite | LOC | Tests |
-|---|---|---|
-| `daemon/tests/admin_smoke.rs` | ~6 100 | 149 (DOM + routing + copy contracts + visual hooks) |
-| `daemon/tests/sub_endpoint.rs` | ~250 | 6 (token resolution + rate-limit + persistent ban) |
-| `daemon/tests/sub_security.rs` | ~280 | 8 (no-token-leak, fingerprint-leak, missing-grant edge) |
-| `crates/inventory/tests/spec_*.rs` | 3 137 | 38 (split across spec_audit_paginated, spec_access_buckets, spec_inventory, spec_migration, spec_node_health, spec_sub_access, spec_sub_rate_bans, spec_vpn_stats) |
-| `crates/protocols/tests/spec_*.rs` | 2 157 | 84 (per-protocol render + share_link + byte-equality) |
-| `crates/ssh/tests/` | 558 | 12 (russh transport happy + error paths) |
-| Total | **~12 500** | **~500** |
-
-Tests-to-production ratio: **~34%** (~12.5K test LOC / 36.9K total). Higher than typical for Rust projects — driven by the methodology rule "every public API gets a test-writer-agent pass + every commit gets a review-agent pass".
-
-## Artefact inventory
-
-### Binaries (2)
-
-| Binary | Crate | Build target | Purpose |
+| Version | Migration Name | File | Lines |
 |---|---|---|---|
-| `vpnctl` | `cli/` | host (cargo build --release) | Operator CLI; reads `/var/lib/vpnctl/inv.db` (or `--db`). |
-| `vpnctld` | `daemon/` | `x86_64-unknown-linux-gnu.2.36` via `cargo zigbuild` | Admin HTTP daemon + /sub/<token>; lives at `/opt/vpnctl/vpnctld` on 192.168.0.236, root:root 0755. Build via cargo-zigbuild to avoid glibc 2.38 dep (see CLAUDE.md). |
+| `0001` | init | `crates/inventory/migrations/0001_init.sql` | 64 |
+| `0002` | sub token | `crates/inventory/migrations/0002_sub_token.sql` | 17 |
+| `0003` | sub access log | `crates/inventory/migrations/0003_sub_access_log.sql` | 46 |
+| `0004` | sub access keep after user delete | `crates/inventory/migrations/0004_sub_access_keep_after_user_delete.sql` | 54 |
+| `0005` | sub rate bans | `crates/inventory/migrations/0005_sub_rate_bans.sql` | 44 |
+| `0006` | vpn connection stats | `crates/inventory/migrations/0006_vpn_connection_stats.sql` | 62 |
+| `0007` | node health | `crates/inventory/migrations/0007_node_health.sql` | 67 |
+| `0008` | users wireguard private | `crates/inventory/migrations/0008_users_wireguard_private.sql` | 29 |
+| `0009` | server kernels | `crates/inventory/migrations/0009_server_kernels.sql` | 49 |
+| `0010` | user traffic limits | `crates/inventory/migrations/0010_user_traffic_limits.sql` | 43 |
+| `0011` | admin alerts | `crates/inventory/migrations/0011_admin_alerts.sql` | 108 |
+| `0012` | admin alerts unacked index | `crates/inventory/migrations/0012_admin_alerts_unacked_index.sql` | 19 |
+| `0013` | admin alerts unique unacked | `crates/inventory/migrations/0013_admin_alerts_unique_unacked.sql` | 60 |
+| `0014` | notification settings | `crates/inventory/migrations/0014_notification_settings.sql` | 48 |
+| `0015` | notification proxy via server | `crates/inventory/migrations/0015_notification_proxy_via_server.sql` | 37 |
+| `0016` | grants per server uuid | `crates/inventory/migrations/0016_grants_per_server_uuid.sql` | 64 |
+| `0017` | users vpn router device id | `crates/inventory/migrations/0017_users_vpn_router_device_id.sql` | 31 |
+| `0018` | protocol visibility | `crates/inventory/migrations/0018_protocol_visibility.sql` | 72 |
+| `0019` | sub access log richer metadata | `crates/inventory/migrations/0019_sub_access_log_richer_metadata.sql` | 47 |
+| `0020` | sub access log tls fingerprint | `crates/inventory/migrations/0020_sub_access_log_tls_fingerprint.sql` | 42 |
+| `0021` | sub access log vpn egress | `crates/inventory/migrations/0021_sub_access_log_vpn_egress.sql` | 84 |
+| `0022` | vpn user daily | `crates/inventory/migrations/0022_vpn_user_daily.sql` | 72 |
+| `0023` | dns ptr cache | `crates/inventory/migrations/0023_dns_ptr_cache.sql` | 45 |
+| `0024` | vpn user destinations | `crates/inventory/migrations/0024_vpn_user_destinations.sql` | 54 |
+| `0025` | vpn user sessions | `crates/inventory/migrations/0025_vpn_user_sessions.sql` | 50 |
+| `0026` | users disabled | `crates/inventory/migrations/0026_users_disabled.sql` | 31 |
+| `0027` | display settings | `crates/inventory/migrations/0027_display_settings.sql` | 30 |
+| `0028` | servers reserved ports | `crates/inventory/migrations/0028_servers_reserved_ports.sql` | 28 |
+| `0029` | servers display name | `crates/inventory/migrations/0029_servers_display_name.sql` | 15 |
+| `0030` | servers auto suppress | `crates/inventory/migrations/0030_servers_auto_suppress.sql` | 22 |
+| `0031` | servers udp pair enabled | `crates/inventory/migrations/0031_servers_udp_pair_enabled.sql` | 9 |
+| `0032` | vpn connection stats ts index | `crates/inventory/migrations/0032_vpn_connection_stats_ts_index.sql` | 25 |
+| `0033` | node health kernel versions | `crates/inventory/migrations/0033_node_health_kernel_versions.sql` | 56 |
+| `0034` | vpn user source ips | `crates/inventory/migrations/0034_vpn_user_source_ips.sql` | 58 |
+| `0035` | vpn user ip concurrency | `crates/inventory/migrations/0035_vpn_user_ip_concurrency.sql` | 39 |
+| `0036` | notification language | `crates/inventory/migrations/0036_notification_language.sql` | 8 |
+| `0037` | admin alerts telegram message id | `crates/inventory/migrations/0037_admin_alerts_telegram_message_id.sql` | 6 |
+| `0038` | node health nic bytes | `crates/inventory/migrations/0038_node_health_nic_bytes.sql` | 13 |
+| `0039` | grants granted at | `crates/inventory/migrations/0039_grants_granted_at.sql` | 5 |
+| `0040` | boosty bridge | `crates/inventory/migrations/0040_boosty_bridge.sql` | 60 |
+| `0041` | boosty multi user | `crates/inventory/migrations/0041_boosty_multi_user.sql` | 22 |
+| `0042` | node health nrestarts | `crates/inventory/migrations/0042_node_health_nrestarts.sql` | 12 |
+| `0043` | vpn server hourly | `crates/inventory/migrations/0043_vpn_server_hourly.sql` | 52 |
+| `0044` | boosty automation | `crates/inventory/migrations/0044_boosty_automation.sql` | 11 |
+| `0045` | reset sharing network peaks | `crates/inventory/migrations/0045_reset_sharing_network_peaks.sql` | 5 |
+| `0046` | server resolved addresses | `crates/inventory/migrations/0046_server_resolved_addresses.sql` | 23 |
+| `0047` | boosty sync lease | `crates/inventory/migrations/0047_boosty_sync_lease.sql` | 2 |
+| `0048` | server quality samples | `crates/inventory/migrations/0048_server_quality_samples.sql` | 30 |
 
-### CLI subcommands (14)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (117)
 
-| Subcommand | Purpose |
-|---|---|
-| `vpnctl uuid` | Smoke test — emit a fresh UUID v4. |
-| `vpnctl registry` | List all registered kernels + protocols (text or JSON). |
-| `vpnctl server {add,list,show,remove,secret,set-fingerprint}` | Server CRUD + per-server secret + TOFU pin (NEW this burst). |
-| `vpnctl user {add,list,show,remove,regen-tuic,regen-sub-token,set-wg,traffic-limit}` | User CRUD + secret rotations + traffic-limit. |
-| `vpnctl grant <user> <server>` | Grant access. |
-| `vpnctl revoke <user> <server>` | Revoke access. |
-| `vpnctl deploy <server>` | Full SSH-push: install kernel + mint missing secrets + render config + restart. Idempotent. |
-| `vpnctl status <server>` | Query kernel runtime status over SSH. |
-| `vpnctl sub <user> [--qr]` | Print all share links for the user; optional ASCII QR. |
-| `vpnctl bootstrap` | Provision a new node from `root:password` (push key, record fingerprint, add to inventory). |
-| `vpnctl render <server>` | Render kernel-native config to stdout (offline review). |
-| `vpnctl backup {snapshot,list,prune}` | `inv.db` snapshot operations. |
-| `vpnctl restore <snapshot>` | Restore inventory from snapshot file. |
-| `vpnctl migrate from-bash <dir>` | Import bash project state. **NEW this burst:** `--i-really-mean-overwrite-address` gate. |
-
-### Admin web endpoints (26)
-
-| Method | Path | Handler | Purpose |
-|---|---|---|---|
-| GET | `/admin/` | `dashboard` | Metrics + alerts tile + heavy-users heatmap + limit alerts + audit timeline. |
-| GET | `/admin/monitoring` | `monitoring` | Sparklines + KPIs over `/api/v1/stats/sub-access`. |
-| GET | `/admin/servers` | `servers` | List + quick-add form. |
-| POST | `/admin/servers` | `server_quick_add` | One-field server add. |
-| GET | `/admin/servers/new` | `wizard_new` | Phase E step 1 form (IP + root pw). |
-| POST | `/admin/servers/new` | `wizard_new_submit` | Step 1 validate + session cookie. |
-| GET | `/admin/servers/new/step2` | `wizard_step2_stub` | Step 2 EventSource attach page. |
-| GET | `/admin/servers/new/sse` | `wizard_step2_sse` | Step 2 SSE stream of bootstrap pipeline. |
-| GET | `/admin/servers/{id}` | `server_detail` | Detail + drift + protocols + kernels + grants + **fingerprint section (NEW)**. |
-| POST | `/admin/servers/{id}/deploy` | `server_deploy` | One-click full deploy. |
-| POST | `/admin/servers/{id}/protocol/{pid}` | `server_protocol_set` | Toggle protocol. |
-| POST | `/admin/servers/{id}/kernel/{kid}` | `server_kernel_set` | Toggle kernel. |
-| POST | `/admin/servers/{id}/set-fingerprint` | `server_set_fingerprint` | **NEW** — auto-detect via ssh-keyscan OR manual paste. |
-| POST | `/admin/servers/{id}/grants/{uid}` | `server_grant_user` | Grant from server side. |
-| POST | `/admin/servers/{id}/grants/{uid}/revoke` | `server_revoke_user` | Revoke from server side. |
-| GET | `/admin/users` | `users` | List + create form. |
-| POST | `/admin/users` | `user_create` | Mint UUID + WG keypair + tuic_password + sub_token. |
-| GET | `/admin/users/{id}` | `user_detail` | Full per-user view: share links + WG + traffic + UA clusters + sub-access log. |
-| POST | `/admin/users/{id}/sub-token/regenerate` | `user_regen_sub_token` | Rotate sub_token. |
-| POST | `/admin/users/{id}/wireguard/regenerate` | `user_regen_wireguard` | New WG keypair. |
-| GET | `/admin/users/{id}/wireguard/conf/{server_id}` | `user_wireguard_conf_download` | `.conf` attachment. |
-| POST | `/admin/users/{id}/traffic-limit` | `user_traffic_limit` | Set/clear per-user cap. |
-| POST | `/admin/users/{id}/grants/{server_id}` | `user_grant_server` | Grant from user side. |
-| POST | `/admin/users/{id}/grants/{server_id}/revoke` | `user_revoke_server` | Revoke from user side. |
-| GET | `/admin/users/{id}/delete-confirm` | `user_delete_confirm` | "Type the id to confirm" gate. |
-| POST | `/admin/users/{id}/delete` | `user_delete` | After confirm — CASCADE through grants. |
-| GET | `/admin/audit[.csv]` | `audit` / `audit_csv` | Phase D — paginated + filtered + CSV export. |
-| GET | `/admin/alerts` | `alerts` | **NEW Phase G** — infra alerts feed (`?show=all` includes acked). |
-| POST | `/admin/alerts/{id}/ack` | `alert_ack` | **NEW Phase G** — idempotent ack. |
-| GET | `/admin/settings` | `settings` | Tweaks (theme/accent) + deploy key view + backups. |
-| POST | `/admin/backup/snapshot` | `backup_snapshot_now` | Manual snapshot trigger. |
-| GET | `/admin/backup/download/{name}` | `backup_download` | Off-site `.bak` download. |
-| POST | `/admin/tweak/{kind}` | `set_tweak` | Cookie set for theme/accent. |
-| GET | `/api/v1/health` | `health::health` | Liveness JSON. |
-| GET | `/api/v1/stats/sub-access` | `stats::sub_access_buckets` | Phase F sparkline data. |
-| GET | `/sub/{token}` | `sub::sub` | Subscription URL (rate-limited, token-resolves to user, JSON envelope). |
-| GET | `/admin/assets/*` | static | admin.css + favicon.svg. |
-
-26 unique paths (+ trailing-slash duplicates for axum 0.8 exact-match).
-
-### Database migrations (11)
-
-| # | File | Purpose |
+| Method | Path | Handler |
 |---|---|---|
-| 0001 | `init.sql` | servers + users + grants + server_secrets + audit_log. |
-| 0002 | `sub_token.sql` | Adds `users.sub_token UNIQUE`. |
-| 0003 | `sub_access_log.sql` | Track-1 abuse-signal log. |
-| 0004 | `sub_access_keep_after_user_delete.sql` | SET NULL on user delete (preserves audit). |
-| 0005 | `sub_rate_bans.sql` | Track-2 persistent rate-limit bans. |
-| 0006 | `vpn_connection_stats.sql` | Track-3 clash-api deltas. |
-| 0007 | `node_health.sql` | Phase H chunk 2 node telemetry snapshots. |
-| 0008 | `users_wireguard_private.sql` | Server-generated WG keypair storage. |
-| 0009 | `server_kernels.sql` | Multi-kernel support (was scalar). |
-| 0010 | `user_traffic_limits.sql` | D.6c per-user cap + alert threshold. |
-| 0011 | `admin_alerts.sql` | **NEW Phase G** — operator-facing alerts + partial index. |
-
-### Background tasks (6, all spawned by `app::build`)
-
-| Task | Cadence | What it does |
-|---|---|---|
-| `spawn_retention_purger` | 1h | Deletes >30d rows in `sub_access_log` + `vpn_connection_stats` + `node_health` + ACKED `admin_alerts`. |
-| `spawn_rate_limit_cleanup` | 10 min | Sweeps idle rate-limit buckets + expired persistent bans. |
-| `spawn_clash_poller` | 5 min (`VPNCTLD_POLL_INTERVAL_SECS`) | SSH-curls clash-api on each sing-box node → DiffEngine → `record_vpn_stats`. |
-| `spawn_node_probe_poller` | 10 min (`VPNCTLD_NODE_PROBE_INTERVAL_SECS`) | **NEW** SSH-execs the probe script → INSERT into `node_health`. |
-| `spawn_health_monitor` | 10 min (`VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS`) | **NEW** Diffs the two newest `node_health` rows per server → INSERT `admin_alerts` + audit. |
-| `spawn_backup_scheduler` | 1h | `VACUUM INTO` snapshot + retention prune (24h / 30d / 12mo). |
-
-### Environment variables (operator knobs)
-
-| Var | Default | Effect |
-|---|---|---|
-| `VPNCTL_DB` | `/var/lib/vpnctl/inv.db` | Inventory file path. |
-| `VPNCTLD_ADMIN_USER` | `slovn` | Basic-auth username. |
-| `VPNCTLD_ADMIN_PASSWORD` | (required) | Basic-auth password — `/etc/vpnctl/vpnctld.env`. |
-| `VPNCTLD_BIND` | `0.0.0.0:18402` | HTTP listener. |
-| `VPNCTLD_DEPLOY_KEY` | `/var/lib/vpnctl/.ssh/id_ed25519` | SSH key for poller + deploy. |
-| `VPNCTLD_POLL_INTERVAL_SECS` | 300 | Clash-api poll interval. |
-| `VPNCTLD_NODE_PROBE_INTERVAL_SECS` | 600 | **NEW** Node-probe interval. |
-| `VPNCTLD_HEALTH_MONITOR_INTERVAL_SECS` | 600 | **NEW** Phase G scan interval. |
-| `VPNCTLD_NOTIFY_WEBHOOK_URL` | unset | **NEW** (stub'd, Phase G chunk 3): when set, alerts also POST JSON to this URL. |
-
-### Files installed on `192.168.0.236`
-
-| Path | Owner | Perm | Purpose |
-|---|---|---|---|
-| `/opt/vpnctl/vpnctld` | root:root | 0755 | Binary. |
-| `/opt/vpnctl/vpnctld.prev` | root:root | 0755 | **NEW** auto-saved previous binary on deploy (rollback hook). |
-| `/opt/vpnctl/assets/admin.css` | root:root | 0644 | UI stylesheet. |
-| `/opt/vpnctl/assets/favicon.svg` | root:root | 0644 | Tab icon. |
-| `/var/lib/vpnctl/inv.db` | user:user | 0640 | SQLite inventory. |
-| `/var/lib/vpnctl/inv.db-wal` | user:user | 0640 | WAL sidecar. |
-| `/var/lib/vpnctl/backups/inv.db.<ts>.bak` | user:user | 0600 | Hourly snapshots. |
-| `/var/lib/vpnctl/.ssh/id_ed25519` | user:user | 0600 | Deploy key (auto-gen if absent). |
-| `/etc/vpnctl/vpnctld.env` | root:user | 0640 | Env file (admin pw + tunables). |
-| `/etc/systemd/system/vpnctld.service` | root:root | 0644 | Systemd unit. |
-| `/etc/iptables/rules.v4` | root:root | 0640 | Persistent firewall (tcp/18402 from LAN). |
-
-## Features and flows
-
-### Phase A/B — editorial shell + dashboard (shipped early)
-
-**Flow:** `GET /admin/` → `dashboard` handler → reads `count_servers` / `count_users` / `count_grants` / `recent_audit(20)` / `top_users_by_traffic(24h, 5)` / `users_traffic_vs_limit()` / `unacked_alert_count` (NEW) → renders 4-tile metric row + alerts tile (Phase G, conditional) + limit alerts + heavy-users heatmap + audit timeline. Theme + accent stored in cookies via `/admin/tweak/{kind}`.
-
-**Code:** `daemon/src/handlers/admin.rs:248` (`shell`), `:352` (`dashboard_metrics`), `:513` (`dashboard`).
-
-### Phase C-1/2/3 — users CRUD + UX (shipped early)
-
-**Flow:** `GET /admin/users` → list of all users with grant counts + ASCII bar; `POST /admin/users` mints ALL secrets (UUID + tuic_password + WG keypair + sub_token) on one-button click; `GET /admin/users/{id}` shows share links (with QR for VLESS/TUIC, `.conf` for WG, `vpn://` for AmneziaVPN), traffic stats, UA clusters, sub-access log; `POST /admin/users/{id}/delete-confirm` requires "type the exact id" double-submit before CASCADE.
-
-**Code:** `daemon/src/handlers/admin.rs:1085` (`user_detail`), `:3855` (`user_create`).
-
-### Track-1 — sub-access log (shipped)
-
-**Flow:** Every `GET /sub/<token>` request: resolve token → user → write `(user_id, ip, ua, ts)` to `sub_access_log` via mpsc-bounded writer task (no per-request task spawn — prevents OOM by abusive token holder). UI surfaces last 20 hits per user on user-detail; aggregated by hour on `/admin/monitoring`; abuse signal "shared URL" when >2 distinct /16s per UA in 1h window.
-
-**Code:** `daemon/src/access_log.rs` (mpsc + writer), `daemon/src/handlers/sub.rs:160` (call site).
-
-### Track-1.1 — retention scheduler (shipped early, status corrected this burst)
-
-**Flow:** Background task in `app::build`: every hour calls `purge_sub_access_older_than(30)` + `purge_vpn_stats_older_than(30)` + `purge_node_health_older_than(30)` (NEW) + `purge_acked_alerts_older_than(30)` (NEW). UNACKED admin_alerts are never auto-purged.
-
-**Code:** `daemon/src/app.rs:256` (`spawn_retention_purger`).
-
-### Track-2 — rate-limit /sub/<token> (shipped)
-
-**Flow:** `RateLimiter` is a token-bucket per (IP, token): 5 burst, 1 token / 30s refill. On every `/sub/<token>` request, in order: check persistent IP ban → check IP bucket → check persistent token ban → check token bucket. After K=5 consecutive 429s on the same key, INSERT a `sub_rate_bans` row (5min ban). Cleanup task sweeps expired bans + idle buckets every 10 min.
-
-**Code:** `daemon/src/rate_limit.rs`, `daemon/src/handlers/sub.rs:78` (gate).
-
-### C-4 — backup + restore (shipped)
-
-**Flow:** Hourly scheduler calls `snapshot_to(inv, /var/lib/vpnctl/backups/inv.db.<ts>.bak)` (SQLite `VACUUM INTO` — atomic + WAL-aware) + `prune_snapshots` with `Retention {keep_hourly: 24, keep_daily: 30, keep_monthly: 12}`. Settings page lists snapshots + "snapshot now" button + per-file download anchor for operator off-site (USB / Forgejo / cloud). Restore is CLI-only (`vpnctl restore <file>`) because the daemon can't replace its own open DB.
-
-**Code:** `crates/inventory/src/backup.rs`, `daemon/src/app.rs:330` (scheduler).
-
-### C-5 — migrate from bash (shipped + split-identity policy this morning)
-
-**Flow:** `vpnctl migrate from-bash <inventory-dir>`: for each `<IP>.env` file → SSH (read-only) into the bash server → pull `/etc/sing-box/config.json` + `keys.env` → `build_migration_plan` (pure) → print plan → if `--apply`: insert servers/users/grants preserving UUIDs and TUIC passwords. New `--overwrite-existing` for replacing stale test users; **NEW this burst** `--i-really-mean-overwrite-address` for the L7 destructive-op gate (the vps-is-01 ↔ 104 recovery).
-
-**Code:** `crates/inventory/src/migrate.rs` (planner), `cli/src/cmd/migrate.rs` (orchestrator).
-
-### Phase E — add-server wizard (shipped 4477199)
-
-**Flow:** `GET /admin/servers/new` → step-1 form (IP + root password); on submit, validate + stash in `WizardStore` keyed by HttpOnly+SameSite=Strict cookie + redirect to step-2 stub; step-2 page attaches an `EventSource` to `/admin/servers/new/sse?session=...`; the SSE handler consumes the session and streams the 9-phase pipeline (push pubkey → create non-root user → disable password auth → harden SSH → install fail2ban → install sing-box → render config → restart → prove live). Each phase emits a `step` SSE event with progress; final event is `done` with the new server's id.
-
-**Code:** `daemon/src/wizard.rs` (store), `daemon/src/wizard_bootstrap.rs` (pipeline), `daemon/src/handlers/admin.rs::wizard_*`.
-
-### Track-3 — clash-api per-user real-time stats (shipped)
-
-**Flow:** Kernel render emits `experimental.clash_api: {external_controller: "127.0.0.1:9090"}`. Daemon poller every 5min SSH-curls `http://127.0.0.1:9090/connections` on each sing-box node → parses connections → `DiffEngine` computes per-user upload/download deltas (restart detection: if new total < prior, treat new as delta from zero) → `record_vpn_stats(server_id, &[VpnStatsDelta])`. UI surfaces per-server breakdown on user-detail + 24h heatmap on dashboard.
-
-**Code:** `daemon/src/clash_api.rs` (client), `daemon/src/clash_poller.rs` (diff + poller).
-
-### Phase D — audit timeline UI (shipped)
-
-**Flow:** `GET /admin/audit?actor=&action=&page=` → `recent_audit_paginated` with LIKE-escaped action prefix + paginated 50/page; sticky-date section headers (Today / Yesterday / `<YYYY-MM-DD>`); `GET /admin/audit.csv?...` exports same filter as CSV with RFC 4180 escaping. Cap 10000 rows for the CSV path.
-
-**Code:** `daemon/src/handlers/admin.rs:4181` (HTML), `:4399` (CSV).
-
-### Phase F — monitoring sparklines (shipped)
-
-**Flow:** `GET /admin/monitoring` reads `sub_access_buckets(since_hours, bucket_size)` from inventory → 4 KPI tiles (hits / distinct IPs / distinct users / peak IP-of-the-day) + 3 inline SVG sparklines (hits, distinct IPs, distinct users over last 24h with hourly buckets + gap-fill). Standalone JSON endpoint `/api/v1/stats/sub-access` returns the same data for external dashboards (Grafana etc).
-
-**Code:** `daemon/src/handlers/admin.rs::monitoring` + `daemon/src/handlers/stats.rs`.
-
-### Track-4 — UA fingerprint (shipped)
-
-**Flow:** `ua_clusters_for_user(uid, since_hours)` groups sub_access rows by User-Agent + counts distinct IPs + distinct /16s. UI table on user-detail sorted by hits DESC with verdict column: "likely shared URL" if >2 distinct /16s in 1h window, "likely roaming" if many IPs in same /16, "—" otherwise.
-
-**Code:** `daemon/src/handlers/admin.rs:2133-2275`, `crates/inventory/src/sqlite.rs::ua_clusters_for_user`.
-
-### Phase H chunks 1-3 — node telemetry (shipped previously)
-
-**Flow:** chunk 1: `node_probe::PROBE_SCRIPT` — single bash script over SSH emitting tagged lines (`SVC sing-box active`, `DISK / 9876 20480`, etc) with `PROBE_OK` sentinel. chunk 2: `record_node_health` stores it. chunk 3: `/admin/servers/{id}` reads `latest_node_health` for hero KPIs + 24h history + DECLARED vs OBSERVED port-drift banner. Until this burst, chunk 4 (the poller) was missing — table got zero rows.
-
-### Phase H chunk 4 — node_probe poller (NEW this burst)
-
-**Flow:** `spawn_node_probe_poller(inv)` in `app::build`: every 10min (configurable), for each sing-box server in inventory, run the probe via `SubprocessSshTransport` + `SshProbeClient::snapshot` + serialize the BTreeSet of listening ports to JSON + `record_node_health(...)`. Per-server failures isolated; missing SSH key logs at info and skips (matches `clash_poller` UX). Existing retention purger extended to also drop >30d node_health rows.
-
-**Code:** `daemon/src/node_probe_poller.rs` (254 LOC), wired in `daemon/src/app.rs:113`.
-
-### Phase G — infra alerts (NEW this burst)
-
-**Flow:** `spawn_health_monitor(inv)` on the same 10min cadence as the probe. For each sing-box server: `recent_node_health_for_server(id, 24h)` → take the two newest rows → `diff_rows(prev, cur)` → for each `AlertEvent`: `insert_alert(kind, server_id, severity, summary, payload)` + mirror into `audit_log` as `alert.fire`. Detection rules: sing-box up/down (critical/info), fail2ban up/down (warning/info), disk_pct >=90 with 5pp hysteresis at 85, mem_used_pct >=95 with hysteresis at 90, sing-box log >500 MiB (Pavel's earlier disk-fill concern).
-
-UI: `/admin/alerts` feed (default unacked, `?show=all` adds history) + per-row `ack` button (idempotent POST). Dashboard tile renders only when count>0 (quiet dashboard stays calm).
-
-NOT in this commit (Phase G chunks 2-3): `server.unreachable` after N missing probes, `fail2ban.banned_self` detection, webhook transport (`VPNCTLD_NOTIFY_WEBHOOK_URL` env — Pavel must pick Telegram/ntfy/journald first).
-
-**Code:** `crates/inventory/migrations/0011_admin_alerts.sql`, `daemon/src/health_monitor.rs` (540 LOC), admin handlers `alerts` + `alert_ack`, dashboard tile `dashboard_alerts_tile`.
-
-### L7 — migrate destructive-op gate (NEW this burst)
-
-**Flow:** Before `apply_migration_plan` runs in `--apply --overwrite-existing`, the CLI calls `report_address_overwrite_warnings(inv, plan)` which compares the existing `Server.address` / `ssh_port` / `ssh_user` to the bash data. If any change is detected AND `--i-really-mean-overwrite-address` is absent, bail with an explicit diff. This closes the methodology gap that allowed the vps-is-01 ↔ 104 cross-overwrite on 2026-05-17.
-
-**Code:** `cli/src/cmd/migrate.rs::report_address_overwrite_warnings`.
-
-### `vpnctl server set-fingerprint` (NEW this burst)
-
-**Flow:**
-- CLI: `vpnctl server set-fingerprint <id> <SHA256:…>` or `... --from-keyscan` (shells `ssh-keyscan -t ed25519 -p <port> <host> | ssh-keygen -lf -`).
-- Web: section on `/admin/servers/{id}` with auto-detect button (primary) + manual paste form (escape hatch). Both POST `/admin/servers/{id}/set-fingerprint` with hidden `mode=keyscan|manual`. Validates shape (`SHA256:` + 1..=44 chars base64), audit-logs `server.set_fingerprint` with `{fingerprint, source}`.
-
-**Code:** `cli/src/cmd/server.rs::SetFingerprint`, `daemon/src/handlers/admin.rs::server_set_fingerprint`.
-
-### `decode_form_value` UTF-8 fix (NEW this burst)
-
-Replaced `out.push(byte as char)` Latin-1 cast with `Vec<u8>` accumulator + `String::from_utf8_lossy`. Every form value can now legitimately carry UTF-8 (Cyrillic, emoji, etc) instead of silently mojibake-ing on bytes ≥ 0x80. 6 new unit tests pin the contract.
-
-**Code:** `daemon/src/handlers/admin.rs:4060-4150`.
-
-## Methodology layers (current, post-burst)
-
-| # | Layer | What it catches |
-|---|---|---|
-| 1 | `cargo clippy --workspace --all-targets -D warnings` | API misuse, dead code, unwrap/expect/panic outside tests. |
-| 2 | `cargo test --workspace` | DOM + routing + DB invariants + spec contracts. |
-| 3 | Copy-contract subset of admin_smoke | Backend response prefix drift, editorial voice regressions. |
-| 4 | review-agent (`general-purpose` agent on git diff) | Logic bugs, SQL injection, swallowed errors, library misuse. |
-| 5 | Live-deploy on 192.168.0.236 + curl | Runtime + auth + DB integration. |
-| 6 | `scripts/visual_check.py` (headless Chrome) | Layout overlap, grid overflow, font fallback. |
-| **7** (NEW) | **Destructive-op confirmation gate in CLI/handler** | Operator typed the right `--server-id` / right address / right kind. The vps-is-01 ↔ 104 fix. |
-
-## Known follow-ups (not blocking)
-
-- Phase G chunk 2: `server.unreachable` + `fail2ban.banned_self` detection.
-- Phase G chunk 3: webhook transport — needs Pavel to pick Telegram / ntfy.sh / journald.
-- Multi-server UUID split-identity: main-brat on vps-de-01 has 5550051c (matches 93), but vpnctl `/sub/<token>` for that user includes a TUIC outbound with the wrong UUID for 104 — accepted trade-off; phones use bash-scanned links directly. Three options for Pavel: live with it / per-server-suffix users / canonical-only revoke.
-- Phase F deep dive: live stats endpoint + per-server real-time tile on dashboard (Track-3 poller already writes the data; just needs a JSON endpoint + maud tile).
-- Live-staging E2E for AnyTLS / Trojan / Hysteria2 / WireGuard on second VPS (Tier-2).
-
-## Burst commit list (e928cd2..aef1c6b)
-
-| Commit | What |
-|---|---|
-| `e33d94a` | `docs(burst): plan for 2026-05-17 overnight autonomous burst` |
-| `e928cd2` | `docs(roadmap): mark shipped — Track-1.1/2/D/F/3/4/C-3.2-4/C-4/C-5/E` |
-| `d391c73` | `feat(daemon): Phase H chunk 4 — node_probe poller wiring` |
-| `a17fad6` | `feat(daemon): Phase G — infra alerts on top of node_health probes` |
-| `aa83241` | `feat(cli/migrate): L7 destructive-op gate on Server.address overwrite` |
-| `2fda5c6` | `feat(cli/web): vpnctl server set-fingerprint + matching web action` |
-| `aef1c6b` | `fix(daemon/admin): decode_form_value UTF-8 — assemble bytes, then String` |
-
-Total burst: **+7 commits**, **+~2 500 LOC code + tests + docs**, **+20 tests** (149 admin_smoke), 1 live-deploy with smoke verification. All CI runs green.
+| `GET` | `/admin` | `admin::dashboard` |
+| `GET` | `/admin/` | `admin::dashboard` |
+| `GET` | `/admin/activity` | `admin::dashboard_activity` |
+| `GET` | `/admin/alerts` | `admin::alerts` |
+| `GET` | `/admin/alerts/` | `admin::alerts` |
+| `POST` | `/admin/alerts/ack-all` | `admin::alert_ack_all` |
+| `POST` | `/admin/alerts/ack-family/{prefix}` | `admin::alert_ack_family` |
+| `POST` | `/admin/alerts/{id}/ack` | `admin::alert_ack` |
+| `GET` | `/admin/audit` | `admin::audit` |
+| `GET` | `/admin/audit.csv` | `admin::audit_csv` |
+| `GET` | `/admin/audit/` | `admin::audit` |
+| `GET` | `/admin/backup/download/{name}` | `admin::backup_download` |
+| `POST` | `/admin/backup/self-test` | `admin::backup_self_test` |
+| `POST` | `/admin/backup/snapshot` | `admin::backup_snapshot_now` |
+| `GET` | `/admin/boosty` | `admin::boosty_page` |
+| `POST` | `/admin/boosty/disable/{user}` | `admin::boosty_disable` |
+| `POST` | `/admin/boosty/link` | `admin::boosty_link` |
+| `POST` | `/admin/boosty/settings` | `admin::boosty_settings_save` |
+| `POST` | `/admin/boosty/sync` | `admin::boosty_sync_now` |
+| `POST` | `/admin/boosty/unlink/{user}` | `admin::boosty_unlink` |
+| `POST` | `/admin/logout` | `admin::logout` |
+| `GET` | `/admin/monitoring` | `admin::monitoring` |
+| `GET` | `/admin/monitoring/` | `admin::monitoring` |
+| `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
+| `GET` | `/admin/overview` | `admin::dashboard` |
+| `GET` | `/admin/search` | `admin::search` |
+| `GET` | `/admin/servers` | `admin::servers` |
+| `GET` | `/admin/servers/` | `admin::servers` |
+| `GET` | `/admin/servers/deploy-all/sse` | `admin::servers_deploy_all_sse` |
+| `GET` | `/admin/servers/new` | `admin::wizard_new` |
+| `POST` | `/admin/servers/new` | `admin::wizard_new_submit` |
+| `GET` | `/admin/servers/new/` | `admin::wizard_new` |
+| `POST` | `/admin/servers/new/` | `admin::wizard_new_submit` |
+| `GET` | `/admin/servers/new/step-2` | `admin::wizard_step2_stub` |
+| `GET` | `/admin/servers/new/step-2/` | `admin::wizard_step2_stub` |
+| `GET` | `/admin/servers/new/step-2/sse` | `admin::wizard_step2_sse` |
+| `POST` | `/admin/servers/quick-add` | `admin::server_quick_add` |
+| `GET` | `/admin/servers/update-kernels-all/sse` | `admin::servers_update_kernels_all_sse` |
+| `GET` | `/admin/servers/{id}` | `admin::server_detail` |
+| `GET` | `/admin/servers/{id}/` | `admin::server_detail` |
+| `GET` | `/admin/servers/{id}/activity` | `admin::server_detail_activity` |
+| `POST` | `/admin/servers/{id}/auto-suppress` | `admin::server_set_auto_suppress` |
+| `POST` | `/admin/servers/{id}/delete` | `admin::server_delete` |
+| `GET` | `/admin/servers/{id}/delete-confirm` | `admin::server_delete_confirm` |
+| `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
+| `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
+| `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
+| `GET` | `/admin/servers/{id}/grants` | `admin::server_detail_grants_tab` |
+| `POST` | `/admin/servers/{id}/grants` | `admin::server_grant_user_form` |
+| `POST` | `/admin/servers/{id}/grants/_grant-all` | `admin::server_grant_all_users` |
+| `POST` | `/admin/servers/{id}/grants/_revoke-all` | `admin::server_revoke_all_users` |
+| `POST` | `/admin/servers/{id}/kernels/{kernel}/disable` | `admin::server_disable_kernel` |
+| `POST` | `/admin/servers/{id}/kernels/{kernel}/enable` | `admin::server_enable_kernel` |
+| `POST` | `/admin/servers/{id}/naive-config` | `admin::server_set_naive_config` |
+| `GET` | `/admin/servers/{id}/protocols` | `admin::server_detail_protocols_tab` |
+| `POST` | `/admin/servers/{id}/protocols/{proto}/disable` | `admin::server_disable_protocol` |
+| `POST` | `/admin/servers/{id}/protocols/{proto}/enable` | `admin::server_enable_protocol` |
+| `POST` | `/admin/servers/{id}/push-deploy-key` | `admin::server_push_deploy_key` |
+| `POST` | `/admin/servers/{id}/reality-config` | `admin::server_set_reality_config` |
+| `POST` | `/admin/servers/{id}/reserved-ports` | `admin::server_set_reserved_ports` |
+| `POST` | `/admin/servers/{id}/set-fingerprint` | `admin::server_set_fingerprint` |
+| `GET` | `/admin/servers/{id}/setup` | `admin::server_detail_setup` |
+| `GET` | `/admin/servers/{id}/status` | `admin::server_detail` |
+| `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
+| `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
+| `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
+| `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
+| `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |
+| `POST` | `/admin/servers/{sid}/protocols/{pid}/hide` | `admin::server_protocol_hide` |
+| `POST` | `/admin/servers/{sid}/protocols/{pid}/unhide` | `admin::server_protocol_unhide` |
+| `GET` | `/admin/settings` | `admin::settings` |
+| `GET` | `/admin/settings/` | `admin::settings` |
+| `GET` | `/admin/settings/appearance` | `admin::settings` |
+| `GET` | `/admin/settings/backups` | `admin::settings_backups` |
+| `POST` | `/admin/settings/digest-now` | `admin::settings_digest_now` |
+| `GET` | `/admin/settings/geoip/update-now` | `admin::settings_geoip_update_now_sse` |
+| `POST` | `/admin/settings/notification-language` | `admin::settings_notification_language` |
+| `GET` | `/admin/settings/notifications` | `admin::settings_notifications` |
+| `GET` | `/admin/settings/system` | `admin::settings_system` |
+| `POST` | `/admin/settings/telegram` | `admin::settings_telegram` |
+| `POST` | `/admin/settings/telegram/test` | `admin::settings_telegram_test` |
+| `POST` | `/admin/settings/timezone` | `admin::settings_timezone_set` |
+| `GET` | `/admin/sharing` | `admin::sharing` |
+| `GET` | `/admin/sharing/` | `admin::sharing` |
+| `POST` | `/admin/tweak/{kind}` | `admin::set_tweak` |
+| `GET` | `/admin/users` | `admin::users` |
+| `POST` | `/admin/users` | `admin::user_create` |
+| `GET` | `/admin/users/` | `admin::users` |
+| `POST` | `/admin/users/` | `admin::user_create` |
+| `GET` | `/admin/users/{id}` | `admin::user_detail` |
+| `GET` | `/admin/users/{id}/` | `admin::user_detail` |
+| `GET` | `/admin/users/{id}/access` | `admin::user_detail_access` |
+| `GET` | `/admin/users/{id}/access.csv` | `admin::user_access_csv` |
+| `GET` | `/admin/users/{id}/activity` | `admin::user_detail_activity` |
+| `POST` | `/admin/users/{id}/delete` | `admin::user_delete` |
+| `GET` | `/admin/users/{id}/delete-confirm` | `admin::user_delete_confirm` |
+| `GET` | `/admin/users/{id}/delivery` | `admin::user_detail_delivery` |
+| `GET` | `/admin/users/{id}/deploy-pending/sse` | `admin::user_deploy_pending_sse` |
+| `POST` | `/admin/users/{id}/disable` | `admin::user_set_disabled_true` |
+| `POST` | `/admin/users/{id}/enable` | `admin::user_set_disabled_false` |
+| `POST` | `/admin/users/{id}/grants/{server_id}` | `admin::user_grant_server` |
+| `POST` | `/admin/users/{id}/grants/{server_id}/revoke` | `admin::user_revoke_server` |
+| `GET` | `/admin/users/{id}/overview` | `admin::user_detail` |
+| `POST` | `/admin/users/{id}/sub-token/regenerate` | `admin::user_regen_sub_token` |
+| `GET` | `/admin/users/{id}/traffic` | `admin::user_detail_traffic` |
+| `POST` | `/admin/users/{id}/traffic-limit` | `admin::user_set_traffic_limit` |
+| `POST` | `/admin/users/{id}/tuic-password/mint` | `admin::user_mint_tuic_password` |
+| `GET` | `/admin/users/{id}/wireguard/conf/{server_id}` | `admin::user_wireguard_conf_download` |
+| `POST` | `/admin/users/{id}/wireguard/regenerate` | `admin::user_regen_wireguard` |
+| `POST` | `/admin/users/{uid}/grants/{sid}/protocols/{pid}/disable` | `admin::grant_protocol_disable` |
+| `POST` | `/admin/users/{uid}/grants/{sid}/protocols/{pid}/enable` | `admin::grant_protocol_enable` |
+| `GET` | `/api/v1/app/config` | `handlers::vpn_router::get_config_root_catchall` |
+| `GET` | `/api/v1/app/config/` | `handlers::vpn_router::get_config_root_catchall` |
+| `GET` | `/api/v1/app/config/{*tail}` | `handlers::vpn_router::get_config` |
+| `GET` | `/api/v1/health` | `handlers::health::get` |
+| `GET` | `/api/v1/stats/sub-access` | `handlers::stats::sub_access` |
+| `GET` | `/sub/{token}` | `handlers::sub::get` |
