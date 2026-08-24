@@ -123,6 +123,11 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     let count_user_grants = |entries: &[vpnctl_inventory::AuditEntry]| {
         entries.iter().filter(|e| e.action == "user.grant").count()
     };
+    // Auto-deploy tasks from the three real grant handlers run in the
+    // background and also write audit rows. Wait for those tasks before
+    // taking the idempotency baseline so their delayed rows cannot race
+    // this assertion on fast/slow CI runners.
+    wait_for_autodeploy_rows(&inv, 3).await;
     let before = count_user_grants(&inv.recent_audit(100).await.unwrap());
     for uri in [
         "/admin/users/u0/grants/s0",
