@@ -365,6 +365,21 @@ fn tuic_userinfo_percent_encodes_colon_in_password_byte_equal() {
 }
 
 #[test]
+fn tuic_percent_encodes_percent_sign_in_password_and_fragment_byte_equal() {
+    // Password "pw%20" — `%` MUST be escaped to %25 to avoid ambiguous/malformed decoding.
+    // Fragment "alice%1" — `%` MUST also become %25.
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let u = user("alice%1", Some("pw%20"));
+    let link = TuicV5::new().share_link(&ctx, &u).unwrap();
+    assert_eq!(
+        link,
+        "tuic://00000000-0000-0000-0000-000000000001:pw%2520@203.0.113.7:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#alice%251",
+    );
+}
+
+#[test]
 fn tuic_missing_password_is_error() {
     let s = srv();
     let secrets = HashMap::new();

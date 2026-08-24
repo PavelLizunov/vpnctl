@@ -403,3 +403,70 @@ fn wg_share_link_byte_stable_across_runs() {
     let b = WireGuard::new().share_link(&ctx, &u).unwrap();
     assert_eq!(a, b, "share_link must be byte-stable across runs");
 }
+
+#[test]
+fn wg_client_config_peer_derived_address_by_index() {
+    let s = srv();
+    let secrets = server_secrets();
+    let u1 = user("alice", Some(PUBKEY_A));
+    let u2 = user("bob", Some(PUBKEY_B));
+    let u3 = user("charlie", Some(PUBKEY_A));
+    let peers = vec![u1.clone(), u2.clone(), u3.clone()];
+    let ctx = RenderCtx::with_peers(&s, &secrets, &peers);
+    let p = WireGuard::new();
+
+    let cfg1 = p.client_config(&ctx, &u1).unwrap();
+    assert_eq!(
+        cfg1.pointer("/interface/address_cidr")
+            .and_then(Value::as_str),
+        Some("10.66.0.2/32")
+    );
+
+    let cfg2 = p.client_config(&ctx, &u2).unwrap();
+    assert_eq!(
+        cfg2.pointer("/interface/address_cidr")
+            .and_then(Value::as_str),
+        Some("10.66.0.3/32")
+    );
+
+    let cfg3 = p.client_config(&ctx, &u3).unwrap();
+    assert_eq!(
+        cfg3.pointer("/interface/address_cidr")
+            .and_then(Value::as_str),
+        Some("10.66.0.4/32")
+    );
+}
+
+#[test]
+fn wg_client_config_missing_user_from_peers_returns_render_error() {
+    let s = srv();
+    let secrets = server_secrets();
+    let u1 = user("alice", Some(PUBKEY_A));
+    let u_unknown = user("stranger", Some(PUBKEY_B));
+    let peers = [u1];
+    let ctx = RenderCtx::with_peers(&s, &secrets, &peers);
+    let err = WireGuard::new()
+        .client_config(&ctx, &u_unknown)
+        .unwrap_err();
+    assert!(
+        matches!(err, vpnctl_core::CoreError::Render(_)),
+        "expected CoreError::Render when user is missing from non-empty peers, got {err:?}"
+    );
+}
+
+#[test]
+fn wg_client_config_overflow_past_254_peers_returns_render_error() {
+    let s = srv();
+    let secrets = server_secrets();
+    let peers: Vec<User> = (0..254)
+        .map(|i| user(&format!("u-{i:03}"), Some(PUBKEY_A)))
+        .collect();
+    let ctx = RenderCtx::with_peers(&s, &secrets, &peers);
+    let last = peers.last().unwrap();
+    let err = WireGuard::new().client_config(&ctx, last).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("overflow"),
+        "expected overflow error; got {msg}"
+    );
+}

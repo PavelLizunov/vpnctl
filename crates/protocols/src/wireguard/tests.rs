@@ -405,3 +405,74 @@ fn awg_share_link_emits_base64_key_verbatim() {
         "private key must be emitted verbatim (raw +,/,= — not url-encoded): {link}"
     );
 }
+
+#[test]
+fn client_config_derives_peer_address_from_ctx_peers() {
+    let server = fake_server();
+    let secrets = fake_secrets();
+    let mut u1 = fake_user();
+    u1.id = UserId("alex".into());
+    let mut u2 = fake_user();
+    u2.id = UserId("brian".into());
+    let mut u3 = fake_user();
+    u3.id = UserId("clara".into());
+
+    let peers = vec![u1.clone(), u2.clone(), u3.clone()];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
+    let p = WireGuard::new();
+
+    let cfg1 = p.client_config(&ctx, &u1).unwrap();
+    assert_eq!(
+        cfg1.pointer("/interface/address_cidr")
+            .and_then(serde_json::Value::as_str),
+        Some("10.66.0.2/32"),
+        "1st peer gets 10.66.0.2/32"
+    );
+
+    let cfg2 = p.client_config(&ctx, &u2).unwrap();
+    assert_eq!(
+        cfg2.pointer("/interface/address_cidr")
+            .and_then(serde_json::Value::as_str),
+        Some("10.66.0.3/32"),
+        "2nd peer gets 10.66.0.3/32"
+    );
+
+    let cfg3 = p.client_config(&ctx, &u3).unwrap();
+    assert_eq!(
+        cfg3.pointer("/interface/address_cidr")
+            .and_then(serde_json::Value::as_str),
+        Some("10.66.0.4/32"),
+        "3rd peer gets 10.66.0.4/32"
+    );
+}
+
+#[test]
+fn client_config_missing_from_non_empty_peers_returns_error() {
+    let server = fake_server();
+    let secrets = fake_secrets();
+    let u1 = fake_user();
+    let mut u2 = fake_user();
+    u2.id = UserId("stranger".into());
+
+    let peers = [u1];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
+    let err = WireGuard::new().client_config(&ctx, &u2).unwrap_err();
+    assert!(
+        matches!(err, vpnctl_core::CoreError::Render(_)),
+        "expected CoreError::Render, got {err:?}"
+    );
+}
+
+#[test]
+fn client_config_empty_peers_fallback_returns_base_address() {
+    let server = fake_server();
+    let secrets = fake_secrets();
+    let u = fake_user();
+    let ctx = RenderCtx::new(&server, &secrets);
+    let cfg = WireGuard::new().client_config(&ctx, &u).unwrap();
+    assert_eq!(
+        cfg.pointer("/interface/address_cidr")
+            .and_then(serde_json::Value::as_str),
+        Some("10.66.0.2/32")
+    );
+}

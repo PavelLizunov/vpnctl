@@ -1,7 +1,7 @@
 //! Integration tests for `RusshTransport`. Запускаются **только** через
 //! `cargo test -- --ignored`, потому что ходят в реальный SSH-сервер.
 //!
-//! По умолчанию используется хост `192.168.0.207` (Forgejo host в нашем LAN)
+//! По умолчанию используется хост `192.168.0.207` (LAN test host)
 //! и SSH-ключ `~/.ssh/id_ed25519` (`claude-chat`). Перекрыть можно через env:
 //!   VPNCTL_TEST_HOST=192.168.0.207
 //!   VPNCTL_TEST_USER=user

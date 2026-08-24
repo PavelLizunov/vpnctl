@@ -15,7 +15,7 @@
 //! forever). The *off-site* half is operator-driven: the Settings
 //! page surfaces each snapshot as a downloadable file; the operator
 //! copies it to whatever off-machine target they trust (USB,
-//! Forgejo, cloud bucket). That keeps credentials for off-site
+//! cloud bucket). That keeps credentials for off-site
 //! destinations OUT of the daemon — zero blast radius if the host
 //! is compromised.
 //!

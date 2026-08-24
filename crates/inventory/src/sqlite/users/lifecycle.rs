@@ -135,7 +135,7 @@ impl SqliteInventory {
                 -- `<` would have excluded the row and the test
                 -- would intermittently fail.
                 OR la.last_seen <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             ORDER BY (la.last_seen IS NOT NULL), la.last_seen ASC
+             ORDER BY (la.last_seen IS NOT NULL), la.last_seen ASC, u.id ASC
              LIMIT ?2",
         )
         .bind(&cutoff)

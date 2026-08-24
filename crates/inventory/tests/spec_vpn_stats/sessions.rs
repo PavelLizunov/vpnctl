@@ -1,7 +1,7 @@
 use tempfile::TempDir;
 use vpnctl_core::{ServerId, UserId};
 
-use crate::common::{open, server, user};
+use crate::common::{open, raw_pool, server, user};
 
 // ────────────────────────────────────────────────────────────────────────
 // Phase 5b — vpn_user_destinations (per-user × destination tracking).
@@ -545,5 +545,154 @@ async fn geo_labels_for_ips_picks_newest_nonnull_geo() {
     assert!(
         !map.contains_key("8.8.8.8"),
         "an IP with no sub_access_log rows is absent from the map"
+    );
+}
+
+#[tokio::test]
+async fn phase5b_top_destinations_orders_by_destination_label_asc_tie_breaker() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let pool = raw_pool(&dir).await;
+    // Both destinations have hit_count = 5 and exact same last_seen timestamp (now)
+    for dest in [
+        "z.example.com:443",
+        "a.example.com:443",
+        "m.example.com:443",
+    ] {
+        sqlx::query(
+            "INSERT INTO vpn_user_destinations (user_id, destination_label, date, hit_count, last_seen)
+             VALUES (?1, ?2, strftime('%Y-%m-%d', 'now'), 5, '2026-08-25T00:00:00.000Z')",
+        )
+        .bind("alice")
+        .bind(dest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let top = inv
+        .top_destinations_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    let labels: Vec<&str> = top.iter().map(|r| r.destination_label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "a.example.com:443",
+            "m.example.com:443",
+            "z.example.com:443"
+        ],
+        "equal hit_count and last_seen must be deterministically tie-broken by destination_label ASC"
+    );
+}
+
+#[tokio::test]
+async fn top_source_ips_orders_by_source_ip_asc_tie_breaker() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let pool = raw_pool(&dir).await;
+    for ip in ["198.51.100.99", "198.51.100.10", "198.51.100.50"] {
+        sqlx::query(
+            "INSERT INTO vpn_user_source_ips (user_id, source_ip, date, hit_count, last_seen)
+             VALUES (?1, ?2, strftime('%Y-%m-%d', 'now'), 3, '2026-08-25T00:00:00.000Z')",
+        )
+        .bind("alice")
+        .bind(ip)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let top = inv
+        .top_source_ips_for_user(&UserId("alice".into()), 7, 10)
+        .await
+        .unwrap();
+    let ips: Vec<&str> = top.iter().map(|r| r.source_ip.as_str()).collect();
+    assert_eq!(
+        ips,
+        vec!["198.51.100.10", "198.51.100.50", "198.51.100.99"],
+        "equal hit_count and last_seen must be deterministically tie-broken by source_ip ASC"
+    );
+}
+
+#[tokio::test]
+async fn phase5c_recent_sessions_orders_by_last_seen_desc_and_id_desc_tie_breaker() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let pool = raw_pool(&dir).await;
+    let ts = "2026-06-01T12:00:00.000Z";
+    // Insert two sessions with exact same last_seen timestamp
+    for id in [1, 2] {
+        sqlx::query(
+            "INSERT INTO vpn_user_sessions (id, user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
+             VALUES (?1, 'alice', 's1', ?2, ?2, 1, 100)",
+        )
+        .bind(id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let sessions = inv
+        .recent_sessions_for_user(&UserId("alice".into()), 10)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(
+        sessions[0].id, 2,
+        "higher id must come first on equal last_seen (id DESC tie-breaker)"
+    );
+    assert_eq!(sessions[1].id, 1);
+}
+
+#[tokio::test]
+async fn phase5c_session_observe_equal_last_seen_picks_highest_id() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+
+    let pool = raw_pool(&dir).await;
+    let t0 = chrono::Utc::now();
+    let t0_s = t0.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+    // Insert two sessions with exact same last_seen
+    for id in [10, 20] {
+        sqlx::query(
+            "INSERT INTO vpn_user_sessions (id, user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
+             VALUES (?1, 'alice', 's1', ?2, ?2, 1, 100)",
+        )
+        .bind(id)
+        .bind(&t0_s)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Now observe 5 minutes later — must pick id 20 to update
+    let t1 = t0 + chrono::Duration::minutes(5);
+    let updated_id = inv
+        .session_observe(
+            &UserId("alice".into()),
+            &ServerId("s1".into()),
+            t1,
+            15,
+            50,
+            2,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated_id, 20,
+        "session_observe must pick the highest id on equal last_seen"
     );
 }

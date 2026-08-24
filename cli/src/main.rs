@@ -121,7 +121,12 @@ enum Cmd {
     /// Render the kernel-native config for a server to STDOUT without
     /// touching SSH. Useful for offline review + live-staging tests
     /// (closes the methodology TODO in docs/PROTOCOL_TESTING.md).
-    Render { server: String },
+    Render {
+        server: String,
+        /// Kernel to render (required if the server has multiple kernels).
+        #[arg(long, short)]
+        kernel: Option<String>,
+    },
     /// Manage `inv.db` snapshots (Phase C-4 backups). Subcommands:
     /// `snapshot` (take one now), `list` (newest-first), `prune`
     /// (apply default retention).
@@ -243,7 +248,9 @@ async fn main() -> std::process::ExitCode {
             ignore_policy,
         } => cmd::sub::run(&user, qr, ignore_policy, cli.db, cli.output).await,
         Cmd::Bootstrap(args) => cmd::bootstrap::run(args, cli.db).await,
-        Cmd::Render { server } => cmd::render::run(&server, cli.db).await,
+        Cmd::Render { server, kernel } => {
+            cmd::render::run(&server, kernel.as_deref(), cli.db).await
+        }
         Cmd::Backup { cmd } => cmd::backup::run(cmd, cli.db, cli.output).await,
         Cmd::Restore { snapshot } => cmd::backup::run_restore(snapshot, cli.db, cli.output).await,
         Cmd::Migrate { cmd } => match cmd {
@@ -448,6 +455,44 @@ mod tests {
         match resolve_update_target(None, true).expect("all ok") {
             cmd::update_kernels::UpdateTarget::All => {}
             other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_cli_parses_without_kernel() {
+        let cli = Cli::try_parse_from(["vpnctl", "render", "de"]).expect("`render de` must parse");
+        match cli.cmd {
+            Cmd::Render { server, kernel } => {
+                assert_eq!(server, "de");
+                assert!(kernel.is_none());
+            }
+            other => panic!("expected `render`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_cli_parses_with_long_kernel() {
+        let cli = Cli::try_parse_from(["vpnctl", "render", "de", "--kernel", "sing-box"])
+            .expect("`render de --kernel sing-box` must parse");
+        match cli.cmd {
+            Cmd::Render { server, kernel } => {
+                assert_eq!(server, "de");
+                assert_eq!(kernel.as_deref(), Some("sing-box"));
+            }
+            other => panic!("expected `render`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_cli_parses_with_short_kernel() {
+        let cli = Cli::try_parse_from(["vpnctl", "render", "de", "-k", "amneziawg"])
+            .expect("`render de -k amneziawg` must parse");
+        match cli.cmd {
+            Cmd::Render { server, kernel } => {
+                assert_eq!(server, "de");
+                assert_eq!(kernel.as_deref(), Some("amneziawg"));
+            }
+            other => panic!("expected `render`, got {other:?}"),
         }
     }
 }

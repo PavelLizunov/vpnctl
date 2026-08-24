@@ -287,8 +287,8 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 em { (crate::i18n::tr(lang, "download", "скачать")) }
                 (crate::i18n::tr(
                     lang,
-                    " next to a snapshot and copy it to USB / Forgejo / cloud / wherever you trust. The daemon never pushes anywhere by itself.",
-                    " рядом со снэпшотом и скопируй на USB / Forgejo / облако / куда доверяешь. Демон сам никуда не пушит.",
+                    " next to a snapshot and copy it to USB / cloud / wherever you trust. The daemon never pushes anywhere by itself.",
+                    " рядом со снэпшотом и скопируй на USB / облако / куда доверяешь. Демон сам никуда не пушит.",
                 ))
             }
             div style="display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap;" {

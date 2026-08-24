@@ -17,8 +17,7 @@ admin UI that's the operator's **only** required surface — every CLI
 action also has a web button.
 
 > **Canonical home:** [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl).
-> A mirror is published to a private, LAN-only Forgejo instance for
-> development. Issues and PRs go on GitHub.
+> Issues and PRs go on GitHub.
 
 ## Status — v0.9 in flight
 

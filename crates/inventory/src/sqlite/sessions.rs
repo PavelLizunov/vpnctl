@@ -116,7 +116,7 @@ impl SqliteInventory {
             "SELECT id, total_bytes, conn_count_peak
              FROM vpn_user_sessions
              WHERE user_id = ?1 AND server_id = ?2 AND last_seen >= ?3
-             ORDER BY last_seen DESC
+             ORDER BY last_seen DESC, id DESC
              LIMIT 1",
         )
         .bind(&user_id.0)
@@ -200,7 +200,7 @@ impl SqliteInventory {
                     conn_count_peak, total_bytes
              FROM vpn_user_sessions
              WHERE user_id = ?1
-             ORDER BY last_seen DESC
+             ORDER BY last_seen DESC, id DESC
              LIMIT ?2",
         )
         .bind(&user_id.0)
@@ -308,7 +308,7 @@ impl SqliteInventory {
                   AND date >= strftime('%Y-%m-%d', 'now', ?2)
                 GROUP BY user_id, destination_label
              )
-             ORDER BY hit_count DESC, last_seen DESC
+             ORDER BY hit_count DESC, last_seen DESC, destination_label ASC
              LIMIT ?3",
         )
         .bind(&user_id.0)
@@ -474,7 +474,7 @@ impl SqliteInventory {
                   AND {pred}
                 GROUP BY user_id, source_ip
              )
-             ORDER BY hit_count DESC, last_seen DESC
+             ORDER BY hit_count DESC, last_seen DESC, source_ip ASC
              LIMIT ?3",
             pred = real_client_ip_predicate("source_ip")
         );

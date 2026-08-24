@@ -189,7 +189,7 @@ pub(crate) async fn run_from_bash(
     }
 
     // ─── APPLY ─────────────────────────────────────────────────────
-    let db_path = db.unwrap_or_else(|| PathBuf::from("/var/lib/vpnctl/inv.db"));
+    let db_path = crate::ui::resolve_db_path(db)?;
     let inv = SqliteInventory::open(&db_path).await?;
     println!();
     // Surface UUID-replacement conflicts up front. Without

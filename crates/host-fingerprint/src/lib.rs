@@ -103,8 +103,8 @@ pub enum Error {
 ///   * plus the padding char `=` at the tail.
 ///
 /// Both alphabets are accepted because real `ssh-keygen` outputs the
-/// standard one (`+/`) but some emitters (jq one-liners, GitHub /
-/// Forgejo UI copy-buttons) substitute the URL-safe variant (`-_`).
+/// standard one (`+/`) but some emitters (jq one-liners, web
+/// UI copy-buttons) substitute the URL-safe variant (`-_`).
 /// SHA-256 produces 32 bytes → 43 base64 chars unpadded → 44 padded.
 /// Anything outside that length is structurally invalid even before
 /// we decode.

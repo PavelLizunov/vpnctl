@@ -24,11 +24,9 @@ operational history lives in git history, not in a memory file.
 
 - There is NO dedicated build VM (`build-1` / `uap-build-1` are retired). The
   required gate is GitHub Actions CI (`.github/workflows/ci.yml`,
-  `ubuntu-latest`); the Forgejo mirror CI (`.forgejo/workflows/ci.yml`, docker
-  runner) is best-effort.
-- `git push` publishes to TWO remotes (GitHub primary + LAN Forgejo mirror);
-  fetch goes to GitHub only. Verify `git remote -v` before pushing; never
-  assume where `origin` points.
+  `ubuntu-latest`).
+- `git push` publishes to GitHub (`origin`); fetch goes to GitHub only. Verify
+  `git remote -v` before pushing; never assume where `origin` points.
 - Production daemon = VM 119 `vpnctld` (LAN `192.168.0.236`, Tailscale
   `vpnctld`). Admin UI `http://vpnctld/admin/`, health `/api/v1/health`.
 

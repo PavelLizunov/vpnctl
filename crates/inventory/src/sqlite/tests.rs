@@ -627,10 +627,10 @@ async fn users_for_server_excludes_disabled_users() -> Result<()> {
         .await?;
     inv.grant(&UserId("bob".into()), &ServerId("srv".into()))
         .await?;
-    assert_eq!(
-        inv.users_for_server(&ServerId("srv".into())).await?.len(),
-        2
-    );
+    let initial = inv.users_for_server(&ServerId("srv".into())).await?;
+    assert_eq!(initial.len(), 2);
+    assert!(!initial[0].disabled);
+    assert!(!initial[1].disabled);
 
     assert!(inv.set_user_disabled(&UserId("alice".into()), true).await?);
     let users = inv.users_for_server(&ServerId("srv".into())).await?;
@@ -640,16 +640,20 @@ async fn users_for_server_excludes_disabled_users() -> Result<()> {
         "disabled user must be excluded from the node config slice"
     );
     assert_eq!(users[0].id.0, "bob");
+    assert!(!users[0].disabled);
 
     assert!(
         inv.set_user_disabled(&UserId("alice".into()), false)
             .await?
     );
+    let reenabled = inv.users_for_server(&ServerId("srv".into())).await?;
     assert_eq!(
-        inv.users_for_server(&ServerId("srv".into())).await?.len(),
+        reenabled.len(),
         2,
         "re-enabled user must return to the node config slice"
     );
+    assert!(!reenabled[0].disabled);
+    assert!(!reenabled[1].disabled);
     Ok(())
 }
 

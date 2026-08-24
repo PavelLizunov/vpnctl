@@ -20,6 +20,7 @@ const SHIPPED_KINDS: &[(&str, &str)] = &[
     ("server.singbox.log.recovered", "info"),
     ("server.singbox.restarted", "warning"),
     ("server.fingerprint.drift", "warning"),
+    ("server.quality.degraded", "warning"),
     ("user.traffic_limit", "warning"),
     ("server.attribution.stalled", "warning"),
     ("user.sub_no_traffic", "warning"),
@@ -392,4 +393,113 @@ fn digest_ru_declines_problem_and_server_counts() {
         let html = render_digest_html(Locale::Ru, servers, &[], "now");
         assert!(html.contains(expected), "servers={servers}: {html}");
     }
+}
+
+#[test]
+fn quality_degraded_warning_and_recovery_render_metrics_properly() {
+    let payload_warn = json!({
+        "score": 45,
+        "availability_pct": 85.0,
+        "packet_loss_pct": 15.0,
+        "p95_rtt_ms": 230,
+        "jitter_ms": 12.5,
+        "samples": 24,
+        "vantage": "RU-MOW",
+        "low_threshold": 60,
+        "recover_threshold": 75,
+    });
+
+    let warn_en = render_alert(
+        "server.quality.degraded",
+        "warning",
+        "Germany",
+        &payload_warn,
+        Locale::En,
+    );
+    assert_eq!(warn_en.icon, "🟠");
+    assert!(warn_en.title.contains("Service quality degraded — Germany"));
+    assert!(warn_en.body.contains("45/100"));
+    assert!(warn_en.body.contains("85.0%"));
+    assert!(warn_en.body.contains("15.0%"));
+    assert!(warn_en.body.contains("230 ms"));
+    assert!(warn_en.body.contains("RU-MOW"));
+    assert!(warn_en.body.contains("60/100"));
+    assert!(
+        warn_en
+            .action
+            .as_ref()
+            .unwrap()
+            .contains("Check network connectivity")
+    );
+
+    let warn_ru = render_alert(
+        "server.quality.degraded",
+        "warning",
+        "Германия",
+        &payload_warn,
+        Locale::Ru,
+    );
+    assert_eq!(warn_ru.icon, "🟠");
+    assert!(
+        warn_ru
+            .title
+            .contains("Качество связи деградировало — Германия")
+    );
+    assert!(warn_ru.body.contains("45/100"));
+    assert!(warn_ru.body.contains("85.0%"));
+    assert!(warn_ru.body.contains("15.0%"));
+    assert!(warn_ru.body.contains("230 мс"));
+    assert!(warn_ru.body.contains("RU-MOW"));
+    assert!(warn_ru.body.contains("60/100"));
+    assert!(
+        warn_ru
+            .action
+            .as_ref()
+            .unwrap()
+            .contains("Проверь сетевую связность")
+    );
+
+    let payload_rec = json!({
+        "score": 85,
+        "availability_pct": 100.0,
+        "packet_loss_pct": 0.0,
+        "p95_rtt_ms": 45,
+        "jitter_ms": 2.0,
+        "samples": 24,
+        "vantage": "RU-MOW",
+        "low_threshold": 60,
+        "recover_threshold": 75,
+    });
+
+    let rec_en = render_alert(
+        "server.quality.degraded",
+        "info",
+        "Germany",
+        &payload_rec,
+        Locale::En,
+    );
+    assert_eq!(rec_en.icon, "🟢");
+    assert!(rec_en.title.contains("Service quality recovered — Germany"));
+    assert!(rec_en.body.contains("85/100"));
+    assert!(rec_en.body.contains("0.0%"));
+    assert!(rec_en.body.contains("45 ms"));
+    assert!(rec_en.action.is_none());
+
+    let rec_ru = render_alert(
+        "server.quality.degraded",
+        "info",
+        "Германия",
+        &payload_rec,
+        Locale::Ru,
+    );
+    assert_eq!(rec_ru.icon, "🟢");
+    assert!(
+        rec_ru
+            .title
+            .contains("Качество связи восстановилось — Германия")
+    );
+    assert!(rec_ru.body.contains("85/100"));
+    assert!(rec_ru.body.contains("0.0%"));
+    assert!(rec_ru.body.contains("45 мс"));
+    assert!(rec_ru.action.is_none());
 }

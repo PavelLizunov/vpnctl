@@ -5,10 +5,13 @@ use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 /// Userinfo-safe set: everything that has a structural meaning in
 /// `<userinfo>@<host>` of an authority component (RFC 3986 §3.2.1).
+/// `%` is included so values already containing `%` don't produce
+/// malformed percent-encoding when re-encoded downstream.
 const USERINFO: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'#')
+    .add(b'%')
     .add(b'<')
     .add(b'>')
     .add(b'?')
@@ -23,6 +26,7 @@ const USERINFO: &AsciiSet = &CONTROLS
 const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
+    .add(b'%')
     .add(b'<')
     .add(b'>')
     .add(b'`')
@@ -248,5 +252,44 @@ mod tests {
             }
             other => panic!("expected CoreError::Render, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn share_link_percent_encodes_percent_sign_in_password_and_name() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let u = user("alice%100", Some("secret%20pass"));
+        let link = TuicV5::new().share_link(&ctx, &u).unwrap();
+        assert!(
+            link.contains(":secret%2520pass@"),
+            "percent sign in password must be escaped to %25; got: {link}"
+        );
+        assert!(
+            link.ends_with("#alice%25100"),
+            "percent sign in name fragment must be escaped to %25; got: {link}"
+        );
+    }
+
+    #[test]
+    fn share_link_percent_encodes_reserved_userinfo_and_fragment_chars() {
+        let s = server();
+        let sec = HashMap::new();
+        let ctx = RenderCtx::new(&s, &sec);
+        let mut u = user("user#name?test <tag>", Some("p@ss:w/d\\test?#%"));
+        u.uuid = "00000000-0000-0000-0000-000000000001%test".into();
+        let link = TuicV5::new().share_link(&ctx, &u).unwrap();
+        assert!(
+            link.contains("00000000-0000-0000-0000-000000000001%25test:"),
+            "uuid with percent must be escaped; got: {link}"
+        );
+        assert!(
+            link.contains(":p%40ss%3Aw%2Fd%5Ctest%3F%23%25@"),
+            "userinfo characters must be escaped; got: {link}"
+        );
+        assert!(
+            link.ends_with("#user%23name%3Ftest%20%3Ctag%3E"),
+            "fragment characters must be escaped; got: {link}"
+        );
     }
 }

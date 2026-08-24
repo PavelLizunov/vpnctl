@@ -240,7 +240,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
     // Phase C-4 — hourly inventory snapshot to /var/lib/vpnctl/backups
     // plus retention pruning (24h / 30d / 12mo). Settings UI surfaces
     // the snapshot list + a manual "snapshot now" button + per-file
-    // download anchor for operator off-site (USB, Forgejo, etc).
+    // download anchor for operator off-site (USB, cloud, etc).
     // Restore is CLI-only — the daemon literally can't replace its
     // own open DB file while it's holding it (see `vpnctl restore`).
     drop(spawn_backup_scheduler(
