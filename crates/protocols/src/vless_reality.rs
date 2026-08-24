@@ -55,6 +55,11 @@ pub(crate) const REALITY_UTLS_FP: &str = "randomized";
 /// in `spec_share_link_byte_equality.rs`.
 pub const DEFAULT_REALITY_SNI: &str = "yahoo.com";
 
+/// Canonical VLESS packet encoding for client artefacts. Both `/sub` and the
+/// vpn-router compatibility endpoint reuse this value so UDP support cannot
+/// drift between their intentionally different URI layouts.
+pub const VLESS_PACKET_ENCODING: &str = "xudp";
+
 /// VLESS + REALITY на TCP:443.
 ///
 /// **Stateless**: ключи REALITY и SNI приходят через [`RenderCtx::secrets`]
@@ -214,6 +219,7 @@ impl Protocol for VlessReality {
             "server_port": server_port,
             "uuid": user.uuid,
             "flow": "xtls-rprx-vision",
+            "packet_encoding": VLESS_PACKET_ENCODING,
             "tls": {
                 "enabled": true,
                 "server_name": sni,
@@ -237,23 +243,23 @@ impl Protocol for VlessReality {
         // Percent-encode defensively even though server/CLI validate ids.
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         // Parameter order + included params are pinned to match the
-        // legacy bash `vpn-control/scripts/get-vless.sh` byte-for-byte:
-        //   `?encryption=none&flow=xtls-rprx-vision&security=reality&sni=...&fp=<REALITY_UTLS_FP>&pbk=...&sid=...&type=tcp`
+        // legacy bash `vpn-control/scripts/get-vless.sh`, with XUDP appended:
+        //   `?encryption=none&flow=xtls-rprx-vision&security=reality&sni=...&fp=<REALITY_UTLS_FP>&pbk=...&sid=...&type=tcp&packetEncoding=xudp`
         // (the `fp` value is no longer the bash `chrome` literal — see
         // `REALITY_UTLS_FP` for the 2026-06-16 DPI-evasion switch.)
         // (caught by Pavel's methodology check on db3998c — comparison
         // against the actual bash script showed mine was missing
         // `encryption=none` AND used a different param order, both
         // breaking the "Migration from bash — seamless preservation"
-        // requirement in CLAUDE.md). The seven query params are pinned
-        // verbatim in `vless_happy_path_byte_equal`.
+        // requirement in CLAUDE.md). `packetEncoding=xudp` is the approved
+        // compatibility change that makes imported profiles relay UDP.
         //
         // The `:443` in the link is the default — when `vless.listen_port`
         // is set on the server-secrets (3x-ui-coexistence case), the
         // alternate port substitutes in. Byte-equality test stays green
         // because it uses the default secrets (no listen_port override).
         Ok(format!(
-            "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp={fp}&pbk={pbk}&sid={sid}&type=tcp#{name}",
+            "vless://{uuid}@{addr}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp={fp}&pbk={pbk}&sid={sid}&type=tcp&packetEncoding={packet_encoding}#{name}",
             uuid = user.uuid,
             addr = host_for_url(&ctx.server.address),
             fp = REALITY_UTLS_FP,
@@ -261,6 +267,7 @@ impl Protocol for VlessReality {
             sid = short_id,
             sni = sni,
             name = name,
+            packet_encoding = VLESS_PACKET_ENCODING,
         ))
     }
 }
