@@ -5,6 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{RenderCtx, User, UserId};
+use vpnctl_protocols::VLESS_PACKET_ENCODING;
 
 use super::compat::server_display_label;
 use crate::app::AppState;
@@ -41,7 +42,8 @@ pub(crate) fn render_vless_uri(
     server_tag: &str,
     client_name: &str,
 ) -> String {
-    // Param order: encryption, type, security, pbk, fp, sni, sid, spx, flow.
+    // Param order: encryption, type, security, pbk, fp, sni, sid, spx, flow,
+    // packetEncoding.
     //
     // 2026-05-23 quickfix (Pavel + другой пользователь):
     // «через V2rayTun появляются в списке конфиги, при подключении
@@ -85,7 +87,7 @@ pub(crate) fn render_vless_uri(
     // static-fingerprint rule has nothing to match. Mirrors
     // `vless_reality.rs::REALITY_UTLS_FP` (Protocol-trait share_link path).
     let params = format!(
-        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=randomized&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision"
+        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=randomized&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision&packetEncoding={VLESS_PACKET_ENCODING}"
     );
 
     // Fragment format (post-2026-05-20 + post-rename + operator-side

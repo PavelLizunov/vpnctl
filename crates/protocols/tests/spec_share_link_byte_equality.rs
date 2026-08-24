@@ -69,6 +69,11 @@ fn vless_secrets() -> HashMap<String, String> {
 // ── VLESS ───────────────────────────────────────────────────────────────
 
 #[test]
+fn vless_packet_encoding_public_contract_is_xudp() {
+    assert_eq!(vpnctl_protocols::VLESS_PACKET_ENCODING, "xudp");
+}
+
+#[test]
 fn vless_happy_path_byte_equal_uses_robust_default_sni() {
     // Pins the link LAYOUT (param ORDER + param SET — `encryption=none`
     // included; was missing in db3998c) against `scripts/get-vless.sh`
@@ -76,8 +81,7 @@ fn vless_happy_path_byte_equal_uses_robust_default_sni() {
     // net: if a future commit reorders/drops a param or changes the
     // encoding, this fires before it lands.
     //
-    // Two intentional deviations from the *literal* bash bytes — neither
-    // changes the param layout this test guards:
+    // Three intentional deviations from the *literal* bash bytes:
     //   1. `fp` is `randomized`, not the bash `chrome` literal. RU DPI
     //      began fingerprinting the static Chrome uTLS ClientHello
     //      (2026-06-16) and resetting REALITY; `randomized` evades it.
@@ -91,6 +95,8 @@ fn vless_happy_path_byte_equal_uses_robust_default_sni() {
     //      bash" contract — for a server that explicitly carries the
     //      legacy microsoft secret — is pinned separately in
     //      `vless_explicit_microsoft_sni_byte_equal_with_bash_scripts`.
+    //   3. `packetEncoding=xudp` explicitly enables UDP relay for clients
+    //      that otherwise import a TCP-only VLESS profile.
     let s = srv();
     let secrets = vless_secrets();
     let ctx = ctx_with(&s, &secrets);
@@ -98,7 +104,7 @@ fn vless_happy_path_byte_equal_uses_robust_default_sni() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp&packetEncoding=xudp#alice",
     );
 }
 
@@ -110,8 +116,9 @@ fn vless_explicit_microsoft_sni_byte_equal_with_bash_scripts() {
     // `vless.sni=www.microsoft.com` (as the bash get-vless.sh deploys
     // baked in) must still render the legacy link BYTE-FOR-BYTE, so a
     // phone holding a cached bash `sni=www.microsoft.com` link keeps
-    // working after the vpnctl cutover. Only `fp` deviates (randomized,
-    // the 2026-06-16 DPI-evasion switch — see the other test).
+    // working after the vpnctl cutover. `fp` deviates (randomized,
+    // the 2026-06-16 DPI-evasion switch) and `packetEncoding=xudp` is
+    // appended so UDP applications work after import.
     let s = srv();
     let mut secrets = vless_secrets();
     secrets.insert("vless.sni".into(), "www.microsoft.com".into());
@@ -120,7 +127,7 @@ fn vless_explicit_microsoft_sni_byte_equal_with_bash_scripts() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp&packetEncoding=xudp#alice",
     );
 }
 
@@ -170,7 +177,7 @@ fn vless_fragment_percent_encodes_space_byte_equal() {
     let link = VlessReality::new().share_link(&ctx, &u).unwrap();
     assert_eq!(
         link,
-        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp#alice%20cool",
+        "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUBKEY_TEST_BASE64URL&sid=deadbeef&type=tcp&packetEncoding=xudp#alice%20cool",
     );
 }
 
@@ -199,7 +206,7 @@ fn vless_server_inbound_user_carries_xtls_vision_flow() {
 }
 
 #[test]
-fn vless_client_outbound_carries_xtls_vision_flow() {
+fn vless_client_outbound_carries_xtls_vision_flow_and_xudp() {
     // Mirror of the inbound check: outbound MUST also set flow at the
     // top level (sing-box outbound vless schema), or the client/server
     // flow mismatch causes handshake-reject.
@@ -214,6 +221,13 @@ fn vless_client_outbound_carries_xtls_vision_flow() {
             .and_then(serde_json::Value::as_str),
         Some("xtls-rprx-vision"),
         "VLESS outbound must carry xtls-rprx-vision flow at top level",
+    );
+    assert_eq!(
+        outbound
+            .pointer("/packet_encoding")
+            .and_then(serde_json::Value::as_str),
+        Some("xudp"),
+        "VLESS outbound must explicitly enable XUDP for UDP applications",
     );
 }
 
