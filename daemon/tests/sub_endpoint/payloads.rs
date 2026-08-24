@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{DnsTunnel, TuicV5, VlessReality, WgTurn, WireGuard};
+use vpnctl_protocols::{DnsTunnel, TuicV5, VlessReality, WireGuard};
 use vpnctld::router;
 
 use super::common::seed;
@@ -104,116 +104,7 @@ async fn sub_valid_token_returns_full_envelope_with_tags() {
     assert!(serialised.contains("pw-alice"));
 }
 
-/// Regression for Pavel's 2026-05-19 question «wgturn находится
-/// внутри обычной подписки, это не будет проблемой? он же не
-/// поддерживается в рамках sing-box?» — confirmed bug: pre-fix,
-/// the /sub handler iterated server.enabled_protocols and called
-/// `client_config` on every one, including wgturn. Wgturn's
-/// `client_config` returned `{ "type": "wgturn" }` which sing-box
-/// has no parser for → whole envelope unusable.
-///
-/// Post-fix: the Protocol trait grew `appears_in_sing_box_sub()`
-/// (default true; wgturn overrides to false), and the sub handler
-/// filters on it. This test pins the contract end-to-end through
-/// the real router.
-#[tokio::test]
-async fn sub_skips_wgturn_protocol_in_sing_box_envelope() {
-    let dir = TempDir::new().unwrap();
-    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
-        .await
-        .unwrap();
-    let mut reg = Registry::new();
-    reg.register_kernel(Box::new(SingBox::new())).unwrap();
-    reg.register_protocol(Box::new(VlessReality::new()))
-        .unwrap();
-    // Register wgturn so the registry lookup succeeds — the WHOLE
-    // point of the test is to verify that the handler then SKIPS
-    // its client_config rather than emitting `{"type":"wgturn"}`.
-    reg.register_protocol(Box::new(WgTurn::new())).unwrap();
-
-    // Server with BOTH protocols enabled. Without the filter, the
-    // sub envelope would carry a wgturn outbound and sing-box would
-    // refuse the entire config.
-    let server = Server {
-        id: ServerId("mixed".into()),
-        address: "10.0.0.50".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("sing-box".into())],
-        enabled_protocols: vec![
-            ProtocolId("vless+reality".into()),
-            ProtocolId("wgturn".into()),
-        ],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    inv.add_server(&server).await.unwrap();
-    inv.set_server_secret(&server.id, "vless.public_key", "PUB_TEST")
-        .await
-        .unwrap();
-    inv.set_server_secret(&server.id, "vless.short_id", "12345678")
-        .await
-        .unwrap();
-
-    let user = User {
-        id: UserId("u1".into()),
-        uuid: "uuid-u1".into(),
-        tuic_password: None,
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        sub_token: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    };
-    inv.add_user(&user).await.unwrap();
-    inv.grant(&user.id, &server.id).await.unwrap();
-    let token = inv
-        .get_user(&user.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .sub_token
-        .unwrap();
-
-    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
-    let app = router(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/sub/{token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    let outbounds = v["outbounds"].as_array().expect("outbounds is array");
-
-    // No outbound should have type=wgturn.
-    for ob in outbounds {
-        let ty = ob["type"].as_str().unwrap_or("");
-        assert_ne!(
-            ty, "wgturn",
-            "wgturn outbound leaked into sing-box sub envelope: {ob:?}. \
-             /sub handler must filter via Protocol::appears_in_sing_box_sub()."
-        );
-    }
-    // And the legit vless+reality outbound IS present.
-    let has_vless = outbounds
-        .iter()
-        .any(|ob| ob["type"].as_str() == Some("vless"));
-    assert!(
-        has_vless,
-        "vless+reality outbound is missing — filter dropped too much: {outbounds:?}"
-    );
-}
-
-/// Sibling of `sub_skips_wgturn_protocol_in_sing_box_envelope` for
-/// dns-tunnel. dns-tunnel is ALSO a non-sing-box two-process bundle
+/// dns-tunnel is a non-sing-box two-process bundle
 /// (`appears_in_sing_box_sub() == false` — slipstream-client + loopback
 /// VLESS), so a `type: "dns-tunnel"` object in the /sub envelope would
 /// make the whole config unparseable and sing-box / Hiddify would drop
@@ -334,7 +225,7 @@ async fn sub_skips_dns_tunnel_protocol_in_sing_box_envelope() {
     );
 }
 
-/// Sibling of the wgturn / dns-tunnel exclusion tests for WireGuard.
+/// Sibling of the dns-tunnel exclusion tests for WireGuard.
 /// WireGuard's `client_config()` is an INTERNAL `{ type: "wireguard",
 /// interface, peer }` object (the wg-quick / AmneziaWG shape), NOT a
 /// valid sing-box outbound — sing-box's wireguard outbound is a flat

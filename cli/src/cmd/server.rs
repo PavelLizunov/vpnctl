@@ -20,7 +20,7 @@ pub(crate) enum ServerCmd {
         /// SSH user that has the deploy key in authorized_keys.
         #[arg(long, default_value = "root")]
         ssh_user: String,
-        /// Kernel id (must be registered): "sing-box", future: "wgturn", "xray".
+        /// Kernel id (must be registered): "sing-box", future: "xray".
         #[arg(long, default_value = "sing-box")]
         kernel: String,
         /// Hoster: "digitalocean" / "cloudzy" / "generic".

@@ -813,62 +813,6 @@ pub(super) fn server_detail_reserved_ports_section(
     }
 }
 
-/// Render the wgturn-specific info section on `/admin/servers/{id}`.
-///
-/// The section is OMITTED entirely when the server doesn't have the
-/// `wgturn` kernel — keeps the page short for the common case where
-/// most nodes are sing-box only. When wgturn IS in `server.kernels`,
-/// the section explains the operator-facing wgturn UX:
-///   * VK link is END-USER-supplied at connect time, NOT operator
-///     input here (Pavel 2026-05-19 + upstream `pkg/wgshare/doc.go`).
-///   * Each VK call has limited concurrent streams → per-user
-///     end-user-supplied is the correct model.
-///   * Operator hands the user `wgturn://…` share-link from the
-///     user-detail page; user pastes their own VK link into
-///     `wgturn-cli connect-url … --vk-link <url>` on their device.
-pub(super) fn server_detail_wgturn_section(
-    server: &vpnctl_core::Server,
-    _secrets: &HashMap<String, String>,
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    let has_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
-    if !has_wgturn {
-        return html! {};
-    }
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow { (tr(lang, "wgturn — emergency channel", "wgturn — аварийный канал")) }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (tr(lang, "VK-TURN-relayed WireGuard. The server-side daemon ", "WireGuard через VK-TURN relay. Серверный демон "))
-            span.ed-mono { "wgturn-cli serve" }
-            (tr(lang, " is configured automatically when you click ", " настраивается автоматически когда ты кликаешь "))
-            span.ed-mono { (tr(lang, "deploy →", "деплой →")) }
-            (tr(lang, " — no operator input is needed here.", " — ввод оператора здесь не нужен."))
-        }
-        div style="font-family: var(--serif); font-size: 13px; line-height: 1.6; padding: 10px 14px; background: var(--paper-tint); border-left: 3px solid var(--accent);" {
-            b { (tr(lang, "VK link is supplied by the END USER, not the operator.", "VK-ссылку даёт КОНЕЧНЫЙ ПОЛЬЗОВАТЕЛЬ, не оператор.")) }
-            (tr(
-                lang,
-                " Each VK call has limited concurrent streams, so a shared per-server link would saturate. Each user creates their own VK call invite on vk.com, then runs (or pastes the URL into their wgturn-cli)",
-                " У каждого VK-звонка ограниченное число одновременных потоков, поэтому общая server-ссылка быстро бы переполнилась. Каждый пользователь сам создаёт инвайт на VK-звонок на vk.com, затем запускает (или вставляет URL в свой wgturn-cli)",
-            ))
-            br {}
-            span.ed-mono style="display: inline-block; margin: 6px 0; padding: 4px 8px; background: var(--paper); font-size: 11px;" {
-                "wgturn-cli connect-url '<wgturn://...>' --vk-link '<https://vk.com/call/join/...>'"
-            }
-            br {}
-            (tr(lang, "The ", "Сама "))
-            span.ed-mono { "wgturn://" }
-            (tr(
-                lang,
-                " share-link itself lives on the user-detail page under «Per-protocol share links».",
-                " share-ссылка лежит на странице пользователя в секции «Ссылки на отдельные протоколы».",
-            ))
-        }
-    }
-}
-
 pub(super) fn server_detail_protocols_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,

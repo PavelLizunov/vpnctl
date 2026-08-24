@@ -66,9 +66,7 @@ pub(crate) const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b'?');
 
 /// Compute the per-user `/32` octet for the target user on this
-/// server. Thin wrapper around the shared `wg_addressing` helper
-/// — both AmneziaWg (here) and wgturn pick from a /24 with the
-/// same indexing scheme, only the base subnet differs.
+/// server. Thin wrapper around the shared `wg_addressing` helper.
 ///
 /// Semantics (per `wg_addressing::peer_octet_in_slash24`):
 ///   * `ctx.peers` empty → `Ok(2)` legacy single-user fallback

@@ -183,21 +183,12 @@ pub(crate) async fn user_detail_render(
         .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wireguard"))
         .map(|s| &s.id)
         .collect();
-    // Sibling tally for wgturn — same shape as wg_capable_granted
-    // / wg_capable_inventory but for the wgturn protocol. Drives
-    // Flow D's conditional rendering and its empty-state copy.
-    let wgturn_capable_granted: Vec<&vpnctl_core::ServerId> = servers
-        .iter()
-        .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "wgturn"))
-        .map(|s| &s.id)
-        .collect();
-    // Sibling tally for dns-tunnel — same shape / same role as
-    // `wgturn_capable_granted`. dns-tunnel is ALSO a non-sing-box
+    // Sibling tally for dns-tunnel — same shape as wg_capable_granted
+    // / wg_capable_inventory. dns-tunnel is a non-sing-box
     // two-process share-link (`appears_in_sing_box_sub() == false`,
-    // slipstream-client + loopback VLESS), so — exactly like wgturn —
-    // it never reaches the user through Flow A's /sub envelope. Drives
-    // the dedicated "Flow E — dns-tunnel" delivery card + its
-    // empty-state copy below the per-protocol grid.
+    // slipstream-client + loopback VLESS), so it never reaches the user
+    // through Flow A's /sub envelope. Drives the dedicated "Flow E — dns-tunnel"
+    // delivery card + its empty-state copy below the per-protocol grid.
     let dns_tunnel_capable_granted: Vec<&vpnctl_core::ServerId> = servers
         .iter()
         .filter(|s| s.enabled_protocols.iter().any(|p| p.0 == "dns-tunnel"))
@@ -783,12 +774,6 @@ pub(crate) async fn user_detail_render(
                         //   * Flow A — sing-box JSON via /sub/<token> URL
                         //   * Flow B — wireguard:// (official WG app, Hiddify)
                         //   * Flow C — vpn://    (AmneziaVPN)
-                        //   * Flow D — wgturn:// (wgturn-cli, VK-TURN relay)
-                        //                  — only when a granted server has
-                        //                  the wgturn protocol enabled. Lives
-                        //                  here so the operator hands the
-                        //                  user one artefact per client app,
-                        //                  same UX as A/B/C.
                         //
                         // Plus a .conf-file download per WG-capable server
                         // as a universal fallback (drag-drop into ANY WG
@@ -803,10 +788,8 @@ pub(crate) async fn user_detail_render(
                         // deep-link. Split into B + C; honest labels.
                         //
                         // Grid uses `auto-fit minmax(340px, 1fr)` so the
-                        // column count adapts to viewport + Flow D's
-                        // conditional presence (3 cols for non-wgturn
-                        // users, 4 for wgturn users; wraps to 2x2 on
-                        // narrower viewports).
+                        // column count adapts to viewport (3 cols; wraps
+                        // to 2x2 on narrower viewports).
                         div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
                             // Flow A — sing-box / Hiddify subscription URL.
                             // The QR renders the same sub_url shown in the
@@ -1118,7 +1101,7 @@ pub(crate) async fn user_detail_render(
                             // one granted server runs the amneziawg kernel
                             // (obfs minted ⇒ a link was produced). Letter F:
                             // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
-                            // D=wgturn, E=dns-tunnel — F is the next free one.
+                            // E=dns-tunnel, F=AmneziaWG awg://.
                             @if !awg_links.is_empty() {
                                 div {
                                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
@@ -1146,71 +1129,6 @@ pub(crate) async fn user_detail_render(
                                                         "Click the box above to select-all + copy.",
                                                         "Кликни на блок выше, чтобы выделить и скопировать.",
                                                     ))
-                                                }))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // Flow D — wgturn (VK-TURN relayed WG).
-                            // Separate from Flow A/B/C because:
-                            //   * sing-box CAN'T parse `type: wgturn` —
-                            //     the protocol is filtered out of /sub
-                            //     (`appears_in_sing_box_sub() = false`),
-                            //     so Flow A doesn't deliver it.
-                            //   * wgturn:// URL is consumed by the
-                            //     dedicated `wgturn-cli` client, not the
-                            //     official WireGuard app (Flow B) or
-                            //     AmneziaVPN (Flow C).
-                            // The card ONLY renders when at least one
-                            // granted server has the wgturn protocol; for
-                            // most users (sing-box-only) this column is
-                            // omitted entirely (grid auto-fits).
-                            @if !wgturn_capable_granted.is_empty() {
-                                div {
-                                    div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
-                                        (crate::i18n::tr(lang, "Flow D — wgturn-cli (VK-TURN relay)", "Поток D — wgturn-cli (VK-TURN relay)"))
-                                    }
-                                    @let wgt_links: Vec<_> = share_links
-                                        .iter()
-                                        .filter(|(_, pid, _)| pid.0 == "wgturn")
-                                        .collect();
-                                    @if wgt_links.is_empty() {
-                                        p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
-                                            (crate::i18n::tr(lang, "Granted wgturn servers ", "Выданные wgturn-серверы "))
-                                            @for (i, sid) in wgturn_capable_granted.iter().enumerate() {
-                                                @if i > 0 { ", " }
-                                                span.ed-mono { (sid.0) }
-                                            }
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " — but the share-link render failed. Most likely missing ",
-                                                " — но рендер share-link провалился. Скорее всего нет ",
-                                            ))
-                                            span.ed-mono { "wgturn:server_wg_public" }
-                                            (crate::i18n::tr(
-                                                lang,
-                                                " server secret. Open the server above and press Deploy.",
-                                                " серверного секрета. Открой сервер выше и нажми «Развернуть».",
-                                            ))
-                                        }
-                                    } @else {
-                                        @for (sid, _pid, link) in &wgt_links {
-                                            div style="margin-bottom: 18px;" {
-                                                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
-                                                    "server " (sid.0)
-                                                    " · ~200 KB/s emergency"
-                                                }
-                                                (share_link_card(link, &html! {
-                                                    "Opens in "
-                                                    span.ed-mono { "wgturn-cli" }
-                                                    " — the user pastes the link AND their own VK Calls invite at connect time: "
-                                                    br {}
-                                                    span.ed-mono style="display: inline-block; margin-top: 4px; padding: 3px 6px; background: var(--paper-tint); font-size: 10px;" {
-                                                        "wgturn-cli connect-url '<this-link>' --vk-link '<https://vk.com/call/join/...>'"
-                                                    }
-                                                    br {}
-                                                    "Each VK call has a limited concurrent-stream count, so each user supplies their own. ~200 KB/s ceiling per device — position as an emergency channel beside Flow A/B/C, not a daily driver."
                                                 }))
                                             }
                                         }
@@ -1513,7 +1431,7 @@ pub(crate) async fn user_detail_render(
     }
     @if tab == UserTab::Delivery {
             // Flow E — dns-tunnel (slipstream DNS-over-НСДИ last resort).
-            // Mirror of Flow D (wgturn) — a SEPARATE delivery card because:
+            // A SEPARATE delivery card because:
             //   * sing-box CAN'T parse `type: dns-tunnel` — the protocol is
             //     filtered out of /sub (`appears_in_sing_box_sub() = false`),
             //     so Flow A doesn't deliver it.
@@ -1527,7 +1445,7 @@ pub(crate) async fn user_detail_render(
             // protocol and calls `share_link`, no `appears_in_sing_box_sub`
             // filter — same as the CLI `vpnctl sub` path), so it already lands
             // in the "Per-protocol share links" list below; this card lifts it
-            // into its own QR + consumption instructions, exactly like wgturn.
+            // into its own QR + consumption instructions.
             // The card ONLY renders when at least one granted server runs the
             // dns-tunnel protocol; sing-box-only users never see it.
             @if !dns_tunnel_capable_granted.is_empty() {

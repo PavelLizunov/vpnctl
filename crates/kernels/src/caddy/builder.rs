@@ -1,8 +1,7 @@
 use super::render::{VLESSWS_SINGBOX_CONFIG, VLESSWS_UNIT};
 
 /// Pinned Go toolchain for the on-node `xcaddy` build. Bump in lockstep
-/// with [`CADDY_VERSION`] when Caddy needs a newer Go. (wgturn pins its
-/// Go the same way.)
+/// with [`CADDY_VERSION`] when Caddy needs a newer Go.
 pub(crate) const GO_VERSION: &str = "go1.26.4";
 
 /// Pinned SHA-256 of the official Go toolchain tarball downloaded by

@@ -687,7 +687,6 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
             kernels: vec![
                 KernelId("amneziawg".into()),
                 KernelId("sing-box".into()),
-                KernelId("wgturn".into()),
             ],
             // Empty enabled_protocols — the server-detail still lists
             // every protocol in the registry with [enable] buttons,
@@ -704,19 +703,19 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
     // Tier distribution across the FULL production registry (the test
     // `state` mirrors `build_registry` — naive + dns-tunnel + vless-ws
     // + vless+xhttp included):
-    //   Strong:   vless+reality, wgturn, naive,
-    //             vless-ws, vless+xhttp            (5)
+    //   Strong:   vless+reality, naive,
+    //             vless-ws, vless+xhttp            (4)
     //   Moderate: tuic-v5, anytls, dns-tunnel      (3)
     //   Weak:     shadowsocks-2022, wireguard,
     //             trojan, hysteria2                (4)
     //   ────────────────────────────────────────────
-    //   total                                      (12)
+    //   total                                      (11)
     let strong_count = html.matches("DPI: strong").count();
     let moderate_count = html.matches("DPI: moderate").count();
     let weak_count = html.matches("DPI: weak").count();
     assert_eq!(
-        strong_count, 5,
-        "expected 5 Strong chips (vless+reality, wgturn, naive, vless-ws, vless+xhttp), got {strong_count}"
+        strong_count, 4,
+        "expected 4 Strong chips (vless+reality, naive, vless-ws, vless+xhttp), got {strong_count}"
     );
     assert_eq!(
         moderate_count, 3,

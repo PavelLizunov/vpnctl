@@ -29,8 +29,6 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
     reg.register_kernel(Box::new(vpnctl_kernels::AmneziaWg::new()))
         .unwrap();
-    reg.register_kernel(Box::new(vpnctl_kernels::WgTurn::new()))
-        .unwrap();
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();
@@ -43,8 +41,6 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
     reg.register_protocol(Box::new(vpnctl_protocols::AnyTls::new()))
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::Trojan::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(vpnctl_protocols::WgTurn::new()))
         .unwrap();
     reg.register_kernel(Box::new(vpnctl_kernels::Caddy::new()))
         .unwrap();

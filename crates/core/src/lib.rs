@@ -2,7 +2,7 @@
 //!
 //! Архитектурный принцип: разделяем «что бежит на сервере» (`Kernel`) и
 //! «какой формат пакетов мы предъявляем клиенту» (`Protocol`).
-//! Это позволяет добавлять новое ядро (например, wgturn) **не трогая**
+//! Это позволяет добавлять новое ядро (например, caddy) **не трогая**
 //! existing inventory / cli / ssh / crypto-слои.
 
 pub mod humanize;
@@ -21,7 +21,7 @@ use std::fmt;
 // ── Identifiers ─────────────────────────────────────────────────────────
 //
 
-/// Стабильный строковый id (типа `"sing-box"`, `"wgturn"`).
+/// Стабильный строковый id (типа `"sing-box"`, `"caddy"`).
 /// Нельзя перепутать с другим `Id` благодаря newtype-обёртке.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KernelId(pub String);
@@ -438,7 +438,7 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     /// (иначе смысл автоматизации теряется).
     ///
     /// DEFAULT — no-op: ядра без управляемого хост-фаервола, или
-    /// управляющие им инлайн (amneziawg / wgturn через wg-quick PostUp
+    /// управляющие им инлайн (amneziawg через wg-quick PostUp
     /// iptables), наследуют пустую реализацию.
     ///
     /// Контракт — **best-effort**: невозможность открыть фаервол (нет
@@ -547,18 +547,12 @@ pub trait Protocol: fmt::Debug + Send + Sync {
     /// unrecognised `type` makes the entire config invalid** and the
     /// client either refuses to start OR silently drops the route.
     ///
-    /// Protocols that ARE NOT sing-box-native (today: wgturn —
-    /// delivered via the dedicated `wgturn-cli connect-url` flow
-    /// with its own `wgturn://` share link) MUST override this to
+    /// Protocols that ARE NOT sing-box-native (e.g. wireguard or
+    /// dns-tunnel — delivered via dedicated client configs / share links
+    /// rather than the sing-box sub) MUST override this to
     /// `false`. The sub handler then skips them when assembling the
     /// sing-box config, but they still appear in the per-protocol
-    /// share-links section of the admin UI (their own «Flow D»-style
-    /// card).
-    ///
-    /// (Pavel 2026-05-19: «wgturn находится внутри обычной подписки,
-    /// это не будет проблемой? он же не поддерживается в рамках
-    /// sing-box?» — yes, it was a problem; this is the trait-level
-    /// fix.)
+    /// share-links section of the admin UI.
     fn appears_in_sing_box_sub(&self) -> bool {
         true
     }
@@ -664,8 +658,8 @@ pub enum ServerSecretSpec {
 /// (compile-time const per protocol impl); never persisted.
 ///
 /// - `Strong` — well-camouflaged: REALITY (TLS handshake to a real
-///   upstream, active-probe defence via `dest:` forwarding), wgturn
-///   (obfuscated WireGuard, no fixed handshake type tag).
+///   upstream, active-probe defence via `dest:` forwarding), Naive
+///   (Caddy with probe-resistant forwardproxy).
 /// - `Moderate` — recognisable on careful active probing but not
 ///   trivially fingerprintable: TUIC v5, Hysteria2, AnyTLS, Trojan.
 /// - `Weak` — known DPI-fingerprintable in 2026 RU/IR/CN:
@@ -740,7 +734,7 @@ impl DpiRisk {
 //
 // ── Registry: модули регистрируют себя здесь ────────────────────────────
 //
-// Чтобы добавить wgturn, не трогая CLI и inventory, делаем централизованный
+// Чтобы добавлять ядра и протоколы, не трогая CLI и inventory, делаем централизованный
 // реестр. CLI ходит сюда: «дай мне Kernel по id».
 //
 
@@ -892,7 +886,7 @@ impl Registry {
                          '{pid}' both bind it on server '{}'. Move one of them to a \
                          different port via its per-server `*.listen_port` secret \
                          (vless.listen_port, vlessws.listen_port, wireguard.listen_port, \
-                         wgturn:listen_port) or to a dedicated node.",
+                         dns-tunnel:listen_port) or to a dedicated node.",
                         server.id
                     )));
                 }

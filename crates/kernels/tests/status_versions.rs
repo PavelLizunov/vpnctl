@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use vpnctl_core::{Kernel, KernelVersionPolicy};
-use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel, SingBox, WgTurn, Xray};
+use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel, SingBox, Xray};
 use vpnctl_ssh::MockTransport;
 
 type StatusCase<'a> = (Box<dyn Kernel>, Vec<&'a str>, &'a str, &'a str);
@@ -21,15 +21,6 @@ async fn every_current_kernel_reports_an_active_installed_version() {
             vec!["systemctl is-active awg-quick@awg0 2>/dev/null || true"],
             "dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null",
             "1.0.20210913-1",
-        ),
-        (
-            Box::new(WgTurn::new()),
-            vec![
-                "systemctl is-active wgturn 2>/dev/null || true",
-                "systemctl is-active wg-quick@wgturn-be 2>/dev/null || true",
-            ],
-            "cat /etc/wgturn/.installed-sha 2>/dev/null",
-            "af0f209f99f8381356fbae82d9b0f64d4af4bdcf",
         ),
         (
             Box::new(Caddy::new()),
@@ -79,13 +70,6 @@ async fn every_current_kernel_reports_inactive_without_turning_it_into_transport
             vec!["systemctl is-active awg-quick@awg0 2>/dev/null || true"],
         ),
         (
-            Box::new(WgTurn::new()),
-            vec![
-                "systemctl is-active wgturn 2>/dev/null || true",
-                "systemctl is-active wg-quick@wgturn-be 2>/dev/null || true",
-            ],
-        ),
-        (
             Box::new(Caddy::new()),
             vec!["systemctl is-active caddy 2>/dev/null || true"],
         ),
@@ -124,11 +108,6 @@ fn every_current_kernel_exposes_its_managed_floor_or_pin() {
             Box::new(AmneziaWg::new()),
             KernelVersionPolicy::Floor,
             "1.0.20210913",
-        ),
-        (
-            Box::new(WgTurn::new()),
-            KernelVersionPolicy::Pin,
-            "af0f209f99f8381356fbae82d9b0f64d4af4bdcf",
         ),
         (Box::new(Caddy::new()), KernelVersionPolicy::Pin, "v2.11.4"),
         (

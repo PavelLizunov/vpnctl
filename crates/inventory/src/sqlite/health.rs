@@ -248,7 +248,7 @@ impl SqliteInventory {
     /// Traffic accounting breakdown for one server over the window:
     /// NIC ground-truth total (ALL protocols), the part attributed to
     /// sing-box via clash-api, and the GAP between them (non-sing-box
-    /// protocols — naive/Caddy, dns-tunnel, wgturn — plus protocol/OS
+    /// protocols — naive/Caddy, dns-tunnel — plus protocol/OS
     /// overhead). Backs the «Traffic accounting» section on the
     /// server-detail page; the gap is THE signal the operator wants
     /// (how much real traffic vpnctl currently can't see per-user).

@@ -2,12 +2,10 @@
 //! `registry` subcommand and (in v0.2 Phase 3b) `deploy` will pull from here.
 
 use vpnctl_core::Registry;
-use vpnctl_kernels::{
-    AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel, Xray,
-};
+use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, Xray};
 use vpnctl_protocols::{
     AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-    VlessReality, VlessWs, VlessXhttp, WgTurn as WgTurnProtocol, WireGuard,
+    VlessReality, VlessWs, VlessXhttp, WireGuard,
 };
 
 /// Build the canonical Registry. Add new kernels/protocols here.
@@ -20,12 +18,6 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // AmneziaVPN PPA; obfuscation params live in
     // RenderCtx::secrets["amneziawg.{jc,jmin,jmax,s1,s2,h1,h2,h3,h4}"].
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
-    // wgturn-core — VK-TURN-relayed WireGuard «emergency channel».
-    // ~200 KB/s ceiling per device (VK rate-limits); position as a
-    // fallback when REALITY / WireGuard direct are blocked. Secrets:
-    // `wgturn:server_wg_private`, `wgturn:vk_link`,
-    // `wgturn:listen_port` (opt), `wgturn:mode` (opt).
-    reg.register_kernel(Box::new(WgTurnKernel::new()))?;
     // Caddy + forwardproxy@naive — serves the `naive` protocol with a
     // real masquerade website (HTTP 200 to probes, tunnel to authed
     // clients). Built from source on-node (xcaddy); ACME built into
@@ -62,11 +54,6 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // for protocol diversity; many older clients know Trojan but
     // not REALITY/AnyTLS.
     reg.register_protocol(Box::new(Trojan::new()))?;
-    // wgturn — companion to the wgturn-core kernel. Phase 1 stub:
-    // `share_link` returns a render-error pointing at the
-    // server-side `wgturn-cli provision-url` flow; the URL encoder
-    // is pending pkg/wgshare → Rust port (phase 2).
-    reg.register_protocol(Box::new(WgTurnProtocol::new()))?;
     // naive — Chromium-fingerprint proxy served by the Caddy kernel.
     // Strongest active-probe resistance (real cover website). Reuses
     // `User.tuic_password` for HTTP Basic; server params

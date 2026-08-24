@@ -21,7 +21,7 @@
 //! deserialises it and assembles the Caddyfile. The protocol never
 //! knows it's Caddy; the kernel never hard-codes per-user secrets.
 //!
-//! # Install (built from source, like `wgturn`)
+//! # Install (built from source via xcaddy)
 //!
 //! The stock `caddy` apt package has NO forwardproxy. `ensure_installed`
 //! installs Go (pinned [`GO_VERSION`]) and `xcaddy build`s Caddy

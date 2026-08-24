@@ -586,8 +586,8 @@ pub struct NodeHealthRow {
 /// Traffic-accounting breakdown for one server over a window, produced
 /// by [`SqliteInventory::server_traffic_breakdown`]. The GAP is the
 /// headline: real NIC traffic minus what clash-api could attribute to
-/// sing-box — i.e. non-sing-box protocols (naive/Caddy, dns-tunnel,
-/// wgturn) plus protocol/OS overhead that vpnctl currently can't break
+/// sing-box — i.e. non-sing-box protocols (naive/Caddy, dns-tunnel)
+/// plus protocol/OS overhead that vpnctl currently can't break
 /// down per-user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrafficBreakdown {

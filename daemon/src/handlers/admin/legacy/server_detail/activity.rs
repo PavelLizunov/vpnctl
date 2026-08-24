@@ -42,8 +42,8 @@ pub(super) fn server_detail_live_activity_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Server-wide totals from this node's clash-api (5-minute tick). Numbers reflect actual VPN traffic — VLESS, TUIC, Trojan auth all summed. AmneziaWG / wgturn are kernel-level and not visible to clash-api, so they're NOT counted here. ",
-                "Сервер-агрегатные показатели из clash-api ноды (тик 5 минут). Числа отражают реальный VPN-трафик — VLESS, TUIC, Trojan сложены вместе. AmneziaWG / wgturn — kernel-уровень, не видны clash-api, поэтому НЕ учитываются.",
+                "Server-wide totals from this node's clash-api (5-minute tick). Numbers reflect actual VPN traffic — VLESS, TUIC, Trojan auth all summed. AmneziaWG is kernel-level and not visible to clash-api, so it's NOT counted here. ",
+                "Сервер-агрегатные показатели из clash-api ноды (тик 5 минут). Числа отражают реальный VPN-трафик — VLESS, TUIC, Trojan сложены вместе. AmneziaWG — kernel-уровень, не виден clash-api, поэтому НЕ учитывается.",
             ))
         }
         div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 8px;" {
@@ -115,8 +115,8 @@ pub(super) fn server_detail_gap_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Real interface traffic (NIC ground-truth — catches ALL protocols, reconciles with the hoster) vs the sing-box part clash-api could attribute. The GAP is everything clash-api can't see: non-sing-box protocols (naive/Caddy, dns-tunnel, wgturn) plus TLS/QUIC overhead.",
-                "Реальный трафик интерфейса (NIC — ловит ВСЕ протоколы, сходится с хостером) против sing-box-части, которую смог атрибутировать clash-api. ГЭП — всё, что clash-api не видит: не-sing-box протоколы (naive/Caddy, dns-tunnel, wgturn) плюс оверхед TLS/QUIC.",
+                "Real interface traffic (NIC ground-truth — catches ALL protocols, reconciles with the hoster) vs the sing-box part clash-api could attribute. The GAP is everything clash-api can't see: non-sing-box protocols (naive/Caddy, dns-tunnel) plus TLS/QUIC overhead.",
+                "Реальный трафик интерфейса (NIC — ловит ВСЕ протоколы, сходится с хостером) против sing-box-части, которую смог атрибутировать clash-api. ГЭП — всё, что clash-api не видит: не-sing-box протоколы (naive/Caddy, dns-tunnel) плюс оверхед TLS/QUIC.",
             ))
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 8px;" {
@@ -126,7 +126,7 @@ pub(super) fn server_detail_gap_section(
             div title=(tr(lang, "Bytes clash-api attributed to sing-box protocols (VLESS/REALITY, TUIC, hy2, Trojan, …) over 24h — the part vpnctl can break down per-user.", "Байт, которые clash-api атрибутировал sing-box-протоколам (VLESS/REALITY, TUIC, hy2, Trojan…) за 24ч — часть, которую vpnctl раскладывает по юзерам.")) {
                 (status_tile(tr(lang, "sing-box (attributed)", "sing-box (атриб.)"), &humanize_bytes(t.attributed_bytes), "var(--ink)"))
             }
-            div title=(tr(lang, "NIC total minus the attributed part: non-sing-box protocols (naive/Caddy, dns-tunnel, wgturn) + protocol/OS overhead. This is what vpnctl currently can't see per-user.", "NIC всего минус атрибутированное: не-sing-box протоколы (naive/Caddy, dns-tunnel, wgturn) + оверхед протокола/ОС. Это то, что vpnctl сейчас не видит по юзерам.")) {
+            div title=(tr(lang, "NIC total minus the attributed part: non-sing-box protocols (naive/Caddy, dns-tunnel) + protocol/OS overhead. This is what vpnctl currently can't see per-user.", "NIC всего минус атрибутированное: не-sing-box протоколы (naive/Caddy, dns-tunnel) + оверхед протокола/ОС. Это то, что vpnctl сейчас не видит по юзерам.")) {
                 (status_tile(tr(lang, "GAP (unattributed)", "ГЭП (неатриб.)"), &humanize_bytes(t.gap_bytes), gap_colour))
             }
         }

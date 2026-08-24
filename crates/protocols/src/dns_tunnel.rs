@@ -26,8 +26,8 @@
 //! `type: "dns-tunnel"` object slip into the `/sub` envelope, every
 //! sing-box / Hiddify client fed the result refuses to start with
 //! «unknown outbound type» (or worse, silently drops EVERY route,
-//! including the working VLESS / TUIC ones). Same hard `false` as
-//! `wgturn`.
+//! including the working VLESS / TUIC ones). Hard `false` (mirrors
+//! wireguard).
 //!
 //! ## Share-link wire format
 //!
@@ -114,8 +114,7 @@
 //! Both return a type-tagged marker (`{"type":"dns-tunnel"}`) — the
 //! kernel renders the REAL loopback VLESS inbound + slipstream server
 //! config itself (it owns BOTH systemd units); this protocol contributes
-//! no sing-box-style inbound block. Trait-compliance stubs, same shape
-//! as `wgturn`.
+//! no sing-box-style inbound block. Trait-compliance stubs.
 //!
 //! Stateless, like every other Protocol in this crate.
 
@@ -145,10 +144,10 @@ const FORMAT_VERSION_WITH_CERT: i32 = 2;
 /// §2).
 const DEFAULT_RESOLVERS: &str = "195.208.4.1:53,195.208.5.1:53";
 
-/// Label-escape set for the `#<label>` fragment. Identical policy to
-/// `wgturn`: the user-id alphabet is validated upstream as
-/// `[A-Za-z0-9._-]+`, so the Go-interop-divergent characters (` `, `+`)
-/// are unreachable; `utf8_percent_encode`'s `%20`-for-space is fine.
+/// Label-escape set for the `#<label>` fragment. The user-id alphabet
+/// is validated upstream as `[A-Za-z0-9._-]+`, so the Go-interop-divergent
+/// characters (` `, `+`) are unreachable; `utf8_percent_encode`'s
+/// `%20`-for-space is fine.
 const LABEL: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'_')
@@ -277,8 +276,8 @@ impl Protocol for DnsTunnel {
         // loopback VLESS sing-box), NOT a single sing-box outbound. A
         // `type: "dns-tunnel"` object in the /sub envelope makes the
         // whole config unparseable → sing-box / Hiddify drops every
-        // route (including the working VLESS / TUIC ones). Hard `false`,
-        // same as wgturn.
+        // route (including the working VLESS / TUIC ones). Hard `false`
+        // (mirrors wireguard).
         false
     }
 
@@ -288,7 +287,7 @@ impl Protocol for DnsTunnel {
         // protocol contributes no sing-box-style inbound block. The
         // kernel NEVER reads this value — it's a throwaway marker that
         // keeps the trait shape uniform without polluting any merged
-        // config. Same approach as wgturn's `{"type":"wgturn"}`.
+        // config. Trait-compliance stub marker.
         Ok(json!({ "type": "dns-tunnel" }))
     }
 

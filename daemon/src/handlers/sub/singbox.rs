@@ -104,13 +104,9 @@ pub(super) async fn render_singbox(
                 );
                 continue;
             };
-            // Skip protocols that are not sing-box-native (today:
-            // wgturn — its `type: "wgturn"` outbound is unknown to
-            // sing-box / Hiddify and would make the WHOLE sub config
-            // unparseable, dropping every legit route too). Such
+            // Skip protocols that are not sing-box-native. Such
             // protocols are still surfaced in admin UI's per-protocol
-            // share-links section via their own client (e.g. wgturn-cli
-            // connect-url '<wgturn://...>').
+            // share-links section via their own client.
             if !proto.appears_in_sing_box_sub() {
                 tracing::debug!(
                     target = "vpnctld::sub",
@@ -186,7 +182,6 @@ fn protocol_display_name(protocol_id: &str) -> String {
         "trojan" => "Trojan".into(),
         "anytls" => "AnyTLS".into(),
         "wireguard" => "WireGuard".into(),
-        "wgturn" => "WGTurn".into(),
         other => other.to_ascii_uppercase(),
     }
 }

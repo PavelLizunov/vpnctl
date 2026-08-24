@@ -50,8 +50,7 @@ impl Protocol for WireGuard {
         // changed without breaking the wire format. TSPU exploited
         // this since 2023 and now drops bare WireGuard 100% in RU
         // residential ASNs; GFW (CN) the same. The IR DPI blocks it
-        // on similar grounds. Use `wgturn` (this crate's obfuscated
-        // variant) or `amneziawg` (kernel-level junk-packet injection)
+        // on similar grounds. Use `amneziawg` (kernel-level junk-packet injection)
         // when WG-style transport is needed in a hostile environment.
         vpnctl_core::DpiRisk::Weak
     }
@@ -66,7 +65,7 @@ impl Protocol for WireGuard {
         // an unknown outbound shape and drops EVERY route (including the
         // working VLESS / TUIC ones). WireGuard is delivered via its own
         // `wg://` share link + `.conf` download. Hard `false`, same as
-        // wgturn / dns-tunnel.
+        // dns-tunnel.
         false
     }
 

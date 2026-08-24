@@ -144,7 +144,7 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
 
 /// A user granted a dns-tunnel server sees the dedicated "Flow E —
 /// dns-tunnel" delivery card carrying their OWN per-user
-/// `dns-tunnel://…uuid=user.uuid…` link (mirror of wgturn's Flow D).
+/// `dns-tunnel://…uuid=user.uuid…` link.
 /// The link must NOT leak into the strict sing-box subscription
 /// (`appears_in_sing_box_sub() == false`, pinned separately in
 /// sub_endpoint.rs).
@@ -194,7 +194,7 @@ async fn user_detail_renders_dns_tunnel_flow_e_card_for_granted_user() {
 
 /// A user with NO dns-tunnel grant must NOT see the Flow E card or any
 /// `dns-tunnel://` link — the card is gated on a granted dns-tunnel
-/// server (sibling of wgturn's Flow-D gating).
+/// server.
 #[tokio::test]
 async fn user_detail_omits_dns_tunnel_flow_e_card_for_non_granted_user() {
     let dir = TempDir::new().unwrap();

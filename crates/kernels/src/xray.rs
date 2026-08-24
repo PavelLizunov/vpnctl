@@ -6,7 +6,7 @@
 //! additions are CLIENT-only (see plans/xray-xhttp.md §2). Xray-core
 //! (XTLS/Xray-core) is the only daemon that serves xhttp server-side.
 //! Different daemon ⇒ different Kernel, same split as amneziawg / caddy /
-//! wgturn vs sing-box.
+//! dns-tunnel vs sing-box.
 //!
 //! ## Install — prebuilt GitHub-release static binary (NOT apt, NOT an
 //! on-node build)
@@ -95,9 +95,8 @@ const XRAY_CONFIG_STAGING_PATH: &str = "/usr/local/etc/xray/config.staging.json"
 /// every deploy. Installs the pinned [`XRAY_VERSION`] release binary when
 /// ABSENT or at a DIFFERENT version (exact-pin equality, not a floor —
 /// see this module's doc comment), provisions a dedicated `xray` system
-/// user + config dir, and writes a hardened systemd unit (profile mirrors
-/// `wgturn.rs`'s 2026-05-18 audit-hardened unit — both are prebuilt-binary
-/// kernels with no apt-packaged unit to inherit from).
+/// user + config dir, and writes a hardened systemd unit (as a prebuilt-binary
+/// kernel with no apt-packaged unit to inherit from).
 ///
 /// Built once via `LazyLock` so the version pin is interpolated exactly
 /// once and the composed script can be asserted directly in tests
@@ -268,8 +267,7 @@ fn xray_apply_script() -> String {
 /// Idempotent, ufw-guarded shell snippet opening every `(transport, port)`
 /// in `ports`. Deliberately duplicated from `sing_box::firewall_open_script`
 /// rather than shared — this codebase prefers small duplication over
-/// cross-kernel coupling at this boundary (see `wgturn.rs`'s `WGTURN_PORT`
-/// constant, duplicated from its protocol-side mirror for the same reason).
+/// cross-kernel coupling at this boundary.
 fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
     if uniq.is_empty() {

@@ -797,7 +797,6 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
         kernels: [
             "sing-box",
             "amneziawg",
-            "wgturn",
             "caddy",
             "dns-tunnel",
             "xray",
@@ -825,7 +824,7 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
             None,
             None,
             Some(
-                r#"{"sing-box":{"version":"1.13.18","active":true},"amneziawg":{"version":"1.0.20210913-1","active":true},"wgturn":{"version":"af0f209f99f8381356fbae82d9b0f64d4af4bdcf","active":true},"caddy":{"version":"v2.11.4","active":true},"dns-tunnel":{"version":"v0.1.0","active":false},"xray":{"version":"26.3.27","active":true}}"#,
+                r#"{"sing-box":{"version":"1.13.18","active":true},"amneziawg":{"version":"1.0.20210913-1","active":true},"caddy":{"version":"v2.11.4","active":true},"dns-tunnel":{"version":"v0.1.0","active":false},"xray":{"version":"26.3.27","active":true}}"#,
             ),
             None,
             None,
@@ -855,7 +854,6 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
         "amneziawg",
         "caddy",
         "dns-tunnel",
-        "wgturn",
     ]
     .map(|kernel| {
         fleet_versions
@@ -869,12 +867,6 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
     assert!(
         list.contains(r#"class="ed-kvers""#),
         "fleet versions must use the single-line compact layout"
-    );
-    assert!(
-        list.contains(
-            r#"class="ed-kvers__value" title="af0f209f99f8381356fbae82d9b0f64d4af4bdcf">af0f209f99</span>"#
-        ),
-        "wgturn must render a short commit prefix with the full SHA in title"
     );
     assert!(
         list.contains(r#"class="ed-kvers__value" title="1.0.20210913-1">1.0.2021…13-1</span>"#),

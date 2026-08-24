@@ -11,7 +11,7 @@
 //! flags, units and ports live in `DNS-TUNNEL.md`,
 //! `configs/dns-tunnel-*.service` and `configs/tunnel-singbox-server.json.tpl`.
 //!
-//! ## Architecture — TWO systemd units (mirrors wgturn relay+backend)
+//! ## Architecture — TWO systemd units (relay + backend)
 //!
 //! ```text
 //! Internet (UDP 53)
@@ -23,8 +23,8 @@
 //!                                                                 — the tunnel already encrypts)
 //! ```
 //!
-//! This kernel OWNS BOTH units (exactly like wgturn owns its relay +
-//! `wg-quick@wgturn-be` backend). The composition with sing-box is
+//! This kernel OWNS BOTH units (slipstream-server relay + loopback
+//! sing-box backend). The composition with sing-box is
 //! INTERNAL — there is NO cross-kernel API in vpnctl and we do not
 //! invent one; the only coupling is the `127.0.0.1:9001` forward-target
 //! string shared between the slipstream `-a` flag and the VLESS inbound
@@ -42,15 +42,14 @@
 //! ## Multi-file deploy bundle
 //!
 //! `render_config` returns a single `Vec<u8>` but we render TWO files
-//! (the slipstream server config + the sing-box JSON), so we reuse
-//! wgturn's delimited multi-file bundle (`BUNDLE_DELIMITER`). See
+//! (the slipstream server config + the sing-box JSON), so we use
+//! a delimited multi-file bundle (`BUNDLE_DELIMITER`). See
 //! `apply_config` for the unpack-then-restart orchestration.
 //!
 //! ## Binary provisioning — prebuilt cache + SHA256 verify (NOT on-node)
 //!
 //! slipstream-rust needs ≥2 GB RAM to build (Rust LTO + picoquic/C) and
-//! the target box has 960 MB — an on-node build (the wgturn / on-node-Go
-//! pattern) is IMPOSSIBLE. So provisioning copies the
+//! the target box has 960 MB — an on-node build is IMPOSSIBLE. So provisioning copies the
 //! **caddy prebuilt-cache + SHA256-verify** pattern instead
 //! (`crates/kernels/src/caddy.rs`): a control-node cache at
 //! `/var/lib/vpnctl/cache/slipstream-<ver>-amd64`, uploaded + SHA256-
@@ -137,13 +136,11 @@ const SLIPSTREAM_BINARY: &str = "/usr/local/bin/slipstream-server";
 
 /// The two systemd unit names this kernel manages. Backend (sing-box)
 /// is restarted FIRST so the relay's forward-target is reachable when
-/// it starts (mirrors wgturn restarting `wg-quick@wgturn-be` before the
-/// relay).
+/// it starts.
 const RELAY_UNIT: &str = "dns-tunnel";
 const BACKEND_UNIT: &str = "dns-tunnel-singbox";
 
-/// Multi-file bundle delimiter — identical format to
-/// `crates/kernels/src/wgturn.rs::BUNDLE_DELIMITER`. `render_config`
+/// Multi-file bundle delimiter. `render_config`
 /// emits text in this shape; `apply_config` parses it. Format:
 ///
 /// ```text
@@ -510,7 +507,7 @@ impl Kernel for DnsTunnel {
         // Defense-in-depth: Registry::validate_server should reject a
         // `kernels=[dns-tunnel]` + a non-dns-tunnel protocol set earlier,
         // but the kernel still verifies its own contract (mirrors
-        // wgturn / caddy).
+        // caddy).
         let _proto = protocols
             .iter()
             .find(|p| p.id() == ProtocolId("dns-tunnel".to_string()))
@@ -615,8 +612,7 @@ impl Kernel for DnsTunnel {
 
         // Listen port — operator-overridable, validated as u16 at render
         // time so a typo surfaces as a clear CoreError::Render rather
-        // than an 8-second is-active poll timeout (mirrors wgturn's
-        // listen_port pre-validation).
+        // than an 8-second is-active poll timeout.
         let listen_port: u16 = match ctx.secrets.get("dns-tunnel:listen_port") {
             None => DEFAULT_LISTEN_PORT,
             Some(s) => {
@@ -740,7 +736,7 @@ impl Kernel for DnsTunnel {
         let sb_json = serde_json::to_string_pretty(&sb_config)
             .map_err(|e| CoreError::Render(format!("dns-tunnel sing-box config marshal: {e}")))?;
 
-        // ── 3. Assemble the multi-file bundle (wgturn format). ────────
+        // ── 3. Assemble the multi-file bundle. ────────
         let mut bundle = String::with_capacity(env_file.len() + sb_json.len() + 256);
         bundle.push_str(BUNDLE_DELIMITER);
         bundle.push_str(SLIPSTREAM_CONFIG_PATH);
@@ -763,9 +759,7 @@ impl Kernel for DnsTunnel {
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
         // Upload the bundle as a single staging file; the unpacker
-        // parses + writes each member then restarts both units. Atomic-
-        // rename + 8s is-active poll + journalctl-on-fail mirrors
-        // wgturn's apply_config.
+        // parses + writes each member then restarts both units.
         ssh.upload("/etc/dns-tunnel/.deploy-bundle.new", config)
             .await?;
         ssh.exec(&dns_tunnel_apply_script()).await?;
@@ -783,7 +777,7 @@ impl Kernel for DnsTunnel {
         // Active iff BOTH units are active. The slipstream relay opens a
         // UDP :53 socket even if its loopback forward-target is down (it
         // can't tell from a UDP socket whether anyone's listening), so
-        // the combined check is the honest one — same as wgturn.
+        // the combined check is the honest one.
         let relay = ssh
             .exec(&format!(
                 "systemctl is-active {RELAY_UNIT} 2>/dev/null || true"
@@ -861,8 +855,8 @@ fn dns_tunnel_apply_script() -> String {
             test -f "$BUNDLE"
 
             # Unpack the bundle. Format documented in
-            # `crates/kernels/src/dns_tunnel.rs::BUNDLE_DELIMITER` (same
-            # as wgturn). Small awk splits on the marker line and writes
+            # `crates/kernels/src/dns_tunnel.rs::BUNDLE_DELIMITER`.
+            # Small awk splits on the marker line and writes
             # each member into its declared path (atomic via mv).
             awk '
                 BEGIN {{ path = ""; outfile = ""; }}
