@@ -684,11 +684,7 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
             address: "203.0.113.22".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            kernels: vec![
-                KernelId("amneziawg".into()),
-                KernelId("sing-box".into()),
-                KernelId("wgturn".into()),
-            ],
+            kernels: vec![KernelId("amneziawg".into()), KernelId("sing-box".into())],
             // Empty enabled_protocols — the server-detail still lists
             // every protocol in the registry with [enable] buttons,
             // and the chip should render alongside the name.
@@ -704,19 +700,19 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
     // Tier distribution across the FULL production registry (the test
     // `state` mirrors `build_registry` — naive + dns-tunnel + vless-ws
     // + vless+xhttp included):
-    //   Strong:   vless+reality, wgturn, naive,
-    //             vless-ws, vless+xhttp            (5)
+    //   Strong:   vless+reality, naive,
+    //             vless-ws, vless+xhttp            (4)
     //   Moderate: tuic-v5, anytls, dns-tunnel      (3)
     //   Weak:     shadowsocks-2022, wireguard,
     //             trojan, hysteria2                (4)
     //   ────────────────────────────────────────────
-    //   total                                      (12)
+    //   total                                      (11)
     let strong_count = html.matches("DPI: strong").count();
     let moderate_count = html.matches("DPI: moderate").count();
     let weak_count = html.matches("DPI: weak").count();
     assert_eq!(
-        strong_count, 5,
-        "expected 5 Strong chips (vless+reality, wgturn, naive, vless-ws, vless+xhttp), got {strong_count}"
+        strong_count, 4,
+        "expected 4 Strong chips (vless+reality, naive, vless-ws, vless+xhttp), got {strong_count}"
     );
     assert_eq!(
         moderate_count, 3,
@@ -843,15 +839,15 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/unksrv/protocols").await;
-    // 12 registered protocols → 12 chips (Strong + Moderate + Weak
+    // 11 registered protocols → 11 chips (Strong + Moderate + Weak
     // sum). If the chip-or-no-chip decision branches on something
     // OTHER than "registry knows this id", the count drifts.
     let total_chips = html.matches("DPI: strong").count()
         + html.matches("DPI: moderate").count()
         + html.matches("DPI: weak").count();
     assert_eq!(
-        total_chips, 12,
-        "12 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+        total_chips, 11,
+        "11 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
     );
 }
 

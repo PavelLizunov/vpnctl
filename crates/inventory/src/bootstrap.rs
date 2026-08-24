@@ -43,7 +43,7 @@ use crate::SqliteInventory;
 /// Replaces the previous per-surface hardcoded vless/wireguard/hysteria2
 /// blocks, which silently omitted `shadowsocks-2022`'s `ss2022.psk` (and
 /// any future protocol's secret) → the `kg` deploy 2026-05-30 failed at
-/// render with `MissingSecret { key: "ss2022.psk" }`. The wgturn KERNEL
+/// render with `MissingSecret { key: "ss2022.psk" }`. The amneziawg KERNEL
 /// secret stays below the loop — it's keyed on `server.kernels`, not
 /// `enabled_protocols`.
 pub async fn bootstrap_server_secrets(
@@ -70,35 +70,6 @@ pub async fn bootstrap_server_secrets(
         for spec in proto.server_secret_specs() {
             mint_secret_spec(inv, &server.id, spec, &mut secrets, &mut minted).await?;
         }
-    }
-
-    // wgturn-core: Curve25519 keypair for the bundled `wgturnsrv`
-    // WireGuard backend. **VK link is NOT minted here** — per Pavel
-    // 2026-05-19 + upstream `pkg/wgshare/doc.go`, the VK invite is a
-    // CLIENT-SIDE parameter the end user supplies when running
-    // `wgturn-cli connect-url … --vk-link <url>`.
-    //
-    // Key naming uses `wgturn:` (colon) to match the kernel's
-    // `render_config` look-ups — intentional kernel-namespace separation
-    // from the protocol-namespaced dot keys (`vless.*`, `wireguard.*`,
-    // `tuic.*`). A future refactor unifying to dots touches both call
-    // sites — flagged here so it's greppable.
-    let needs_wgturn = server.kernels.iter().any(|k| k.0 == "wgturn");
-    if needs_wgturn
-        && (!secrets.contains_key("wgturn:server_wg_private")
-            || !secrets.contains_key("wgturn:server_wg_public"))
-    {
-        let (priv_key, pub_key) = vpnctl_crypto::gen_wireguard_keypair();
-        for (k, v) in [
-            ("wgturn:server_wg_private", &priv_key),
-            ("wgturn:server_wg_public", &pub_key),
-        ] {
-            inv.set_server_secret(&server.id, k, v)
-                .await
-                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
-            secrets.insert(k.to_string(), v.clone());
-        }
-        minted.push("wgturn server wireguard keypair");
     }
 
     // AmneziaWG obfuscation params — per-server, keyed on the `amneziawg`

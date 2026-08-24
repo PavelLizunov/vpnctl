@@ -63,7 +63,7 @@ fn render(sec: &HashMap<String, String>, users: &[User]) -> vpnctl_core::Result<
 }
 
 /// Pull the sing-box JSON member out of the multi-file bundle. The bundle
-/// format (mirrors wgturn) frames each file with a `====FILE: <path>====`
+/// format frames each file with a `====FILE: <path>====`
 /// marker line; the sing-box config is the last member, after
 /// `/etc/dns-tunnel/tunnel-sb.json`. Returns its raw bytes so the test can
 /// `serde_json::from_slice` and assert on the structured `users[]`.

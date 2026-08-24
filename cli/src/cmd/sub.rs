@@ -99,7 +99,7 @@ pub(crate) async fn run(
 ///
 /// NOTE: this deliberately does NOT apply
 /// [`vpnctl_core::Protocol::appears_in_sing_box_sub`] — the CLI emits raw
-/// share-links (including `wgturn://`), not a sing-box JSON envelope, so
+/// share-links (e.g. `dns-tunnel://`), not a sing-box JSON envelope, so
 /// non-sing-box protocols are intentionally still printed (unlike the
 /// daemon's JSON `/sub` path).
 async fn resolve_sub_targets(

@@ -31,12 +31,14 @@ The verification layer retained **2 critical** and **22 important** findings wit
 
 ## Critical findings
 
-### AUD-001 — WgTurn backend lacks forwarding and NAT
+### AUD-001 — WgTurn backend lacks forwarding and NAT [removed-with-wgturn]
 
-- **File:** `crates/kernels/src/wgturn.rs:482-496`
+- **Status:** removed-with-wgturn (WgTurn kernel and protocol removed from codebase)
+- **File:** `crates/kernels/src/wgturn.rs:482-496` (removed)
 - **Evidence:** the generated `wgturn-be` WireGuard interface contains only an INPUT filter. It does not enable `net.ipv4.ip_forward`, accept forwarding, or MASQUERADE traffic through the default egress interface.
 - **Impact:** clients can establish a tunnel through the relay but forwarded internet traffic is dropped or leaves with private `10.7.0.x` source addresses.
-- **Minimal fix:** persist IPv4 forwarding and render symmetric `PostUp`/`PostDown` FORWARD and MASQUERADE rules using a detected egress interface.
+- **Remediation & Migration:** resolved via complete WgTurn codebase removal. Migration `0049_remove_wgturn.sql` removes active inventory bindings (`server_protocols`, `server_kernels`, `grant_protocol_overrides`) while intentionally retaining `wgturn:*` secrets in SQLite as rollback material for one transition release. A later secret purge requires a separate verified cleanup release.
+- **Production Deploy Gate:** this code removal must NOT be deployed to production until legacy `wgturn.service` and `wg-quick@wgturn-be` are stopped, disabled, and removed on every affected server via hoster console (strictly following the no-SSH-instruction policy).
 
 ### AUD-002 — Clean Debian 12 sing-box install can fail because fail2ban lacks python3-systemd
 
@@ -53,12 +55,12 @@ The verification layer retained **2 critical** and **22 important** findings wit
 | AUD-004 | SSH | `crates/ssh/src/russh_transport.rs:52-56` compares fingerprint strings exactly, while accepted inventory shapes include padded and URL-safe base64. A fingerprint that passes validation can later fail host verification. | Normalize padding and URL-safe alphabet before comparison, or canonicalize at write time. |
 | AUD-005 | Protocol | `crates/protocols/src/tuic_v5.rs:88-116` uses an empty password when `tuic_password` is absent, while the server omits that user. Generated clients fail authentication silently. | Return `CoreError::Render` for missing password in client config and share link. |
 | AUD-006 | Protocol | `crates/protocols/src/hysteria2.rs:269` emits an empty password in `client_config`, although its share link rejects the same missing credential and the server omits the user. | Fail rendering when `tuic_password` is absent. |
-| AUD-007 | Protocol | `crates/protocols/src/wgturn.rs:285` emits IPv6 endpoints without brackets, producing values such as `2a00::1:56000` that Go `net.SplitHostPort` rejects. | Use `host_for_url` before adding the port. |
+| AUD-007 | Protocol | **[removed-with-wgturn]** `crates/protocols/src/wgturn.rs:285` emits IPv6 endpoints without brackets, producing values such as `2a00::1:56000` that Go `net.SplitHostPort` rejects. | Removed with WgTurn protocol removal. Active bindings removed by migration 0049; `wgturn:*` secrets retained for 1 transition release rollback window. |
 | AUD-008 | Protocol | `crates/protocols/src/dns_tunnel.rs:259-275` declares no effective UDP listen port even though the kernel listens on configurable UDP 53. Drift, conflict and quality checks miss it. | Implement `listen_ports` and secret-aware `effective_listen_ports`. |
 | AUD-009 | Protocol | `crates/protocols/src/vless_xhttp.rs:209-210` binds Xray to `0.0.0.0`, preventing IPv6 clients from connecting on dual-stack/IPv6-only nodes. | Bind the inbound to `::` if the deployed Xray configuration supports the intended dual-stack behavior. |
 | AUD-010 | Kernel | `crates/kernels/src/caddy.rs:233-255` reports/restarts only `caddy.service`, not the managed `caddy-vlessws.service` backend. The page can report healthy while clients receive 502. | Check and restart both units when VLESS-WS is active. |
 | AUD-011 | Kernel | `crates/kernels/src/dns_tunnel.rs:436-441` probes for sing-box but never installs it; absence also causes redundant slipstream uploads. | Install sing-box or fail clearly, and separate the two presence checks. |
-| AUD-012 | Kernel | First-deploy failures in `dns_tunnel_apply_script` and `wgturn_apply_script` leave enabled `Restart=on-failure` units crash-looping when no backup exists. | On first-deploy failure, stop/disable units and remove failing configs. |
+| AUD-012 | Kernel | First-deploy failures in `dns_tunnel_apply_script` (and historically removed `wgturn_apply_script`) leave enabled `Restart=on-failure` units crash-looping when no backup exists. | On first-deploy failure, stop/disable units and remove failing configs. |
 | AUD-013 | Inventory | `crates/inventory/src/sqlite/stats/rollups.rs:213-225` omits `servers.usage_coefficient` from monthly daily-rollup totals. Quotas undercount weighted servers. | Join `servers` and apply the coefficient consistently with other traffic queries. |
 | AUD-014 | Inventory | `crates/inventory/src/sqlite/models.rs:701-706` slices the last four bytes of a UTF-8 Telegram token without checking a character boundary. Non-ASCII input can panic a production request. | Extract trailing characters with `chars()` or validate ASCII tokens before storage. |
 | AUD-016 | Boosty | `crates/boosty-bridge/src/sync.rs:53-69` releases the DB sync lease only on normal async completion. Cancellation can block all syncs for ten minutes. | Use a cancellation-safe/RAII lease guard. |
@@ -81,7 +83,7 @@ These are lower priority but reproduced by a group verifier:
 - `crates/core/src/lib.rs`: duplicate protocol IDs produce a misleading self-conflict error.
 - `crates/protocols/src/naive.rs`: an explicitly empty domain passes validation.
 - `crates/protocols/src/wireguard/protocol.rs`: `client_config` hardcodes `10.66.0.2/32` instead of peer-derived addressing.
-- `crates/protocols/tests/spec_ipv6_sharelink_brackets.rs`: missing WgTurn and several newer protocol cases.
+- `crates/protocols/tests/spec_ipv6_sharelink_brackets.rs`: missing several newer protocol cases (WgTurn removed).
 - `crates/kernels/src/caddy/render.rs`: Naive Caddy config does not explicitly disable HTTP/3/UDP 443.
 - `crates/kernels/src/dns_tunnel.rs`: no UFW opening for its public UDP port.
 - `crates/kernels/src/sing_box.rs`: user-removal confirmation depends on an ambient host environment variable rather than an in-band web action.
@@ -115,14 +117,21 @@ The verification layer explicitly rejected or omitted claims that were not suffi
 
 ## Recommended remediation order
 
-1. **Immediate kernel deployment blockers:** AUD-001 and AUD-002.
+1. **Immediate kernel deployment blockers:** AUD-002 (AUD-001 removed-with-wgturn).
 2. **SSH trust and timeout reliability:** AUD-003 and AUD-004.
-3. **Broken generated client artefacts:** AUD-005 through AUD-009.
+3. **Broken generated client artefacts:** AUD-005, AUD-006, AUD-008, AUD-009 (AUD-007 removed-with-wgturn).
 4. **Kernel runtime reliability:** AUD-010 through AUD-012.
 5. **Accounting, panic and lease safety:** AUD-013, AUD-014 and AUD-016.
 6. **CLI correctness and CI parity:** AUD-018 through AUD-020 and AUD-026.
 7. **Runtime alert/deploy reliability:** AUD-021 through AUD-025.
 8. Address minor findings opportunistically with the owning subsystem.
+
+## Remediation Definition of Done (DOD) & Deployment Rules
+
+- **Status semantics:** Every audit item must resolve to `fixed`, `removed-with-wgturn`, or `deferred-with-reason` with documented justification and regression coverage where applicable.
+- **Production deploy blocker for WgTurn removal:** The WgTurn code removal must **NOT** be deployed to production until legacy `wgturn.service` and `wg-quick@wgturn-be` units are stopped, disabled, and removed on every affected server via hoster console (following the web-only / hoster console policy — no SSH instructions).
+- **Migration & rollback invariant:** Migration `0049_remove_wgturn.sql` removes active inventory bindings (`server_protocols`, `server_kernels`, `grant_protocol_overrides`) while intentionally retaining `wgturn:*` secrets for rollback safety across one transition release. A later secret purge requires a separate verified cleanup release.
+- **Gate compliance:** All waves require isolated regression tests, passing local/CI gates (`cargo check`, `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, `cargo deny check`), and independent review before main integration.
 
 ## Audit limitations
 

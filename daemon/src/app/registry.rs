@@ -8,22 +8,15 @@ use vpnctl_core::Registry;
 /// caller that needs the canonical protocol set) build the real registry
 /// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
-    use vpnctl_kernels::{
-        AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, WgTurn as WgTurnKernel, Xray,
-    };
+    use vpnctl_kernels::{AmneziaWg, Caddy, DnsTunnel as DnsTunnelKernel, SingBox, Xray};
     use vpnctl_protocols::{
         AnyTls, DnsTunnel as DnsTunnelProtocol, Hysteria2, Naive, Shadowsocks2022, Trojan, TuicV5,
-        VlessReality, VlessWs, VlessXhttp, WgTurn as WgTurnProtocol, WireGuard,
+        VlessReality, VlessWs, VlessXhttp, WireGuard,
     };
 
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new()))?;
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
-    // wgturn-core — VK-TURN-relayed WireGuard emergency channel.
-    // Mirrors `cli/src/registry.rs::build`. The duplication is
-    // pre-existing (see this function's doc-comment); a future
-    // `vpnctl-registry` crate consolidates both sites.
-    reg.register_kernel(Box::new(WgTurnKernel::new()))?;
     // Caddy + forwardproxy@naive — serves the `naive` protocol with a
     // real masquerade website. MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(Caddy::new()))?;
@@ -42,7 +35,6 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(WireGuard::new()))?;
     reg.register_protocol(Box::new(AnyTls::new()))?;
     reg.register_protocol(Box::new(Trojan::new()))?;
-    reg.register_protocol(Box::new(WgTurnProtocol::new()))?;
     // naive — Chromium-fingerprint proxy served by the Caddy kernel.
     // Without this the daemon's /sub render + admin dpi-chip silently
     // drop naive (the CLI deploy still worked, hiding the gap).
@@ -93,23 +85,15 @@ mod registry_drift_guard {
             "vless+reality",
             "vless+xhttp",
             "vless-ws",
-            "wgturn",
             "wireguard",
         ]
         .map(String::from)
         .to_vec();
         want_protos.sort();
 
-        let mut want_kernels = [
-            "amneziawg",
-            "caddy",
-            "dns-tunnel",
-            "sing-box",
-            "wgturn",
-            "xray",
-        ]
-        .map(String::from)
-        .to_vec();
+        let mut want_kernels = ["amneziawg", "caddy", "dns-tunnel", "sing-box", "xray"]
+            .map(String::from)
+            .to_vec();
         want_kernels.sort();
 
         assert_eq!(protos, want_protos, "daemon protocol registry drifted");

@@ -122,7 +122,7 @@ pub struct Probe {
     /// the gap computation diffs consecutive stored readings with a
     /// reboot/reset guard. This is the SERVER-WIDE ground truth: it
     /// catches ALL traffic on the node (incl. non-sing-box protocols
-    /// clash-api can't see — naive/Caddy, dns-tunnel, wgturn), so it
+    /// clash-api can't see — naive/Caddy, dns-tunnel), so it
     /// reconciles with the hoster's billing. `None` when the counters
     /// were unreadable (kept independent of `nic_iface` for parser
     /// partial-success symmetry).
@@ -259,8 +259,8 @@ sb_ver=$(sing-box version 2>/dev/null | awk '/version/{print $NF; exit}')
 [ -n "$sb_ver" ] && echo "VER sing-box $sb_ver"
 command -v caddy >/dev/null 2>&1 && echo "VER caddy $(caddy version 2>/dev/null | awk '{print $1; exit}')"
 # Public-interface byte counters — server-wide traffic ground truth.
-# Catches ALL protocols (incl. non-sing-box: naive/Caddy, dns-tunnel,
-# wgturn) so the total reconciles with the hoster's billing. Pick the
+# Catches ALL protocols (incl. non-sing-box: naive/Caddy, dns-tunnel)
+# so the total reconciles with the hoster's billing. Pick the
 # default-route interface (the one carrying internet egress/ingress);
 # emit its RAW cumulative rx/tx — the daemon diffs readings over time.
 nic=$(ip route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')

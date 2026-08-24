@@ -163,8 +163,7 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
     let registry = crate::app::build_registry().unwrap();
 
-    // Every sing-box-rendered protocol (exclude wgturn — it's not a
-    // sing-box inbound; it has its own kernel-keyed secret + cli).
+    // Every sing-box-rendered protocol.
     let sing_box = registry.kernel(&KernelId("sing-box".into())).unwrap();
     let enabled = sing_box.supported_protocols();
     let server = Server {

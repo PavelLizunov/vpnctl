@@ -279,7 +279,7 @@ pub(super) fn server_detail_drift_detail_section(
 
 /// STATUS-tab drift glance (ui-audit §4): the declared-vs-observed
 /// verdict + drift counts, linking to the full grid + observed-socket
-/// list on the protocols tab. The list itself (100+ rows on wgturn/xray
+/// list on the protocols tab. The list itself (100+ rows on xray
 /// nodes) stays off the status wall — that's the whole point of the tab
 /// split. Counts come from the same `missing`/`extra` the full section
 /// uses, so the two can never disagree.
@@ -346,7 +346,7 @@ pub(super) fn server_detail_drift_section(
     let has_wg = server
         .enabled_protocols
         .iter()
-        .any(|p| p.0.contains("wireguard") || p.0.contains("amnezia") || p.0.contains("wgturn"));
+        .any(|p| p.0.contains("wireguard") || p.0.contains("amnezia"));
     // Group the undeclared listeners. Adopt/ignore actions are
     // deliberately absent — the inventory doesn't model per-peer
     // ports yet (NM-14); this table only keeps the wall readable.

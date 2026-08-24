@@ -1,9 +1,8 @@
 //! Shared WireGuard-family per-peer addressing helper.
 //!
-//! Both `wireguard.rs` (AmneziaWg native) and `wgturn.rs` (VK-TURN
-//! relayed) assign each granted user a deterministic /32 inside a
-//! kernel-specific /24. The mapping is `<base>.<2 + index>` where
-//! `index` is the user's position in `ctx.peers` (the granted-users
+//! `wireguard.rs` (WireGuard / AmneziaWG native) assigns each granted user
+//! a deterministic /32 inside a kernel-specific /24. The mapping is
+//! `<base>.<2 + index>` where `index` is the user's position in `ctx.peers` (the granted-users
 //! list in stable `ORDER BY id` order — see `RenderCtx::with_peers`).
 //!
 //! Cap at host octet 254 — past that the /24 wraps and a later user
@@ -20,8 +19,7 @@
 //!   bug case (caller built `with_peers` for the wrong server, or
 //!   user was revoked between fetch and render). Fail loud rather
 //!   than silently emitting an octet that collides with whoever is
-//!   actually at index 0. (Review-agent finding 2 on wgturn phase 2
-//!   — important.)
+//!   actually at index 0. (Fail-closed on peer desync.)
 
 use vpnctl_core::{CoreError, RenderCtx, Result, User};
 

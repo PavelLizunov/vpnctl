@@ -159,8 +159,8 @@ impl Protocol for VlessXhttp {
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
-        // Same REALITY active-probe defence as vless+reality and wgturn
-        // (NM-12's two existing Strong-tier protocols): an unauthenticated
+        // Same REALITY active-probe defence as vless+reality
+        // (an existing Strong-tier protocol): an unauthenticated
         // probe gets transparently forwarded to the real `dest:` upstream,
         // indistinguishable from a genuine visitor. xhttp's HTTP-framing
         // adds a layer that mimics ordinary HTTP/2-3 traffic on top of

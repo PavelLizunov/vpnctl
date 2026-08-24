@@ -476,9 +476,6 @@ pub(crate) fn kernel_observations_of(
 pub(crate) fn compact_kernel_version(kernel: &str, version: &str) -> String {
     let len = version.chars().count();
     match kernel {
-        "wgturn" if len > 10 && version.chars().all(|c| c.is_ascii_hexdigit()) => {
-            version.chars().take(10).collect()
-        }
         "amneziawg" if len > 13 => format!(
             "{}…{}",
             version.chars().take(8).collect::<String>(),

@@ -94,9 +94,8 @@ pub(super) async fn render_v2ray_subscription(
                 Ok(link) => {
                     // V2Ray-family clients only understand a subset of
                     // share-link schemes. WireGuard's `wireguard://?conf=…`
-                    // and wgturn's `wgturn://…` would be silently dropped
-                    // at best, crash the parser at worst — so neither
-                    // bucket takes them. The sing-box-only transports go
+                    // would be silently dropped at best, crash the parser at
+                    // worst — so neither bucket takes it. The sing-box-only transports go
                     // to `singbox_links` and are emitted only to clients
                     // that can parse them (see `client_singbox`).
                     if link.starts_with("vless://")

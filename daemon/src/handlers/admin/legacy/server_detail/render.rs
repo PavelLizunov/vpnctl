@@ -183,7 +183,7 @@ pub(super) async fn server_detail_render(
     // Traffic accounting — NIC ground-truth (ALL protocols) vs the
     // sing-box part clash-api attributed vs the GAP between them. The
     // gap is the operator's headline: real traffic vpnctl can't yet
-    // break down per-user (naive/Caddy, dns-tunnel, wgturn + overhead).
+    // break down per-user (naive/Caddy, dns-tunnel + overhead).
     let traffic = state
         .inv
         .server_traffic_breakdown(&sid, 24)
@@ -261,7 +261,7 @@ pub(super) async fn server_detail_render(
     };
 
     // Per-server secrets — only read here so kernel-specific sections
-    // (currently wgturn's VK-link form) can display their current state.
+    // can display their current state.
     // Fetched even when no such kernel is enabled because the cost is
     // one indexed SELECT; conditional load would complicate the section
     // helper without measurable savings).
@@ -660,8 +660,6 @@ pub(super) async fn server_detail_render(
             (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
             // Reserved ports — operator port allowlist the apply-guard skips.
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
-            // wgturn VK-link — only when the wgturn kernel is enabled.
-            (server_detail_wgturn_section(&server, &server_secrets, lang))
             // Drift DETAIL — on-node orphan UUIDs; `?drift=live` arms a
             // best-effort 6s SSH read of the node's sing-box config.
             // Stays at the bottom: it's the on-demand deep dive, not
