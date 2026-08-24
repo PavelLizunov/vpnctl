@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 312 (234 prod / 78 test)
-- **Total Rust LOC:** 122,633 (80,209 prod / 42,424 test)
+- **Tracked Rust Files:** 331 (234 prod / 97 test)
+- **Total Rust LOC:** 122,651 (80,209 prod / 42,442 test)
 - **Database Migrations:** 48
-- **`daemon/src/app.rs` `.route(...)` Registrations:** 0
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 117
 
 ## Workspace Crates & Targets
 
@@ -23,21 +23,18 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 2 tests | 6,637 (10) | 605 (2) | **7,242** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 5,658 (19) | 4,186 (11) | **9,844** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 520 (3) | 558 (3) | **1,078** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,624 (124) | 24,298 (24) | **69,922** |
-| **Total** | | | | **80,209 (234)** | **42,424 (78)** | **122,633** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 45,624 (124) | 24,316 (43) | **69,940** |
+| **Total** | | | | **80,209 (234)** | **42,442 (97)** | **122,651** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/user_detail.rs` | 3,445 | `daemon` | Test |
-| `daemon/tests/admin_smoke/server_detail.rs` | 3,264 | `daemon` | Test |
-| `daemon/tests/admin_smoke/grants.rs` | 2,677 | `daemon` | Test |
-| `daemon/tests/admin_smoke/shell_nav.rs` | 2,409 | `daemon` | Test |
 | `daemon/src/handlers/admin/user_detail/render.rs` | 1,954 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 1,576 | `daemon` | Test |
 | `crates/kernels/src/sing_box.rs` | 1,403 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,310 | `daemon` | Test |
 | `crates/core/src/lib.rs` | 1,272 | `crates/core` | Prod |
 | `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,233 | `daemon` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,227 | `daemon` | Prod |
@@ -47,14 +44,17 @@
 | `crates/kernels/src/wgturn.rs` | 1,096 | `crates/kernels` | Prod |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,058 | `daemon` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
+| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,003 | `daemon` | Test |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
 | `daemon/tests/vpn_router_endpoint/protocols.rs` | 988 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 965 | `daemon` | Test |
 | `crates/kernels/src/amnezia_wg.rs` | 954 | `crates/kernels` | Prod |
 | `daemon/src/handlers/admin/legacy/deploy_sse.rs` | 945 | `daemon` | Prod |
 | `daemon/src/node_probe.rs` | 944 | `daemon` | Prod |
 | `crates/protocols/src/dns_tunnel.rs` | 936 | `crates/protocols` | Prod |
 | `daemon/tests/admin_smoke/servers.rs` | 897 | `daemon` | Test |
 | `daemon/src/handlers/admin/user_actions.rs` | 883 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 877 | `daemon` | Test |
 
 ## Database Migrations (48)
 
@@ -109,7 +109,124 @@
 | `0047` | boosty sync lease | `crates/inventory/migrations/0047_boosty_sync_lease.sql` | 2 |
 | `0048` | server quality samples | `crates/inventory/migrations/0048_server_quality_samples.sql` | 30 |
 
-## `daemon/src/app.rs` `.route(...)` Registrations (0)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (117)
 
 | Method | Path | Handler |
 |---|---|---|
+| `GET` | `/admin` | `admin::dashboard` |
+| `GET` | `/admin/` | `admin::dashboard` |
+| `GET` | `/admin/activity` | `admin::dashboard_activity` |
+| `GET` | `/admin/alerts` | `admin::alerts` |
+| `GET` | `/admin/alerts/` | `admin::alerts` |
+| `POST` | `/admin/alerts/ack-all` | `admin::alert_ack_all` |
+| `POST` | `/admin/alerts/ack-family/{prefix}` | `admin::alert_ack_family` |
+| `POST` | `/admin/alerts/{id}/ack` | `admin::alert_ack` |
+| `GET` | `/admin/audit` | `admin::audit` |
+| `GET` | `/admin/audit.csv` | `admin::audit_csv` |
+| `GET` | `/admin/audit/` | `admin::audit` |
+| `GET` | `/admin/backup/download/{name}` | `admin::backup_download` |
+| `POST` | `/admin/backup/self-test` | `admin::backup_self_test` |
+| `POST` | `/admin/backup/snapshot` | `admin::backup_snapshot_now` |
+| `GET` | `/admin/boosty` | `admin::boosty_page` |
+| `POST` | `/admin/boosty/disable/{user}` | `admin::boosty_disable` |
+| `POST` | `/admin/boosty/link` | `admin::boosty_link` |
+| `POST` | `/admin/boosty/settings` | `admin::boosty_settings_save` |
+| `POST` | `/admin/boosty/sync` | `admin::boosty_sync_now` |
+| `POST` | `/admin/boosty/unlink/{user}` | `admin::boosty_unlink` |
+| `POST` | `/admin/logout` | `admin::logout` |
+| `GET` | `/admin/monitoring` | `admin::monitoring` |
+| `GET` | `/admin/monitoring/` | `admin::monitoring` |
+| `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
+| `GET` | `/admin/overview` | `admin::dashboard` |
+| `GET` | `/admin/search` | `admin::search` |
+| `GET` | `/admin/servers` | `admin::servers` |
+| `GET` | `/admin/servers/` | `admin::servers` |
+| `GET` | `/admin/servers/deploy-all/sse` | `admin::servers_deploy_all_sse` |
+| `GET` | `/admin/servers/new` | `admin::wizard_new` |
+| `POST` | `/admin/servers/new` | `admin::wizard_new_submit` |
+| `GET` | `/admin/servers/new/` | `admin::wizard_new` |
+| `POST` | `/admin/servers/new/` | `admin::wizard_new_submit` |
+| `GET` | `/admin/servers/new/step-2` | `admin::wizard_step2_stub` |
+| `GET` | `/admin/servers/new/step-2/` | `admin::wizard_step2_stub` |
+| `GET` | `/admin/servers/new/step-2/sse` | `admin::wizard_step2_sse` |
+| `POST` | `/admin/servers/quick-add` | `admin::server_quick_add` |
+| `GET` | `/admin/servers/update-kernels-all/sse` | `admin::servers_update_kernels_all_sse` |
+| `GET` | `/admin/servers/{id}` | `admin::server_detail` |
+| `GET` | `/admin/servers/{id}/` | `admin::server_detail` |
+| `GET` | `/admin/servers/{id}/activity` | `admin::server_detail_activity` |
+| `POST` | `/admin/servers/{id}/auto-suppress` | `admin::server_set_auto_suppress` |
+| `POST` | `/admin/servers/{id}/delete` | `admin::server_delete` |
+| `GET` | `/admin/servers/{id}/delete-confirm` | `admin::server_delete_confirm` |
+| `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
+| `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
+| `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
+| `GET` | `/admin/servers/{id}/grants` | `admin::server_detail_grants_tab` |
+| `POST` | `/admin/servers/{id}/grants` | `admin::server_grant_user_form` |
+| `POST` | `/admin/servers/{id}/grants/_grant-all` | `admin::server_grant_all_users` |
+| `POST` | `/admin/servers/{id}/grants/_revoke-all` | `admin::server_revoke_all_users` |
+| `POST` | `/admin/servers/{id}/kernels/{kernel}/disable` | `admin::server_disable_kernel` |
+| `POST` | `/admin/servers/{id}/kernels/{kernel}/enable` | `admin::server_enable_kernel` |
+| `POST` | `/admin/servers/{id}/naive-config` | `admin::server_set_naive_config` |
+| `GET` | `/admin/servers/{id}/protocols` | `admin::server_detail_protocols_tab` |
+| `POST` | `/admin/servers/{id}/protocols/{proto}/disable` | `admin::server_disable_protocol` |
+| `POST` | `/admin/servers/{id}/protocols/{proto}/enable` | `admin::server_enable_protocol` |
+| `POST` | `/admin/servers/{id}/push-deploy-key` | `admin::server_push_deploy_key` |
+| `POST` | `/admin/servers/{id}/reality-config` | `admin::server_set_reality_config` |
+| `POST` | `/admin/servers/{id}/reserved-ports` | `admin::server_set_reserved_ports` |
+| `POST` | `/admin/servers/{id}/set-fingerprint` | `admin::server_set_fingerprint` |
+| `GET` | `/admin/servers/{id}/setup` | `admin::server_detail_setup` |
+| `GET` | `/admin/servers/{id}/status` | `admin::server_detail` |
+| `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
+| `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
+| `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
+| `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
+| `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |
+| `POST` | `/admin/servers/{sid}/protocols/{pid}/hide` | `admin::server_protocol_hide` |
+| `POST` | `/admin/servers/{sid}/protocols/{pid}/unhide` | `admin::server_protocol_unhide` |
+| `GET` | `/admin/settings` | `admin::settings` |
+| `GET` | `/admin/settings/` | `admin::settings` |
+| `GET` | `/admin/settings/appearance` | `admin::settings` |
+| `GET` | `/admin/settings/backups` | `admin::settings_backups` |
+| `POST` | `/admin/settings/digest-now` | `admin::settings_digest_now` |
+| `GET` | `/admin/settings/geoip/update-now` | `admin::settings_geoip_update_now_sse` |
+| `POST` | `/admin/settings/notification-language` | `admin::settings_notification_language` |
+| `GET` | `/admin/settings/notifications` | `admin::settings_notifications` |
+| `GET` | `/admin/settings/system` | `admin::settings_system` |
+| `POST` | `/admin/settings/telegram` | `admin::settings_telegram` |
+| `POST` | `/admin/settings/telegram/test` | `admin::settings_telegram_test` |
+| `POST` | `/admin/settings/timezone` | `admin::settings_timezone_set` |
+| `GET` | `/admin/sharing` | `admin::sharing` |
+| `GET` | `/admin/sharing/` | `admin::sharing` |
+| `POST` | `/admin/tweak/{kind}` | `admin::set_tweak` |
+| `GET` | `/admin/users` | `admin::users` |
+| `POST` | `/admin/users` | `admin::user_create` |
+| `GET` | `/admin/users/` | `admin::users` |
+| `POST` | `/admin/users/` | `admin::user_create` |
+| `GET` | `/admin/users/{id}` | `admin::user_detail` |
+| `GET` | `/admin/users/{id}/` | `admin::user_detail` |
+| `GET` | `/admin/users/{id}/access` | `admin::user_detail_access` |
+| `GET` | `/admin/users/{id}/access.csv` | `admin::user_access_csv` |
+| `GET` | `/admin/users/{id}/activity` | `admin::user_detail_activity` |
+| `POST` | `/admin/users/{id}/delete` | `admin::user_delete` |
+| `GET` | `/admin/users/{id}/delete-confirm` | `admin::user_delete_confirm` |
+| `GET` | `/admin/users/{id}/delivery` | `admin::user_detail_delivery` |
+| `GET` | `/admin/users/{id}/deploy-pending/sse` | `admin::user_deploy_pending_sse` |
+| `POST` | `/admin/users/{id}/disable` | `admin::user_set_disabled_true` |
+| `POST` | `/admin/users/{id}/enable` | `admin::user_set_disabled_false` |
+| `POST` | `/admin/users/{id}/grants/{server_id}` | `admin::user_grant_server` |
+| `POST` | `/admin/users/{id}/grants/{server_id}/revoke` | `admin::user_revoke_server` |
+| `GET` | `/admin/users/{id}/overview` | `admin::user_detail` |
+| `POST` | `/admin/users/{id}/sub-token/regenerate` | `admin::user_regen_sub_token` |
+| `GET` | `/admin/users/{id}/traffic` | `admin::user_detail_traffic` |
+| `POST` | `/admin/users/{id}/traffic-limit` | `admin::user_set_traffic_limit` |
+| `POST` | `/admin/users/{id}/tuic-password/mint` | `admin::user_mint_tuic_password` |
+| `GET` | `/admin/users/{id}/wireguard/conf/{server_id}` | `admin::user_wireguard_conf_download` |
+| `POST` | `/admin/users/{id}/wireguard/regenerate` | `admin::user_regen_wireguard` |
+| `POST` | `/admin/users/{uid}/grants/{sid}/protocols/{pid}/disable` | `admin::grant_protocol_disable` |
+| `POST` | `/admin/users/{uid}/grants/{sid}/protocols/{pid}/enable` | `admin::grant_protocol_enable` |
+| `GET` | `/api/v1/app/config` | `handlers::vpn_router::get_config_root_catchall` |
+| `GET` | `/api/v1/app/config/` | `handlers::vpn_router::get_config_root_catchall` |
+| `GET` | `/api/v1/app/config/{*tail}` | `handlers::vpn_router::get_config` |
+| `GET` | `/api/v1/health` | `handlers::health::get` |
+| `GET` | `/api/v1/stats/sub-access` | `handlers::stats::sub_access` |
+| `GET` | `/sub/{token}` | `handlers::sub::get` |
