@@ -195,6 +195,7 @@ assert_contains "$SCP_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite scp command used res
 
 # Check ssh invocation used offsite deploy key
 SSH_CALLS=$(cat "$SSH_LOG")
+assert_contains "$SSH_CALLS" "ssh -i $DEPLOY_KEY_FILE" "Primary LAN retention ssh uses resolved deploy key"
 assert_contains "$SSH_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite ssh command used resolved deploy key (-i $DEPLOY_KEY_FILE)"
 
 # 7. Test explicit OFFSITE_KEY override in commands

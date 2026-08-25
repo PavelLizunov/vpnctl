@@ -208,7 +208,7 @@ scp -O -q -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 \
 
 ## ── 5. rotation on 207 ──────────────────────────────────────────────────
 log "rotating ${TARGET_DIR} (keep ${RETENTION_DAYS} days)"
-ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET_HOST" \
+ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$TARGET_HOST" \
     "find '${TARGET_DIR}' -maxdepth 1 -name '*.tar.zst.age' -mtime +${RETENTION_DAYS} -delete" \
     || log "WARN: rotation step failed (non-fatal — manual cleanup possible)"
 
