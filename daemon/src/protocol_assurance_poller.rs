@@ -184,7 +184,12 @@ async fn sample_protocol(
         ));
     }
 
-    match run_external_runner(server, protocol, &ports).await? {
+    let runner_attempt = if !protocol_uses_external_runner(&protocol.id().0) {
+        RunnerAttempt::NotConfigured
+    } else {
+        run_external_runner(server, protocol, &ports).await?
+    };
+    match runner_attempt {
         RunnerAttempt::Result(result) => {
             let failure_code = result
                 .failure_code
@@ -496,6 +501,10 @@ fn run_runner_process_with_timeout(
     }
 }
 
+fn protocol_uses_external_runner(protocol: &str) -> bool {
+    protocol != "wireguard"
+}
+
 fn sanitize_client_kind(value: &str) -> String {
     let value: String = value
         .chars()
@@ -634,6 +643,12 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn wireguard_runner_is_deliberately_not_configured() {
+        assert!(!protocol_uses_external_runner("wireguard"));
+        assert!(protocol_uses_external_runner("hysteria2"));
     }
 
     #[test]
