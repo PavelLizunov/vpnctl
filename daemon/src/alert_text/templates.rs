@@ -423,10 +423,16 @@ pub fn render_alert(
             let client = ps(payload, "client_kind").map(code).unwrap_or_default();
             let stage = ps(payload, "stage").map(code).unwrap_or_default();
             (
-                pick(loc, format!("Protocol recovered — {subj}"), format!("Протокол восстановлен — {subj}")),
-                pick(loc,
+                pick(
+                    loc,
+                    format!("Protocol recovered — {subj}"),
+                    format!("Протокол восстановлен — {subj}"),
+                ),
+                pick(
+                    loc,
                     format!("{protocol} passed assurance at stage {stage} using {client}."),
-                    format!("{protocol} снова прошёл проверку на этапе {stage}, клиент {client}.")),
+                    format!("{protocol} снова прошёл проверку на этапе {stage}, клиент {client}."),
+                ),
                 None,
             )
         }

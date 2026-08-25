@@ -183,10 +183,12 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         inv.clone(),
         Arc::clone(&registry),
     ));
-    drop(crate::protocol_assurance_poller::spawn_protocol_assurance_poller(
-        inv.clone(),
-        Arc::clone(&registry),
-    ));
+    drop(
+        crate::protocol_assurance_poller::spawn_protocol_assurance_poller(
+            inv.clone(),
+            Arc::clone(&registry),
+        ),
+    );
 
     // Phase G — operator-facing alerts on top of node_health rows.
     // Same cadence as the probe (10 min) — no point scanning faster

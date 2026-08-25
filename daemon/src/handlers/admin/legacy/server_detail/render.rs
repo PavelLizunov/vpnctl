@@ -15,8 +15,8 @@ use crate::handlers::admin::helpers::{
     format_msk_iso, humanize_bytes, internal_error, not_found, render_page, theme_accent_lang,
 };
 use crate::handlers::admin::legacy::dashboard::{
-    humanize_age, kernel_floor_rollup, server_detail_kernel_inventory_section,
-    server_detail_assurance_section, server_detail_quality_section,
+    humanize_age, kernel_floor_rollup, server_detail_assurance_section,
+    server_detail_kernel_inventory_section, server_detail_quality_section,
 };
 use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
 use crate::handlers::admin::servers::fp_short;

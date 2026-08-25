@@ -48,9 +48,25 @@ async fn protocol_assurance_alerts_dedupe_per_protocol_kind() {
     inv.add_server(&srv("s1")).await.unwrap();
     let server = sid("s1");
 
-    assert!(fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server)).await.is_some());
-    assert!(fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server)).await.is_none());
-    assert!(fire(&inv, "protocol.assurance.failed.vless+reality", Some(&server)).await.is_some());
+    assert!(
+        fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server))
+            .await
+            .is_some()
+    );
+    assert!(
+        fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server))
+            .await
+            .is_none()
+    );
+    assert!(
+        fire(
+            &inv,
+            "protocol.assurance.failed.vless+reality",
+            Some(&server)
+        )
+        .await
+        .is_some()
+    );
 }
 
 // ─── insert_alert_if_no_unacked ──────────────────────────────────────

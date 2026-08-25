@@ -58,7 +58,7 @@ impl SqliteInventory {
         .bind(&server_id.0)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(row_to_sample).collect()
+        rows.iter().map(row_to_sample).collect()
     }
 
     pub async fn purge_protocol_assurance_older_than(&self, days: u32) -> Result<u64> {
@@ -73,7 +73,7 @@ impl SqliteInventory {
     }
 }
 
-fn row_to_sample(row: sqlx::sqlite::SqliteRow) -> Result<ProtocolAssuranceSample> {
+fn row_to_sample(row: &sqlx::sqlite::SqliteRow) -> Result<ProtocolAssuranceSample> {
     let ts: String = row.try_get("ts")?;
     let stage: String = row.try_get("stage")?;
     let state: String = row.try_get("state")?;

@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
@@ -37,9 +39,7 @@ async fn latest_sample_wins_per_protocol_across_client_kinds() {
     let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
         .await
         .unwrap();
-    inv.add_server(&server())
-        .await
-        .unwrap();
+    inv.add_server(&server()).await.unwrap();
     inv.record_protocol_assurance_sample(&sample(AssuranceState::Blocked, -1))
         .await
         .unwrap();
@@ -60,7 +60,9 @@ async fn latest_sample_wins_per_protocol_across_client_kinds() {
 #[tokio::test]
 async fn deleting_server_cascades_assurance_rows() {
     let tmp = TempDir::new().unwrap();
-    let inv = SqliteInventory::open(&tmp.path().join("inv.db")).await.unwrap();
+    let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+        .await
+        .unwrap();
     inv.add_server(&server()).await.unwrap();
     inv.record_protocol_assurance_sample(&sample(AssuranceState::Blocked, 0))
         .await
@@ -79,9 +81,7 @@ async fn database_rejects_unbounded_failure_code() {
     let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
         .await
         .unwrap();
-    inv.add_server(&server())
-        .await
-        .unwrap();
+    inv.add_server(&server()).await.unwrap();
     let mut row = sample(AssuranceState::Blocked, 0);
     row.failure_code = Some("x".repeat(129));
     assert!(inv.record_protocol_assurance_sample(&row).await.is_err());

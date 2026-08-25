@@ -17,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpStream, lookup_host};
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use vpnctl_core::{Protocol, Registry, RenderCtx, Server};
-use vpnctl_inventory::{
-    AssuranceStage, AssuranceState, ProtocolAssuranceSample, SqliteInventory,
-};
+use vpnctl_inventory::{AssuranceStage, AssuranceState, ProtocolAssuranceSample, SqliteInventory};
 
 const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 const TCP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -198,7 +196,10 @@ async fn sample_protocol(
                             .chars()
                             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 })
-                .or(result.failure_code.as_ref().map(|_| "runner_invalid_failure_code"));
+                .or(result
+                    .failure_code
+                    .as_ref()
+                    .map(|_| "runner_invalid_failure_code"));
             return Ok(sample(
                 server,
                 protocol,
@@ -240,25 +241,21 @@ async fn sample_protocol(
     }
     let started = Instant::now();
     for port in tcp_ports {
-        let targets: Vec<SocketAddr> = match timeout(
-            TCP_TIMEOUT,
-            lookup_host((server.address.as_str(), port)),
-        )
-        .await
-        {
-            Ok(Ok(targets)) => targets.collect(),
-            _ => {
-                return Ok(sample(
-                    server,
-                    protocol,
-                    CLIENT_KIND,
-                    AssuranceStage::ExternalPath,
-                    AssuranceState::Blocked,
-                    None,
-                    Some("dns_lookup_failed"),
-                ));
-            }
-        };
+        let targets: Vec<SocketAddr> =
+            match timeout(TCP_TIMEOUT, lookup_host((server.address.as_str(), port))).await {
+                Ok(Ok(targets)) => targets.collect(),
+                _ => {
+                    return Ok(sample(
+                        server,
+                        protocol,
+                        CLIENT_KIND,
+                        AssuranceStage::ExternalPath,
+                        AssuranceState::Blocked,
+                        None,
+                        Some("dns_lookup_failed"),
+                    ));
+                }
+            };
         let mut connected = false;
         for target in targets {
             if timeout(TCP_TIMEOUT, TcpStream::connect(target))
@@ -327,11 +324,17 @@ async fn run_external_runner(
     };
     let runner = std::path::PathBuf::from(runner.trim());
     if !runner.is_absolute() {
-        tracing::warn!(target = "vpnctld::assurance", "runner path must be absolute");
+        tracing::warn!(
+            target = "vpnctld::assurance",
+            "runner path must be absolute"
+        );
         return Ok(RunnerAttempt::Failed("runner_invalid_path"));
     }
     if std::fs::symlink_metadata(&runner).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        tracing::warn!(target = "vpnctld::assurance", "runner path must not be a symlink");
+        tracing::warn!(
+            target = "vpnctld::assurance",
+            "runner path must not be a symlink"
+        );
         return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
     }
     let runner = match std::fs::canonicalize(&runner) {
@@ -352,13 +355,23 @@ async fn run_external_runner(
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || metadata.mode() & 0o111 == 0 {
-            tracing::warn!(target = "vpnctld::assurance", "runner must be root-owned, executable and not group/world writable");
+            tracing::warn!(
+                target = "vpnctld::assurance",
+                "runner must be root-owned, executable and not group/world writable"
+            );
             return Ok(RunnerAttempt::Failed("runner_unsafe_permissions"));
         }
-        for parent in runner.ancestors().skip(1).take_while(|path| !path.as_os_str().is_empty()) {
+        for parent in runner
+            .ancestors()
+            .skip(1)
+            .take_while(|path| !path.as_os_str().is_empty())
+        {
             if let Ok(parent_meta) = std::fs::metadata(parent) {
                 if parent_meta.uid() != 0 || parent_meta.mode() & 0o022 != 0 {
-                    tracing::warn!(target = "vpnctld::assurance", "runner parent directory is not trusted");
+                    tracing::warn!(
+                        target = "vpnctld::assurance",
+                        "runner parent directory is not trusted"
+                    );
                     return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
                 }
             }
@@ -370,7 +383,10 @@ async fn run_external_runner(
         ports,
     })?;
     if request.len() > 64 * 1024 {
-        tracing::warn!(target = "vpnctld::assurance", "runner request exceeds 64 KiB");
+        tracing::warn!(
+            target = "vpnctld::assurance",
+            "runner request exceeds 64 KiB"
+        );
         return Ok(RunnerAttempt::Failed("runner_request_too_large"));
     }
     match tokio::task::spawn_blocking(move || run_runner_process(&runner, &request)).await {
@@ -456,7 +472,10 @@ fn run_runner_process_with_timeout(
             if let Some(writer) = writer.take() {
                 let _ = writer.join();
             }
-            let output = reader.take().and_then(|reader| reader.join().ok()).unwrap_or_default();
+            let output = reader
+                .take()
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default();
             if !status.success() || output.len() > 4096 {
                 return Ok(None);
             }
@@ -498,11 +517,16 @@ async fn persist_and_alert(
     inv: &SqliteInventory,
     sample: &ProtocolAssuranceSample,
 ) -> anyhow::Result<()> {
-    let previous = inv.latest_protocol_assurance_for_server(&sample.server_id).await?;
+    let previous = inv
+        .latest_protocol_assurance_for_server(&sample.server_id)
+        .await?;
     let previous_builtin_failed = previous.iter().any(|row| {
         row.protocol_id == sample.protocol_id
             && row.client_kind == CLIENT_KIND
-            && matches!(row.state, AssuranceState::Blocked | AssuranceState::Degraded)
+            && matches!(
+                row.state,
+                AssuranceState::Blocked | AssuranceState::Degraded
+            )
     });
     let kind = assurance_alert_kind(&sample.protocol_id.0);
     let has_open = inv
@@ -510,7 +534,10 @@ async fn persist_and_alert(
         .await
         .unwrap_or(false);
     inv.record_protocol_assurance_sample(sample).await?;
-    let failed = matches!(sample.state, AssuranceState::Blocked | AssuranceState::Degraded);
+    let failed = matches!(
+        sample.state,
+        AssuranceState::Blocked | AssuranceState::Degraded
+    );
     if failed {
         let payload = serde_json::json!({
             "protocol": sample.protocol_id.0,
@@ -534,14 +561,8 @@ async fn persist_and_alert(
             )
             .await?
         {
-            crate::node_probe_poller::audit_alert_fire(
-                inv,
-                &sample.server_id,
-                id,
-                &kind,
-                &summary,
-            )
-            .await;
+            crate::node_probe_poller::audit_alert_fire(inv, &sample.server_id, id, &kind, &summary)
+                .await;
             let subject = crate::node_probe_poller::server_subject(inv, &sample.server_id).await;
             crate::node_probe_poller::push_alert(
                 inv,
@@ -592,6 +613,13 @@ async fn persist_and_alert(
     Ok(())
 }
 
+pub async fn purge_old(
+    inv: &SqliteInventory,
+    days: u32,
+) -> Result<u64, vpnctl_inventory::SqliteInventoryError> {
+    inv.purge_protocol_assurance_older_than(days).await
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -624,14 +652,12 @@ mod tests {
 
     #[test]
     fn runner_parses_bounded_sanitized_result() {
-        let (_dir, runner) = script("cat >/dev/null; printf '%s' '{\"stage\":\"transfer\",\"state\":\"verified\",\"latency_ms\":12,\"failure_code\":null,\"client_kind\":\"xray\"}'");
-        let result = run_runner_process_with_timeout(
-            &runner,
-            b"{}",
-            Duration::from_secs(1),
-        )
-        .unwrap()
-        .unwrap();
+        let (_dir, runner) = script(
+            "cat >/dev/null; printf '%s' '{\"stage\":\"transfer\",\"state\":\"verified\",\"latency_ms\":12,\"failure_code\":null,\"client_kind\":\"xray\"}'",
+        );
+        let result = run_runner_process_with_timeout(&runner, b"{}", Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(result.stage, AssuranceStage::Transfer);
         assert_eq!(result.state, AssuranceState::Verified);
         assert_eq!(result.client_kind, "xray");
@@ -640,31 +666,16 @@ mod tests {
     #[test]
     fn runner_timeout_is_unknown_not_verified() {
         let (_dir, runner) = script("sleep 2");
-        let result = run_runner_process_with_timeout(
-            &runner,
-            b"{}",
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let result =
+            run_runner_process_with_timeout(&runner, b"{}", Duration::from_millis(50)).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn oversized_runner_output_is_rejected() {
         let (_dir, runner) = script("cat >/dev/null; head -c 5000 /dev/zero");
-        let result = run_runner_process_with_timeout(
-            &runner,
-            b"{}",
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let result =
+            run_runner_process_with_timeout(&runner, b"{}", Duration::from_secs(1)).unwrap();
         assert!(result.is_none());
     }
-}
-
-pub async fn purge_old(
-    inv: &SqliteInventory,
-    days: u32,
-) -> Result<u64, vpnctl_inventory::SqliteInventoryError> {
-    inv.purge_protocol_assurance_older_than(days).await
 }
