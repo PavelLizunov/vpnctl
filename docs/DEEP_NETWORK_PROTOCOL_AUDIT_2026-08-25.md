@@ -83,6 +83,25 @@ AmneziaWG is active on S4's configured UDP port. Existing peers showed historica
 
 Active PMTU probing was inconclusive because the control environment did not provide usable ICMP DF responses. This is recorded as an evidence gap, not an MTU failure.
 
+## Remediation status — 2026-08-25
+
+| Finding | Status | Evidence |
+|---|---|---|
+| NET-001 default-accept firewall | FIXED S2/S3/S4; DEFERRED S1 | S2/S4 use persistent iptables-nft INPUT DROP; S3 uses persistent nftables INPUT DROP. S1 rolled back pending provider UDP 8444 repair. |
+| NET-002 public LLMNR | FIXED S2; DEFERRED S1 | S2 resolved has LLMNR disabled and TCP/UDP 5355 listeners absent. S1 restored to baseline after rollback. |
+| NET-003 public mDNS | FIXED S2 | Avahi service and socket disabled; firewall does not allow UDP 5353. |
+| SEC-001 S2 SSH/fail2ban | FIXED | Key-only root SSH, password authentication disabled, python3-systemd installed, fail2ban active/enabled/systemd-owned. |
+| SEC-002 S3 SSH | FIXED | Key-only root SSH, password authentication disabled, fail2ban active alongside vpnctl nftables policy. |
+| NET-004 S4 recursive DNS | FIXED externally | Public TCP/UDP 53 removed from allowlist; BIND remains active for loopback and awg0 tunnel clients. |
+| LEGACY-001 S4 WgTurn | FIXED | Frontend/backend units and configs removed; UDP 56000 and legacy interface absent. |
+| LEGACY-002 S4 WireGuard 51820 | FIXED | Legacy wg0 removed; inventory AmneziaWG awg0/UDP 51822 preserved. |
+
+S2 and S3 passed 15-minute stability checks with deploy-key reachability, zero sing-box/Xray restarts and successful Hysteria2/Reality handshakes. S4 passed all HY2, TUIC, Reality, VLESS-WS and XHTTP gates plus its 15-minute deploy-key stability check.
+
+### S1 blocker — provider UDP 8444 return path
+
+S1 Hysteria2 currently fails from VM119 and S2/S3/S4, while self-handshake succeeds. Packet capture proves an external UDP 8444 datagram reaches S1 and S1 emits a reply. Host INPUT is restored to ACCEPT, sing-box config is valid and the selected credential exists in live config. This is therefore classified as a provider/network return-path blocker. Provider security-group/network ACL must explicitly permit inbound UDP 8444 and stateful/stateless UDP return traffic before S1 hardening resumes.
+
 ## Confirmed findings
 
 ### NET-001 — default-accept host firewalls
