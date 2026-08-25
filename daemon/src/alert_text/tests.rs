@@ -503,3 +503,42 @@ fn quality_degraded_warning_and_recovery_render_metrics_properly() {
     assert!(rec_ru.body.contains("45 мс"));
     assert!(rec_ru.action.is_none());
 }
+
+#[test]
+fn protocol_assurance_alerts_name_failure_layer_and_recovery() {
+    let payload = json!({
+        "protocol": "hysteria2",
+        "client_kind": "external-runner",
+        "stage": "handshake",
+        "state": "blocked",
+        "failure_code": "handshake_timeout",
+    });
+    let failed = render_alert(
+        "protocol.assurance.failed.hysteria2",
+        "warning",
+        "Sweden",
+        &payload,
+        Locale::En,
+    );
+    assert!(failed.title.contains("Protocol assurance failed"));
+    assert!(failed.body.contains("hysteria2"));
+    assert!(failed.body.contains("handshake"));
+    assert!(failed.body.contains("handshake_timeout"));
+    assert!(!failed.body.contains("client_config"));
+
+    let recovered = render_alert(
+        "protocol.assurance.failed.hysteria2",
+        "info",
+        "Sweden",
+        &json!({
+            "protocol": "hysteria2",
+            "client_kind": "external-runner",
+            "stage": "transfer",
+            "state": "verified",
+        }),
+        Locale::En,
+    );
+    assert!(recovered.title.contains("Protocol recovered"));
+    assert!(recovered.body.contains("transfer"));
+    assert!(recovered.action.is_none());
+}

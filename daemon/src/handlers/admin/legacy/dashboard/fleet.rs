@@ -641,6 +641,49 @@ pub(in crate::handlers::admin::legacy) fn server_detail_quality_section(
     }
 }
 
+pub(in crate::handlers::admin::legacy) fn server_detail_assurance_section(
+    rows: &[vpnctl_inventory::ProtocolAssuranceSample],
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if rows.is_empty() {
+        return html! {};
+    }
+    html! {
+        section id="protocol-assurance" style="margin-top:18px;" {
+            div.ed-art-eyebrow { (tr(lang, "Protocol assurance", "Проверка протоколов")) }
+            p style="font-family:var(--serif);font-style:italic;font-size:12px;color:var(--mute);margin:4px 0 12px;" {
+                (tr(lang,
+                    "Latest render, listener, external-path or client-handshake result. Unknown means no protocol-aware external runner is configured.",
+                    "Последний результат render/listener/external-path или клиентского handshake. Unknown означает, что внешний protocol-aware runner не настроен."))
+            }
+            table.ed-table {
+                thead { tr { th { "Protocol" } th { "Client" } th { "Stage" } th { "State" } th { "Failure" } th { "Latency" } th { "Checked" } } }
+                tbody {
+                    @for row in rows {
+                        @let state = row.state.as_str();
+                        @let color = match row.state {
+                            vpnctl_inventory::AssuranceState::Verified => "var(--ok)",
+                            vpnctl_inventory::AssuranceState::Unknown => "var(--mute)",
+                            vpnctl_inventory::AssuranceState::Degraded => "var(--warn)",
+                            vpnctl_inventory::AssuranceState::Blocked => "var(--err)",
+                        };
+                        tr {
+                            td.ed-mono { (&row.protocol_id.0) }
+                            td.ed-mono { (&row.client_kind) }
+                            td.ed-mono { (row.stage.as_str()) }
+                            td style=(format!("color:{color};font-weight:600;")) { (state) }
+                            td.ed-mono { (row.failure_code.as_deref().unwrap_or("—")) }
+                            td.ed-mono { (row.latency_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
+                            td.ed-mono { (row.ts.format("%Y-%m-%d %H:%MZ")) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(in crate::handlers::admin::legacy) fn pct_color(pct: Option<u8>) -> &'static str {
     match pct {
         Some(p) if p >= 99 => "#2e7d32", // green
