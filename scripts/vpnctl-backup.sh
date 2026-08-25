@@ -199,7 +199,9 @@ log "local archive: $ARCHIVE_NAME (${LOCAL_SIZE} bytes)"
 
 ## ── 4. scp to 207 ───────────────────────────────────────────────────────
 log "uploading to ${TARGET_HOST}:${TARGET_DIR}/"
-scp -q -o BatchMode=yes -o ConnectTimeout=10 \
+# VM 118 exposes the legacy scp subsystem but not SFTP. OpenSSH 9 defaults
+# scp(1) to SFTP, so force the legacy SCP protocol for this LAN archive hop.
+scp -O -q -o BatchMode=yes -o ConnectTimeout=10 \
     "$LOCAL_PATH" \
     "${TARGET_HOST}:${TARGET_DIR}/${ARCHIVE_NAME}" \
     || fail "scp to ${TARGET_HOST} failed (network or auth); local archive kept at ${LOCAL_PATH} for manual recovery" 11
