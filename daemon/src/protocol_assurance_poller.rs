@@ -24,6 +24,7 @@ const TCP_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNNER_TIMEOUT: Duration = Duration::from_secs(30);
 const NODE_HEALTH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(20);
 const CLIENT_KIND: &str = "vpnctl-builtin";
+const ALERT_FAILURE_TICKS: u32 = 3;
 
 #[derive(Debug, Serialize)]
 struct RunnerRequest<'a> {
@@ -537,6 +538,16 @@ async fn persist_and_alert(
         AssuranceState::Blocked | AssuranceState::Degraded
     );
     if failed {
+        let consecutive = inv
+            .consecutive_protocol_assurance_failures(
+                &sample.server_id,
+                &sample.protocol_id,
+                ALERT_FAILURE_TICKS,
+            )
+            .await?;
+        if consecutive < ALERT_FAILURE_TICKS {
+            return Ok(());
+        }
         let payload = serde_json::json!({
             "protocol": sample.protocol_id.0,
             "client_kind": sample.client_kind,

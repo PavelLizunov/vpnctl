@@ -61,6 +61,28 @@ impl SqliteInventory {
         rows.iter().map(row_to_sample).collect()
     }
 
+    pub async fn consecutive_protocol_assurance_failures(
+        &self,
+        server_id: &ServerId,
+        protocol_id: &vpnctl_core::ProtocolId,
+        limit: u32,
+    ) -> Result<u32> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT state FROM protocol_assurance_samples
+             WHERE server_id = ?1 AND protocol_id = ?2
+             ORDER BY id DESC LIMIT ?3",
+        )
+        .bind(&server_id.0)
+        .bind(&protocol_id.0)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .take_while(|state| matches!(state.as_str(), "blocked" | "degraded"))
+            .count() as u32)
+    }
+
     pub async fn purge_protocol_assurance_older_than(&self, days: u32) -> Result<u64> {
         let result = sqlx::query(
             "DELETE FROM protocol_assurance_samples
