@@ -16,9 +16,9 @@ Server and user identities are intentionally omitted. Server evidence uses anony
 | Client delivery (`/sub`, VPNRouter) | PASS |
 | Admin UI read-only surfaces | PASS |
 | Pollers, telemetry and alert pipelines | PASS |
-| Backup snapshot, off-site copy and restore drill | PASS with one retention WARN |
-| Security and resource posture | WARN |
-| **Overall** | **PASS with 2 WARN items** |
+| Backup snapshot, off-site copy and restore drill | PASS |
+| Security and resource posture | PASS |
+| **Overall** | **PASS — all audit WARN items resolved** |
 
 ## 1. Control plane
 
@@ -92,26 +92,24 @@ Authentication rejection and authenticated read-only surfaces were exercised.
 - Production deploy private/public key paths were included by the configured backup script.
 - Rollback daemon, CLI, assets, offline DB copy and checksum manifest remain available.
 
-### WARN-BACKUP-001 — remote retention authentication
+### WARN-BACKUP-001 — remote retention authentication — FIXED
 
-The archive upload succeeds, but the subsequent remote retention SSH command does not pass the resolved deploy key explicitly. The cleanup step logs a non-fatal authentication warning, so old archives may accumulate on VM 118.
-
-Recommended fix: pass `-i "$DEPLOY_KEY"` to the primary LAN retention SSH invocation and add a regression assertion matching the SCP authentication test.
+Resolved by PR #166 (`16a0fa8`): the primary LAN retention SSH command now passes the resolved deploy key explicitly. The exact retention command was exercised against VM 118 after production installation and completed successfully. Regression suite: 24/24.
 
 ## 7. Security and resource posture
 
 Systemd hardening, service user, environment-file permissions, private-key permissions, listening sockets, firewall summary, proxy configuration presence and resource pressure were checked read-only.
 
-### WARN-SEC-001 — writable SSH trust database
+### WARN-SEC-001 — writable SSH trust database — FIXED
 
-- Daemon SSH directory mode: 0755.
-- `known_hosts` files checked by the audit were mode 0666.
-- Private deploy keys remained mode 0600.
-- No extended ACL compensated for the broad trust-file permissions.
+Production trust permissions were hardened without restarting vpnctld:
 
-Impact: another local unprivileged process could alter host pins and influence outbound SSH verification, although it cannot read the private key from this permission issue alone.
-
-Recommended fix: change the daemon SSH directory to 0700 and trust files to 0600 or 0644, then verify daemon and backup service access. This was not performed because the approved audit was read-only.
+- Daemon SSH directory: `0700`.
+- Daemon and user `known_hosts`: `0600`.
+- Private deploy key remained `0600`.
+- Owners and SHA-256 content hashes were unchanged.
+- Rollback copies were created before chmod.
+- Strict host-key/deploy-key reachability remained 4/4 and health stayed HTTP 200.
 
 ## 8. Items not tested
 
@@ -121,4 +119,4 @@ Recommended fix: change the daemon SSH directory to 0700 and trust files to 0600
 
 ## Conclusion
 
-The production functional base is operational: control plane, every inventory server, client delivery, admin GET surfaces, pollers and restore capability passed. No functional FAIL was found. Two non-blocking operational WARN items remain: SSH trust-file permissions and remote backup retention authentication.
+The production functional base is operational: control plane, every inventory server, client delivery, admin GET surfaces, pollers and restore capability passed. No functional FAIL remains. Both operational WARN items found by the audit were fixed and reverified in production.
