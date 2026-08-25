@@ -55,6 +55,7 @@ pub mod alert_sink;
 pub mod alert_text;
 pub mod node_probe;
 pub mod node_probe_poller;
+pub mod protocol_assurance_poller;
 pub mod quality_poller;
 pub mod rate_limit;
 // Subprocess-based SSH transport — wraps system `ssh` binary instead

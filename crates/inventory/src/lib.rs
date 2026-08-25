@@ -8,6 +8,7 @@
 //! `mem.rs` stub was deleted 2026-05-22 as orphan code — no caller
 //! used it in 9 months (audit I3 catch).
 
+pub mod assurance;
 pub mod backup;
 // Declarative per-server secret bootstrap, shared by the daemon's
 // wizard/web deploy AND the CLI `vpnctl deploy` so the two paths can't
@@ -19,6 +20,7 @@ pub mod operation_lock;
 pub mod quality;
 pub mod sqlite;
 
+pub use assurance::{AssuranceStage, AssuranceState, ProtocolAssuranceSample};
 pub use backup::{
     CheckResult, CheckStatus, DEFAULT_BACKUP_DIR, Retention, SelfTestReport, SnapshotInfo,
     list_snapshots, parse_snapshot_filename, prune_snapshots, restore_from, snapshot_filename_at,

@@ -41,6 +41,18 @@ async fn fire(inv: &SqliteInventory, kind: &str, server: Option<&ServerId>) -> O
         .expect("insert_alert_if_no_unacked must not error")
 }
 
+#[tokio::test]
+async fn protocol_assurance_alerts_dedupe_per_protocol_kind() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+    let server = sid("s1");
+
+    assert!(fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server)).await.is_some());
+    assert!(fire(&inv, "protocol.assurance.failed.hysteria2", Some(&server)).await.is_none());
+    assert!(fire(&inv, "protocol.assurance.failed.vless+reality", Some(&server)).await.is_some());
+}
+
 // ─── insert_alert_if_no_unacked ──────────────────────────────────────
 
 // 1. Happy path: first call with a fresh (kind, server_id) → Some(id).

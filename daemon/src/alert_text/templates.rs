@@ -418,6 +418,33 @@ pub fn render_alert(
                     "Если переустанавливал ноду — обнови отпечаток на странице сервера. Если нет — тревожный знак, проверь.".into())),
             )
         }
+        kind if kind.starts_with("protocol.assurance.failed.") && severity == "info" => {
+            let protocol = ps(payload, "protocol").map(code).unwrap_or_default();
+            let client = ps(payload, "client_kind").map(code).unwrap_or_default();
+            let stage = ps(payload, "stage").map(code).unwrap_or_default();
+            (
+                pick(loc, format!("Protocol recovered — {subj}"), format!("Протокол восстановлен — {subj}")),
+                pick(loc,
+                    format!("{protocol} passed assurance at stage {stage} using {client}."),
+                    format!("{protocol} снова прошёл проверку на этапе {stage}, клиент {client}.")),
+                None,
+            )
+        }
+        kind if kind.starts_with("protocol.assurance.failed.") => {
+            let protocol = ps(payload, "protocol").map(code).unwrap_or_default();
+            let client = ps(payload, "client_kind").map(code).unwrap_or_default();
+            let stage = ps(payload, "stage").map(code).unwrap_or_default();
+            let failure = ps(payload, "failure_code").map(code).unwrap_or_default();
+            (
+                pick(loc, format!("Protocol assurance failed — {subj}"), format!("Проверка протокола не пройдена — {subj}")),
+                pick(loc,
+                    format!("{protocol} failed at stage {stage} using {client}. Failure: {failure}."),
+                    format!("{protocol} не прошёл этап {stage}, клиент {client}. Причина: {failure}.")),
+                Some(pick(loc,
+                    "Open the server page and check the protocol assurance matrix; config generation alone does not prove external reachability.".into(),
+                    "Открой страницу сервера и проверь матрицу протоколов: генерация конфига сама по себе не доказывает внешнюю доступность.".into())),
+            )
+        }
         "server.quality.degraded" if severity == "info" => {
             let score = u(payload, "score")
                 .map(|s| code(&format!("{s}/100")))

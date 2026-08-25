@@ -5,9 +5,9 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 328 (231 prod / 97 test)
-- **Total Rust LOC:** 123,766 (80,685 prod / 43,081 test)
-- **Database Migrations:** 51
+- **Tracked Rust Files:** 332 (234 prod / 98 test)
+- **Total Rust LOC:** 124,710 (81,546 prod / 43,164 test)
+- **Database Migrations:** 52
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 117
 
 ## Workspace Crates & Targets
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,830 (5) | 0 (0) | **1,830** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 32 tests | 13,065 (46) | 13,760 (36) | **26,825** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 33 tests | 13,255 (48) | 13,843 (37) | **27,098** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,183 (8) | 113 (1) | **6,296** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 10 tests | 4,261 (17) | 3,855 (10) | **8,116** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 3 tests | 1,018 (3) | 558 (3) | **1,576** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 46,726 (124) | 23,399 (43) | **70,125** |
-| **Total** | | | | **80,685 (231)** | **43,081 (97)** | **123,766** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 7 tests | 47,397 (125) | 23,399 (43) | **70,796** |
+| **Total** | | | | **81,546 (234)** | **43,164 (98)** | **124,710** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -41,7 +41,7 @@
 | `crates/core/src/lib.rs` | 1,266 | `crates/core` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,179 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,177 | `daemon` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,056 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,062 | `daemon` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
@@ -56,7 +56,7 @@
 | `daemon/src/handlers/admin/user_actions.rs` | 883 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 877 | `daemon` | Test |
 
-## Database Migrations (51)
+## Database Migrations (52)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -111,6 +111,7 @@
 | `0049` | remove wgturn | `crates/inventory/migrations/0049_remove_wgturn.sql` | 45 |
 | `0050` | remove dns tunnel | `crates/inventory/migrations/0050_remove_dns_tunnel.sql` | 46 |
 | `0051` | node health sample id | `crates/inventory/migrations/0051_node_health_sample_id.sql` | 79 |
+| `0052` | protocol assurance | `crates/inventory/migrations/0052_protocol_assurance.sql` | 22 |
 
 ## `daemon/src/app/routes.rs` `.route(...)` Registrations (117)
 

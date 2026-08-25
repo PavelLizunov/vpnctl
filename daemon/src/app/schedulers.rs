@@ -193,6 +193,11 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     "node_health purge failed; will retry next tick"
                 ),
             }
+            match crate::protocol_assurance_poller::purge_old(&inv, RETENTION_DAYS).await {
+                Ok(0) => tracing::debug!(target = "vpnctld::retention", days = RETENTION_DAYS, "protocol assurance purge tick: nothing to remove"),
+                Ok(n) => tracing::info!(target = "vpnctld::retention", days = RETENTION_DAYS, removed = n, "purged old protocol assurance rows"),
+                Err(e) => tracing::warn!(target = "vpnctld::retention", error = %e, "protocol assurance purge failed; will retry next tick"),
+            }
             match crate::quality_poller::purge_old(&inv, RETENTION_DAYS).await {
                 Ok(0) => tracing::debug!(
                     target = "vpnctld::retention",

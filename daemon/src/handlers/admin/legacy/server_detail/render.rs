@@ -16,7 +16,7 @@ use crate::handlers::admin::helpers::{
 };
 use crate::handlers::admin::legacy::dashboard::{
     humanize_age, kernel_floor_rollup, server_detail_kernel_inventory_section,
-    server_detail_quality_section,
+    server_detail_assurance_section, server_detail_quality_section,
 };
 use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
 use crate::handlers::admin::servers::fp_short;
@@ -142,6 +142,11 @@ pub(super) async fn server_detail_render(
     let quality_history = state
         .inv
         .service_quality_samples_for_server(&sid, 24)
+        .await
+        .unwrap_or_default();
+    let assurance_rows = state
+        .inv
+        .latest_protocol_assurance_for_server(&sid)
         .await
         .unwrap_or_default();
 
@@ -593,6 +598,7 @@ pub(super) async fn server_detail_render(
                 &quality_history,
                 lang,
             ))
+            (server_detail_assurance_section(&assurance_rows, lang))
         }
 
         // ── ACTIVITY — clash-api-snapshot-derived + the audit trail

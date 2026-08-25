@@ -12,6 +12,7 @@
 
 mod access;
 mod alerts;
+mod assurance;
 mod audit;
 mod base;
 mod boosty;
