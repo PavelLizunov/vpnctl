@@ -117,7 +117,12 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+    // Sanitize filename for Content-Disposition header (defense-in-depth vs header corruption / injection)
+    let safe_name: String = name
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+        .collect();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     resp

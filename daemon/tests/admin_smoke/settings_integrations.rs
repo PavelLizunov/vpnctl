@@ -1305,6 +1305,42 @@ async fn admin_backup_scheduler_produces_snapshot_and_audits() {
 }
 
 #[tokio::test]
+async fn admin_backup_download_serves_valid_snapshot_with_content_disposition_header() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+
+    let backup_dir = std::path::PathBuf::from(vpnctld::app::DEFAULT_BACKUP_DIR);
+    if std::fs::create_dir_all(&backup_dir).is_ok() {
+        if let Ok(snapshot_path) = vpnctl_inventory::snapshot_now(&s.inv, &backup_dir).await {
+            let filename = snapshot_path.file_name().unwrap().to_str().unwrap();
+            let app = router(s);
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/admin/backup/download/{filename}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::OK);
+            let cd = resp
+                .headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                cd.contains(&format!("attachment; filename=\"{filename}\"")),
+                "Content-Disposition header missing or invalid: {cd}"
+            );
+
+            let _ = std::fs::remove_file(snapshot_path);
+        }
+    }
+}
+
+#[tokio::test]
 async fn admin_backup_download_404_on_missing_snapshot() {
     // Valid-shaped filename but file doesn't exist. The handler
     // should 404 with a canonical body — not 500.

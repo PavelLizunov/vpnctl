@@ -5298,6 +5298,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vpnctl-core",
+ "vpnctl-host-fingerprint",
  "zeroize",
 ]
 
