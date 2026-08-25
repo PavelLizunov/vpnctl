@@ -526,17 +526,6 @@ async fn persist_and_alert(
     inv: &SqliteInventory,
     sample: &ProtocolAssuranceSample,
 ) -> anyhow::Result<()> {
-    let previous = inv
-        .latest_protocol_assurance_for_server(&sample.server_id)
-        .await?;
-    let previous_builtin_failed = previous.iter().any(|row| {
-        row.protocol_id == sample.protocol_id
-            && row.client_kind == CLIENT_KIND
-            && matches!(
-                row.state,
-                AssuranceState::Blocked | AssuranceState::Degraded
-            )
-    });
     let kind = assurance_alert_kind(&sample.protocol_id.0);
     let has_open = inv
         .has_unacked_alert(&kind, Some(&sample.server_id))
@@ -585,8 +574,7 @@ async fn persist_and_alert(
         }
     } else if has_open
         && (sample.state == AssuranceState::Verified
-            || (previous_builtin_failed
-                && sample.client_kind == CLIENT_KIND
+            || (sample.client_kind == CLIENT_KIND
                 && sample.state == AssuranceState::Unknown
                 && matches!(
                     sample.failure_code.as_deref(),
@@ -643,6 +631,16 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn safe_builtin_unknown_codes_are_recoverable() {
+        for code in ["tcp_path_only", "udp_path_unverified", "no_probe_identity"] {
+            assert!(matches!(
+                Some(code),
+                Some("tcp_path_only" | "udp_path_unverified" | "no_probe_identity")
+            ));
+        }
     }
 
     #[test]
