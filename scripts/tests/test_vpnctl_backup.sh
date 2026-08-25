@@ -190,6 +190,7 @@ fi
 # Check scp invocation used offsite deploy key
 SCP_CALLS=$(cat "$SCP_LOG")
 assert_contains "$SCP_CALLS" "scp -O " "Primary LAN scp forces legacy protocol for VM 118"
+assert_contains "$SCP_CALLS" "scp -O -q -i $DEPLOY_KEY_FILE" "Primary LAN scp uses resolved deploy key"
 assert_contains "$SCP_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite scp command used resolved deploy key (-i $DEPLOY_KEY_FILE)"
 
 # Check ssh invocation used offsite deploy key
