@@ -78,7 +78,9 @@ async fn deleting_server_cascades_assurance_rows() {
 #[tokio::test]
 async fn consecutive_failure_count_stops_at_recovery() {
     let tmp = TempDir::new().unwrap();
-    let inv = SqliteInventory::open(&tmp.path().join("inv.db")).await.unwrap();
+    let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+        .await
+        .unwrap();
     inv.add_server(&server()).await.unwrap();
     for minute in 0..3 {
         inv.record_protocol_assurance_sample(&sample(AssuranceState::Blocked, minute))
