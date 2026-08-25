@@ -87,8 +87,8 @@ Active PMTU probing was inconclusive because the control environment did not pro
 
 | Finding | Status | Evidence |
 |---|---|---|
-| NET-001 default-accept firewall | FIXED S2/S3/S4; DEFERRED S1 | S2/S4 use persistent iptables-nft INPUT DROP; S3 uses persistent nftables INPUT DROP. S1 rolled back pending provider UDP 8444 repair. |
-| NET-002 public LLMNR | FIXED S2; DEFERRED S1 | S2 resolved has LLMNR disabled and TCP/UDP 5355 listeners absent. S1 restored to baseline after rollback. |
+| NET-001 default-accept firewall | FIXED S1–S4 | S1/S2/S4 use persistent iptables-nft INPUT DROP; S3 uses persistent nftables INPUT DROP. Required protocol and management ports remain reachable. |
+| NET-002 public LLMNR | FIXED S1/S2 | resolved has LLMNR disabled and TCP/UDP 5355 listeners are absent. |
 | NET-003 public mDNS | FIXED S2 | Avahi service and socket disabled; firewall does not allow UDP 5353. |
 | SEC-001 S2 SSH/fail2ban | FIXED | Key-only root SSH, password authentication disabled, python3-systemd installed, fail2ban active/enabled/systemd-owned. |
 | SEC-002 S3 SSH | FIXED | Key-only root SSH, password authentication disabled, fail2ban active alongside vpnctl nftables policy. |
@@ -96,11 +96,11 @@ Active PMTU probing was inconclusive because the control environment did not pro
 | LEGACY-001 S4 WgTurn | FIXED | Frontend/backend units and configs removed; UDP 56000 and legacy interface absent. |
 | LEGACY-002 S4 WireGuard 51820 | FIXED | Legacy wg0 removed; inventory AmneziaWG awg0/UDP 51822 preserved. |
 
-S2 and S3 passed 15-minute stability checks with deploy-key reachability, zero sing-box/Xray restarts and successful Hysteria2/Reality handshakes. S4 passed all HY2, TUIC, Reality, VLESS-WS and XHTTP gates plus its 15-minute deploy-key stability check.
+S1–S3 passed 15-minute stability checks with deploy-key reachability, zero sing-box/Xray restarts and successful Hysteria2/Reality handshakes. S4 passed all HY2, TUIC, Reality, VLESS-WS and XHTTP gates plus its 15-minute deploy-key stability check. S1 external Hysteria2 was verified from VM119, S2 and S3 after the provider security group added inbound UDP 8444.
 
-### S1 blocker — provider UDP 8444 return path
+### S1 provider UDP 8444 return path — FIXED
 
-S1 Hysteria2 currently fails from VM119 and S2/S3/S4, while self-handshake succeeds. Packet capture proves an external UDP 8444 datagram reaches S1 and S1 emits a reply. Host INPUT is restored to ACCEPT, sing-box config is valid and the selected credential exists in live config. This is therefore classified as a provider/network return-path blocker. Provider security-group/network ACL must explicitly permit inbound UDP 8444 and stateful/stateless UDP return traffic before S1 hardening resumes.
+The provider security group lacked inbound UDP 8444 (nearby rules covered other ports). After adding IPv4 UDP 8444 from `0.0.0.0/0`, Hysteria2 passed from VM119, S2 and S3. S1 was then hardened to persistent INPUT DROP with TCP 22/443/9443, UDP 8444, essential ICMP/ICMPv6, loopback and established/related traffic; LLMNR/mDNS were disabled.
 
 ## Confirmed findings
 
