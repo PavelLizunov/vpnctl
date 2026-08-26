@@ -114,6 +114,17 @@ pub(crate) async fn auto_remediate_alert(
     plan: Remediation,
     subject: &str,
 ) -> bool {
+    let jump = match inv.resolve_jump_host(server).await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::health_remediation",
+                server = %server.id.0,
+                "jump host resolution failed: {e}"
+            );
+            return false;
+        }
+    };
     let key_path = crate::app::deploy_key_path();
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
@@ -121,6 +132,8 @@ pub(crate) async fn auto_remediate_alert(
         key_path,
     )
     .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump)
     .timeout(Duration::from_secs(120));
 
     let command_result = ssh.exec(plan.command()).await;

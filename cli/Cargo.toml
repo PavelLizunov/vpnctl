@@ -17,7 +17,7 @@ vpnctl-protocols = { path = "../crates/protocols" }
 vpnctl-kernels = { path = "../crates/kernels" }
 vpnctl-inventory = { path = "../crates/inventory" }
 vpnctl-crypto = { path = "../crates/crypto" }
-vpnctl-ssh = { path = "../crates/ssh" }
+vpnctl-ssh = { path = "../crates/ssh", features = ["russh"] }
 vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
 vpnctl-boosty-bridge = { path = "../crates/boosty-bridge" }
 

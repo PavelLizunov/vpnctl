@@ -37,7 +37,7 @@ pub(super) async fn render_v2ray_subscription(
     }
     let servers = state
         .inv
-        .servers_for_user(&user.id)
+        .subscription_servers_for_user(&user.id)
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
     // Whether THIS client can parse the sing-box-only transports

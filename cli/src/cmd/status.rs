@@ -2,7 +2,7 @@ use crate::{OutputFormat, ui};
 use std::path::PathBuf;
 use vpnctl_core::ServerId;
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_ssh::RusshTransportBuilder;
+use vpnctl_ssh::SubprocessSshTransport;
 
 pub(crate) async fn run(
     server_id: &str,
@@ -34,13 +34,11 @@ pub(crate) async fn run(
         .collect::<anyhow::Result<_>>()?;
 
     let key_path = crate::cmd::deploy::resolve_key_path(ssh_key)?;
-    let mut builder =
-        RusshTransportBuilder::new(server.address.clone(), server.ssh_user.clone(), key_path)
-            .port(server.ssh_port);
-    if let Some(fp) = server.trusted_host_fingerprint.as_deref() {
-        builder = builder.trusted_fingerprint(fp);
-    }
-    let ssh = builder.connect().await?;
+    let jump = inv.resolve_jump_host(&server).await?;
+    let ssh = SubprocessSshTransport::new(&server.address, &server.ssh_user, key_path)
+        .port(server.ssh_port)
+        .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+        .with_jump(jump);
 
     // Multi-kernel: query each declared kernel's status and emit a
     // block per kernel. The JSON variant returns an array of statuses

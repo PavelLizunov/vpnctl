@@ -33,7 +33,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{Server, ServerId, SshTransport};
 use vpnctl_inventory::{NodeOperationLock, SqliteInventory};
-use vpnctl_ssh::RusshTransportBuilder;
+use vpnctl_ssh::SubprocessSshTransport;
 
 /// Which node(s) to upgrade.
 #[derive(Debug, Clone)]
@@ -147,7 +147,7 @@ pub(crate) async fn run(
             vec![server]
         }
         UpdateTarget::All => {
-            let all = inv.list_servers().await?;
+            let all = inv.list_fleet_servers().await?;
             if all.is_empty() {
                 anyhow::bail!("inventory has no servers");
             }
@@ -270,24 +270,23 @@ async fn update_one_server(
         server.ssh_port,
         key_path.display()
     );
-    let mut builder =
-        RusshTransportBuilder::new(server.address.clone(), server.ssh_user.clone(), key_path)
-            .port(server.ssh_port);
-    if let Some(fp) = server.trusted_host_fingerprint.as_deref() {
-        builder = builder.trusted_fingerprint(fp);
-    }
-    let ssh = builder.connect().await?;
-
-    // TOFU: persist the observed fingerprint on a first connect, exactly
-    // like `deploy`/`status` so this command can't be a fingerprint-pinning
-    // blind spot.
-    if server.trusted_host_fingerprint.is_none() {
-        if let Some(observed) = ssh.observed_host_fingerprint().await {
-            inv.update_trusted_fingerprint(&server.id, &observed)
-                .await?;
-            println!("  TOFU: stored host fingerprint {observed}");
-        }
-    }
+    let jump = inv.resolve_jump_host(server).await?;
+    let fingerprint = if let Some(value) = server.trusted_host_fingerprint.clone() {
+        Some(value)
+    } else if jump.is_none() {
+        let observed =
+            vpnctl_host_fingerprint::fetch_via_keyscan(&server.address, server.ssh_port)?;
+        inv.update_trusted_fingerprint(&server.id, &observed)
+            .await?;
+        println!("  TOFU: stored host fingerprint {observed}");
+        Some(observed)
+    } else {
+        None
+    };
+    let ssh = SubprocessSshTransport::new(&server.address, &server.ssh_user, key_path)
+        .port(server.ssh_port)
+        .trusted_fingerprint(fingerprint)
+        .with_jump(jump);
 
     let mut rows: Vec<KernelUpdate> = Vec::with_capacity(kernels.len());
     for k in &kernels {

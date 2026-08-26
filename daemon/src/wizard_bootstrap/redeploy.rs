@@ -348,12 +348,19 @@ async fn redeploy_pipeline(
         fail!("deploy", "deploy skipped — {reason}.");
     }
 
+    let jump = match inv.resolve_jump_host(&server).await {
+        Ok(j) => j,
+        Err(e) => fail!("deploy", "jump host resolution failed: {e}"),
+    };
+
     let ssh = SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         deploy_key_path,
     )
-    .port(server.ssh_port);
+    .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump);
 
     let users = match inv.users_for_server(&server.id).await {
         Ok(u) => u,

@@ -525,7 +525,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
     // burst pattern.
     let grant_all = form_field(&body, "grant_all").as_deref() == Some("1");
     if grant_all {
-        match state.inv.list_servers().await {
+        match state.inv.list_fleet_servers().await {
             Ok(servers) => {
                 let mut granted: u32 = 0;
                 let mut granted_servers: Vec<vpnctl_core::Server> = Vec::new();

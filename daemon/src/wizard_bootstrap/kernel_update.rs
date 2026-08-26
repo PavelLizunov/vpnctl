@@ -212,12 +212,19 @@ async fn update_kernels_pipeline(
         fail!("update", "update skipped — {reason}.");
     }
 
+    let jump = match inv.resolve_jump_host(&server).await {
+        Ok(j) => j,
+        Err(e) => fail!("update", "jump host resolution failed: {e}"),
+    };
+
     let ssh = SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         deploy_key_path,
     )
-    .port(server.ssh_port);
+    .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump);
 
     // ── Per-kernel: probe version → ensure_installed → probe again. ──
     // NO render_config, NO apply_config, NO reserved-ports guard, NO

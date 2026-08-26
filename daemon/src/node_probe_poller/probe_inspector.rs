@@ -98,12 +98,19 @@ pub(crate) async fn probe_one_server_with_registry(
         return ProbeOutcome::NoDeployKey;
     }
 
+    let jump = match inv.resolve_jump_host(server).await {
+        Ok(j) => j,
+        Err(e) => return ProbeOutcome::SshFailed(format!("jump host resolution failed: {e}")),
+    };
+
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         key_path,
     )
-    .port(server.ssh_port);
+    .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump);
 
     use crate::node_probe::{ProbeClient, SshProbeClient};
     let client = SshProbeClient::new(&ssh);

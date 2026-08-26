@@ -616,13 +616,22 @@ pub async fn build_alert_sink(
         match inv.list_servers().await {
             Ok(servers) => {
                 if let Some(server) = servers.iter().find(|s| s.id == server_id) {
+                    let jump = match inv.resolve_jump_host(server).await {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(target = "vpnctld::alert_sink", %error, "Telegram proxy jump validation failed; transport disabled");
+                            return Ok(None);
+                        }
+                    };
                     let key_path = crate::app::deploy_key_path();
                     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
                         server.address.clone(),
                         server.ssh_user.clone(),
                         key_path,
                     )
-                    .port(server.ssh_port);
+                    .port(server.ssh_port)
+                    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+                    .with_jump(jump);
                     sink = sink.with_via_ssh(ssh);
                 } else {
                     // Operator explicitly chose proxy_via_server_id;

@@ -595,7 +595,7 @@ pub(crate) async fn servers_deploy_all_sse(
         return resp;
     }
 
-    let servers = match state.inv.list_servers().await {
+    let servers = match state.inv.list_fleet_servers().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
@@ -814,7 +814,7 @@ pub(crate) async fn servers_update_kernels_all_sse(
         }
     }
 
-    let servers = match state.inv.list_servers().await {
+    let servers = match state.inv.list_fleet_servers().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };

@@ -113,21 +113,20 @@ pub(super) async fn load_drift_live(
     server: &vpnctl_core::Server,
     granted_users: &[vpnctl_core::User],
     all_users: &[vpnctl_core::User],
+    jump: Option<vpnctl_core::PinnedJumpRoute>,
 ) -> DriftLiveResult {
     use crate::ssh_subprocess::SubprocessSshTransport;
     use vpnctl_core::SshTransport;
 
     let key_path = crate::app::deploy_key_path();
-    let transport = SubprocessSshTransport::new(
-        server.address.clone(),
-        server.ssh_user.clone(),
-        key_path,
-    )
-    .port(server.ssh_port)
-    // Hard wall-clock cap — keep the armed path snappy even when the
-    // node is black-holed (the transport already sets ConnectTimeout=10
-    // + ServerAlive keepalives, but we want ≤6s end-to-end here).
-    .timeout(std::time::Duration::from_secs(6));
+    let transport = SubprocessSshTransport::new(server.address.clone(), server.ssh_user.clone(), key_path)
+            .port(server.ssh_port)
+            .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+        .with_jump(jump)
+            // Hard wall-clock cap — keep the armed path snappy even when the
+            // node is black-holed (the transport already sets ConnectTimeout=10
+            // + ServerAlive keepalives, but we want ≤6s end-to-end here).
+            .timeout(std::time::Duration::from_secs(6));
 
     // Outer guard belt-and-suspenders against a wedged child the
     // transport's own timeout somehow misses — 7s leaves a 1s margin.

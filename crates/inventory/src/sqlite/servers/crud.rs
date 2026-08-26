@@ -74,6 +74,19 @@ impl SqliteInventory {
         Ok(())
     }
 
+    pub async fn resolve_jump_host(
+        &self,
+        target: &Server,
+    ) -> Result<Option<vpnctl_core::PinnedJumpRoute>> {
+        let jump_record = if let Some(ref jump_id) = target.jump_via {
+            self.get_server(jump_id).await?
+        } else {
+            None
+        };
+        crate::jump_resolver::resolve_jump_host(target, jump_record.as_ref())
+            .map_err(|e| SqliteInventoryError::Invalid(e.to_string()))
+    }
+
     pub async fn get_server(&self, id: &ServerId) -> Result<Option<Server>> {
         let row_opt = sqlx::query(
             "SELECT id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient

@@ -10,6 +10,49 @@ use super::super::helpers::{
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
+/// `POST /admin/servers/{id}/routing-policy` — set the durable server role
+/// and optional one-hop management route without raw SQL.
+pub(crate) async fn server_set_routing_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(id.clone());
+    if match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    } {
+        return not_found(&format!("no such server '{id}'"));
+    }
+    let Some(role) = form_field(&body, "role") else {
+        return bad_request("role field is required");
+    };
+    let role: vpnctl_inventory::ServerRole = match role.parse() {
+        Ok(value) => value,
+        Err(error) => return bad_request(&error.to_string()),
+    };
+    let Some(jump_field) = form_field(&body, "jump_via") else {
+        return bad_request("jump_via field is required (blank means direct)");
+    };
+    let jump = Some(jump_field)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(vpnctl_core::ServerId);
+    if let Err(error) = state
+        .inv
+        .set_server_routing_policy_as("admin", &sid, role, jump.as_ref())
+        .await
+    {
+        return bad_request(&error.to_string());
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/setup#routing-policy",
+        path_segment_encode(&id)
+    ))
+    .into_response()
+}
+
 /// `POST /admin/servers/quick-add` — register a SERVER YOU ALREADY HAVE
 /// in inventory with minimal input: id + address (+ optional ssh_port).
 /// Default kernel = sing-box; default protocols = every protocol

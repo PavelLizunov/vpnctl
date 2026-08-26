@@ -129,9 +129,9 @@ pub(crate) async fn collect_vless_uris_for_user(
 ) -> Result<Vec<String>, String> {
     let servers = state
         .inv
-        .servers_for_user(user_id)
+        .subscription_servers_for_user(user_id)
         .await
-        .map_err(|e| format!("servers_for_user: {e}"))?;
+        .map_err(|e| format!("subscription_servers_for_user: {e}"))?;
 
     let mut uris: Vec<String> = Vec::with_capacity(servers.len());
     for server in &servers {
@@ -262,9 +262,9 @@ pub(crate) async fn collect_extra_protocol_uris(
 
     let servers = state
         .inv
-        .servers_for_user(&user.id)
+        .subscription_servers_for_user(&user.id)
         .await
-        .map_err(|e| format!("servers_for_user: {e}"))?;
+        .map_err(|e| format!("subscription_servers_for_user: {e}"))?;
 
     // A node exposing BOTH naive and HY2 tags both share-links with a shared
     // `pair=<server id>` query param, so a client can route UDP — which naive
@@ -389,10 +389,10 @@ pub(crate) async fn collect_extra_protocol_uris(
 /// logged + skipped, never dropping a user's vless. Returns a Vec (never
 /// an error) for the same "serve what we have" contract.
 pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User) -> Vec<String> {
-    let servers = match state.inv.servers_for_user(&user.id).await {
+    let servers = match state.inv.subscription_servers_for_user(&user.id).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "awg: servers_for_user failed");
+            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "awg: subscription_servers_for_user failed");
             return Vec::new();
         }
     };
