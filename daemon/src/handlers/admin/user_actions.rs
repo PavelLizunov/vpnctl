@@ -307,7 +307,7 @@ pub(crate) async fn user_wireguard_conf_download(
     // SOMETHING) is unambiguous.
     let safe = |s: &str| -> String {
         s.chars()
-            .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+            .filter(|c| !matches!(c, '"' | '\\' | ';' | '\r' | '\n') && !c.is_control())
             .collect()
     };
     let filename = format!("{}-{}.conf", safe(&user.id.0), safe(&server.id.0));

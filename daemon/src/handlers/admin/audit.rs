@@ -534,7 +534,8 @@ pub(crate) async fn user_access_csv(
         out.push('\n');
     }
     let stamp = chrono::Utc::now().format("%Y%m%d");
-    let filename = format!("vpnctl-access-{}-{stamp}.csv", user_id_str);
+    let safe_user = safe_filename_part(&user_id_str);
+    let filename = format!("vpnctl-access-{}-{stamp}.csv", safe_user);
     (
         StatusCode::OK,
         [
@@ -627,6 +628,14 @@ pub(crate) async fn audit_csv(
         .into_response()
 }
 
+/// Strip unsafe characters (quotes, backslashes, semicolons, CRLF, control bytes)
+/// from dynamic strings before inserting them into a Content-Disposition header.
+pub(crate) fn safe_filename_part(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '"' | '\\' | ';' | '\r' | '\n') && !c.is_control())
+        .collect()
+}
+
 /// Quote a single CSV field per RFC 4180. If the field contains
 /// `"`, `,`, `\n`, or `\r` we wrap it in double-quotes and double
 /// any internal quotes; otherwise return the field verbatim.
@@ -656,7 +665,17 @@ fn csv_field(s: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod csv_tests {
-    use super::csv_field;
+    use super::{csv_field, safe_filename_part};
+
+    #[test]
+    fn test_user_access_csv_filename_sanitization() {
+        assert_eq!(safe_filename_part("alice"), "alice");
+        assert_eq!(
+            safe_filename_part("alice;filename=\"injection.txt\"\r\nHeader: Value"),
+            "alicefilename=injection.txtHeader: Value"
+        );
+        assert_eq!(safe_filename_part("user\\with\"quotes"), "userwithquotes");
+    }
 
     /// OWASP CSV-injection pin (audit 2026-06-10): a field starting
     /// with = + - @ must be neutralised with a leading quote so

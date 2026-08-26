@@ -5292,12 +5292,14 @@ name = "vpnctl-ssh"
 version = "0.9.0"
 dependencies = [
  "async-trait",
+ "base64",
  "russh",
  "tempfile",
  "testcontainers",
  "tokio",
  "tracing",
  "vpnctl-core",
+ "vpnctl-host-fingerprint",
  "zeroize",
 ]
 
@@ -5325,6 +5327,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tempfile",
+ "testcontainers",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
