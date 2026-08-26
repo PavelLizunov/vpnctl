@@ -65,6 +65,18 @@ enum Cmd {
     Grant { user: String, server: String },
     /// Revoke a user's access to a server.
     Revoke { user: String, server: String },
+    /// Hide one protocol from a specific user's grant.
+    GrantProtocolDisable {
+        user: String,
+        server: String,
+        protocol: String,
+    },
+    /// Restore one protocol for a specific user's grant.
+    GrantProtocolEnable {
+        user: String,
+        server: String,
+        protocol: String,
+    },
     /// Push current inventory state to a server (install kernel, generate
     /// missing REALITY keys / TUIC cert, render & apply config, restart).
     Deploy {
@@ -236,6 +248,16 @@ async fn main() -> std::process::ExitCode {
         Cmd::Boosty { cmd } => cmd::boosty::run(cmd, cli.db, cli.output).await,
         Cmd::Grant { user, server } => cmd::grant::run_grant(&user, &server, cli.db).await,
         Cmd::Revoke { user, server } => cmd::grant::run_revoke(&user, &server, cli.db).await,
+        Cmd::GrantProtocolDisable {
+            user,
+            server,
+            protocol,
+        } => cmd::grant::run_protocol_disable(&user, &server, &protocol, cli.db).await,
+        Cmd::GrantProtocolEnable {
+            user,
+            server,
+            protocol,
+        } => cmd::grant::run_protocol_enable(&user, &server, &protocol, cli.db).await,
         Cmd::Deploy { server, key } => cmd::deploy::run(&server, key, cli.db).await,
         Cmd::Status { server, key } => cmd::status::run(&server, key, cli.db, cli.output).await,
         Cmd::UpdateKernels { server, all, key } => match resolve_update_target(server, all) {
@@ -284,6 +306,39 @@ mod tests {
     //! opaque-value args accept a leading hyphen and bind it verbatim.
 
     use super::*;
+
+    #[test]
+    fn new_operator_parity_commands_parse() {
+        for args in [
+            vec!["vpnctl", "user", "disable", "alice"],
+            vec!["vpnctl", "user", "enable", "alice"],
+            vec![
+                "vpnctl",
+                "user",
+                "traffic-limit",
+                "alice",
+                "--limit-gib",
+                "10",
+            ],
+            vec!["vpnctl", "user", "regen-wireguard", "alice", "--yes"],
+            vec!["vpnctl", "user", "wireguard-conf", "alice", "de"],
+            vec!["vpnctl", "server", "protocol-hide", "de", "tuic-v5"],
+            vec!["vpnctl", "server", "protocol-unhide", "de", "tuic-v5"],
+            vec!["vpnctl", "grant-protocol-disable", "alice", "de", "tuic-v5"],
+            vec!["vpnctl", "grant-protocol-enable", "alice", "de", "tuic-v5"],
+        ] {
+            Cli::try_parse_from(args.clone())
+                .unwrap_or_else(|error| panic!("command failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn traffic_limit_requires_value_or_clear() {
+        assert!(Cli::try_parse_from(["vpnctl", "user", "traffic-limit", "alice"]).is_err());
+        assert!(
+            Cli::try_parse_from(["vpnctl", "user", "traffic-limit", "alice", "--clear"]).is_ok()
+        );
+    }
 
     #[test]
     fn server_secret_accepts_leading_hyphen_value() {
