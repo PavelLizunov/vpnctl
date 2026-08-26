@@ -799,6 +799,296 @@ async fn admin_server_set_reality_config_rejects_zero_with_single_prefix() {
     );
 }
 
+const ROUTING_FP: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+fn routing_server(
+    id: &str,
+    address: &str,
+    fingerprint: Option<&str>,
+    jump_via: Option<&str>,
+) -> Server {
+    Server {
+        id: ServerId(id.into()),
+        address: address.into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: fingerprint.map(str::to_owned),
+        hoster: "generic".into(),
+        jump_via: jump_via.map(|id| ServerId(id.into())),
+        usage_coefficient: 1.0,
+    }
+}
+
+async fn post_routing_policy(app: axum::Router, id: &str, body: &str) -> axum::response::Response {
+    app.oneshot(
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/admin/servers/{id}/routing-policy"))
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(body.to_owned()))
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn admin_server_setup_renders_routing_policy_role_and_jump_options() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&routing_server("edge", "10.0.0.1", Some(ROUTING_FP), None))
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&routing_server(
+            "bastion",
+            "10.0.0.2",
+            Some(ROUTING_FP),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers/edge/setup").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/edge/routing-policy""#),
+        "routing-policy form action must render"
+    );
+    assert!(html.contains(r#"name="role""#));
+    assert!(html.contains(r#"value="vpn-exit""#));
+    assert!(html.contains(r#"value="workload-only""#));
+    assert!(html.contains(r#"name="jump_via""#));
+    assert!(html.contains(r#"value="" selected"#));
+    assert!(html.contains(r#"value="bastion""#));
+}
+
+#[tokio::test]
+async fn admin_server_routing_policy_post_requires_role_and_jump_fields() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let sid = ServerId("edge".into());
+    s.inv
+        .add_server(&routing_server("edge", "10.0.0.1", Some(ROUTING_FP), None))
+        .await
+        .unwrap();
+
+    for body in ["jump_via=", "role=vpn-exit"] {
+        let resp = post_routing_policy(router(s.clone()), "edge", body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+    assert_eq!(
+        s.inv.get_server_role(&sid).await.unwrap(),
+        vpnctl_inventory::ServerRole::VpnExit
+    );
+    assert_eq!(
+        s.inv.get_server(&sid).await.unwrap().unwrap().jump_via,
+        None
+    );
+    assert!(
+        s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.action != "server.routing_policy.set")
+    );
+}
+
+#[tokio::test]
+async fn admin_server_routing_policy_rejects_workload_only_with_grants() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let sid = ServerId("edge".into());
+    s.inv
+        .add_server(&routing_server("edge", "10.0.0.1", Some(ROUTING_FP), None))
+        .await
+        .unwrap();
+    s.inv
+        .add_user(&User {
+            id: UserId("alice".into()),
+            uuid: "00000000-0000-0000-0000-000000000123".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    s.inv.grant(&UserId("alice".into()), &sid).await.unwrap();
+
+    let resp = post_routing_policy(router(s.clone()), "edge", "role=workload-only&jump_via=").await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        s.inv.get_server_role(&sid).await.unwrap(),
+        vpnctl_inventory::ServerRole::VpnExit
+    );
+    assert_eq!(
+        s.inv.get_server(&sid).await.unwrap().unwrap().jump_via,
+        None
+    );
+    assert!(
+        s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.action != "server.routing_policy.set")
+    );
+}
+
+#[tokio::test]
+async fn admin_server_routing_policy_sets_role_and_jump_once() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let sid = ServerId("edge".into());
+    s.inv
+        .add_server(&routing_server("edge", "10.0.0.1", Some(ROUTING_FP), None))
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&routing_server(
+            "bastion",
+            "10.0.0.2",
+            Some(ROUTING_FP),
+            None,
+        ))
+        .await
+        .unwrap();
+    let body = "role=workload-only&jump_via=bastion";
+
+    let resp = post_routing_policy(router(s.clone()), "edge", body).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/admin/servers/edge/setup#routing-policy"
+    );
+    assert_eq!(
+        s.inv.get_server_role(&sid).await.unwrap(),
+        vpnctl_inventory::ServerRole::WorkloadOnly
+    );
+    assert_eq!(
+        s.inv.get_server(&sid).await.unwrap().unwrap().jump_via,
+        Some(ServerId("bastion".into()))
+    );
+    let audit = s.inv.recent_audit(10).await.unwrap();
+    let entry = audit
+        .iter()
+        .find(|entry| entry.action == "server.routing_policy.set")
+        .expect("routing-policy mutation must be audited");
+    assert_eq!(entry.actor, "admin");
+    assert_eq!(entry.target.as_deref(), Some("edge"));
+    let payload = entry.payload.as_ref().unwrap();
+    assert_eq!(payload["old_role"], "vpn-exit");
+    assert_eq!(payload["new_role"], "workload-only");
+    assert_eq!(payload["old_jump_via"], serde_json::Value::Null);
+    assert_eq!(payload["new_jump_via"], "bastion");
+    let audit_count = audit
+        .iter()
+        .filter(|entry| entry.action == "server.routing_policy.set")
+        .count();
+    assert_eq!(audit_count, 1, "one mutation must write one audit row");
+
+    let repeat = post_routing_policy(router(s.clone()), "edge", body).await;
+    assert_eq!(repeat.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.action == "server.routing_policy.set")
+            .count(),
+        audit_count,
+        "repeating the same policy must not add audit spam"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_routing_policy_rejects_invalid_routes_unchanged() {
+    for (case, target_fp, jump_fp, jump_via) in [
+        (
+            "invalid target fingerprint",
+            Some("invalid"),
+            Some(ROUTING_FP),
+            "bastion",
+        ),
+        (
+            "invalid jump fingerprint",
+            Some(ROUTING_FP),
+            Some("invalid"),
+            "bastion",
+        ),
+        ("self", Some(ROUTING_FP), Some(ROUTING_FP), "edge"),
+        ("nested", Some(ROUTING_FP), Some(ROUTING_FP), "nested"),
+        (
+            "missing target fingerprint",
+            None,
+            Some(ROUTING_FP),
+            "bastion",
+        ),
+        (
+            "missing jump fingerprint",
+            Some(ROUTING_FP),
+            None,
+            "bastion",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        let sid = ServerId("edge".into());
+        s.inv
+            .add_server(&routing_server("hop0", "10.0.0.3", Some(ROUTING_FP), None))
+            .await
+            .unwrap();
+        s.inv
+            .add_server(&routing_server("bastion", "10.0.0.2", jump_fp, None))
+            .await
+            .unwrap();
+        s.inv
+            .add_server(&routing_server("nested", "10.0.0.4", jump_fp, Some("hop0")))
+            .await
+            .unwrap();
+        s.inv
+            .add_server(&routing_server("edge", "10.0.0.1", target_fp, None))
+            .await
+            .unwrap();
+
+        let resp = post_routing_policy(
+            router(s.clone()),
+            "edge",
+            &format!("role=workload-only&jump_via={jump_via}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "case: {case}");
+        assert_eq!(
+            s.inv.get_server_role(&sid).await.unwrap(),
+            vpnctl_inventory::ServerRole::VpnExit,
+            "case: {case}"
+        );
+        assert_eq!(
+            s.inv.get_server(&sid).await.unwrap().unwrap().jump_via,
+            None,
+            "case: {case}"
+        );
+        assert!(
+            s.inv
+                .recent_audit(10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| entry.action != "server.routing_policy.set"),
+            "case: {case}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() {
     // naive owns tcp/443 on this node; blank listen_port means reality

@@ -107,7 +107,7 @@ pub async fn ssh_password_run(
         "-o".into(),
         "PubkeyAuthentication=no".into(),
     ];
-    args.extend(ssh_safety_opts(known_hosts));
+    args.extend(ssh_safety_opts(known_hosts, false));
     args.push("-p".into());
     args.push(port_s);
     // POSIX getopt separator — same defense as `build_ssh_args` /

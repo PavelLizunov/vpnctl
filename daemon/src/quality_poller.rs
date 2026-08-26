@@ -100,7 +100,7 @@ pub fn spawn_quality_poller(
         let mut alert_state = QualityAlertState::default();
         loop {
             tick.tick().await;
-            let servers = match inv.list_servers().await {
+            let servers = match inv.list_fleet_servers().await {
                 Ok(servers) => servers,
                 Err(e) => {
                     tracing::warn!(target = "vpnctld::quality", error = %e, "list_servers failed");

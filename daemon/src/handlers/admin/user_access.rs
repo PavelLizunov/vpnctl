@@ -5,7 +5,7 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 
-use super::helpers::{internal_error, not_found, user_not_found};
+use super::helpers::{bad_request, internal_error, not_found, user_not_found};
 use super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
@@ -50,7 +50,10 @@ pub(crate) async fn user_grant_server(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     if let Err(e) = state.inv.grant(&uid, &sid).await {
-        return internal_error(anyhow::Error::new(e));
+        return match e {
+            vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
+            other => internal_error(anyhow::Error::new(other)),
+        };
     }
     // Canonical grant-audit shape (2026-06-04 unification): per-user
     // `user.grant` with target = USER id — what the pending-deploy

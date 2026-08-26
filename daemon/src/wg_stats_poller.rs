@@ -85,7 +85,7 @@ pub fn spawn_wg_stats_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()
 
 /// One tick: build the pubkey→user map once, then poll every amneziawg node.
 async fn poll_all(inv: &SqliteInventory, byte_state: &mut ByteState) {
-    let servers = match inv.list_servers().await {
+    let servers = match inv.list_fleet_servers().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(target = "vpnctld::wg_poller", error = %e, "list_servers failed");
@@ -166,12 +166,26 @@ async fn poll_one_wg_server(
         return;
     }
 
+    let jump = match inv.resolve_jump_host(server).await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::wg_poller",
+                server = %server.id.0,
+                "jump host resolution failed: {e}"
+            );
+            return;
+        }
+    };
+
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         key_path,
     )
-    .port(server.ssh_port);
+    .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump);
 
     let dump = match ssh.exec(&format!("awg show {AWG_IFACE} dump")).await {
         Ok(out) => out,

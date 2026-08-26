@@ -7,18 +7,24 @@ authors.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = ["russh"]
+russh = ["dep:russh", "dep:zeroize"]
+
 [dependencies]
 vpnctl-core = { path = "../core" }
 vpnctl-host-fingerprint = { path = "../host-fingerprint" }
 async-trait = { workspace = true }
+base64 = "0.22"
+tempfile = "3"
 
 # Real SSH transport.
-russh = "0.60"
+russh = { version = "0.60", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util"] }
 tracing = "0.1"
 # Wrap secrets so they don't leak through Debug, accidental println, or
 # memory after drop.
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -26,7 +32,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # tests that exercise it; gated by `#[ignore]` so `cargo test` on machines
 # without Docker stays green (CI has Docker by default).
 testcontainers = { version = "0.25", default-features = false }
-tempfile = "3"
 
 [lints]
 workspace = true

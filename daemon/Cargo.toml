@@ -29,17 +29,9 @@ vpnctl-crypto = { path = "../crates/crypto" }
 vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
 # Boosty → VPN subscription bridge (reconcile + sync).
 vpnctl-boosty-bridge = { path = "../crates/boosty-bridge" }
-# Track-3 chunk 1: clash-api client uses the SshTransport trait.
+vpnctl-ssh = { path = "../crates/ssh", default-features = false }
 async-trait = "0.1"
 thiserror = { workspace = true }
-## NOTE: vpnctl-ssh (russh) is intentionally NOT a regular dep.
-## It pulls glibc 2.38 syscalls; bookworm production host runs
-## glibc 2.36. The poller + web-deploy reach VPN nodes via
-## `crate::ssh_subprocess::SubprocessSshTransport` instead —
-## wraps the system /usr/bin/ssh binary (no russh, no glibc bump).
-## See `daemon/src/ssh_subprocess.rs` for the full rationale.
-## vpnctl-ssh stays in [dev-dependencies] for the MockTransport
-## used by unit tests (mocks don't pull russh).
 
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 # NOTE: NO `process` feature here — `tokio::process::Command` pulls

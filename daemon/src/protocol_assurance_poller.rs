@@ -67,7 +67,7 @@ pub fn spawn_protocol_assurance_poller(
         tick.tick().await;
         loop {
             tick.tick().await;
-            let servers = match inv.list_servers().await {
+            let servers = match inv.list_fleet_servers().await {
                 Ok(servers) => servers,
                 Err(error) => {
                     tracing::warn!(target = "vpnctld::assurance", %error, "list_servers failed");

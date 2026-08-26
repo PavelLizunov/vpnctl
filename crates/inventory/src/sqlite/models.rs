@@ -716,3 +716,43 @@ impl TelegramConfig {
         }
     }
 }
+
+/// Role of a server in inventory (`vpn-exit` vs `workload-only`).
+/// Introduced in migration 0053. Core `Server` struct deliberately does NOT
+/// include this field — role is an inventory-only attribute.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerRole {
+    #[default]
+    VpnExit,
+    WorkloadOnly,
+}
+
+impl ServerRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServerRole::VpnExit => "vpn-exit",
+            ServerRole::WorkloadOnly => "workload-only",
+        }
+    }
+}
+
+impl std::fmt::Display for ServerRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ServerRole {
+    type Err = SqliteInventoryError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "vpn-exit" => Ok(ServerRole::VpnExit),
+            "workload-only" => Ok(ServerRole::WorkloadOnly),
+            other => Err(SqliteInventoryError::Invalid(format!(
+                "invalid server role '{other}'"
+            ))),
+        }
+    }
+}

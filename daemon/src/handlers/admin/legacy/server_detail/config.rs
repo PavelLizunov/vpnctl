@@ -260,6 +260,50 @@ pub(super) fn server_detail_push_deploy_key_section(
     }
 }
 
+pub(super) fn server_detail_routing_policy_section(
+    server: &vpnctl_core::Server,
+    role: vpnctl_inventory::ServerRole,
+    candidates: &[vpnctl_core::Server],
+    routing_error: Option<&str>,
+    lang: crate::i18n::Locale,
+) -> maud::Markup {
+    let sid = crate::http_util::path_segment_encode(&server.id.0);
+    maud::html! {
+        section id="routing-policy" class="ed-card" style="margin: 16px 0;" {
+            h3 { (crate::i18n::tr(lang, "Routing policy", "Политика маршрутизации")) }
+            p class="ed-muted" {
+                (crate::i18n::tr(
+                    lang,
+                    "Workload-only servers cannot receive user grants or enter subscriptions/fleet actions. A jump host is used only for explicit management.",
+                    "Workload-only серверы не получают пользовательские grants и не входят в подписки/fleet actions. Jump host используется только для явного управления.",
+                ))
+            }
+            @if let Some(error) = routing_error {
+                div class="ed-alert ed-alert--warn" { "management route invalid: " (error) }
+            }
+            form method="post" action=(format!("/admin/servers/{sid}/routing-policy")) {
+                label for="server-role" { "role" }
+                select id="server-role" name="role" {
+                    option value="vpn-exit" selected[role == vpnctl_inventory::ServerRole::VpnExit] { "vpn-exit" }
+                    option value="workload-only" selected[role == vpnctl_inventory::ServerRole::WorkloadOnly] { "workload-only" }
+                }
+                label for="jump-via" style="margin-left: 12px;" { "jump_via" }
+                select id="jump-via" name="jump_via" {
+                    option value="" selected[server.jump_via.is_none()] { "direct" }
+                    @for candidate in candidates {
+                        @if candidate.id != server.id {
+                            option value=(candidate.id.0) selected[server.jump_via.as_ref() == Some(&candidate.id)] { (candidate.id.0) }
+                        }
+                    }
+                }
+                button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
+                    (crate::i18n::tr(lang, "save routing policy", "сохранить политику"))
+                }
+            }
+        }
+    }
+}
+
 /// Trusted host SSH fingerprint section — shows current pinned
 /// fingerprint (if any) plus a form for the operator to set / replace
 /// it. Two paths:

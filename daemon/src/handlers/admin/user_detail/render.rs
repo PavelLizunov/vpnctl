@@ -43,7 +43,7 @@ pub(crate) async fn user_detail_render(
 
     let servers = state
         .inv
-        .servers_for_user(&uid)
+        .subscription_servers_for_user(&uid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
@@ -68,7 +68,7 @@ pub(crate) async fn user_detail_render(
     // The set of granted ids lets us split the full list visually.
     let all_servers = state
         .inv
-        .list_servers()
+        .list_fleet_servers()
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
     let granted_ids: HashSet<vpnctl_core::ServerId> =

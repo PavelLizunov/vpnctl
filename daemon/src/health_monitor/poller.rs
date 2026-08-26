@@ -55,7 +55,7 @@ async fn scan_once_inner(
     inv: &SqliteInventory,
     auto_remediate: bool,
 ) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
-    let servers = inv.list_servers().await?;
+    let servers = inv.list_fleet_servers().await?;
     for server in &servers {
         // Same filter as node_probe_poller — using the shared helper
         // so the two surfaces never disagree on what's in scope.

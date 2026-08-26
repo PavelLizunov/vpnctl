@@ -42,7 +42,10 @@ pub(crate) async fn server_grant_user(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     if let Err(e) = state.inv.grant(&uid, &sid).await {
-        return internal_error(anyhow::Error::new(e));
+        return match e {
+            vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
+            other => internal_error(anyhow::Error::new(other)),
+        };
     }
     // Canonical grant-audit shape (2026-06-04 unification): per-user
     // `user.grant` row with target = USER id. The pending-deploy
@@ -195,6 +198,15 @@ pub(crate) async fn server_grant_all_users(
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    match state.inv.get_server_role(&server.id).await {
+        Ok(vpnctl_inventory::ServerRole::VpnExit) => {}
+        Ok(vpnctl_inventory::ServerRole::WorkloadOnly) => {
+            return bad_request(&format!(
+                "server '{server_id_str}' is workload-only and cannot receive grants"
+            ));
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
     let users = match state.inv.list_users().await {
         Ok(u) => u,
         Err(e) => return internal_error(anyhow::Error::new(e)),

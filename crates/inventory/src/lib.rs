@@ -10,15 +10,14 @@
 
 pub mod assurance;
 pub mod backup;
-// Declarative per-server secret bootstrap, shared by the daemon's
-// wizard/web deploy AND the CLI `vpnctl deploy` so the two paths can't
-// drift (the CLI used to hand-roll vless/wireguard minting and miss
-// shadowsocks-2022's `ss2022.psk` + hysteria2's obfs password).
 pub mod bootstrap;
+pub mod jump_resolver;
 pub mod migrate;
 pub mod operation_lock;
 pub mod quality;
 pub mod sqlite;
+
+pub use jump_resolver::{JumpResolverError, resolve_jump_host};
 
 pub use assurance::{AssuranceStage, AssuranceState, ProtocolAssuranceSample};
 pub use backup::{
@@ -36,9 +35,9 @@ pub use operation_lock::NodeOperationLock;
 pub use quality::{QUALITY_MIN_SAMPLES, ServiceQualitySample, ServiceQualityScore, score_samples};
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, BoostySettings, HeavyUser, NodeHealthRow,
-    ProxyMaskedStats, ServerLiveActivity, SharingSignals, SqliteInventory, SqliteInventoryError,
-    SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn, SubOriginCountry, SubOriginIp,
-    TelegramConfig, TodayDigest, TrafficBreakdown, UaCluster, UptimeStat, UserLifecycle,
-    VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow,
-    VpnUserSourceIpRow, sum_nic_deltas,
+    ProxyMaskedStats, ServerLiveActivity, ServerRole, SharingSignals, SqliteInventory,
+    SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn,
+    SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, TrafficBreakdown, UaCluster,
+    UptimeStat, UserLifecycle, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow,
+    VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
 };

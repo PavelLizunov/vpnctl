@@ -103,13 +103,24 @@ pub struct Server {
     /// Имя хостера (Hoster key): "digitalocean" / "cloudzy" / "generic".
     #[serde(default = "default_hoster")]
     pub hoster: String,
-    /// SSH-jump host (ProxyJump). `None` — прямое подключение. ProxyJump
-    /// в SSH-транспорте появится в v0.3, но поле резервируем заранее.
+    /// SSH-jump host (ProxyJump). `None` — прямое подключение.
     #[serde(default)]
     pub jump_via: Option<ServerId>,
     /// Множитель учёта трафика (Marzban-style). Резерв для будущих лимитов.
     #[serde(default = "default_usage_coefficient")]
     pub usage_coefficient: f64,
+}
+
+/// Fully pinned route for a one-hop system OpenSSH ProxyJump connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedJumpRoute {
+    pub host: String,
+    pub user: String,
+    pub port: u16,
+    /// Canonical SHA-256 fingerprint of the jump host key.
+    pub jump_fingerprint: String,
+    /// Canonical SHA-256 fingerprint of the final target host key.
+    pub target_fingerprint: String,
 }
 
 fn default_hoster() -> String {

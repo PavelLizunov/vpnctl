@@ -286,6 +286,23 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    let routing_error = state
+        .inv
+        .resolve_jump_host(&server)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    let server_role = state
+        .inv
+        .get_server_role(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let routing_candidates = state
+        .inv
+        .list_servers()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // Per-server reserved-ports list (migration 0028). Empty for
     // every server in the fleet by default; this load is one
     // indexed SELECT so the section helper always has data without
@@ -394,7 +411,13 @@ pub(super) async fn server_detail_render(
     // crawler) must NOT trigger the 6s SSH read and throw the result
     // away. review-agent Phase 1.
     let drift_live: Option<DriftLiveResult> = if tab == ServerTab::Protocols && query.drift_live() {
-        Some(load_drift_live(&server, &users, &all_users).await)
+        match state.inv.resolve_jump_host(&server).await {
+            Ok(jump) => Some(load_drift_live(&server, &users, &all_users, jump).await),
+            Err(error) => {
+                tracing::warn!(server = %server.id, %error, "live drift skipped: jump validation failed");
+                None
+            }
+        }
     } else {
         None
     };
@@ -718,7 +741,11 @@ pub(super) async fn server_detail_render(
                     }
                 }
             }
-        @if all_users.is_empty() {
+        @if server_role == vpnctl_inventory::ServerRole::WorkloadOnly {
+            div class="ed-alert ed-alert--warn" {
+                (crate::i18n::tr(lang, "This server is workload-only. User grants are disabled by policy.", "Этот сервер workload-only. Пользовательские grants запрещены политикой."))
+            }
+        } @else if all_users.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
                 (crate::i18n::tr(lang, "No users in the inventory yet. Create one on ", "В инвентаре ещё нет пользователей. Создай на "))
                 a href="/admin/users" style="color: var(--ink);" { "/admin/users" }
@@ -1031,6 +1058,7 @@ pub(super) async fn server_detail_render(
             // clash-api poller + deploy (web action + the
             // `vpnctl server set-fingerprint <id>` CLI, one source of truth).
             (server_detail_fingerprint_section(&server, lang))
+            (server_detail_routing_policy_section(&server, server_role, &routing_candidates, routing_error.as_deref(), lang))
             // Display name — operator subscription label (migration 0029).
             (server_detail_display_name_section(&server, display_name.as_deref(), lang))
             // Auto-suppress from subscription when unreachable (migration 0030).

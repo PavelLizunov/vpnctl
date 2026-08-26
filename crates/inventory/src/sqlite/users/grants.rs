@@ -76,6 +76,26 @@ impl SqliteInventory {
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
+        let server_role: Option<(String,)> =
+            sqlx::query_as("SELECT role FROM servers WHERE id = ?1")
+                .bind(&server.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let Some((role_str,)) = server_role else {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such server {}; cannot grant",
+                server.0
+            )));
+        };
+
+        if role_str == "workload-only" {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "cannot grant access to workload-only server '{}'",
+                server.0
+            )));
+        }
+
         // Already granted? Idempotent no-op (preserves the prior
         // `ON CONFLICT DO NOTHING` semantics) — and skip the collision check.
         let already = sqlx::query("SELECT 1 FROM grants WHERE user_id = ?1 AND server_id = ?2")
@@ -230,6 +250,26 @@ impl SqliteInventory {
     pub async fn servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {
         let rows = sqlx::query(
             "SELECT g.server_id FROM grants g WHERE g.user_id = ?1 ORDER BY g.server_id",
+        )
+        .bind(&user.0)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let sid: String = r.try_get("server_id")?;
+            if let Some(s) = self.get_server(&ServerId(sid)).await? {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn subscription_servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {
+        let rows = sqlx::query(
+            "SELECT g.server_id FROM grants g
+             INNER JOIN servers s ON s.id = g.server_id
+             WHERE g.user_id = ?1 AND s.role = 'vpn-exit'
+             ORDER BY g.server_id",
         )
         .bind(&user.0)
         .fetch_all(&self.pool)

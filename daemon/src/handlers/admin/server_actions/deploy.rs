@@ -137,9 +137,15 @@ pub(crate) async fn server_deploy(
         None
     };
     if ssh_skip_reason.is_none() {
+        let jump = match state.inv.resolve_jump_host(&server).await {
+            Ok(j) => j,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
         let ssh =
             SubprocessSshTransport::new(server.address.clone(), server.ssh_user.clone(), key_path)
-                .port(server.ssh_port);
+                .port(server.ssh_port)
+                .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+                .with_jump(jump);
 
         // Pre-load users + render context once; reused for every
         // kernel's render call.
@@ -387,6 +393,15 @@ pub(crate) async fn server_push_deploy_key(
     );
 
     let mut method = "sshpass";
+    let jump = match state.inv.resolve_jump_host(&server).await {
+        Ok(value) => value,
+        Err(error) => return bad_request(&format!("jump host validation failed: {error}")),
+    };
+    if jump.is_some() && !try_reference {
+        return bad_request(
+            "password deploy-key push through a jump host is not supported; use the existing reference/deploy key path",
+        );
+    }
     let mut push_result: std::result::Result<(), String>;
     if let Some(ref_key) = reference_key_path.clone().filter(|_| try_reference) {
         method = "reference-key";
@@ -395,13 +410,15 @@ pub(crate) async fn server_push_deploy_key(
             ssh_user.clone(),
             std::path::PathBuf::from(&ref_key),
         )
-        .port(server.ssh_port);
+        .port(server.ssh_port)
+        .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+        .with_jump(jump.clone());
         push_result = ssh
             .exec_unprivileged(&push_cmd)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string());
-        if push_result.is_err() && !password.is_empty() {
+        if push_result.is_err() && !password.is_empty() && jump.is_none() {
             method = "sshpass";
             let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
             push_result = crate::wizard_bootstrap::ssh_password_run(
@@ -442,7 +459,9 @@ pub(crate) async fn server_push_deploy_key(
                     ssh_user.clone(),
                     key_path.to_path_buf(),
                 )
-                .port(server.ssh_port);
+                .port(server.ssh_port)
+                .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+                .with_jump(jump);
                 verify.exec("true").await.map(|_| ()).map_err(|e| {
                     format!("deploy-key or passwordless-sudo verification failed: {e}")
                 })

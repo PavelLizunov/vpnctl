@@ -174,7 +174,7 @@ impl DiffEngine {
     /// Drop one server's tracked totals.
     ///
     /// **Call-site contract for chunk 4 (poller wiring):** after
-    /// every `inv.list_servers()` pass, the poller MUST call
+    /// every `inv.list_fleet_servers()` pass, the poller MUST call
     /// `forget(&id)` for any `ServerId` that was previously tracked
     /// but is no longer in the inventory result. Without this, the
     /// in-memory `state` map grows monotonically as servers are
@@ -296,7 +296,7 @@ pub fn spawn_clash_poller(
 
         loop {
             tick.tick().await;
-            let servers = match inv.list_servers().await {
+            let servers = match inv.list_fleet_servers().await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(
@@ -405,12 +405,26 @@ async fn poll_one_server(
     // clash-api). Future optimisation: ssh ControlMaster session
     // multiplexing if poll cadence drops below ~30 s. For 5-min
     // ticks this is overkill.
+    let jump = match inv.resolve_jump_host(server).await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                "jump host resolution failed: {e}"
+            );
+            return;
+        }
+    };
+
     let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
         server.address.clone(),
         server.ssh_user.clone(),
         key_path,
     )
-    .port(server.ssh_port);
+    .port(server.ssh_port)
+    .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+    .with_jump(jump);
 
     use crate::clash_api::{ClashClient, SshClashClient};
     let client = SshClashClient::new(&ssh);

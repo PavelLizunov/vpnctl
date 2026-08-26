@@ -110,6 +110,18 @@ pub(crate) enum ServerCmd {
         ports: String,
     },
 
+    /// Set server policy role: `vpn-exit` or `workload-only`.
+    SetRole { id: String, role: String },
+
+    /// Route management SSH through one inventory server; omit jump id to clear.
+    SetJumpVia {
+        id: String,
+        #[arg(required_unless_present = "clear")]
+        jump: Option<String>,
+        #[arg(long, conflicts_with = "jump")]
+        clear: bool,
+    },
+
     /// Hide a server protocol from client subscription / config generation.
     ProtocolHide {
         /// Server id (e.g. "fra-01").
@@ -398,6 +410,35 @@ pub(crate) async fn run(
             Ok(())
         }
 
+        ServerCmd::SetRole { id, role } => {
+            let role: vpnctl_inventory::ServerRole = role.parse()?;
+            let sid = ServerId(id.clone());
+            let server = inv
+                .get_server(&sid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such server: {id}"))?;
+            inv.set_server_routing_policy_as("cli", &sid, role, server.jump_via.as_ref())
+                .await?;
+            ui::print(format, &json!({"id": id, "role": role.as_str()}), |_| {
+                println!("server '{id}' role set to {}", role.as_str());
+                Ok(())
+            })
+        }
+        ServerCmd::SetJumpVia { id, jump, clear: _ } => {
+            let jump = jump.map(ServerId);
+            let sid = ServerId(id.clone());
+            let role = inv.get_server_role(&sid).await?;
+            inv.set_server_routing_policy_as("cli", &sid, role, jump.as_ref())
+                .await?;
+            ui::print(
+                format,
+                &json!({"id": id, "jump_via": jump.as_ref().map(|v| &v.0)}),
+                |_| {
+                    println!("server '{id}' jump_via updated");
+                    Ok(())
+                },
+            )
+        }
         ServerCmd::ProtocolHide { server, protocol } => {
             let sid = ServerId(server.clone());
             let pid = ProtocolId(protocol.clone());

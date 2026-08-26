@@ -18,7 +18,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{Protocol, RenderCtx, ServerId};
 use vpnctl_inventory::{NodeOperationLock, SqliteInventory};
-use vpnctl_ssh::RusshTransportBuilder;
+use vpnctl_ssh::SubprocessSshTransport;
 
 pub(crate) async fn run(
     server_id: &str,
@@ -95,21 +95,22 @@ pub(crate) async fn run(
         server.ssh_port,
         key_path.display()
     );
-    let mut builder =
-        RusshTransportBuilder::new(server.address.clone(), server.ssh_user.clone(), key_path)
-            .port(server.ssh_port);
-    if let Some(fp) = server.trusted_host_fingerprint.as_deref() {
-        builder = builder.trusted_fingerprint(fp);
-    }
-    let ssh = builder.connect().await?;
-
-    // TOFU: if we didn't have a fingerprint, persist what we observed.
-    if server.trusted_host_fingerprint.is_none() {
-        if let Some(observed) = ssh.observed_host_fingerprint().await {
-            inv.update_trusted_fingerprint(&sid, &observed).await?;
-            println!("  TOFU: stored host fingerprint {observed}");
-        }
-    }
+    let jump = inv.resolve_jump_host(&server).await?;
+    let fingerprint = if let Some(value) = server.trusted_host_fingerprint.clone() {
+        Some(value)
+    } else if jump.is_none() {
+        let observed =
+            vpnctl_host_fingerprint::fetch_via_keyscan(&server.address, server.ssh_port)?;
+        inv.update_trusted_fingerprint(&sid, &observed).await?;
+        println!("  TOFU: stored host fingerprint {observed}");
+        Some(observed)
+    } else {
+        None
+    };
+    let ssh = SubprocessSshTransport::new(&server.address, &server.ssh_user, key_path)
+        .port(server.ssh_port)
+        .trusted_fingerprint(fingerprint)
+        .with_jump(jump);
 
     // ─── 2. Install every declared kernel if needed ──────────────────────
     for k in &kernels {
