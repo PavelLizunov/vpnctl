@@ -3,7 +3,7 @@ use clap::Subcommand;
 use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{User, UserId};
-use vpnctl_crypto::{gen_password, gen_uuid, gen_wireguard_keypair};
+use vpnctl_crypto::{gen_password, gen_uuid, gen_vpn_router_device_id, gen_wireguard_keypair};
 use vpnctl_inventory::SqliteInventory;
 
 const TUIC_PASSWORD_BYTES: usize = 24;
@@ -149,7 +149,7 @@ pub(crate) async fn run(
                 // None → inventory generates one. Don't pre-gen here so the
                 // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
-                vpn_router_device_id: None,
+                vpn_router_device_id: Some(gen_vpn_router_device_id()?),
                 // Migration 0026 default — CLI-created users start enabled.
                 disabled: false,
             };
@@ -306,7 +306,7 @@ mod tests {
             wireguard_pubkey: None,
             wireguard_private: None,
             sub_token: Some("bearer-sub-token".into()),
-            vpn_router_device_id: None,
+            vpn_router_device_id: Some("0123456789abcdef0123456789abcdef".into()),
             disabled: false,
         }
     }
@@ -347,6 +347,10 @@ mod tests {
             v.get("sub_token").is_none(),
             "default JSON must not carry the sub_token bearer credential"
         );
+        assert!(
+            v.get("vpn_router_device_id").is_none(),
+            "default JSON must not carry vpn_router_device_id"
+        );
         // Non-secret fields still present (byte-identical to the old path).
         assert_eq!(v.get("uuid").and_then(|x| x.as_str()), Some("uuid-alice"));
     }
@@ -361,6 +365,134 @@ mod tests {
         assert_eq!(
             v.get("sub_token").and_then(|x| x.as_str()),
             Some("bearer-sub-token")
+        );
+        assert!(
+            v.get("vpn_router_device_id").is_none(),
+            "user_show_json must not carry vpn_router_device_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_add_generates_and_persists_vpn_router_device_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let cmd = UserCmd::Add {
+            id: "bob".into(),
+            uuid: None,
+            tuic_password: None,
+            wireguard_pubkey: None,
+            gen_wireguard: false,
+        };
+
+        run(cmd, Some(db_path.clone()), OutputFormat::Text)
+            .await
+            .unwrap();
+
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        let user = inv
+            .get_user(&UserId("bob".into()))
+            .await
+            .unwrap()
+            .expect("user should exist");
+
+        let device_id = user
+            .vpn_router_device_id
+            .as_deref()
+            .expect("vpn_router_device_id should be populated on user add");
+
+        assert!(
+            vpnctl_crypto::is_valid_vpn_router_device_id(device_id),
+            "generated vpn_router_device_id '{device_id}' must be a valid 32-hex string"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_add_generates_distinct_device_ids_for_different_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("inv.db");
+
+        run(
+            UserCmd::Add {
+                id: "user1".into(),
+                uuid: None,
+                tuic_password: None,
+                wireguard_pubkey: None,
+                gen_wireguard: false,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        run(
+            UserCmd::Add {
+                id: "user2".into(),
+                uuid: None,
+                tuic_password: None,
+                wireguard_pubkey: None,
+                gen_wireguard: false,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        let u1 = inv
+            .get_user(&UserId("user1".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let u2 = inv
+            .get_user(&UserId("user2".into()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let dev1 = u1.vpn_router_device_id.unwrap();
+        let dev2 = u2.vpn_router_device_id.unwrap();
+
+        assert_ne!(dev1, dev2, "each user must receive a unique device_id");
+        assert!(vpnctl_crypto::is_valid_vpn_router_device_id(&dev1));
+        assert!(vpnctl_crypto::is_valid_vpn_router_device_id(&dev2));
+    }
+
+    #[test]
+    fn user_add_json_output_does_not_leak_vpn_router_device_id() {
+        let user = User {
+            id: UserId("charlie".into()),
+            uuid: "uuid-charlie".into(),
+            tuic_password: Some("secret-tuic-pass".into()),
+            wireguard_pubkey: Some("44charsWireguardPubkeyEndingWithEqualSign==".into()),
+            wireguard_private: Some("44charsWireguardPrivkeyEndingWithEqualSign==".into()),
+            sub_token: Some("secret-sub-token".into()),
+            vpn_router_device_id: Some("0123456789abcdef0123456789abcdef".into()),
+            disabled: false,
+        };
+
+        let json_val = serde_json::to_value(&user).unwrap();
+        assert!(
+            json_val.get("vpn_router_device_id").is_none(),
+            "JSON serialization of user must omit vpn_router_device_id"
+        );
+        assert!(
+            json_val.get("sub_token").is_none(),
+            "JSON serialization of user must omit sub_token"
+        );
+        assert!(
+            json_val.get("wireguard_private").is_none(),
+            "JSON serialization of user must omit wireguard_private"
+        );
+        assert!(
+            json_val.get("tuic_password").is_none(),
+            "JSON serialization of user must omit tuic_password"
+        );
+        assert_eq!(json_val.get("id").and_then(|x| x.as_str()), Some("charlie"));
+        assert_eq!(
+            json_val.get("uuid").and_then(|x| x.as_str()),
+            Some("uuid-charlie")
         );
     }
 }

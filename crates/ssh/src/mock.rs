@@ -39,6 +39,10 @@ impl SshTransport for MockTransport {
         Ok(g.get(cmd).cloned().unwrap_or_default())
     }
 
+    async fn exec_unprivileged(&self, cmd: &str) -> Result<String> {
+        self.exec(cmd).await
+    }
+
     async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
         let mut g = self
             .files

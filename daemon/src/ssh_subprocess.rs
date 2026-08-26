@@ -431,6 +431,10 @@ impl SshTransport for SubprocessSshTransport {
     /// `ssh` stdin → remote `base64 -d > '<path>'`. The bytes
     /// never enter the argv, only the path does (and that's
     /// single-quoted server-side; `'` in path is rejected upfront).
+    async fn exec_unprivileged(&self, cmd: &str) -> Result<String> {
+        SubprocessSshTransport::exec_unprivileged(self, cmd).await
+    }
+
     async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
         if path.contains('\'') {
             return Err(CoreError::Transport(format!(

@@ -133,17 +133,31 @@ pub(crate) async fn user_detail_render(
         &servers,
         &secrets_per_server,
         &peers_per_server,
-    );
+    )
+    .await;
     // Flow C — AmneziaVPN-native deep-links (vpn://...). Built
     // separately because the format isn't `Protocol::share_link()`
     // semantics — it's an AmneziaVPN-app-specific wrapper around the
     // same WG secret material. `collect_amnezia_links` returns one
     // (server_id, vpn://...) per WG-enabled granted server.
-    let amnezia_links =
-        collect_amnezia_links(&user, &servers, &secrets_per_server, &peers_per_server);
+    let amnezia_links = collect_amnezia_links(
+        &state,
+        &user,
+        &servers,
+        &secrets_per_server,
+        &peers_per_server,
+    )
+    .await;
     // Flow F — awg:// links for the operator's sing-box-lx client app.
     // Only AmneziaWG-capable servers (obfs minted) yield a link.
-    let awg_links = collect_awg_links(&user, &servers, &secrets_per_server, &peers_per_server);
+    let awg_links = collect_awg_links(
+        &state,
+        &user,
+        &servers,
+        &secrets_per_server,
+        &peers_per_server,
+    )
+    .await;
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     // Phase 3+ ninitux-compat URL: the production endpoint that mobile

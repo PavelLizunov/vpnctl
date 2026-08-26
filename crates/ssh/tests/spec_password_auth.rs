@@ -101,7 +101,10 @@ async fn password_only_fresh_server_succeeds() {
         .await
         .expect("password fallback should succeed");
 
-    let out = transport.exec("echo hi").await.expect("exec echo hi");
+    let out = transport
+        .exec_unprivileged("echo hi")
+        .await
+        .expect("exec echo hi");
     assert_eq!(out.trim(), "hi");
 }
 
@@ -133,7 +136,7 @@ async fn pubkey_succeeds_short_circuits_wrong_password() {
         .await
         .expect("pubkey should win, wrong password never tried");
 
-    let out = transport.exec("echo ok").await.expect("exec");
+    let out = transport.exec_unprivileged("echo ok").await.expect("exec");
     assert_eq!(out.trim(), "ok");
 }
 
@@ -230,7 +233,7 @@ async fn password_leak_worker_internal_do_not_invoke_directly() {
         .connect()
         .await
         .expect("connect");
-    let _ = t.exec("echo hi").await.expect("exec");
+    let _ = t.exec_unprivileged("echo hi").await.expect("exec");
 
     // Exit immediately so the test harness in the child stops here.
     // (If we let it return Ok, the harness might still write summary
@@ -315,7 +318,7 @@ async fn exec_after_password_fallback_behaves_like_pubkey_path() {
         .connect()
         .await
         .expect("A connect");
-    let out_a = t_a.exec("echo hi").await.expect("A exec");
+    let out_a = t_a.exec_unprivileged("echo hi").await.expect("A exec");
 
     // Run B: pubkey-only connect.
     let (good_priv, good_pub) = fresh_keypair(&tmp, "id_good");
@@ -333,7 +336,7 @@ async fn exec_after_password_fallback_behaves_like_pubkey_path() {
         .connect()
         .await
         .expect("B connect");
-    let out_b = t_b.exec("echo hi").await.expect("B exec");
+    let out_b = t_b.exec_unprivileged("echo hi").await.expect("B exec");
 
     assert_eq!(
         out_a, out_b,

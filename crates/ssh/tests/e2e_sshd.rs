@@ -63,7 +63,7 @@ async fn ssh_transport_full_roundtrip_against_real_sshd() {
         .with_env_var("USER_NAME", TEST_USER)
         .with_env_var("PUBLIC_KEY", &pub_str)
         .with_env_var("PASSWORD_ACCESS", "false")
-        .with_env_var("SUDO_ACCESS", "false");
+        .with_env_var("SUDO_ACCESS", "true");
 
     let container = image.start().await.expect("start sshd container");
     let host_port = container

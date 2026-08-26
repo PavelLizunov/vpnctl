@@ -155,6 +155,12 @@ pub(crate) async fn run(
             // so the secret-aware port-conflict gate runs at deploy time,
             // where real secrets are available.
             reg.validate_server_support(&server)?;
+            if let Some(existing) = inv.server_id_for_address(&server.address).await? {
+                anyhow::bail!(
+                    "address '{}' is already registered to server '{existing}' — one node = one server record; edit '{existing}' instead of adding a duplicate",
+                    server.address
+                );
+            }
             inv.add_server(&server).await?;
             // Whitelist what goes into audit_log — if Server ever gains a
             // sensitive field (api token, jump credentials), serializing
@@ -413,3 +419,74 @@ fn parse_reserved_ports(raw: &str) -> anyhow::Result<Vec<u16>> {
 // flag-injection defense and the validators had drifted on URL-safe
 // base64 acceptance. The crate is the single source of truth; spec
 // tests for both functions live there.
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn server_add_duplicate_address_is_rejected_before_mutation() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+
+        run(
+            ServerCmd::Add {
+                id: "fra-01".into(),
+                address: "203.0.113.10".into(),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernel: "sing-box".into(),
+                hoster: "generic".into(),
+                protocols: vec!["vless+reality".into()],
+                jump_via: None,
+                trusted_fingerprint: None,
+                usage_coefficient: 1.0,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let err = run(
+            ServerCmd::Add {
+                id: "fra-02".into(),
+                address: "203.0.113.10".into(),
+                ssh_port: 22,
+                ssh_user: "root".into(),
+                kernel: "sing-box".into(),
+                hoster: "generic".into(),
+                protocols: vec!["vless+reality".into()],
+                jump_via: None,
+                trusted_fingerprint: None,
+                usage_coefficient: 1.0,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("address '203.0.113.10' is already registered to server 'fra-01'"),
+            "unexpected error message: {err}"
+        );
+
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        assert!(
+            inv.get_server(&ServerId("fra-02".into()))
+                .await
+                .unwrap()
+                .is_none(),
+            "duplicate server record must not be added"
+        );
+        let audit = inv.recent_audit(10).await.unwrap();
+        assert!(
+            audit.iter().all(|a| a.target.as_deref() != Some("fra-02")),
+            "audit log must not contain entry for rejected duplicate server add"
+        );
+    }
+}
