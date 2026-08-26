@@ -11,6 +11,8 @@ mod alerts_health;
 mod dashboard;
 #[path = "admin_smoke/grants.rs"]
 mod grants;
+#[path = "admin_smoke/monitoring.rs"]
+mod monitoring;
 #[path = "admin_smoke/server_detail.rs"]
 mod server_detail;
 #[path = "admin_smoke/servers.rs"]

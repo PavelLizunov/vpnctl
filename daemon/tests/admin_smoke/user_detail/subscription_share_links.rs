@@ -927,3 +927,294 @@ async fn v2_user_delivery_renders_subscription_recap() {
         "legacy /sub fallback note missing"
     );
 }
+
+#[tokio::test]
+async fn admin_delivery_share_links_empty_when_user_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+
+    s.inv
+        .set_server_secret(
+            &ServerId("s0".into()),
+            "vless.private_key",
+            "QGZ8K-private-key-base64==",
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(
+            &ServerId("s0".into()),
+            "vless.public_key",
+            "PUBLIC-KEY-BASE64=",
+        )
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&ServerId("s0".into()), "vless.short_id", "deadbeef")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&ServerId("s0".into()), "vless.sni", "www.microsoft.com")
+        .await
+        .unwrap();
+
+    // Disable the user.
+    s.inv
+        .set_user_disabled(&UserId("u0".into()), true)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u0/delivery").await;
+    assert!(
+        !html.contains("vless://"),
+        "disabled user must not have share links in delivery"
+    );
+    assert!(
+        !html.contains("s0 · vless+reality"),
+        "disabled user must not have protocol items listed in per-protocol share links"
+    );
+}
+
+#[tokio::test]
+async fn admin_delivery_share_links_skip_auto_suppressed_server() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
+
+    for sid in ["s0", "s1"] {
+        s.inv
+            .set_server_secret(
+                &ServerId(sid.into()),
+                "vless.private_key",
+                "QGZ8K-private-key-base64==",
+            )
+            .await
+            .unwrap();
+        s.inv
+            .set_server_secret(
+                &ServerId(sid.into()),
+                "vless.public_key",
+                "PUBLIC-KEY-BASE64=",
+            )
+            .await
+            .unwrap();
+        s.inv
+            .set_server_secret(&ServerId(sid.into()), "vless.short_id", "deadbeef")
+            .await
+            .unwrap();
+        s.inv
+            .set_server_secret(&ServerId(sid.into()), "vless.sni", "www.microsoft.com")
+            .await
+            .unwrap();
+    }
+
+    // Auto-suppress s0: enable opt-in AND set suppressed_at.
+    s.inv
+        .set_server_auto_suppress(&ServerId("s0".into()), true)
+        .await
+        .unwrap();
+    s.inv
+        .set_server_suppressed(&ServerId("s0".into()), true)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users/u0/delivery").await;
+    assert!(
+        !html.contains("s0 · vless+reality"),
+        "auto-suppressed server s0 must be excluded from delivery share links"
+    );
+    assert!(
+        html.contains("s1 · vless+reality"),
+        "healthy server s1 must remain in delivery share links"
+    );
+}
+
+#[tokio::test]
+async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+
+    let sid = ServerId("s0".into());
+    let uid = UserId("u0".into());
+
+    s.inv.mint_tuic_password_if_absent(&uid).await.unwrap();
+
+    // Add tuic-v5 protocol to s0.
+    s.inv
+        .add_server_protocol(&sid, &ProtocolId("tuic-v5".into()))
+        .await
+        .unwrap();
+
+    // Set vless secrets
+    s.inv
+        .set_server_secret(&sid, "vless.private_key", "QGZ8K-private-key-base64==")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "vless.public_key", "PUBLIC-KEY-BASE64=")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "vless.short_id", "deadbeef")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "vless.sni", "www.microsoft.com")
+        .await
+        .unwrap();
+
+    // Before hiding: both vless+reality and tuic-v5 render.
+    let html_before = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
+    assert!(html_before.contains("s0 · vless+reality"));
+    assert!(html_before.contains("s0 · tuic-v5"));
+
+    // Case 1: Hide vless+reality on s0 for everyone.
+    s.inv
+        .set_server_protocol_hidden(&sid, &ProtocolId("vless+reality".into()), true)
+        .await
+        .unwrap();
+
+    let html_hidden = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
+    assert!(
+        !html_hidden.contains("s0 · vless+reality"),
+        "hidden protocol must not render in share links"
+    );
+    assert!(
+        html_hidden.contains("s0 · tuic-v5"),
+        "unhidden protocol tuic-v5 must render"
+    );
+
+    // Case 2: Disable tuic-v5 for user u0 on s0 via grant protocol override.
+    s.inv
+        .set_grant_protocol_override(&uid, &sid, &ProtocolId("tuic-v5".into()), true)
+        .await
+        .unwrap();
+
+    let html_disabled = fetch_html(router(s), "/admin/users/u0/delivery").await;
+    assert!(
+        !html_disabled.contains("s0 · tuic-v5"),
+        "per-user-disabled protocol must not render in share links"
+    );
+}
+
+#[tokio::test]
+async fn admin_delivery_amnezia_and_awg_respect_auto_suppress_hidden_and_user_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    let sid = ServerId("awgnode".into());
+    let uid = UserId("awguser".into());
+
+    inv.add_server(&Server {
+        id: sid.clone(),
+        address: "203.0.113.88".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("amneziawg".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    inv.set_server_secret(
+        &sid,
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &sid,
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    for (k, v) in [
+        ("amneziawg.jc", "7"),
+        ("amneziawg.jmin", "50"),
+        ("amneziawg.jmax", "1000"),
+        ("amneziawg.s1", "30"),
+        ("amneziawg.s2", "90"),
+        ("amneziawg.h1", "1111111111"),
+        ("amneziawg.h2", "2022222222"),
+        ("amneziawg.h3", "333333333"),
+        ("amneziawg.h4", "444444444"),
+    ] {
+        inv.set_server_secret(&sid, k, v).await.unwrap();
+    }
+
+    inv.add_user(&User {
+        id: uid.clone(),
+        uuid: "55555555-5555-5555-5555-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-awguser".into()),
+        vpn_router_device_id: None,
+        disabled: false,
+    })
+    .await
+    .unwrap();
+
+    inv.grant(&uid, &sid).await.unwrap();
+
+    // Initially: AmneziaVPN (vpn://) and AmneziaWG (awg://) render.
+    let html_init = fetch_html(router(s.clone()), "/admin/users/awguser/delivery").await;
+    assert!(html_init.contains("vpn://"));
+    assert!(html_init.contains("awg://"));
+
+    // Case 1: Hide wireguard protocol on the server.
+    inv.set_server_protocol_hidden(&sid, &ProtocolId("wireguard".into()), true)
+        .await
+        .unwrap();
+    let html_hidden = fetch_html(router(s.clone()), "/admin/users/awguser/delivery").await;
+    assert!(
+        !html_hidden.contains("vpn://"),
+        "hidden wireguard must not emit AmneziaVPN vpn:// link"
+    );
+    assert!(
+        !html_hidden.contains("awg://"),
+        "hidden wireguard must not emit AmneziaWG awg:// link"
+    );
+
+    // Case 2: Unhide, but set per-user-disabled override on wireguard.
+    inv.set_server_protocol_hidden(&sid, &ProtocolId("wireguard".into()), false)
+        .await
+        .unwrap();
+    inv.set_grant_protocol_override(&uid, &sid, &ProtocolId("wireguard".into()), true)
+        .await
+        .unwrap();
+    let html_user_disabled = fetch_html(router(s.clone()), "/admin/users/awguser/delivery").await;
+    assert!(
+        !html_user_disabled.contains("vpn://"),
+        "user-disabled wireguard must not emit AmneziaVPN vpn:// link"
+    );
+    assert!(
+        !html_user_disabled.contains("awg://"),
+        "user-disabled wireguard must not emit AmneziaWG awg:// link"
+    );
+
+    // Case 3: Re-enable user override, but auto-suppress server.
+    inv.set_grant_protocol_override(&uid, &sid, &ProtocolId("wireguard".into()), false)
+        .await
+        .unwrap();
+    inv.set_server_auto_suppress(&sid, true).await.unwrap();
+    inv.set_server_suppressed(&sid, true).await.unwrap();
+    let html_suppressed = fetch_html(router(s), "/admin/users/awguser/delivery").await;
+    assert!(
+        !html_suppressed.contains("vpn://"),
+        "auto-suppressed server must not emit AmneziaVPN vpn:// link"
+    );
+    assert!(
+        !html_suppressed.contains("awg://"),
+        "auto-suppressed server must not emit AmneziaWG awg:// link"
+    );
+}

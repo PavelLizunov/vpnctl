@@ -1930,6 +1930,9 @@ mod tests {
                 self.scripts.lock().unwrap().push(cmd.to_string());
                 Ok(String::new())
             }
+            async fn exec_unprivileged(&self, cmd: &str) -> vpnctl_core::Result<String> {
+                self.exec(cmd).await
+            }
             async fn upload(&self, _path: &str, _content: &[u8]) -> vpnctl_core::Result<()> {
                 Ok(())
             }

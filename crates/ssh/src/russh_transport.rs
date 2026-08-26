@@ -230,6 +230,7 @@ impl RusshTransportBuilder {
         Ok(RusshTransport {
             handle: AsyncMutex::new(handle),
             address: self.address,
+            user: self.user,
             op_timeout: self.op_timeout,
             observed_fingerprint: observed,
         })
@@ -246,6 +247,7 @@ pub struct RusshTransport {
     /// concurrent multiplexing каналов добавим, если станет узким местом.
     handle: AsyncMutex<client::Handle<VerifyHandler>>,
     address: String,
+    user: String,
     op_timeout: Duration,
     observed_fingerprint: Arc<AsyncMutex<Option<String>>>,
 }
@@ -254,6 +256,7 @@ impl std::fmt::Debug for RusshTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RusshTransport")
             .field("address", &self.address)
+            .field("user", &self.user)
             .field("op_timeout", &self.op_timeout)
             .finish_non_exhaustive()
     }
@@ -262,6 +265,18 @@ impl std::fmt::Debug for RusshTransport {
 impl RusshTransport {
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    fn privileged_command(&self, command: &str) -> String {
+        if self.user == "root" {
+            command.to_string()
+        } else {
+            format!("sudo -n sh -c {}", shell_quote(command))
+        }
     }
 
     /// Fingerprint host key который мы реально получили при коннекте — TOFU
@@ -284,7 +299,7 @@ impl RusshTransport {
 impl SshTransport for RusshTransport {
     async fn exec(&self, cmd: &str) -> Result<String> {
         let session = self.handle.lock().await;
-        let cmd_owned = cmd.to_string();
+        let cmd_owned = self.privileged_command(cmd);
         timeout(self.op_timeout, async move {
             let mut channel = session
                 .channel_open_session()
@@ -326,10 +341,47 @@ impl SshTransport for RusshTransport {
         .map_err(|_| CoreError::Transport(format!("exec timed out: {cmd}")))?
     }
 
+    async fn exec_unprivileged(&self, cmd: &str) -> Result<String> {
+        let session = self.handle.lock().await;
+        let cmd_owned = cmd.to_string();
+        timeout(self.op_timeout, async move {
+            let mut channel = session
+                .channel_open_session()
+                .await
+                .map_err(|e| CoreError::Transport(format!("open session: {e}")))?;
+            channel
+                .exec(true, cmd_owned.as_bytes())
+                .await
+                .map_err(|e| CoreError::Transport(format!("exec: {e}")))?;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit = None;
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+                    ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
+                    ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                    _ => {}
+                }
+            }
+            match exit {
+                Some(0) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+                Some(code) => Err(CoreError::Transport(format!(
+                    "exec exit={code}: {}",
+                    String::from_utf8_lossy(&stderr).trim()
+                ))),
+                None => Err(CoreError::Transport("exec: no exit status".into())),
+            }
+        })
+        .await
+        .map_err(|_| CoreError::Transport(format!("exec timed out: {cmd}")))?
+    }
+
     async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
         let session = self.handle.lock().await;
         let quoted = shell_quote(path);
-        let cmd = format!("tee {quoted} >/dev/null");
+        let raw_cmd = format!("tee {quoted} >/dev/null");
+        let cmd = self.privileged_command(&raw_cmd);
         let payload = content.to_vec();
 
         timeout(self.op_timeout, async move {
@@ -382,7 +434,8 @@ impl SshTransport for RusshTransport {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let session = self.handle.lock().await;
         let quoted = shell_quote(path);
-        let cmd = format!("cat {quoted}");
+        let raw_cmd = format!("cat {quoted}");
+        let cmd = self.privileged_command(&raw_cmd);
 
         timeout(self.op_timeout, async move {
             let mut channel = session
@@ -914,5 +967,78 @@ mod tests {
             }
             other => panic!("expected CoreError::Transport(timed out), got {other:?}"),
         }
+    }
+
+    async fn make_test_transport(user: &str) -> RusshTransport {
+        let tmp = tempfile::tempdir().unwrap();
+        let server_key_path = tmp.path().join("server_key");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+            .arg(&server_key_path)
+            .status()
+            .expect("ssh-keygen server key");
+        assert!(status.success());
+
+        let client_key_path = make_test_key(&tmp);
+        let port = spawn_stalled_channel_server(&server_key_path, false).await;
+
+        RusshTransportBuilder::new("127.0.0.1", user, client_key_path)
+            .port(port)
+            .timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .expect("connect succeeds")
+    }
+
+    #[tokio::test]
+    async fn root_commands_are_not_wrapped_in_sudo() {
+        let t = make_test_transport("root").await;
+        assert_eq!(t.user(), "root");
+        assert_eq!(t.privileged_command("id -u"), "id -u");
+        assert_eq!(
+            t.privileged_command("printf '%s' \"$HOME\""),
+            "printf '%s' \"$HOME\""
+        );
+    }
+
+    #[tokio::test]
+    async fn non_root_commands_use_passwordless_sudo_with_shell_quoting() {
+        let t = make_test_transport("debian").await;
+        assert_eq!(t.user(), "debian");
+        assert_eq!(t.privileged_command("id -u"), "sudo -n sh -c 'id -u'");
+        assert_eq!(
+            t.privileged_command("printf '%s' \"$HOME\""),
+            "sudo -n sh -c 'printf '\\''%s'\\'' \"$HOME\"'"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_upload_and_read_file_commands_are_not_wrapped_in_sudo() {
+        let t = make_test_transport("root").await;
+        let upload_cmd = format!("tee {} >/dev/null", shell_quote("/etc/vpnctl/config.json"));
+        let read_cmd = format!("cat {}", shell_quote("/etc/vpnctl/config.json"));
+        assert_eq!(
+            t.privileged_command(&upload_cmd),
+            "tee '/etc/vpnctl/config.json' >/dev/null"
+        );
+        assert_eq!(
+            t.privileged_command(&read_cmd),
+            "cat '/etc/vpnctl/config.json'"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_root_upload_and_read_file_commands_use_passwordless_sudo_with_shell_quoting() {
+        let t = make_test_transport("debian").await;
+        let upload_cmd = format!("tee {} >/dev/null", shell_quote("/etc/vpnctl/config.json"));
+        let read_cmd = format!("cat {}", shell_quote("/etc/vpnctl/config.json"));
+        assert_eq!(
+            t.privileged_command(&upload_cmd),
+            "sudo -n sh -c 'tee '\\''/etc/vpnctl/config.json'\\'' >/dev/null'"
+        );
+        assert_eq!(
+            t.privileged_command(&read_cmd),
+            "sudo -n sh -c 'cat '\\''/etc/vpnctl/config.json'\\'''"
+        );
     }
 }

@@ -79,6 +79,12 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
             args.id
         ));
     }
+    if let Some(existing) = inv.server_id_for_address(&args.address).await? {
+        return Err(anyhow::anyhow!(
+            "address '{}' is already registered to server '{existing}' — one node = one server record; edit '{existing}' instead of bootstrapping a duplicate",
+            args.address
+        ));
+    }
 
     // Load our pubkey first — fail fast if it's missing/unreadable.
     let pub_path = match args.pubkey {
@@ -156,7 +162,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
          echo OK",
         key_quoted = shell_single_quote(&pubkey_one_line),
     );
-    let out = ssh.exec(&install_cmd).await?;
+    let out = ssh.exec_unprivileged(&install_cmd).await?;
     // Per review finding: `out.contains("OK")` would happily match MOTD
     // text like "TOKEN" or "COOKIE". Compare the LAST line exactly.
     let last_line = out.lines().last().map(str::trim).unwrap_or("");

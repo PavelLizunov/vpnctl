@@ -252,20 +252,43 @@ fn user_for_server_render(
 /// granted server that declares the `wireguard` protocol. Used by the
 /// user-detail page's Flow C card (AmneziaVPN).
 ///
+/// Follows `/sub` policy: returns empty for disabled users, skips
+/// auto-suppressed servers, and filters out hidden/per-user-disabled protocols.
 /// Errors from `amnezia_share_link` (missing user pubkey, missing
 /// server private key, malformed pubkey) are LOGGED-AND-SKIPPED — the
 /// page still renders. The empty-state classifier in the Flow C card
 /// distinguishes "no grants" from "no WG-capable server" from "render
 /// failed" using the same `wg_capable_granted` tally as Flow B.
-pub(crate) fn collect_amnezia_links(
+pub(crate) async fn collect_amnezia_links(
+    state: &AppState,
     user: &vpnctl_core::User,
     servers: &[vpnctl_core::Server],
     secrets_per_server: &HashMap<vpnctl_core::ServerId, HashMap<String, String>>,
     peers_per_server: &HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
 ) -> Vec<(vpnctl_core::ServerId, String)> {
+    if user.disabled {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for server in servers {
         if !server.enabled_protocols.iter().any(|p| p.0 == "wireguard") {
+            continue;
+        }
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let visible_protocols = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .unwrap_or_default();
+        let wg_pid = vpnctl_core::ProtocolId("wireguard".into());
+        if !visible_protocols.contains(&wg_pid) {
             continue;
         }
         let Some(secrets) = secrets_per_server.get(&server.id) else {
@@ -301,12 +324,19 @@ pub(crate) fn collect_amnezia_links(
 /// without a server-generated private key cause `awg_share_link` to
 /// error; those are LOGGED-AND-SKIPPED so the page still renders and the
 /// card naturally shows only AmneziaWG-capable servers.
-pub(crate) fn collect_awg_links(
+///
+/// Follows `/sub` policy: returns empty for disabled users, skips
+/// auto-suppressed servers, and filters out hidden/per-user-disabled protocols.
+pub(crate) async fn collect_awg_links(
+    state: &AppState,
     user: &vpnctl_core::User,
     servers: &[vpnctl_core::Server],
     secrets_per_server: &HashMap<vpnctl_core::ServerId, HashMap<String, String>>,
     peers_per_server: &HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
 ) -> Vec<(vpnctl_core::ServerId, String)> {
+    if user.disabled {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for server in servers {
         // awg:// only makes sense for an AmneziaWG node (obfs minted)
@@ -316,6 +346,23 @@ pub(crate) fn collect_awg_links(
         let is_amnezia = server.kernels.iter().any(|k| k.0 == "amneziawg");
         let serves_wg = server.enabled_protocols.iter().any(|p| p.0 == "wireguard");
         if !is_amnezia || !serves_wg {
+            continue;
+        }
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let visible_protocols = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .unwrap_or_default();
+        let wg_pid = vpnctl_core::ProtocolId("wireguard".into());
+        if !visible_protocols.contains(&wg_pid) {
             continue;
         }
         let Some(secrets) = secrets_per_server.get(&server.id) else {
@@ -347,15 +394,37 @@ pub(crate) fn collect_awg_links(
 /// the CLI's `vpnctl sub` and the daemon's `/sub/<token>` handler. Each
 /// entry has the protocol id and the rendered URI; failures are logged
 /// and skipped, never panic.
-pub(crate) fn collect_share_links(
+///
+/// Follows `/sub` policy: returns empty for disabled users, skips
+/// auto-suppressed servers, and filters out hidden/per-user-disabled protocols.
+pub(crate) async fn collect_share_links(
     state: &AppState,
     user: &vpnctl_core::User,
     servers: &[vpnctl_core::Server],
     secrets_per_server: &HashMap<vpnctl_core::ServerId, HashMap<String, String>>,
     peers_per_server: &HashMap<vpnctl_core::ServerId, Vec<vpnctl_core::User>>,
 ) -> Vec<(vpnctl_core::ServerId, vpnctl_core::ProtocolId, String)> {
+    if user.disabled {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for server in servers {
+        if state
+            .inv
+            .is_server_auto_suppressed(&server.id)
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let visible_protocols = state
+            .inv
+            .visible_protocols_for_subscription(&user.id, &server.id)
+            .await
+            .unwrap_or_default();
+        let visible_set: std::collections::HashSet<vpnctl_core::ProtocolId> =
+            visible_protocols.into_iter().collect();
+
         let Some(secrets) = secrets_per_server.get(&server.id) else {
             tracing::warn!(target = "vpnctld::admin", server = %server.id, "secrets missing for granted server");
             continue;
@@ -367,6 +436,9 @@ pub(crate) fn collect_share_links(
         let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
         let per_server_user = user_for_server_render(user, peers, &server.id);
         for pid in &server.enabled_protocols {
+            if !visible_set.contains(pid) {
+                continue;
+            }
             let Some(proto) = state.registry.protocol(pid) else {
                 tracing::warn!(target = "vpnctld::admin", protocol = %pid, "protocol not registered");
                 continue;
