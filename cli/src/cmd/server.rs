@@ -109,6 +109,22 @@ pub(crate) enum ServerCmd {
         /// (e.g. `443,2053,2096`). Empty string clears the list.
         ports: String,
     },
+
+    /// Hide a server protocol from client subscription / config generation.
+    ProtocolHide {
+        /// Server id (e.g. "fra-01").
+        server: String,
+        /// Protocol id (e.g. "vless+reality", "tuic-v5").
+        protocol: String,
+    },
+
+    /// Unhide a server protocol so it appears in client configs again.
+    ProtocolUnhide {
+        /// Server id (e.g. "fra-01").
+        server: String,
+        /// Protocol id (e.g. "vless+reality", "tuic-v5").
+        protocol: String,
+    },
 }
 
 pub(crate) async fn run(
@@ -381,6 +397,22 @@ pub(crate) async fn run(
             }
             Ok(())
         }
+
+        ServerCmd::ProtocolHide { server, protocol } => {
+            let sid = ServerId(server.clone());
+            let pid = ProtocolId(protocol.clone());
+            inv.set_server_protocol_hidden(&sid, &pid, true).await?;
+            println!("hid protocol '{protocol}' on server '{server}'");
+            Ok(())
+        }
+
+        ServerCmd::ProtocolUnhide { server, protocol } => {
+            let sid = ServerId(server.clone());
+            let pid = ProtocolId(protocol.clone());
+            inv.set_server_protocol_hidden(&sid, &pid, false).await?;
+            println!("unhid protocol '{protocol}' on server '{server}'");
+            Ok(())
+        }
     }
 }
 
@@ -487,6 +519,264 @@ mod tests {
         assert!(
             audit.iter().all(|a| a.target.as_deref() != Some("fra-02")),
             "audit log must not contain entry for rejected duplicate server add"
+        );
+    }
+
+    async fn setup_test_server(db_path: &std::path::Path) -> SqliteInventory {
+        let inv = SqliteInventory::open(db_path).await.unwrap();
+        let server = Server {
+            id: ServerId("s1".into()),
+            address: "203.0.113.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![
+                ProtocolId("vless+reality".into()),
+                ProtocolId("tuic-v5".into()),
+            ],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+        inv
+    }
+
+    #[tokio::test]
+    async fn server_protocol_hide_and_unhide() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+
+        let sid = ServerId("s1".into());
+        let pid = ProtocolId("tuic-v5".into());
+
+        assert!(
+            !inv.is_server_protocol_hidden(&sid, &pid).await.unwrap(),
+            "protocol must initially not be hidden"
+        );
+
+        run(
+            ServerCmd::ProtocolHide {
+                server: "s1".into(),
+                protocol: "tuic-v5".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            inv.is_server_protocol_hidden(&sid, &pid).await.unwrap(),
+            "protocol must be hidden after protocol-hide"
+        );
+
+        let audit = inv.recent_audit(10).await.unwrap();
+        let hide_events: Vec<_> = audit
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .collect();
+        assert_eq!(hide_events.len(), 1, "hide must write exactly 1 audit row");
+        assert_eq!(hide_events[0].target.as_deref(), Some("s1"));
+        let payload = hide_events[0].payload.as_ref().unwrap();
+        assert_eq!(payload["protocol_id"], "tuic-v5");
+        assert_eq!(payload["new_hidden"], true);
+
+        run(
+            ServerCmd::ProtocolUnhide {
+                server: "s1".into(),
+                protocol: "tuic-v5".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !inv.is_server_protocol_hidden(&sid, &pid).await.unwrap(),
+            "protocol must not be hidden after protocol-unhide"
+        );
+
+        let audit2 = inv.recent_audit(10).await.unwrap();
+        let hide_events2: Vec<_> = audit2
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .collect();
+        assert_eq!(hide_events2.len(), 2, "unhide must write 2nd audit row");
+        let payload2 = hide_events2[0].payload.as_ref().unwrap();
+        assert_eq!(payload2["protocol_id"], "tuic-v5");
+        assert_eq!(payload2["new_hidden"], false);
+    }
+
+    #[tokio::test]
+    async fn server_protocol_hide_unhide_noop_does_not_duplicate_audit() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+
+        // Hide first time -> 1 audit row
+        run(
+            ServerCmd::ProtocolHide {
+                server: "s1".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let audit1 = inv.recent_audit(10).await.unwrap();
+        let count1 = audit1
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .count();
+        assert_eq!(count1, 1, "first hide must produce 1 audit row");
+
+        // Hide second time (no-op) -> still 1 audit row
+        run(
+            ServerCmd::ProtocolHide {
+                server: "s1".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let audit2 = inv.recent_audit(10).await.unwrap();
+        let count2 = audit2
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .count();
+        assert_eq!(count2, 1, "no-op hide must not duplicate audit log");
+
+        // Unhide first time -> 2 audit rows
+        run(
+            ServerCmd::ProtocolUnhide {
+                server: "s1".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let audit3 = inv.recent_audit(10).await.unwrap();
+        let count3 = audit3
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .count();
+        assert_eq!(count3, 2, "first unhide must produce 2nd audit row");
+
+        // Unhide second time (no-op) -> still 2 audit rows
+        run(
+            ServerCmd::ProtocolUnhide {
+                server: "s1".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        let audit4 = inv.recent_audit(10).await.unwrap();
+        let count4 = audit4
+            .iter()
+            .filter(|a| a.action == "server.protocol.set_hidden")
+            .count();
+        assert_eq!(count4, 2, "no-op unhide must not duplicate audit log");
+    }
+
+    #[tokio::test]
+    async fn server_protocol_hide_unhide_missing_protocol_or_server_fails() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+
+        // Missing protocol on existing server
+        let err_hide_proto = run(
+            ServerCmd::ProtocolHide {
+                server: "s1".into(),
+                protocol: "wireguard".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err_hide_proto
+                .to_string()
+                .contains("no such server_protocols row"),
+            "unexpected error: {err_hide_proto}"
+        );
+
+        let err_unhide_proto = run(
+            ServerCmd::ProtocolUnhide {
+                server: "s1".into(),
+                protocol: "wireguard".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err_unhide_proto
+                .to_string()
+                .contains("no such server_protocols row"),
+            "unexpected error: {err_unhide_proto}"
+        );
+
+        // Missing server
+        let err_hide_srv = run(
+            ServerCmd::ProtocolHide {
+                server: "nonexistent".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err_hide_srv
+                .to_string()
+                .contains("no such server_protocols row"),
+            "unexpected error: {err_hide_srv}"
+        );
+
+        let err_unhide_srv = run(
+            ServerCmd::ProtocolUnhide {
+                server: "nonexistent".into(),
+                protocol: "vless+reality".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err_unhide_srv
+                .to_string()
+                .contains("no such server_protocols row"),
+            "unexpected error: {err_unhide_srv}"
+        );
+
+        // Verify no audit log was created for failed calls
+        let audit = inv.recent_audit(10).await.unwrap();
+        assert!(
+            audit
+                .iter()
+                .all(|a| a.action != "server.protocol.set_hidden"),
+            "no audit log must be written on failure"
         );
     }
 }

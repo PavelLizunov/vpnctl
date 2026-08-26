@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 340 (234 prod / 106 test)
-- **Total Rust LOC:** 129,412 (82,188 prod / 47,224 test)
+- **Tracked Rust Files:** 341 (234 prod / 107 test)
+- **Total Rust LOC:** 130,913 (83,475 prod / 47,438 test)
 - **Database Migrations:** 52
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 117
 
@@ -14,7 +14,7 @@
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin | 5,676 (20) | 0 (0) | **5,676** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 6,963 (20) | 214 (1) | **7,177** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,339 (6) | 870 (2) | **2,209** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,834 (5) | 0 (0) | **1,834** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
@@ -24,7 +24,7 @@
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 10 tests | 4,261 (17) | 3,855 (10) | **8,116** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,148 (3) | 693 (4) | **1,841** |
 | `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,665 (125) | 26,113 (47) | **73,778** |
-| **Total** | | | | **82,188 (234)** | **47,224 (106)** | **129,412** |
+| **Total** | | | | **83,475 (234)** | **47,438 (107)** | **130,913** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -39,6 +39,7 @@
 | `crates/inventory/src/sqlite/tests.rs` | 1,378 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,306 | `daemon` | Test |
 | `crates/core/src/lib.rs` | 1,270 | `crates/core` | Prod |
+| `cli/src/cmd/user.rs` | 1,268 | `cli` | Prod |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,220 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,179 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/config.rs` | 1,177 | `daemon` | Prod |
@@ -54,7 +55,6 @@
 | `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
 | `daemon/src/ssh_subprocess.rs` | 894 | `daemon` | Prod |
 | `daemon/src/handlers/admin/user_actions.rs` | 883 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 877 | `daemon` | Test |
 
 ## Database Migrations (52)
 

@@ -31,18 +31,16 @@ Mutation behavior was exercised only on disposable SQLite databases, temporary a
 
 The campaign adds a `SubprocessSshTransport` testcontainers suite. GitHub Actions remains the canonical execution environment because local macOS and Linux workers did not provide a usable Docker daemon with sufficient disk for all-target linking.
 
-## Remaining parity gaps
+## Final parity status
 
-The repository already covers many routes, but the route/CLI inventory found remaining slices that should not be mixed into this transport/lifecycle PR:
+Follow-up PRs closed the non-Boosty gaps found by the route/CLI inventory:
 
-- CLI equivalents for user disable/enable, traffic limits and WireGuard config/rotation;
-- CLI equivalents for protocol hidden state and per-grant protocol overrides;
-- exhaustive admin tests for every low-risk settings POST;
-- terminal-event tests for every deploy-all/user-pending/update-kernels SSE branch;
-- standalone wizard password/key-push Docker suite (the underlying password and transport paths already have separate Docker coverage);
-- explicit Web button for every remaining CLI-only disaster-recovery action where appropriate.
+- CLI user disable/enable, traffic limits, WireGuard rotation and owner-only config export;
+- CLI server protocol hide/unhide and per-grant protocol overrides;
+- deterministic tests for all non-Boosty mutating admin routes;
+- terminal/lock/CSRF/error tests for deploy, deploy-all, user-pending and update-kernels SSE actions.
 
-These are tracked as follow-up parity work; they are not represented as completed by this campaign.
+Boosty live sync remains intentionally deferred by the existing product decision. The wizard password/key-push flow is composed from separately Docker-tested password authentication, strict host-key and privileged/unprivileged transport contracts rather than another copied end-to-end script.
 
 ## Verification
 

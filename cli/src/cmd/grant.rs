@@ -1,7 +1,7 @@
 use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
-use vpnctl_core::{ServerId, UserId};
+use vpnctl_core::{ProtocolId, ServerId, UserId};
 use vpnctl_inventory::SqliteInventory;
 
 pub(crate) async fn run_grant(
@@ -83,6 +83,58 @@ pub(crate) async fn run_revoke(
         .await?;
     }
     println!("revoked '{user}' from '{server}'");
+    Ok(())
+}
+
+pub(crate) async fn run_protocol_disable(
+    user: &str,
+    server: &str,
+    protocol: &str,
+    db_flag: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let db_path = ui::resolve_db_path(db_flag)?;
+    let inv = SqliteInventory::open(&db_path).await?;
+
+    let uid = UserId(user.to_string());
+    let sid = ServerId(server.to_string());
+    let pid = ProtocolId(protocol.to_string());
+
+    if inv.get_user(&uid).await?.is_none() {
+        return Err(anyhow::anyhow!("no such user: {user}"));
+    }
+    if inv.get_server(&sid).await?.is_none() {
+        return Err(anyhow::anyhow!("no such server: {server}"));
+    }
+
+    inv.set_grant_protocol_override(&uid, &sid, &pid, true)
+        .await?;
+    println!("disabled protocol '{protocol}' for '{user}' on '{server}'");
+    Ok(())
+}
+
+pub(crate) async fn run_protocol_enable(
+    user: &str,
+    server: &str,
+    protocol: &str,
+    db_flag: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let db_path = ui::resolve_db_path(db_flag)?;
+    let inv = SqliteInventory::open(&db_path).await?;
+
+    let uid = UserId(user.to_string());
+    let sid = ServerId(server.to_string());
+    let pid = ProtocolId(protocol.to_string());
+
+    if inv.get_user(&uid).await?.is_none() {
+        return Err(anyhow::anyhow!("no such user: {user}"));
+    }
+    if inv.get_server(&sid).await?.is_none() {
+        return Err(anyhow::anyhow!("no such server: {server}"));
+    }
+
+    inv.set_grant_protocol_override(&uid, &sid, &pid, false)
+        .await?;
+    println!("enabled protocol '{protocol}' for '{user}' on '{server}'");
     Ok(())
 }
 
@@ -206,5 +258,125 @@ mod tests {
             .filter(|e| e.action == "user.revoke")
             .count();
         assert_eq!(before, after, "no-op re-revoke must not write a row");
+    }
+
+    #[tokio::test]
+    async fn cli_protocol_override_requires_grant() {
+        let dir = TempDir::new().unwrap();
+        let _inv = seeded_inv(&dir).await;
+        let db = dir.path().join("inv.db");
+
+        // alice is NOT granted s1 yet
+        let res_dis = run_protocol_disable("alice", "s1", "vless+reality", Some(db.clone())).await;
+        assert!(res_dis.is_err(), "protocol-disable without grant must fail");
+
+        let res_en = run_protocol_enable("alice", "s1", "vless+reality", Some(db)).await;
+        assert!(res_en.is_err(), "protocol-enable without grant must fail");
+    }
+
+    #[tokio::test]
+    async fn cli_protocol_override_no_duplicate_audit_on_noop() {
+        let dir = TempDir::new().unwrap();
+        let inv = seeded_inv(&dir).await;
+        inv.grant(&UserId("alice".into()), &ServerId("s1".into()))
+            .await
+            .unwrap();
+        let db = dir.path().join("inv.db");
+
+        // Initial disable -> 1 audit row
+        run_protocol_disable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let entries = inv.recent_audit(20).await.unwrap();
+        let overrides: Vec<_> = entries
+            .iter()
+            .filter(|e| e.action == "grant.protocol.set_override")
+            .collect();
+        assert_eq!(overrides.len(), 1, "first disable must write 1 audit row");
+        assert_eq!(overrides[0].target.as_deref(), Some("alice"));
+        assert_eq!(overrides[0].payload.as_ref().unwrap()["disabled"], true);
+
+        // Second disable (no-op) -> still 1 audit row
+        run_protocol_disable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let entries2 = inv.recent_audit(20).await.unwrap();
+        let count_noop = entries2
+            .iter()
+            .filter(|e| e.action == "grant.protocol.set_override")
+            .count();
+        assert_eq!(
+            count_noop, 1,
+            "no-op disable must not write duplicate audit"
+        );
+
+        // Enable -> 2nd audit row
+        run_protocol_enable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let entries3 = inv.recent_audit(20).await.unwrap();
+        let count_enable = entries3
+            .iter()
+            .filter(|e| e.action == "grant.protocol.set_override")
+            .count();
+        assert_eq!(count_enable, 2, "enable must write 1 audit row");
+
+        // Second enable (no-op) -> still 2 audit rows
+        run_protocol_enable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let entries4 = inv.recent_audit(20).await.unwrap();
+        let count_enable_noop = entries4
+            .iter()
+            .filter(|e| e.action == "grant.protocol.set_override")
+            .count();
+        assert_eq!(
+            count_enable_noop, 2,
+            "no-op enable must not write duplicate audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_protocol_override_affects_visibility() {
+        let dir = TempDir::new().unwrap();
+        let inv = seeded_inv(&dir).await;
+        let uid = UserId("alice".into());
+        let sid = ServerId("s1".into());
+        inv.grant(&uid, &sid).await.unwrap();
+        let db = dir.path().join("inv.db");
+
+        // Initially visible
+        let visible = inv
+            .visible_protocols_for_subscription(&uid, &sid)
+            .await
+            .unwrap();
+        assert_eq!(visible, vec![ProtocolId("vless+reality".into())]);
+
+        // Disable protocol -> excluded from visible
+        run_protocol_disable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let visible_after_disable = inv
+            .visible_protocols_for_subscription(&uid, &sid)
+            .await
+            .unwrap();
+        assert!(
+            visible_after_disable.is_empty(),
+            "disabled protocol must not be visible"
+        );
+
+        // Re-enable protocol -> visible again
+        run_protocol_enable("alice", "s1", "vless+reality", Some(db.clone()))
+            .await
+            .unwrap();
+        let visible_after_enable = inv
+            .visible_protocols_for_subscription(&uid, &sid)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible_after_enable,
+            vec![ProtocolId("vless+reality".into())],
+            "enabled protocol must be visible again"
+        );
     }
 }
