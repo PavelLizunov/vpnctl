@@ -1574,3 +1574,457 @@ async fn phase3c_settings_page_carries_no_inline_script_blocks() {
         "the single script tag must be the external admin.js include"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+//  POST notification-language / digest-now / backup/self-test gates
+// ════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn settings_notification_language_method_and_csrf_gates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // 1. GET method is rejected with 405 Method Not Allowed
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/settings/notification-language")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET on POST-only notification-language endpoint must 405"
+    );
+
+    // 2. POST without Origin header is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/notification-language")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("language=ru"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST without Origin must be rejected by CSRF middleware"
+    );
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(
+        body_str.starts_with("vpnctl admin: csrf"),
+        "CSRF reject body must use unified prefix: {body_str}"
+    );
+
+    // 3. POST with cross-origin Origin is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/notification-language")
+                .header("host", "127.0.0.1:3080")
+                .header("origin", "http://evil.com")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("language=ru"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "Cross-origin POST must be rejected by CSRF middleware"
+    );
+
+    // Rejections must not write audit rows or alter state
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert!(
+        audits.is_empty(),
+        "CSRF rejection must write zero audit records"
+    );
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(
+        cfg.language, None,
+        "CSRF rejection must not modify notification language in DB"
+    );
+}
+
+#[tokio::test]
+async fn settings_notification_language_valid_values_persist_state_and_audit() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // 1. Valid language "ru" -> 303 Redirect to /admin/settings/notifications
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/notification-language")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("language=ru"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "Valid notification language update must redirect 303"
+    );
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/admin/settings/notifications"),
+        "Redirect location must be /admin/settings/notifications"
+    );
+
+    // State check in DB
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(
+        cfg.language.as_deref(),
+        Some("ru"),
+        "Notification language in DB must be updated to 'ru'"
+    );
+
+    // Audit check
+    let audits = inv.recent_audit(20).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|a| a.action == "settings.notification.language")
+        .expect("must write settings.notification.language audit entry");
+    assert_eq!(audit.actor, "admin");
+    assert_eq!(
+        audit.payload,
+        Some(serde_json::json!({ "language": "ru" })),
+        "audit payload must record the updated language"
+    );
+
+    // 2. Valid language "en" -> 303 Redirect and DB updated
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/notification-language")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("language=en"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(
+        cfg.language.as_deref(),
+        Some("en"),
+        "Notification language in DB must be updated to 'en'"
+    );
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    let count = audits
+        .iter()
+        .filter(|a| a.action == "settings.notification.language")
+        .count();
+    assert_eq!(
+        count, 2,
+        "Second language update must write second audit row"
+    );
+}
+
+#[tokio::test]
+async fn settings_notification_language_invalid_values_return_400_and_leave_state_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    let invalid_bodies = [
+        "language=de",
+        "language=fr",
+        "language=",
+        "other_field=ru",
+        "language=RU",
+    ];
+
+    for body in invalid_bodies {
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/settings/notification-language")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Invalid body {body:?} must be rejected with 400 Bad Request"
+        );
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(
+            body_str.contains("notification language must be 'ru' or 'en'"),
+            "Error body for {body:?} must explain valid language options: {body_str}"
+        );
+    }
+
+    // State in DB remains unconfigured (None)
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(
+        cfg.language, None,
+        "Invalid requests must not modify notification language"
+    );
+
+    // No audit rows written
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert!(
+        audits.is_empty(),
+        "Rejected invalid requests must not write audit rows"
+    );
+}
+
+#[tokio::test]
+async fn settings_digest_now_method_and_csrf_gates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // 1. GET method is rejected with 405 Method Not Allowed
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/settings/digest-now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET on POST-only digest-now endpoint must 405"
+    );
+
+    // 2. POST without Origin header is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/digest-now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST without Origin must be rejected by CSRF middleware"
+    );
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(
+        body_str.starts_with("vpnctl admin: csrf"),
+        "CSRF reject body must use unified prefix: {body_str}"
+    );
+
+    // 3. POST with cross-origin Origin is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/digest-now")
+                .header("host", "127.0.0.1:3080")
+                .header("origin", "http://attacker.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "Cross-origin POST must be rejected by CSRF middleware"
+    );
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert!(
+        audits.is_empty(),
+        "CSRF rejection must write zero audit records"
+    );
+}
+
+#[tokio::test]
+async fn settings_digest_now_fires_audits_and_redirects_to_anchor() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // Trigger digest-now on demand
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/digest-now"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "digest-now must return 303 See Other"
+    );
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/admin/settings/notifications#telegram-notifications"),
+        "digest-now must redirect back to telegram notifications section anchor"
+    );
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|a| a.action == "settings.digest.send")
+        .expect("must write settings.digest.send audit entry");
+    assert_eq!(audit.actor, "admin");
+
+    // Second invocation writes a second audit entry
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/digest-now"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    let count = audits
+        .iter()
+        .filter(|a| a.action == "settings.digest.send")
+        .count();
+    assert_eq!(
+        count, 2,
+        "Second digest-now trigger must write second audit row"
+    );
+}
+
+#[tokio::test]
+async fn backup_self_test_method_and_csrf_gates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+
+    // 1. GET method is rejected with 405 Method Not Allowed
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/backup/self-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET on POST-only backup/self-test endpoint must 405"
+    );
+
+    // 2. POST without Origin header is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/self-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST without Origin must be rejected by CSRF middleware"
+    );
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(
+        body_str.starts_with("vpnctl admin: csrf"),
+        "CSRF reject body must use unified prefix: {body_str}"
+    );
+
+    // 3. POST with cross-origin Origin is rejected with 403 Forbidden
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/self-test")
+                .header("host", "127.0.0.1:3080")
+                .header("origin", "http://malicious-site.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "Cross-origin POST must be rejected by CSRF middleware"
+    );
+
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert!(
+        audits.is_empty(),
+        "CSRF rejection must write zero audit records"
+    );
+}
