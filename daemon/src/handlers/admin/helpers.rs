@@ -391,6 +391,15 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     } else {
         return "/admin/".to_string();
     };
+    // Defense against open-redirect via protocol-relative URLs, backslashes,
+    // or path traversal (`..`) escaping `/admin/`.
+    if path.starts_with("//")
+        || path.starts_with("/\\")
+        || path.contains('\\')
+        || path.contains("..")
+    {
+        return "/admin/".to_string();
+    }
     let path_only = path.split(['?', '#']).next().unwrap_or(path);
     if path_only == "/admin" || path_only.starts_with("/admin/") {
         path.to_string()

@@ -61,6 +61,9 @@ async fn admin_tweak_rejects_external_referer() {
         "/etc/passwd",                    // path, but not under /admin
         "javascript:alert(1)",
         "data:text/html,<script>1</script>",
+        "/admin/..//evil.example.com", // path traversal protocol-relative escape
+        "/admin/..\\evil.example.com", // backslash path traversal escape
+        "/admin/users/../..",          // path traversal escape out of /admin
     ] {
         // Same-origin Host + Origin so the CSRF middleware lets this
         // through — we want to test the SECOND-layer open-redirect

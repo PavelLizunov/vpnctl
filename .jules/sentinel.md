@@ -1,0 +1,4 @@
+## 2026-06-15 - Open Redirect via Referer Path Traversal and Protocol-Relative Slashes
+**Vulnerability:** `sanitize_referer` accepted referer paths starting with `/admin/` even if they contained `..` path traversal sequences (such as `/admin/..//evil.com` or `/admin/..\\evil.com`), allowing attackers to craft referers that browsers would normalize to protocol-relative URLs (`//evil.com`) leading to off-site open redirects.
+**Learning:** Checking string prefix (`path.starts_with("/admin/")`) without validating path traversal (`..`), backslashes (`\`), or double leading slashes (`//`) is insufficient because browsers perform path canonicalization before navigation.
+**Prevention:** Always validate that redirect paths are strictly relative, contain no backslashes or `..` path traversal components, and do not begin with double slashes before passing them to `Redirect::to`.
