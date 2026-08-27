@@ -2,6 +2,24 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Deploy All lock retry on concurrent user auto-deploy
+
+**Status:** Surfaced in production testing (user `gelios` enable).
+
+**Problem:**
+When a user is enabled via `/admin/users/{id}/enable`, `vpnctld` spawns a background auto-deploy (`spawn_user_servers_redeploy` → `redeploy_servers_collect_errors`) targeting the user's granted servers.
+If the operator simultaneously clicks **"Deploy all"** (or triggers `/admin/servers/deploy-all`), `run_deploy_all` attempts to acquire `DeployGuard` per server sequentially without retry.
+Because the background auto-deploy holds `DeployGuard` for `bahnhof`, `run_deploy_all` immediately emits a per-server error:
+`[apply] ✗ bahnhof: deploy already running for server 'bahnhof' — wait for it to finish, then retry`.
+
+This causes the entire `run_deploy_all` stream to finish with a terminal `BootstrapEvent::Error`. Consequently:
+1. `admin.js` receives an error event and does NOT auto-reload the page (`window.location`).
+2. The UI banner `⚠ Config not yet deployed to: bahnhof, ch, de-1, is` remains visible until a manual page refresh, even though `ch`, `de-1`, and `is` succeeded in DB/audit and `bahnhof` was already being deployed by the background task.
+
+**Proposed Fix:**
+1. In `wizard_bootstrap::run_deploy_all` (or `redeploy_pipeline`), add a brief retry mechanism (e.g. up to 3-4 retries with 1-2s delay when encountering `DEPLOY_ALREADY_RUNNING_PREFIX`), matching the retry posture in `redeploy_servers_collect_errors`.
+2. Alternatively, evaluate whether `run_deploy_all` should treat a concurrent in-flight deploy of the same revision as non-fatal or await the held `DeployGuard` permit before reporting error.
+
 ## Purge retained WgTurn and DNS Tunnel secrets (post-transition release)
 
 **Status:** scheduled post-transition.
