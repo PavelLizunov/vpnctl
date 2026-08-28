@@ -628,24 +628,25 @@ pub(crate) async fn audit_csv(
 }
 
 /// Quote a single CSV field per RFC 4180. If the field contains
-/// `"`, `,`, `\n`, or `\r` we wrap it in double-quotes and double
+/// `"`, `,`, `\n`, `\r`, or `\t` we wrap it in double-quotes and double
 /// any internal quotes; otherwise return the field verbatim.
 fn csv_field(s: &str) -> String {
     // Formula-injection guard (audit 2026-06-10, OWASP CSV-injection):
-    // Excel/LibreOffice execute a cell starting with = + - @ as a
-    // formula — an attacker-influenced field (user id, alert summary)
-    // beginning with `=HYPERLINK(...)` would run on the operator's
-    // machine when the export is opened. Standard mitigation: prefix a
-    // single quote, which spreadsheets treat as a text marker. Server
-    // ids may legitimately start with `-` — they render with a visible
-    // leading `'` in a spreadsheet, an accepted cosmetic cost.
-    let injectable = matches!(s.chars().next(), Some('=' | '+' | '-' | '@'));
+    // Excel/LibreOffice execute a cell starting with = + - @ or \t or \r
+    // (even with leading whitespace) as a formula — an attacker-influenced
+    // field (user id, user agent, alert summary) beginning with `=HYPERLINK(...)`
+    // would run on the operator's machine when the export is opened. Standard
+    // mitigation: prefix a single quote, which spreadsheets treat as a text
+    // marker. Server ids may legitimately start with `-` — they render with a
+    // visible leading `'` in a spreadsheet, an accepted cosmetic cost.
+    let trimmed = s.trim_start_matches([' ', '\t', '\r', '\n']);
+    let injectable = trimmed.starts_with(['=', '+', '-', '@', '\t', '\r']);
     let s = if injectable {
         format!("'{s}")
     } else {
         s.to_string()
     };
-    let needs_quote = s.contains(['"', ',', '\n', '\r']);
+    let needs_quote = s.contains(['"', ',', '\n', '\r', '\t']);
     if !needs_quote {
         return s;
     }
@@ -667,6 +668,10 @@ mod csv_tests {
         assert_eq!(csv_field("+1"), "'+1");
         assert_eq!(csv_field("-srv"), "'-srv");
         assert_eq!(csv_field("@cmd"), "'@cmd");
+        // Leading whitespace / tabs before formula trigger must also be neutralised.
+        assert_eq!(csv_field("  =HYPERLINK(1)"), "'  =HYPERLINK(1)");
+        assert_eq!(csv_field("\t=CMD(1)"), "\"'\t=CMD(1)\"");
+        assert_eq!(csv_field("\r+1"), "\"'\r+1\"");
         // Quoting still composes with the injection guard.
         assert_eq!(csv_field("=a,b"), "\"'=a,b\"");
         // Plain fields stay untouched.
