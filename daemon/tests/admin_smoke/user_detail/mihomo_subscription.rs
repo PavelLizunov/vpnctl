@@ -12,7 +12,7 @@ async fn delivery_renders_mihomo_subscription_card_and_overview_omits_it() {
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
 
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
-    let _token = u0.sub_token.expect("sub_token must be present");
+    let token = u0.sub_token.expect("sub_token must be present");
 
     let app = router(s);
 
@@ -24,10 +24,16 @@ async fn delivery_renders_mihomo_subscription_card_and_overview_omits_it() {
         "Delivery page must contain the Mihomo / Omarchy card label"
     );
 
+    let expected_url = format!("https://ninitux.com/api/v1/sub/{token}");
+
     assert!(
-        html_delivery.contains("https://ninitux.com/api/v1/sub/")
-            && html_delivery.contains("format=mihomo"),
-        "Delivery page must contain canonical public Mihomo URL with format=mihomo"
+        html_delivery.contains(&expected_url),
+        "Delivery page must contain exact canonical public Mihomo URL without query"
+    );
+
+    assert!(
+        !html_delivery.contains("format=mihomo"),
+        "Delivery page must reject format=mihomo"
     );
 
     assert!(

@@ -256,21 +256,45 @@ async fn public_alias_content_type_and_ua_override() {
     let (state1, token1, _) = setup_mihomo_env(&dir1).await;
     let dir2 = TempDir::new().unwrap();
     let (state2, token2, _) = setup_mihomo_env(&dir2).await;
+    let dir3 = TempDir::new().unwrap();
+    let (state3, token3, _) = setup_mihomo_env(&dir3).await;
+    let dir4 = TempDir::new().unwrap();
+    let (state4, token4, _) = setup_mihomo_env(&dir4).await;
 
     let uri1 = format!("/sub/{token1}?format=mihomo");
     let uri2 = format!("/api/v1/sub/{token2}?format=mihomo");
+    let uri3_no_query = format!("/api/v1/sub/{token3}");
+    let uri4_singbox = format!("/api/v1/sub/{token4}?format=sing-box");
 
     let (status1, headers1, body1) = request_sub(state1, &uri1, None).await;
     let (status2, headers2, body2) = request_sub(state2, &uri2, None).await;
+    let (status3, headers3, body3) = request_sub(state3, &uri3_no_query, None).await;
+    let (status4, headers4, _) = request_sub(state4, &uri4_singbox, None).await;
 
     assert_eq!(status1, StatusCode::OK);
     assert_eq!(status2, StatusCode::OK);
+    assert_eq!(status3, StatusCode::OK);
+    assert_eq!(status4, StatusCode::OK);
     assert_eq!(headers1.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
     assert_eq!(headers2.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
+    assert_eq!(headers3.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
+    assert_eq!(
+        headers4.get(header::CONTENT_TYPE).unwrap(),
+        "application/json",
+        "explicit sing-box selector must override the public Mihomo default"
+    );
     assert_eq!(
         body1, body2,
         "public alias /api/v1/sub and /sub must return identical body"
     );
+    assert_eq!(
+        body2, body3,
+        "public alias /api/v1/sub without query must return byte-identical Mihomo YAML body as explicit ?format=mihomo"
+    );
+
+    let yaml_str3 = std::str::from_utf8(&body3).expect("UTF-8 body");
+    let _: Value = serde_saphyr::from_str(yaml_str3)
+        .expect("public alias /api/v1/sub without query must parse as Mihomo YAML");
 
     assert_eq!(headers1.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(headers1.get("x-frame-options").unwrap(), "DENY");
@@ -280,6 +304,8 @@ async fn public_alias_content_type_and_ua_override() {
         "HiddifyNext/1.0.0",
         "v2rayN/6.62",
         "ClashMeta/1.18.0",
+        "Mihomo/1.18.0",
+        "mihoro",
     ] {
         let dir_ua = TempDir::new().unwrap();
         let (state_ua, token_ua, _) = setup_mihomo_env(&dir_ua).await;
@@ -294,6 +320,23 @@ async fn public_alias_content_type_and_ua_override() {
         let yaml_str = std::str::from_utf8(&body).unwrap();
         let _: Value = serde_saphyr::from_str(yaml_str)
             .expect("explicit format=mihomo body must parse as Mihomo YAML regardless of UA");
+
+        // Also assert that Mihomo-like UA does not matter on the public route /api/v1/sub/{token} without query
+        let dir_pub_ua = TempDir::new().unwrap();
+        let (state_pub_ua, token_pub_ua, _) = setup_mihomo_env(&dir_pub_ua).await;
+        let uri_pub_no_query = format!("/api/v1/sub/{token_pub_ua}");
+        let (status_pub, headers_pub, body_pub) =
+            request_sub(state_pub_ua, &uri_pub_no_query, Some(ua)).await;
+        assert_eq!(status_pub, StatusCode::OK);
+        assert_eq!(
+            headers_pub.get(header::CONTENT_TYPE).unwrap(),
+            "text/yaml",
+            "public route /api/v1/sub without query must return text/yaml regardless of UA '{ua}'"
+        );
+        assert_eq!(
+            body_pub, body1,
+            "public route /api/v1/sub without query with UA '{ua}' must return byte-identical Mihomo YAML body"
+        );
     }
 
     for ua in ["Mihomo/1.18.0", "ClashMeta/1.18.0"] {
@@ -308,6 +351,43 @@ async fn public_alias_content_type_and_ua_override() {
             "Mihomo-like UA without the explicit selector must keep legacy /sub behavior"
         );
     }
+}
+
+#[tokio::test]
+async fn chain_same_server_address_entry_and_target() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, inv) = setup_mihomo_env(&dir).await;
+    let shared_address = "198.51.100.20";
+    inv.update_server_address(&ServerId("srv-target".into()), shared_address, 22, "root")
+        .await
+        .unwrap();
+
+    let uri = format!("/api/v1/sub/{token}");
+    let (status, headers, body) = request_sub(state, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
+
+    let yaml = std::str::from_utf8(&body).expect("UTF-8 body");
+    let val: Value = serde_saphyr::from_str(yaml).expect("parse Mihomo YAML");
+    let proxies = val["proxies"].as_array().expect("proxies array");
+    assert_eq!(
+        proxies
+            .iter()
+            .filter(|proxy| proxy["server"] == shared_address)
+            .count(),
+        2,
+        "same-address entry and target must both remain"
+    );
+
+    let entry = proxies
+        .iter()
+        .find(|proxy| proxy["reality-opts"]["public-key"] == "PUB_ENTRY")
+        .expect("entry proxy");
+    let target = proxies
+        .iter()
+        .find(|proxy| proxy["reality-opts"]["public-key"] == "PUB_TARGET")
+        .expect("target proxy");
+    assert_eq!(target["dialer-proxy"], entry["name"]);
 }
 
 #[tokio::test]
@@ -658,15 +738,28 @@ async fn visibility_and_unsupported_filtering() {
 
 #[tokio::test]
 async fn disabled_no_grant_user_and_unknown_token() {
-    // 1. Unknown token stays 404
+    // 1. Unknown token keeps the shared 404 response on the public route.
     {
         let dir = TempDir::new().unwrap();
         let (state, _, _) = setup_mihomo_env(&dir).await;
-        let (status, _, _) = request_sub(state, "/sub/unknown-token?format=mihomo", None).await;
+        let (status, headers, body) = request_sub(state, "/api/v1/sub/unknown-token", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, b"unknown token\n");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
     }
 
-    // 2. Disabled user gets valid YAML with empty proxies and VPN group selecting DIRECT
+    // 2. Invalid selectors keep the shared byte-exact 400 response.
+    {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _) = setup_mihomo_env(&dir).await;
+        let uri = format!("/api/v1/sub/{token}?format=bogus");
+        let (status, _, body) = request_sub(state, &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, b"invalid format selector\n");
+    }
+
+    // 3. Disabled user gets valid YAML with empty proxies and VPN group selecting DIRECT
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -713,7 +806,7 @@ async fn disabled_no_grant_user_and_unknown_token() {
             .unwrap();
         let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
 
-        let uri = format!("/sub/{token}?format=mihomo");
+        let uri = format!("/api/v1/sub/{token}");
         let (status, headers, body) = request_sub(state, &uri, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
@@ -740,7 +833,7 @@ async fn disabled_no_grant_user_and_unknown_token() {
         assert!(rules.iter().any(|r| r == "MATCH,VPN"));
     }
 
-    // 3. User with no grants gets valid YAML with empty proxies and VPN group selecting DIRECT
+    // 4. User with no grants gets valid YAML with empty proxies and VPN group selecting DIRECT
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -772,7 +865,7 @@ async fn disabled_no_grant_user_and_unknown_token() {
             .unwrap();
         let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
 
-        let uri = format!("/sub/{token}?format=mihomo");
+        let uri = format!("/api/v1/sub/{token}");
         let (status, headers, body) = request_sub(state, &uri, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/yaml");
