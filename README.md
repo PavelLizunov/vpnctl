@@ -50,6 +50,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
 | Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
+| Chain-capable stock sing-box subscription — explicit JSON URL, native `detour`, fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — auto-creates complete users for new paid subscribers, grants every server, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY Strong; tuic/anytls Moderate; rest Weak) | ✅ |
@@ -101,6 +102,15 @@ layer, daemon, admin UI, and crypto stay **unaffected**.
 
 Protocols are **stateless** — per-server secrets arrive via `RenderCtx`,
 never live on the protocol struct.
+
+### Subscription formats
+
+`GET /sub/<token>` preserves the existing User-Agent-selected response byte-for-byte.
+When a user has a chained exit, the admin **Delivery** tab also provides one ready
+`GET /sub/<token>?format=sing-box` URL/QR. That explicit response is stock sing-box
+JSON: chained targets carry native `detour` fields and disappear fail-closed when
+their entry has no usable outbound. Fork-only protocols such as `vless+xhttp`
+remain available to VPNRouter/sing-box-lx but are omitted from this stock format.
 
 ## Workspace layout
 

@@ -11,6 +11,7 @@ use crate::app::AppState;
 pub(super) async fn render_singbox(
     state: &AppState,
     user: &User,
+    stock_only: bool,
 ) -> Result<(UserId, Value), SubError> {
     let user_id = user.id.clone();
 
@@ -115,15 +116,18 @@ pub(super) async fn render_singbox(
                 );
                 continue;
             };
-            // Skip protocols that are not sing-box-native. Such
-            // protocols are still surfaced in admin UI's per-protocol
-            // share-links section via their own client.
-            if !proto.appears_in_sing_box_sub() {
+            let compatible = if stock_only {
+                proto.appears_in_stock_sing_box_sub()
+            } else {
+                proto.appears_in_sing_box_sub()
+            };
+            if !compatible {
                 tracing::debug!(
                     target = "vpnctld::sub",
                     server = %server.id,
                     protocol = %pid,
-                    "protocol declared non-sing-box; skipping in sub config"
+                    stock_only,
+                    "protocol incompatible with requested sing-box format; skipping"
                 );
                 continue;
             }

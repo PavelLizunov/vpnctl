@@ -553,23 +553,19 @@ pub trait Protocol: fmt::Debug + Send + Sync {
         self.listen_ports().to_vec()
     }
 
-    /// Does this protocol's `client_config` produce a sing-box-
-    /// compatible outbound JSON object? Default `true` — almost every
-    /// protocol in this crate today does (VLESS / TUIC / Hysteria2 /
-    /// Trojan / AnyTLS / Shadowsocks-2022 / WireGuard). The `/sub/<token>`
-    /// endpoint assembles a sing-box `outbounds` array and serves it
-    /// to Hiddify / sing-box clients; **any outbound with an
-    /// unrecognised `type` makes the entire config invalid** and the
-    /// client either refuses to start OR silently drops the route.
-    ///
-    /// Protocols that ARE NOT sing-box-native (e.g. wireguard —
-    /// delivered via dedicated client configs / share links
-    /// rather than the sing-box sub) MUST override this to
-    /// `false`. The sub handler then skips them when assembling the
-    /// sing-box config, but they still appear in the per-protocol
-    /// share-links section of the admin UI.
+    /// Does this protocol's `client_config` belong in the legacy sing-box
+    /// JSON response? Default `true`; protocols delivered only through
+    /// dedicated artefacts (for example WireGuard) override this to `false`.
     fn appears_in_sing_box_sub(&self) -> bool {
         true
+    }
+
+    /// Does the same outbound work in stock sing-box? Defaults to the legacy
+    /// decision so native protocols need no second override. Fork-only
+    /// transports override this method while remaining available to legacy
+    /// sing-box-lx/VPNRouter consumers.
+    fn appears_in_stock_sing_box_sub(&self) -> bool {
+        self.appears_in_sing_box_sub()
     }
 
     /// How well this protocol resists DPI / active-probing in

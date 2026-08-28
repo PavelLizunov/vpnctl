@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
+use serde::Deserialize;
 use vpnctl_core::User;
 
 use super::singbox::render_singbox;
@@ -16,6 +17,11 @@ use crate::app::AppState;
 /// for the operator to notice. Resets on daemon restart, which is what
 /// we want (a fresh warn after a deploy that re-broke the wiring).
 static WARNED_MISSING_CONNECT_INFO: AtomicBool = AtomicBool::new(false);
+
+#[derive(Deserialize)]
+struct SubQuery {
+    format: Option<String>,
+}
 
 pub(crate) async fn get(
     State(state): State<AppState>,
@@ -252,12 +258,10 @@ pub(crate) async fn get(
         }
     }
 
-    // 2026-05-23 — V2Ray-family UA detection (quickfix per Pavel
-    // «через V2raytun наш QR не работает»). The dispatch mirrors
-    // `vpn_router::is_vpn_client_ua` exactly so a UA that already
-    // worked on the ninitux endpoint now also works on the legacy
-    // `/sub/<token>` LAN fallback. Default (no UA / browser / sing-\n    // box / Hiddify) renders the JSON envelope.
-    let want_v2ray_subscription = ua
+    // Existing clients keep their UA-selected legacy format unless the
+    // operator hands them the explicit stock sing-box URL. The query is
+    // validated only after both abuse gates below have run.
+    let ua_wants_v2ray_subscription = ua
         .as_deref()
         .map(crate::handlers::vpn_router::is_vpn_client_ua_v2ray_family)
         .unwrap_or(false);
@@ -371,9 +375,22 @@ pub(crate) async fn get(
         return rate_limited(retry, "token");
     }
 
+    let explicit_stock_singbox = match Query::<SubQuery>::try_from_uri(request.uri()) {
+        Ok(Query(query)) => match query.format.as_deref() {
+            None => false,
+            Some("sing-box") => true,
+            Some(_) => {
+                return (StatusCode::BAD_REQUEST, "invalid format selector\n").into_response();
+            }
+        },
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid format selector\n").into_response(),
+    };
+    let want_v2ray_subscription = !explicit_stock_singbox && ua_wants_v2ray_subscription;
+
     // ────────────────────────────────────────────────────────────────
-    // Render branch — UA selects format ONLY. Both arms share the
-    // already-resolved `user` and the already-passed token gates above.
+    // Render branch — UA selects the legacy default; `format=sing-box`
+    // explicitly overrides it. Both arms share the already-resolved
+    // user and the already-passed token gates above.
     let (tls_ja3, tls_ja4) = peer_ip
         .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
         .unwrap_or((None, None));
@@ -413,7 +430,7 @@ pub(crate) async fn get(
             }
         }
     } else {
-        match render_singbox(&state, &user).await {
+        match render_singbox(&state, &user, explicit_stock_singbox).await {
             Ok((user_id, cfg)) => {
                 let body = cfg.to_string();
                 // 32-bit defensive — `body.len()` is `usize`; on a

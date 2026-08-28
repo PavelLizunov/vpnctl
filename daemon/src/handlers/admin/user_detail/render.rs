@@ -119,17 +119,23 @@ pub(crate) async fn user_detail_render(
     }
     // Standalone share-link formats cannot represent a sing-box outbound
     // detour. Keep chained targets in the access/grant UI, but never offer a
-    // direct URI that bypasses their required entry server.
+    // direct URI that bypasses their required entry server. A chain artefact is
+    // useful only when this user is also granted the entry server.
     let mut direct_link_servers = Vec::with_capacity(servers.len());
+    let mut chain_routes = Vec::new();
     for server in &servers {
-        if state
+        match state
             .inv
             .client_detour_via(&server.id)
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?
-            .is_none()
         {
-            direct_link_servers.push(server.clone());
+            Some(entry) => {
+                if granted_ids.contains(&entry) {
+                    chain_routes.push((server.id.clone(), entry));
+                }
+            }
+            None => direct_link_servers.push(server.clone()),
         }
     }
 
@@ -176,6 +182,30 @@ pub(crate) async fn user_detail_render(
     .await;
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
+    let chain_sub_url_str = if chain_routes.is_empty() {
+        None
+    } else {
+        sub_url_str
+            .as_ref()
+            .map(|url| format!("{url}?format=sing-box"))
+    };
+    let mut chain_route_labels = Vec::with_capacity(chain_routes.len());
+    for (target, entry) in &chain_routes {
+        let target_name = state
+            .inv
+            .server_display_name(target)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            .unwrap_or_else(|| target.0.clone());
+        let entry_name = state
+            .inv
+            .server_display_name(entry)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            .unwrap_or_else(|| entry.0.clone());
+        chain_route_labels.push(format!("{target_name} via {entry_name}"));
+    }
+    let chain_route_summary = chain_route_labels.join(", ");
     // Phase 3+ ninitux-compat URL: the production endpoint that mobile
     // apps actually fetch. Rendered as the PRIMARY subscription URL
     // (with QR) when the user has a device_id pinned; the legacy
@@ -761,6 +791,23 @@ pub(crate) async fn user_detail_render(
                     (mask_secret(t))
                     " · " (crate::i18n::tr(lang, "LAN-only fallback", "LAN-only fallback"))
                 }
+            }
+        }
+        @if let Some(url) = chain_sub_url_str.as_ref() {
+            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule);" {
+                div.ed-art-eyebrow {
+                    (crate::i18n::tr(lang, "Sing-box chain subscription", "Sing-box подписка с цепочкой"))
+                }
+                div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 8px 0;" {
+                    (&chain_route_summary)
+                }
+                (share_link_card(url, &html! {
+                    (crate::i18n::tr(
+                        lang,
+                        "Import this URL when the chained exit is needed. The target disappears automatically if its entry server is unavailable; standalone links remain direct-only.",
+                        "Импортируй этот URL, когда нужен выход через цепочку. Целевой сервер автоматически исчезнет, если входной сервер недоступен; отдельные ссылки остаются только прямыми.",
+                    ))
+                }))
             }
         }
             div.ed-rule {}
