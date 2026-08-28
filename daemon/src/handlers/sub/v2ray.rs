@@ -65,6 +65,19 @@ pub(super) async fn render_v2ray_subscription(
         {
             continue;
         }
+        // URI subscriptions cannot express an outbound chain. Publishing the
+        // target link here would silently turn a required 2-hop route into a
+        // direct connection, so chained targets are fail-closed.
+        if state
+            .inv
+            .client_detour_via(&server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
+            .is_some()
+        {
+            continue;
+        }
+
         let secrets = state
             .inv
             .list_server_secrets(&server.id)

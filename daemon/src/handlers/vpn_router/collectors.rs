@@ -146,6 +146,18 @@ pub(crate) async fn collect_vless_uris_for_user(
         {
             continue;
         }
+        // This endpoint emits standalone URIs and cannot encode sing-box's
+        // outbound `detour`. Omit chained targets rather than leaking the
+        // target as a direct connection.
+        if state
+            .inv
+            .client_detour_via(&server.id)
+            .await
+            .map_err(|e| format!("client_detour_via: {e}"))?
+            .is_some()
+        {
+            continue;
+        }
         // Visibility filter (migration 0018): ninitux endpoint emits
         // VLESS+REALITY only, so skip this server if vless+reality is
         // hidden globally OR per-this-user. Skipping = NO URI for this
@@ -282,6 +294,15 @@ pub(crate) async fn collect_extra_protocol_uris(
         {
             continue;
         }
+        if state
+            .inv
+            .client_detour_via(&server.id)
+            .await
+            .map_err(|e| format!("client_detour_via: {e}"))?
+            .is_some()
+        {
+            continue;
+        }
         // OR-semantics visibility (NM-10): server-hidden OR per-user-denied
         // → protocol absent for this (user, server). This is the kill-switch.
         let visible = state
@@ -413,6 +434,14 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
             .unwrap_or(false)
         {
             continue;
+        }
+        match state.inv.client_detour_via(&server.id).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg: client_detour_via lookup failed; skipping");
+                continue;
+            }
         }
         // NM-10 visibility: server-hidden OR per-user-denied → no awg://
         // for this (user, server). This is the operator's kill-switch.

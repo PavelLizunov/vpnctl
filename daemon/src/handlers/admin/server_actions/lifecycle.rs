@@ -53,6 +53,42 @@ pub(crate) async fn server_set_routing_policy(
     .into_response()
 }
 
+/// `POST /admin/servers/{id}/client-detour` — set or clear the client detour
+/// (entry server) policy for 2-hop VPN chains.
+pub(crate) async fn server_set_client_detour_via(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(id.clone());
+    if match state.inv.get_server(&sid).await {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    } {
+        return not_found(&format!("no such server '{id}'"));
+    }
+    let Some(detour_field) = form_field(&body, "client_detour_via") else {
+        return bad_request("client_detour_via field is required (blank means direct)");
+    };
+    let detour = Some(detour_field)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(vpnctl_core::ServerId);
+    if let Err(error) = state
+        .inv
+        .set_client_detour_via_as("admin", &sid, detour.as_ref())
+        .await
+    {
+        return bad_request(&error.to_string());
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/setup#client-detour",
+        path_segment_encode(&id)
+    ))
+    .into_response()
+}
+
 /// `POST /admin/servers/quick-add` — register a SERVER YOU ALREADY HAVE
 /// in inventory with minimal input: id + address (+ optional ssh_port).
 /// Default kernel = sing-box; default protocols = every protocol

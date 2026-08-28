@@ -302,6 +302,17 @@ pub(super) async fn server_detail_render(
         .list_servers()
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let client_detour_candidates = state
+        .inv
+        .list_fleet_servers()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    let client_detour_via = state
+        .inv
+        .client_detour_via(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     // Per-server reserved-ports list (migration 0028). Empty for
     // every server in the fleet by default; this load is one
@@ -1059,6 +1070,7 @@ pub(super) async fn server_detail_render(
             // `vpnctl server set-fingerprint <id>` CLI, one source of truth).
             (server_detail_fingerprint_section(&server, lang))
             (server_detail_routing_policy_section(&server, server_role, &routing_candidates, routing_error.as_deref(), lang))
+            (server_detail_client_detour_section(&server, client_detour_via.as_ref(), &client_detour_candidates, lang))
             // Display name — operator subscription label (migration 0029).
             (server_detail_display_name_section(&server, display_name.as_deref(), lang))
             // Auto-suppress from subscription when unreachable (migration 0030).

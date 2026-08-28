@@ -122,6 +122,15 @@ pub(crate) enum ServerCmd {
         clear: bool,
     },
 
+    /// Route client VPN traffic through an upstream entry server; omit upstream to clear with --clear.
+    SetClientDetourVia {
+        target: String,
+        #[arg(required_unless_present = "clear")]
+        upstream: Option<String>,
+        #[arg(long, conflicts_with = "upstream")]
+        clear: bool,
+    },
+
     /// Hide a server protocol from client subscription / config generation.
     ProtocolHide {
         /// Server id (e.g. "fra-01").
@@ -254,9 +263,11 @@ pub(crate) async fn run(
                 .ok_or_else(|| anyhow::anyhow!("no such server: {id}"))?;
             let secrets_keys: Vec<String> =
                 inv.list_server_secrets(&sid).await?.into_keys().collect();
+            let detour_via = inv.client_detour_via(&sid).await?;
             let payload = json!({
                 "server": server,
                 "secret_keys": secrets_keys,
+                "client_detour_via": detour_via.as_ref().map(|v| &v.0),
             });
             ui::print(format, &payload, |_| {
                 println!("id            : {}", server.id.0);
@@ -292,6 +303,12 @@ pub(crate) async fn run(
                     "jump_via      : {}",
                     server
                         .jump_via
+                        .as_ref()
+                        .map_or("(none)".to_string(), |v| v.0.clone())
+                );
+                println!(
+                    "client_detour : {}",
+                    detour_via
                         .as_ref()
                         .map_or("(none)".to_string(), |v| v.0.clone())
                 );
@@ -435,6 +452,24 @@ pub(crate) async fn run(
                 &json!({"id": id, "jump_via": jump.as_ref().map(|v| &v.0)}),
                 |_| {
                     println!("server '{id}' jump_via updated");
+                    Ok(())
+                },
+            )
+        }
+        ServerCmd::SetClientDetourVia {
+            target,
+            upstream,
+            clear: _,
+        } => {
+            let upstream = upstream.map(ServerId);
+            let target_sid = ServerId(target.clone());
+            inv.set_client_detour_via_as("cli", &target_sid, upstream.as_ref())
+                .await?;
+            ui::print(
+                format,
+                &json!({"target": target, "client_detour_via": upstream.as_ref().map(|v| &v.0)}),
+                |_| {
+                    println!("server '{target}' client_detour_via updated");
                     Ok(())
                 },
             )
@@ -818,6 +853,69 @@ mod tests {
                 .iter()
                 .all(|a| a.action != "server.protocol.set_hidden"),
             "no audit log must be written on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_set_client_detour_via_and_show() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+
+        let s2 = Server {
+            id: ServerId("s2".into()),
+            address: "203.0.113.2".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId("vless+reality".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&s2).await.unwrap();
+
+        run(
+            ServerCmd::SetClientDetourVia {
+                target: "s1".into(),
+                upstream: Some("s2".into()),
+                clear: false,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            inv.client_detour_via(&ServerId("s1".into())).await.unwrap(),
+            Some(ServerId("s2".into()))
+        );
+
+        run(
+            ServerCmd::Show { id: "s1".into() },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        run(
+            ServerCmd::SetClientDetourVia {
+                target: "s1".into(),
+                upstream: None,
+                clear: true,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            inv.client_detour_via(&ServerId("s1".into())).await.unwrap(),
+            None
         );
     }
 }
