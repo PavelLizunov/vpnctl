@@ -60,13 +60,9 @@ async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String) {
     if grant_entry {
         inv.grant(&user.id, &ServerId("is".into())).await.unwrap();
     }
-    inv.set_client_detour_via_as(
-        "test",
-        &ServerId("s5".into()),
-        Some(&ServerId("is".into())),
-    )
-    .await
-    .unwrap();
+    inv.set_client_detour_via_as("test", &ServerId("s5".into()), Some(&ServerId("is".into())))
+        .await
+        .unwrap();
 
     let token = inv
         .get_user(&user.id)
@@ -166,7 +162,10 @@ async fn v2ray_subscription_omits_chained_target_uri() {
         .decode(body)
         .unwrap();
     let links = std::str::from_utf8(&decoded).unwrap();
-    assert!(links.contains("@198.51.100.10:443"), "entry missing: {links}");
+    assert!(
+        links.contains("@198.51.100.10:443"),
+        "entry missing: {links}"
+    );
     assert!(
         !links.contains("@198.51.100.50:443"),
         "S5 leaked as a direct URI: {links}"
@@ -186,11 +185,7 @@ async fn clearing_detour_restores_original_subscription_bytes() {
 
     state
         .inv
-        .set_client_detour_via_as(
-            "test",
-            &ServerId("s5".into()),
-            Some(&ServerId("is".into())),
-        )
+        .set_client_detour_via_as("test", &ServerId("s5".into()), Some(&ServerId("is".into())))
         .await
         .unwrap();
     state
@@ -200,5 +195,8 @@ async fn clearing_detour_restores_original_subscription_bytes() {
         .unwrap();
     let (_, after) = get_sub(state, &token, None).await;
 
-    assert_eq!(before, after, "detour clear must restore exact legacy bytes");
+    assert_eq!(
+        before, after,
+        "detour clear must restore exact legacy bytes"
+    );
 }

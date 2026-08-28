@@ -1143,12 +1143,22 @@ async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() 
     );
 }
 
+fn client_detour_server(id: &str) -> Server {
+    routing_server(id, &format!("{id}.example.com"), None, None)
+}
+
 #[tokio::test]
 async fn admin_server_client_detour_section_renders() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    s.inv.add_server(&srv("target")).await.unwrap();
-    s.inv.add_server(&srv("entry")).await.unwrap();
+    s.inv
+        .add_server(&client_detour_server("target"))
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&client_detour_server("entry"))
+        .await
+        .unwrap();
 
     let html = fetch_html(router(s), "/admin/servers/target/setup").await;
     assert!(
@@ -1173,8 +1183,8 @@ async fn admin_server_client_detour_section_renders() {
 async fn admin_server_client_detour_sets_clears_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    s.inv.add_server(&srv("s1")).await.unwrap();
-    s.inv.add_server(&srv("s2")).await.unwrap();
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
+    s.inv.add_server(&client_detour_server("s2")).await.unwrap();
 
     let sid1 = ServerId("s1".into());
     let sid2 = ServerId("s2".into());
@@ -1236,7 +1246,7 @@ async fn admin_server_client_detour_sets_clears_and_audits() {
 async fn admin_server_client_detour_validates_required_field() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    s.inv.add_server(&srv("s1")).await.unwrap();
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
 
     let resp = router(s)
         .oneshot(
@@ -1258,7 +1268,7 @@ async fn admin_server_client_detour_validates_required_field() {
 async fn admin_server_client_detour_rejects_invalid_detour_error() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    s.inv.add_server(&srv("s1")).await.unwrap();
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
 
     // Self-reference s1 -> s1 is invalid
     let resp = router(s.clone())
@@ -1276,7 +1286,10 @@ async fn admin_server_client_detour_rejects_invalid_detour_error() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        s.inv.client_detour_via(&ServerId("s1".into())).await.unwrap(),
+        s.inv
+            .client_detour_via(&ServerId("s1".into()))
+            .await
+            .unwrap(),
         None,
         "detour policy must remain unmutated on rejection"
     );
