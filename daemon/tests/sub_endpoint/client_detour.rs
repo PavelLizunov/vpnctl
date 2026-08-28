@@ -6,6 +6,7 @@ use base64::Engine;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tempfile::TempDir;
+use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
@@ -13,7 +14,7 @@ use vpnctl_kernels::SingBox;
 use vpnctl_protocols::VlessReality;
 use vpnctld::{AppState, router};
 
-async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String) {
+async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String, JoinHandle<()>) {
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
         .unwrap();
@@ -71,8 +72,8 @@ async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String) {
         .unwrap()
         .sub_token
         .unwrap();
-    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(registry));
-    (state, token)
+    let (state, writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(registry));
+    (state, token, writer)
 }
 
 async fn get_sub(state: AppState, token: &str, user_agent: Option<&str>) -> (StatusCode, Vec<u8>) {
@@ -92,7 +93,7 @@ async fn get_sub(state: AppState, token: &str, user_agent: Option<&str>) -> (Sta
 #[tokio::test]
 async fn singbox_subscription_chains_s5_through_iceland() {
     let dir = TempDir::new().unwrap();
-    let (state, token) = seed(&dir, true).await;
+    let (state, token, _writer) = seed(&dir, true).await;
     let (status, body) = get_sub(state, &token, None).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -115,7 +116,7 @@ async fn singbox_subscription_chains_s5_through_iceland() {
 #[tokio::test]
 async fn singbox_subscription_omits_target_when_entry_is_not_granted() {
     let dir = TempDir::new().unwrap();
-    let (state, token) = seed(&dir, false).await;
+    let (state, token, _writer) = seed(&dir, false).await;
     let (status, body) = get_sub(state, &token, None).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -133,7 +134,7 @@ async fn singbox_subscription_omits_target_when_entry_is_not_granted() {
 #[tokio::test]
 async fn singbox_subscription_omits_target_when_entry_protocol_is_hidden() {
     let dir = TempDir::new().unwrap();
-    let (state, token) = seed(&dir, true).await;
+    let (state, token, _writer) = seed(&dir, true).await;
     state
         .inv
         .set_server_protocol_hidden(
@@ -154,7 +155,7 @@ async fn singbox_subscription_omits_target_when_entry_protocol_is_hidden() {
 #[tokio::test]
 async fn v2ray_subscription_omits_chained_target_uri() {
     let dir = TempDir::new().unwrap();
-    let (state, token) = seed(&dir, true).await;
+    let (state, token, _writer) = seed(&dir, true).await;
     let (status, body) = get_sub(state, &token, Some("v2rayN/6.62")).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -175,13 +176,17 @@ async fn v2ray_subscription_omits_chained_target_uri() {
 #[tokio::test]
 async fn clearing_detour_restores_original_subscription_bytes() {
     let dir = TempDir::new().unwrap();
-    let (state, token) = seed(&dir, true).await;
+    let (state, token, writer) = seed(&dir, true).await;
+    let inv = state.inv.clone();
+    let registry = Arc::clone(&state.registry);
     state
         .inv
         .set_client_detour_via_as("test", &ServerId("s5".into()), None)
         .await
         .unwrap();
     let (_, before) = get_sub(state.clone(), &token, None).await;
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
 
     state
         .inv
@@ -193,6 +198,7 @@ async fn clearing_detour_restores_original_subscription_bytes() {
         .set_client_detour_via_as("test", &ServerId("s5".into()), None)
         .await
         .unwrap();
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, registry);
     let (_, after) = get_sub(state, &token, None).await;
 
     assert_eq!(
