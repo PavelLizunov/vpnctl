@@ -35,6 +35,18 @@ enum SubFormat {
     Mihomo,
 }
 
+#[derive(Clone, Copy)]
+struct DefaultMihomo;
+
+pub(crate) async fn get_mihomo(
+    state: State<AppState>,
+    path: Path<String>,
+    mut request: Request,
+) -> impl IntoResponse {
+    request.extensions_mut().insert(DefaultMihomo);
+    get(state, path, request).await
+}
+
 pub(crate) async fn get(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -387,6 +399,8 @@ pub(crate) async fn get(
         return rate_limited(retry, "token");
     }
 
+    let default_mihomo = request.extensions().get::<DefaultMihomo>().is_some();
+
     let format_selector = match Query::<SubQuery>::try_from_uri(request.uri()) {
         Ok(Query(query)) => match query.format.as_deref() {
             None => None,
@@ -402,6 +416,7 @@ pub(crate) async fn get(
     let sub_format = match format_selector {
         Some(FormatSelector::Mihomo) => SubFormat::Mihomo,
         Some(FormatSelector::SingBox) => SubFormat::SingBox { stock_only: true },
+        None if default_mihomo => SubFormat::Mihomo,
         None if ua_wants_v2ray_subscription => SubFormat::V2Ray,
         None => SubFormat::SingBox { stock_only: false },
     };

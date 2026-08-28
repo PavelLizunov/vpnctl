@@ -43,7 +43,7 @@ pub fn router(state: AppState) -> Router {
         // only aggregate counts, no per-IP/per-token details).
         .route("/api/v1/stats/sub-access", get(handlers::stats::sub_access))
         .route("/sub/{token}", get(handlers::sub::get))
-        .route("/api/v1/sub/{token}", get(handlers::sub::get))
+        .route("/api/v1/sub/{token}", get(handlers::sub::get_mihomo))
         // Phase 3 — ninitux subscription-server compat endpoint
         // (`https://ninitux.com/api/v1/app/config/<device_id>`). Same
         // response shape as subscription-server; nginx on 192.168.0.207

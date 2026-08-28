@@ -105,11 +105,9 @@ never live on the protocol struct.
 
 ### Subscription formats
 
-`GET /sub/<token>` preserves the existing User-Agent-selected response byte-for-byte.
-The daemon exposes canonical public subscription endpoints (`https://ninitux.com/api/v1/sub/<token>`)
-alongside LAN fallback aliases (`http://<host>/sub/<token>`).
+The canonical public route (`https://ninitux.com/api/v1/sub/<token>`) defaults to the Mihomo / Omarchy YAML format without requiring a query parameter. The legacy `GET /sub/<token>` route is unchanged: without a selector it keeps its existing sing-box/UA behavior, while `?format=mihomo` and `?format=sing-box` remain explicit options.
 
-- **Mihomo / Omarchy format** (`?format=mihomo`): Renders a ready YAML configuration for
+- **Mihomo / Omarchy format** (default for public `https://ninitux.com/api/v1/sub/<token>`, legacy query `?format=mihomo`): Renders a ready YAML configuration for
   Mihomo, Omarchy, and Clash Meta. The initial scope is `vless+reality` and `hysteria2`;
   unsupported protocols are omitted. Chained routes use Mihomo `dialer-proxy`, failing closed
   (omitting target nodes) when their direct entry node is unavailable or unusable.
