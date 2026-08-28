@@ -92,9 +92,11 @@ pub(crate) async fn run(
 ///   * an auto-suppressed server (health monitor flagged it unreachable,
 ///     per-server opt-in; migration 0030) is skipped;
 ///   * per-(user, server, protocol) visibility filters out hidden
-///     protocols and per-user deny overrides (migration 0018).
+///     protocols and per-user deny overrides (migration 0018);
+///   * chained targets are skipped because standalone share links cannot
+///     encode sing-box's outbound `detour` without leaking a direct route.
 ///
-/// `ignore_policy` bypasses ALL THREE — the operator then sees every raw
+/// `ignore_policy` bypasses ALL FOUR — the operator then sees every raw
 /// share-link regardless of subscription policy.
 ///
 /// NOTE: this deliberately does NOT apply
@@ -124,6 +126,9 @@ async fn resolve_sub_targets(
                 .await
                 .unwrap_or(false)
         {
+            continue;
+        }
+        if !ignore_policy && inv.client_detour_via(&server.id).await?.is_some() {
             continue;
         }
 

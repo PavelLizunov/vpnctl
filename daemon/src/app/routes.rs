@@ -183,6 +183,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             "/admin/servers/{id}/routing-policy",
             post(admin::server_set_routing_policy),
         )
+        .route(
+            "/admin/servers/{id}/client-detour",
+            post(admin::server_set_client_detour_via),
+        )
         // Display name (migration 0029). Operator pins the friendly
         // subscription label end users see ({Country} VLESS ~user);
         // blank clears it back to the country-map fallback.

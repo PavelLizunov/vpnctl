@@ -1142,3 +1142,175 @@ async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() 
         "nothing may persist on rejection"
     );
 }
+
+fn client_detour_server(id: &str) -> Server {
+    routing_server(id, &format!("{id}.example.com"), None, None)
+}
+
+#[tokio::test]
+async fn admin_server_client_detour_section_renders() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&client_detour_server("target"))
+        .await
+        .unwrap();
+    s.inv
+        .add_server(&client_detour_server("entry"))
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/servers/target/setup").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/target/client-detour""#),
+        "client detour form action must render"
+    );
+    assert!(
+        html.contains(r#"name="client_detour_via""#),
+        "select name must be client_detour_via"
+    );
+    assert!(
+        html.contains(r#"value="entry""#),
+        "entry candidate server must be listed in options"
+    );
+    assert!(
+        html.contains("Client entry"),
+        "English section copy contract"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_client_detour_sets_clears_and_audits() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
+    s.inv.add_server(&client_detour_server("s2")).await.unwrap();
+
+    let sid1 = ServerId("s1".into());
+    let sid2 = ServerId("s2".into());
+
+    // Initially None
+    assert_eq!(s.inv.client_detour_via(&sid1).await.unwrap(), None);
+
+    // Set detour s1 -> s2
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/client-detour")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("client_detour_via=s2"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/admin/servers/s1/setup#client-detour"
+    );
+    assert_eq!(
+        s.inv.client_detour_via(&sid1).await.unwrap(),
+        Some(sid2.clone())
+    );
+
+    let audit = s.inv.recent_audit(10).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action == "server.client_detour.set" && e.target.as_deref() == Some("s1")),
+        "audit row server.client_detour.set must land"
+    );
+
+    // Clear detour s1 -> direct
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/client-detour")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("client_detour_via="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(s.inv.client_detour_via(&sid1).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn admin_server_client_detour_validates_required_field() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
+
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/client-detour")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("other_field=val"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_server_client_detour_rejects_invalid_detour_error() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv.add_server(&client_detour_server("s1")).await.unwrap();
+
+    // Self-reference s1 -> s1 is invalid
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s1/client-detour")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("client_detour_via=s1"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        s.inv
+            .client_detour_via(&ServerId("s1".into()))
+            .await
+            .unwrap(),
+        None,
+        "detour policy must remain unmutated on rejection"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_client_detour_404_on_missing_server() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/no-such/client-detour")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("client_detour_via=s2"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

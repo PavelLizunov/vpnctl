@@ -64,6 +64,40 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
 }
 
 #[tokio::test]
+async fn vpn_router_omits_chained_target_from_uri_config() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    state
+        .inv
+        .set_client_detour_via_as("test", &ServerId("de".into()), Some(&ServerId("is".into())))
+        .await
+        .unwrap();
+    let app = router(state);
+
+    let (status, body, _) = get(
+        app,
+        &format!("/api/v1/app/config/{TEST_DEVICE_ID}"),
+        "Mozilla/5.0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let decoded = BASE64_STANDARD
+        .decode(v["config"].as_str().unwrap())
+        .unwrap();
+    let config = std::str::from_utf8(&decoded).unwrap();
+
+    assert!(
+        config.contains("@is.example.com:443"),
+        "entry missing: {config}"
+    );
+    assert!(
+        !config.contains("@de.example.com:443"),
+        "chained target leaked as a direct URI: {config}"
+    );
+}
+
+#[tokio::test]
 async fn vpn_router_valid_device_id_vpn_client_ua_returns_raw_base64() {
     let dir = TempDir::new().unwrap();
     let state = seed_state(&dir).await;

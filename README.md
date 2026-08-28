@@ -182,11 +182,19 @@ scripting / disaster recovery.
 | Add a user | `/admin/users` + form | `vpnctl user add <name>` |
 | Grant a user access to a server | `/admin/users/<id>` per-server toggle | `vpnctl grant <user> <server>` |
 | Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
+| Set client 2-hop detour | `/admin/servers/<id>` («Client entry / Входной сервер») | `vpnctl server set-client-detour-via <target> <upstream>` (or `--clear`) |
 | Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
 | Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
 | Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (global `--output json` for automation) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+
+### Client detour vs SSH jump_via
+
+- **Client detour** (`client_detour_via`): configures a 2-hop VPN client outbound chain where a target server dials out through an entry server in generated subscriptions. Set via `/admin/servers/<id>` («Client entry / Входной сервер») or `vpnctl server set-client-detour-via <target> <upstream>` (`--clear` to remove).
+- **SSH `jump_via`**: configures an SSH ProxyJump bastion host used exclusively by the control plane for node administration over SSH.
+
+Client detour chaining is independent of SSH `jump_via`. It supports up to one hop across granted `vpn-exit` servers; self-reference, cycles, and nested chains are rejected.
 
 ### Boosty status JSON
 

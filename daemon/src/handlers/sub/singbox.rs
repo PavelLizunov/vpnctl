@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use vpnctl_core::{RenderCtx, User, UserId};
+use vpnctl_core::{RenderCtx, ServerId, User, UserId};
 
 use super::handler::SubError;
 use crate::app::AppState;
@@ -38,8 +38,12 @@ pub(super) async fn render_singbox(
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 
-    let mut outbounds: Vec<Value> = Vec::new();
-    let mut tags: Vec<String> = Vec::new();
+    // Render every usable outbound first, then apply client detours in a
+    // second pass. The entry server may sort after its target, while sing-box
+    // `detour` must reference the entry outbound's final user-facing tag.
+    let mut rendered: Vec<(ServerId, Value, String)> = Vec::new();
+    let mut detours: std::collections::HashMap<ServerId, Option<ServerId>> =
+        std::collections::HashMap::new();
 
     for server in &servers {
         // Auto-suppress (migration 0030): skip a server the health
@@ -53,6 +57,13 @@ pub(super) async fn render_singbox(
         {
             continue;
         }
+        let detour = state
+            .inv
+            .client_detour_via(&server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        detours.insert(server.id.clone(), detour);
+
         let secrets = state
             .inv
             .list_server_secrets(&server.id)
@@ -145,8 +156,7 @@ pub(super) async fn render_singbox(
                     if let Some(obj) = value.as_object_mut() {
                         obj.insert("tag".into(), json!(tag));
                     }
-                    outbounds.push(value);
-                    tags.push(tag);
+                    rendered.push((server.id.clone(), value, tag));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -159,6 +169,43 @@ pub(super) async fn render_singbox(
                 }
             }
         }
+    }
+
+    let mut first_tag_by_server: std::collections::HashMap<ServerId, String> =
+        std::collections::HashMap::new();
+    for (server_id, _, tag) in &rendered {
+        first_tag_by_server
+            .entry(server_id.clone())
+            .or_insert_with(|| tag.clone());
+    }
+
+    let mut outbounds: Vec<Value> = Vec::with_capacity(rendered.len());
+    let mut tags: Vec<String> = Vec::with_capacity(rendered.len());
+    for (server_id, mut value, tag) in rendered {
+        if let Some(Some(entry_id)) = detours.get(&server_id) {
+            let Some(entry_tag) = first_tag_by_server.get(entry_id) else {
+                tracing::warn!(
+                    target = "vpnctld::sub",
+                    user = %user.id,
+                    server = %server_id,
+                    entry_server = %entry_id,
+                    "client detour entry has no usable outbound; omitting target"
+                );
+                continue;
+            };
+            let Some(obj) = value.as_object_mut() else {
+                tracing::warn!(
+                    target = "vpnctld::sub",
+                    user = %user.id,
+                    server = %server_id,
+                    "client detour target rendered a non-object outbound; omitting target"
+                );
+                continue;
+            };
+            obj.insert("detour".into(), json!(entry_tag));
+        }
+        outbounds.push(value);
+        tags.push(tag);
     }
 
     let cfg = build_client_envelope(user, outbounds, &tags);

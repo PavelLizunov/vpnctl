@@ -117,6 +117,22 @@ pub(crate) async fn user_detail_render(
             .map_err(|e| internal_error(anyhow::Error::new(e)))?;
         hidden_per_server.insert(s.id.clone(), hidden);
     }
+    // Standalone share-link formats cannot represent a sing-box outbound
+    // detour. Keep chained targets in the access/grant UI, but never offer a
+    // direct URI that bypasses their required entry server.
+    let mut direct_link_servers = Vec::with_capacity(servers.len());
+    for server in &servers {
+        if state
+            .inv
+            .client_detour_via(&server.id)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            .is_none()
+        {
+            direct_link_servers.push(server.clone());
+        }
+    }
+
     // Per-user override map (server_id, protocol_id) → disabled.
     // One query for the whole user; small (typically 0 entries until
     // the operator clicks "block" on a protocol). Empty map = no
@@ -130,7 +146,7 @@ pub(crate) async fn user_detail_render(
     let share_links = collect_share_links(
         &state,
         &user,
-        &servers,
+        &direct_link_servers,
         &secrets_per_server,
         &peers_per_server,
     )
@@ -143,7 +159,7 @@ pub(crate) async fn user_detail_render(
     let amnezia_links = collect_amnezia_links(
         &state,
         &user,
-        &servers,
+        &direct_link_servers,
         &secrets_per_server,
         &peers_per_server,
     )
@@ -153,7 +169,7 @@ pub(crate) async fn user_detail_render(
     let awg_links = collect_awg_links(
         &state,
         &user,
-        &servers,
+        &direct_link_servers,
         &secrets_per_server,
         &peers_per_server,
     )

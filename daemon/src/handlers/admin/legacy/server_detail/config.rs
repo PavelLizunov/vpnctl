@@ -304,6 +304,50 @@ pub(super) fn server_detail_routing_policy_section(
     }
 }
 
+/// Client entry / Входной сервер section on the server-detail page.
+/// Configures `client_detour_via` for 2-hop VPN chaining.
+pub(super) fn server_detail_client_detour_section(
+    server: &vpnctl_core::Server,
+    current_detour: Option<&vpnctl_core::ServerId>,
+    candidates: &[vpnctl_core::Server],
+    lang: crate::i18n::Locale,
+) -> maud::Markup {
+    use crate::i18n::tr;
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        section id="client-detour" class="ed-card" style="margin: 16px 0;" {
+            h3 { (tr(lang, "Client entry", "Входной сервер")) }
+            p class="ed-muted" {
+                (tr(
+                    lang,
+                    "Routes client outbound traffic through an entry server before reaching this target exit (2-hop VPN chain).",
+                    "Маршрутизирует клиентский трафик через входной сервер перед этим целевым выходом (2-hop VPN цепочка).",
+                ))
+            }
+            form method="post" action=(format!("/admin/servers/{sid_enc}/client-detour")) {
+                label for="client-detour-via" {
+                    (tr(lang, "Client entry", "Входной сервер"))
+                }
+                select id="client-detour-via" name="client_detour_via" style="margin-left: 8px;" {
+                    option value="" selected[current_detour.is_none()] {
+                        (tr(lang, "direct (none)", "прямой (нет)"))
+                    }
+                    @for candidate in candidates {
+                        @if candidate.id != server.id {
+                            option value=(candidate.id.0) selected[current_detour == Some(&candidate.id)] {
+                                (candidate.id.0)
+                            }
+                        }
+                    }
+                }
+                button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
+                    (tr(lang, "save client entry", "сохранить входной сервер"))
+                }
+            }
+        }
+    }
+}
+
 /// Trusted host SSH fingerprint section — shows current pinned
 /// fingerprint (if any) plus a form for the operator to set / replace
 /// it. Two paths:
