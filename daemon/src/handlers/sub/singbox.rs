@@ -4,6 +4,13 @@ use vpnctl_core::{RenderCtx, ServerId, User, UserId};
 use super::handler::SubError;
 use crate::app::AppState;
 
+#[derive(Clone, Copy, Debug)]
+enum Compatibility {
+    Legacy,
+    Stock,
+    Mihomo,
+}
+
 /// Render the sing-box JSON envelope for an ALREADY-RESOLVED user.
 /// Takes `&User` (not a token) because the handler resolves the user
 /// once up front and runs the per-token ban + rate-limit gates before
@@ -12,6 +19,29 @@ pub(super) async fn render_singbox(
     state: &AppState,
     user: &User,
     stock_only: bool,
+) -> Result<(UserId, Value), SubError> {
+    let compatibility = if stock_only {
+        Compatibility::Stock
+    } else {
+        Compatibility::Legacy
+    };
+    render_singbox_with(state, user, compatibility).await
+}
+
+/// Reuse the stock outbound collector while limiting entry selection to
+/// protocols Mihomo can actually consume. Otherwise a TUIC-first entry would
+/// make a usable VLESS chain disappear during the later YAML conversion.
+pub(super) async fn render_singbox_for_mihomo(
+    state: &AppState,
+    user: &User,
+) -> Result<(UserId, Value), SubError> {
+    render_singbox_with(state, user, Compatibility::Mihomo).await
+}
+
+async fn render_singbox_with(
+    state: &AppState,
+    user: &User,
+    compatibility: Compatibility,
 ) -> Result<(UserId, Value), SubError> {
     let user_id = user.id.clone();
 
@@ -116,18 +146,18 @@ pub(super) async fn render_singbox(
                 );
                 continue;
             };
-            let compatible = if stock_only {
-                proto.appears_in_stock_sing_box_sub()
-            } else {
-                proto.appears_in_sing_box_sub()
+            let compatible = match compatibility {
+                Compatibility::Legacy => proto.appears_in_sing_box_sub(),
+                Compatibility::Stock => proto.appears_in_stock_sing_box_sub(),
+                Compatibility::Mihomo => matches!(pid.0.as_str(), "vless+reality" | "hysteria2"),
             };
             if !compatible {
                 tracing::debug!(
                     target = "vpnctld::sub",
                     server = %server.id,
                     protocol = %pid,
-                    stock_only,
-                    "protocol incompatible with requested sing-box format; skipping"
+                    ?compatibility,
+                    "protocol incompatible with requested subscription format; skipping"
                 );
                 continue;
             }

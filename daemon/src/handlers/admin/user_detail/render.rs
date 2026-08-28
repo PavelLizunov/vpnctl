@@ -14,8 +14,8 @@ use crate::handlers::admin::helpers::{
 };
 use crate::handlers::admin::legacy::{
     collect_amnezia_links, collect_awg_links, collect_share_links, detail_tabs,
-    live_vpn_stats_section, ninitux_url, qr_svg, share_link_card, sub_url, ua_clusters_section,
-    user_detail_per_protocol_grid, user_online_badge, user_sessions_section,
+    live_vpn_stats_section, mihomo_sub_url, ninitux_url, qr_svg, share_link_card, sub_url,
+    ua_clusters_section, user_detail_per_protocol_grid, user_online_badge, user_sessions_section,
     user_source_ips_section, user_subscription_origins_section, user_top_destinations_section,
     user_traffic_limit_section,
 };
@@ -182,6 +182,7 @@ pub(crate) async fn user_detail_render(
     .await;
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
+    let mihomo_sub_url_str = sub_token.as_deref().map(mihomo_sub_url);
     let chain_sub_url_str = if chain_routes.is_empty() {
         None
     } else {
@@ -791,6 +792,20 @@ pub(crate) async fn user_detail_render(
                     (mask_secret(t))
                     " · " (crate::i18n::tr(lang, "LAN-only fallback", "LAN-only fallback"))
                 }
+            }
+        }
+        @if let Some(url) = mihomo_sub_url_str.as_ref() {
+            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule);" {
+                div.ed-art-eyebrow {
+                    (crate::i18n::tr(lang, "Mihomo / Omarchy subscription", "Mihomo / Omarchy подписка"))
+                }
+                (share_link_card(url, &html! {
+                    (crate::i18n::tr(
+                        lang,
+                        "Import this URL into Mihomo, Omarchy, Clash Meta, or compatible clients. It delivers a ready YAML config and uses dialer-proxy only when a direct entry node is available.",
+                        "Импортируй этот URL в Mihomo, Omarchy, Clash Meta или совместимые клиенты. Он отдаёт готовый YAML и использует dialer-proxy только при доступном прямом входном узле.",
+                    ))
+                }))
             }
         }
         @if let Some(url) = chain_sub_url_str.as_ref() {

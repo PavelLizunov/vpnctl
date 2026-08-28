@@ -106,11 +106,16 @@ never live on the protocol struct.
 ### Subscription formats
 
 `GET /sub/<token>` preserves the existing User-Agent-selected response byte-for-byte.
-When a user has a chained exit, the admin **Delivery** tab also provides one ready
-`GET /sub/<token>?format=sing-box` URL/QR. That explicit response is stock sing-box
-JSON: chained targets carry native `detour` fields and disappear fail-closed when
-their entry has no usable outbound. Fork-only protocols such as `vless+xhttp`
-remain available to VPNRouter/sing-box-lx but are omitted from this stock format.
+The daemon exposes canonical public subscription endpoints (`https://ninitux.com/api/v1/sub/<token>`)
+alongside LAN fallback aliases (`http://<host>/sub/<token>`).
+
+- **Mihomo / Omarchy format** (`?format=mihomo`): Renders a ready YAML configuration for
+  Mihomo, Omarchy, and Clash Meta. The initial scope is `vless+reality` and `hysteria2`;
+  unsupported protocols are omitted. Chained routes use Mihomo `dialer-proxy`, failing closed
+  (omitting target nodes) when their direct entry node is unavailable or unusable.
+- **Stock sing-box format** (`?format=sing-box`): Delivers stock sing-box JSON where chained targets
+  carry native `detour` fields and disappear fail-closed when their entry has no usable outbound.
+  Fork-only protocols such as `vless+xhttp` remain available to VPNRouter/sing-box-lx but are omitted from stock format exports.
 
 ## Workspace layout
 

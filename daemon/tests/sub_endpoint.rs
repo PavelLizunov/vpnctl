@@ -8,6 +8,8 @@
 mod client_detour;
 #[path = "sub_endpoint/common.rs"]
 mod common;
+#[path = "sub_endpoint/mihomo.rs"]
+mod mihomo;
 #[path = "sub_endpoint/payloads.rs"]
 mod payloads;
 #[path = "sub_endpoint/rate_limiting.rs"]
