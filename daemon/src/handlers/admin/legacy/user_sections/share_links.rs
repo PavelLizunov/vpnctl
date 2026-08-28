@@ -54,6 +54,16 @@ pub(crate) fn ninitux_url(device_id: &str) -> Option<String> {
     Some(format!("https://ninitux.com/api/v1/app/config/{device_id}"))
 }
 
+/// Canonical public Mihomo subscription URL — the URL Mihomo / Omarchy
+/// clients fetch when importing subscription configs.
+///
+/// Constructs `https://ninitux.com/api/v1/sub/<path-segment-encoded-sub-token>?format=mihomo`.
+/// Never logged and never exposed anywhere except the authenticated admin Delivery page/QR.
+pub(crate) fn mihomo_sub_url(sub_token: &str) -> String {
+    let encoded_token = crate::http_util::path_segment_encode(sub_token);
+    format!("https://ninitux.com/api/v1/sub/{encoded_token}?format=mihomo")
+}
+
 /// Fixed display side of every share-link QR, in CSS pixels. Picked
 /// to fit on a phone screen at scan distance while keeping the
 /// user-detail page's Flow column narrow enough that the textarea

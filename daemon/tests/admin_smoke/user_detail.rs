@@ -4,6 +4,8 @@
 mod access_origins_presence;
 #[path = "user_detail/chain_subscription.rs"]
 mod chain_subscription;
+#[path = "user_detail/mihomo_subscription.rs"]
+mod mihomo_subscription;
 #[path = "user_detail/overview_routes.rs"]
 mod overview_routes;
 #[path = "user_detail/subscription_share_links.rs"]

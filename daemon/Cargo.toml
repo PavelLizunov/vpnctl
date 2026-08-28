@@ -71,6 +71,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde-saphyr = { workspace = true, features = ["serialize"] }
 clap = { version = "4", features = ["derive", "env"] }
 # Inline-SVG QR codes for /admin/users/<id> share-links.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -112,6 +113,7 @@ geoip = ["dep:maxminddb"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+serde-saphyr = { workspace = true, features = ["deserialize"] }
 http-body-util = "0.1"
 # Used both in admin_smoke tests AND in ssh_subprocess unit tests
 # (tempdir for deploy-key generation). The crate is already a dev-dep

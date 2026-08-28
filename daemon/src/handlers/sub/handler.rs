@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use vpnctl_core::User;
 
+use super::mihomo::render_mihomo;
 use super::singbox::render_singbox;
 use super::v2ray::render_v2ray_subscription;
 use crate::app::AppState;
@@ -21,6 +22,17 @@ static WARNED_MISSING_CONNECT_INFO: AtomicBool = AtomicBool::new(false);
 #[derive(Deserialize)]
 struct SubQuery {
     format: Option<String>,
+}
+
+enum FormatSelector {
+    SingBox,
+    Mihomo,
+}
+
+enum SubFormat {
+    V2Ray,
+    SingBox { stock_only: bool },
+    Mihomo,
 }
 
 pub(crate) async fn get(
@@ -259,8 +271,8 @@ pub(crate) async fn get(
     }
 
     // Existing clients keep their UA-selected legacy format unless the
-    // operator hands them the explicit stock sing-box URL. The query is
-    // validated only after both abuse gates below have run.
+    // operator hands them an explicit format URL. The query is validated
+    // only after both abuse gates below have run.
     let ua_wants_v2ray_subscription = ua
         .as_deref()
         .map(crate::handlers::vpn_router::is_vpn_client_ua_v2ray_family)
@@ -375,111 +387,71 @@ pub(crate) async fn get(
         return rate_limited(retry, "token");
     }
 
-    let explicit_stock_singbox = match Query::<SubQuery>::try_from_uri(request.uri()) {
+    let format_selector = match Query::<SubQuery>::try_from_uri(request.uri()) {
         Ok(Query(query)) => match query.format.as_deref() {
-            None => false,
-            Some("sing-box") => true,
+            None => None,
+            Some("sing-box") => Some(FormatSelector::SingBox),
+            Some("mihomo") => Some(FormatSelector::Mihomo),
             Some(_) => {
                 return (StatusCode::BAD_REQUEST, "invalid format selector\n").into_response();
             }
         },
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid format selector\n").into_response(),
     };
-    let want_v2ray_subscription = !explicit_stock_singbox && ua_wants_v2ray_subscription;
+
+    let sub_format = match format_selector {
+        Some(FormatSelector::Mihomo) => SubFormat::Mihomo,
+        Some(FormatSelector::SingBox) => SubFormat::SingBox { stock_only: true },
+        None if ua_wants_v2ray_subscription => SubFormat::V2Ray,
+        None => SubFormat::SingBox { stock_only: false },
+    };
 
     // ────────────────────────────────────────────────────────────────
-    // Render branch — UA selects the legacy default; `format=sing-box`
-    // explicitly overrides it. Both arms share the already-resolved
-    // user and the already-passed token gates above.
+    // Render branch — UA / format query selects renderer.
+    // All arms share the already-resolved user and token gates above.
     let (tls_ja3, tls_ja4) = peer_ip
         .map(|p| crate::real_ip::collect_tls_fingerprints(request.headers(), p))
         .unwrap_or((None, None));
 
-    if want_v2ray_subscription {
-        match render_v2ray_subscription(&state, &user, ua.as_deref()).await {
-            Ok((user_id, body)) => {
-                let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-                let _ = crate::access_log::try_enqueue(
-                    &state.access_log_tx,
-                    crate::access_log::AccessLogRecord {
-                        user_id,
-                        ip,
-                        ua,
-                        status: 200,
-                        bytes,
-                        accept_language,
-                        http_version,
-                        device_class,
-                        geo_country: None,
-                        geo_asn: None,
-                        tls_ja3,
-                        tls_ja4,
-                    },
-                );
-                (
-                    StatusCode::OK,
-                    [("content-type", "text/plain; charset=utf-8")],
-                    body,
-                )
-                    .into_response()
-            }
-            Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
-            Err(SubError::Internal(msg)) => {
-                tracing::error!(target = "vpnctld::sub", error = %msg, "v2ray sub render failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
-            }
+    let render_res = match sub_format {
+        SubFormat::V2Ray => render_v2ray_subscription(&state, &user, ua.as_deref())
+            .await
+            .map(|(uid, body)| (uid, body, "text/plain; charset=utf-8")),
+        SubFormat::SingBox { stock_only } => render_singbox(&state, &user, stock_only)
+            .await
+            .map(|(uid, cfg)| (uid, cfg.to_string(), "application/json")),
+        SubFormat::Mihomo => render_mihomo(&state, &user)
+            .await
+            .map(|(uid, yaml)| (uid, yaml, "text/yaml")),
+    };
+
+    match render_res {
+        Ok((user_id, body, content_type)) => {
+            let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            let _ = crate::access_log::try_enqueue(
+                &state.access_log_tx,
+                crate::access_log::AccessLogRecord {
+                    user_id,
+                    ip,
+                    ua,
+                    status: 200,
+                    bytes,
+                    accept_language,
+                    http_version,
+                    device_class,
+                    geo_country: None,
+                    geo_asn: None,
+                    tls_ja3,
+                    tls_ja4,
+                },
+            );
+
+            (StatusCode::OK, [("content-type", content_type)], body).into_response()
         }
-    } else {
-        match render_singbox(&state, &user, explicit_stock_singbox).await {
-            Ok((user_id, cfg)) => {
-                let body = cfg.to_string();
-                // 32-bit defensive — `body.len()` is `usize`; on a
-                // 32-bit build `as u64` would silently truncate if it
-                // ever exceeded 4 GiB (impossible for a sub-config, but
-                // the same defensive cast pattern is used in
-                // `log_sub_access` for the bytes bind, so keep symmetry).
-                let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-
-                // Bounded back-pressure (audit-fix Plan B / retroactive
-                // review #3 / security #2): hand the record to the
-                // dedicated writer task via a non-blocking `try_send`.
-                // Channel-full → record dropped + warn-log; channel-
-                // closed → error-log (writer crashed). Either way the
-                // HTTP response stays 200 — we never block on the log
-                // write and we never spawn an unbounded number of tasks.
-                // See `crate::access_log` module docs for the rationale.
-                // Track-1.4 — TLS fingerprint from nginx-forwarded
-                // headers, GATED by VPNCTLD_TRUSTED_PROXIES. peer_ip is
-                // the raw TCP peer (NOT the XFF-resolved one) since the
-                // trust gate keys on the immediate connection's source.
-                let _ = crate::access_log::try_enqueue(
-                    &state.access_log_tx,
-                    crate::access_log::AccessLogRecord {
-                        user_id,
-                        ip,
-                        ua,
-                        status: 200,
-                        bytes,
-                        accept_language,
-                        http_version,
-                        device_class,
-                        // GeoIP fields populated by writer task —
-                        // handler always sends None.
-                        geo_country: None,
-                        geo_asn: None,
-                        tls_ja3,
-                        tls_ja4,
-                    },
-                );
-
-                (StatusCode::OK, [("content-type", "application/json")], body).into_response()
-            }
-            Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
-            Err(SubError::Internal(msg)) => {
-                tracing::error!(target = "vpnctld::sub", error = %msg, "sub render failed");
-                // Don't leak internals to the user — generic 500.
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
-            }
+        Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
+        Err(SubError::Internal(msg)) => {
+            tracing::error!(target = "vpnctld::sub", error = %msg, "sub render failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
         }
     }
 }

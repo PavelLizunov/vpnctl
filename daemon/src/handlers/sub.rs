@@ -1,9 +1,8 @@
-//! `GET /sub/<token>` — opaque-token-keyed sing-box client config.
+//! `GET /sub/<token>` — opaque-token-keyed client subscriptions.
 //!
-//! Hiddify-style clients are pointed at this URL once and re-pull on
-//! their own schedule. We resolve the token to a user, walk all servers
-//! granted to that user, and emit a sing-box client JSON containing one
-//! outbound per (server × protocol) plus a selector for switching.
+//! Existing clients keep their User-Agent-selected sing-box JSON or URI-list
+//! bytes. Explicit selectors add stock sing-box JSON and Mihomo YAML while
+//! reusing the same token, grant, visibility, suppression, and abuse gates.
 //!
 //! Phase Track-1 hook: every successful resolve (200) writes one row
 //! into `sub_access_log` so the admin can see "how many distinct IPs
@@ -12,6 +11,7 @@
 //! be able to fill the table by spamming garbage tokens.
 
 mod handler;
+mod mihomo;
 mod singbox;
 #[cfg(test)]
 mod tests;
