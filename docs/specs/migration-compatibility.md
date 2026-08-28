@@ -15,6 +15,9 @@
     is carried by `grants.client_uuid`.
   - Restore must not change rendered output: after `vpnctl restore`,
     `/api/v1/app/config/<id>` is byte-identical for every user (CI-enforced).
+  - `GET /sub/<token>` keeps its User-Agent-selected bytes unchanged. New client
+    capabilities use explicit query-selected formats; `format=sing-box` is an
+    additive stock sing-box JSON response and never changes the default URL.
 
 ## 2. Interface / Data Contract
 

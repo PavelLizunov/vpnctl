@@ -158,6 +158,10 @@ impl Protocol for VlessXhttp {
         &[("tcp", VLESS_XHTTP_PORT)]
     }
 
+    fn appears_in_stock_sing_box_sub(&self) -> bool {
+        false
+    }
+
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         // Same REALITY active-probe defence as vless+reality
         // (an existing Strong-tier protocol): an unauthenticated
