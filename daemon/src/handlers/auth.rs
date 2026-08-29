@@ -376,14 +376,17 @@ impl BasicAuth {
 }
 
 /// Extract the value of a single cookie from the `Cookie:` header,
-/// if present. Returns the FIRST match — cookie shadowing (multiple
-/// values for one name) is not our concern; pick the first.
+/// if present. Returns the FIRST match across all `Cookie:` headers —
+/// HTTP clients/proxies may split cookies across multiple header fields.
 fn extract_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in raw.split(';') {
-        let trimmed = kv.trim();
-        if let Some(v) = trimmed.strip_prefix(&format!("{name}=")) {
-            return Some(v);
+    let prefix = format!("{name}=");
+    for raw_hv in headers.get_all(header::COOKIE) {
+        let Ok(raw) = raw_hv.to_str() else { continue };
+        for kv in raw.split(';') {
+            let trimmed = kv.trim();
+            if let Some(v) = trimmed.strip_prefix(&prefix) {
+                return Some(v);
+            }
         }
     }
     None
@@ -841,6 +844,21 @@ mod tests {
             "must extract the session cookie value among siblings"
         );
         assert_eq!(extract_cookie(&hm, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_scans_multiple_headers() {
+        let mut hm = HeaderMap::new();
+        hm.append(header::COOKIE, HeaderValue::from_static("dummy=1"));
+        hm.append(
+            header::COOKIE,
+            HeaderValue::from_static("vpnctl_admin_session=second_header_session"),
+        );
+        assert_eq!(
+            extract_cookie(&hm, SESSION_COOKIE),
+            Some("second_header_session"),
+            "must extract cookie located in secondary Cookie header line"
+        );
     }
 
     #[test]

@@ -62,7 +62,10 @@ impl Locale {
     pub fn from_request(headers: &HeaderMap) -> Self {
         // 1. Cookie. We hand-parse instead of pulling tower-cookies —
         //    one cookie, one shape, no need for a crate.
-        if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for cookie_hv in headers.get_all(axum::http::header::COOKIE) {
+            let Ok(cookie_hdr) = cookie_hv.to_str() else {
+                continue;
+            };
             for kv in cookie_hdr.split(';') {
                 let kv = kv.trim();
                 if let Some(val) = kv.strip_prefix("vpnctl_lang=") {
@@ -557,5 +560,16 @@ mod tests {
         assert_eq!(f(22), "22 страны");
         assert_eq!(f(111), "111 стран");
         assert_eq!(f(33), "33 страны");
+    }
+
+    #[test]
+    fn cookie_multiple_headers_preference() {
+        let mut h = HeaderMap::new();
+        h.append("cookie", axum::http::HeaderValue::from_static("other=1"));
+        h.append(
+            "cookie",
+            axum::http::HeaderValue::from_static("vpnctl_lang=ru"),
+        );
+        assert_eq!(Locale::from_request(&h), Locale::Ru);
     }
 }

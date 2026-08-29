@@ -36,13 +36,15 @@ use crate::http_util::form_field;
 /// existing cookie reader in this module is in `theme_accent`, which
 /// also walks the header by hand. Two readers, same pattern.
 fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let kv = piece.trim();
-        if let Some(rest) = kv.strip_prefix(name)
-            && let Some(value) = rest.strip_prefix('=')
-        {
-            return Some(value);
+    for raw_hv in headers.get_all(header::COOKIE) {
+        let Ok(raw) = raw_hv.to_str() else { continue };
+        for piece in raw.split(';') {
+            let kv = piece.trim();
+            if let Some(rest) = kv.strip_prefix(name)
+                && let Some(value) = rest.strip_prefix('=')
+            {
+                return Some(value);
+            }
         }
     }
     None

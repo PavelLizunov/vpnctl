@@ -65,13 +65,35 @@ pub(crate) fn shell(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cookie_scans_multiple_headers() {
+        let mut hm = HeaderMap::new();
+        hm.append(header::COOKIE, HeaderValue::from_static("other=val"));
+        hm.append(
+            header::COOKIE,
+            HeaderValue::from_static("vpnctl_theme=newsprint"),
+        );
+        assert_eq!(
+            cookie(&hm, "vpnctl_theme"),
+            Some("newsprint"),
+            "must find cookie in secondary Cookie header field"
+        );
+    }
+}
+
 pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == name {
-                return Some(v);
+    for raw_hv in headers.get_all(header::COOKIE) {
+        let Ok(raw) = raw_hv.to_str() else { continue };
+        for part in raw.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k == name {
+                    return Some(v);
+                }
             }
         }
     }
