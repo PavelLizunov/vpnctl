@@ -44,7 +44,7 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     }
     // Audit ts has millisecond precision; guarantee the grants below
     // land strictly AFTER the baseline rows.
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let app = router(s);
 
     // 1. user-detail grant handler.

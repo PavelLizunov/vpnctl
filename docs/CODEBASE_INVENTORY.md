@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 352 (238 prod / 114 test)
-- **Total Rust LOC:** 135,095 (85,115 prod / 49,980 test)
+- **Total Rust LOC:** 135,151 (85,171 prod / 49,980 test)
 - **Database Migrations:** 54
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,186 (8) | 113 (1) | **6,299** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,265 (17) | 3,928 (11) | **8,193** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,061 (4) | 693 (4) | **2,754** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,573 (126) | 28,016 (51) | **75,589** |
-| **Total** | | | | **85,115 (238)** | **49,980 (114)** | **135,095** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,629 (126) | 28,016 (51) | **75,645** |
+| **Total** | | | | **85,171 (238)** | **49,980 (114)** | **135,151** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -51,7 +51,7 @@
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 965 | `daemon` | Test |
 | `crates/kernels/src/amnezia_wg.rs` | 954 | `crates/kernels` | Prod |
-| `daemon/src/handlers/admin/legacy/deploy_sse.rs` | 945 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/deploy_sse.rs` | 947 | `daemon` | Prod |
 | `daemon/src/node_probe.rs` | 944 | `daemon` | Prod |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
