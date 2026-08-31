@@ -894,7 +894,7 @@ mod tests {
             "rollback must attempt both restores"
         );
         assert!(script.contains("sing-box.rollback-new"));
-        assert!(script.contains("singbox-stats-helper.rollback-new"));
+        assert!(script.contains("$LIVE_HELPER.rollback-new"));
         assert!(script.contains("systemctl is-active --quiet sing-box"));
         assert!(
             script.contains("cmp -s"),

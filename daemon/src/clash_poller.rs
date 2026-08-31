@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use vpnctl_core::{ServerId, UserId};
 use vpnctl_inventory::{SqliteInventory, VpnStatsDelta};
 
+#[cfg(test)]
 use crate::clash_api::Snapshot;
 
 /// Per-server cumulative-totals memory. The diff engine keeps one
@@ -43,7 +44,7 @@ struct DiffEngine {
 
 #[cfg(test)]
 impl DiffEngine {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
@@ -68,7 +69,7 @@ impl DiffEngine {
     /// `SqliteInventory::server_live_activity`) never double-counts the
     /// attributed portion. As attribution approaches 100% the remainder
     /// trends to ~0 (only sub-poll-interval connections never sampled).
-    pub fn tick(&mut self, server_id: &ServerId, snapshot: &Snapshot) -> Vec<VpnStatsDelta> {
+    fn tick(&mut self, server_id: &ServerId, snapshot: &Snapshot) -> Vec<VpnStatsDelta> {
         let prior = self.state.get(server_id).cloned();
 
         // Rebuild per-connection state from this snapshot and, in the
@@ -159,7 +160,7 @@ impl DiffEngine {
     /// removed from inventory — slow leak in a long-running daemon.
     /// (Caught by review-agent on the burst review of
     /// cd61838^..492fdeb; pinned here so chunk 4 can't forget.)
-    pub fn forget(&mut self, server_id: &ServerId) {
+    fn forget(&mut self, server_id: &ServerId) {
         self.state.remove(server_id);
     }
 
