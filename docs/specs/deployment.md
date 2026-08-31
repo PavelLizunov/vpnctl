@@ -5,8 +5,8 @@
 - What: how vpnctld is built, shipped, and kept alive on the homelab prod host,
   and the runtime constraints that once broke production.
 - Invariants:
-  - Deploy daemon + CLI from the SAME revision; installing only the daemon used
-    to leave `/usr/local/bin/vpnctl` stale and broke the weekly kernel updater.
+  - Deploy daemon, CLI, managed sing-box, and its stats helper from the SAME
+    revision; partial revision rollouts break migrations or traffic accounting.
   - A failed copy must never leave a partial executable (atomic temp + rename).
   - Never ship an SSH library that pulls glibc newer than the prod host.
 
@@ -19,6 +19,7 @@
 | Health | `/api/v1/health` → `{"status":"ok","version":"<semver>","build":"<semver>+<sha>"}` |
 | Binary | `/opt/vpnctl/vpnctld` (root:root 0755) |
 | CLI | `/usr/local/bin/vpnctl` |
+| Node artifacts | `/opt/vpnctl/node-artifacts/{sing-box,singbox-stats-helper}` |
 | Assets | `/opt/vpnctl/assets/` |
 | Inventory DB | `/var/lib/vpnctl/inv.db` |
 | EnvFile | `/etc/vpnctl/vpnctld.env` (creds live here, never in `Environment=`) |
@@ -36,10 +37,16 @@ build-host prerequisites are NOT yet covered by CI (see BACKLOG.md). The
 that verification.
 
 Deploy: `scripts/deploy.sh` on the prod host — builds (or accepts prebuilt)
-daemon + CLI, exports `VPNCTL_BUILD_SHA` before build so binaries report
-`<semver>+<sha>` (`vpnctl_core::build_version`, `option_env!`, no git at
-runtime), validates BOTH sources before installing either, atomic rename into
-place. Then `sudo systemctl restart vpnctld` and verify the changed code path
+daemon + CLI + managed sing-box + node-side stats helper, exports
+`VPNCTL_BUILD_SHA` before the Rust build so binaries report `<semver>+<sha>`
+(`vpnctl_core::build_version`, `option_env!`, no git at runtime), validates all
+four sources before installing any, stages all four, installs node artifacts
+first and daemon last, and rolls every prior path back on an interrupted swap.
+The Go artifacts are static linux/amd64 builds; managed sing-box must report the
+`with_v2ray_api` tag. For the accounting migration, install artifacts first,
+deploy every sing-box node while the old daemon still polls Clash, verify the
+loopback Stats API, and only then restart vpnctld; this avoids a collection gap
+during rollout. Then `sudo systemctl restart vpnctld` and verify the changed code path
 with a curl. Before replacing: `sudo cp -a /opt/vpnctl/vpnctld
 /opt/vpnctl/vpnctld.bak-<tag>`.
 

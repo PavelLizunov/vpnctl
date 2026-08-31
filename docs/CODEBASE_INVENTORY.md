@@ -5,9 +5,9 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 352 (238 prod / 114 test)
-- **Total Rust LOC:** 135,095 (85,115 prod / 49,980 test)
-- **Database Migrations:** 54
+- **Tracked Rust Files:** 354 (239 prod / 115 test)
+- **Total Rust LOC:** 136,444 (85,734 prod / 50,710 test)
+- **Database Migrations:** 55
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
 
 ## Workspace Crates & Targets
@@ -19,19 +19,19 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,841 (5) | 0 (0) | **1,841** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 38 tests | 13,943 (50) | 15,620 (42) | **29,563** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,186 (8) | 113 (1) | **6,299** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 39 tests | 14,240 (50) | 16,278 (43) | **30,518** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,366 (8) | 113 (1) | **6,479** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,265 (17) | 3,928 (11) | **8,193** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,061 (4) | 693 (4) | **2,754** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,573 (126) | 28,016 (51) | **75,589** |
-| **Total** | | | | **85,115 (238)** | **49,980 (114)** | **135,095** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,715 (127) | 28,088 (51) | **75,803** |
+| **Total** | | | | **85,734 (239)** | **50,710 (115)** | **136,444** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
+| `crates/kernels/src/sing_box.rs` | 2,151 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,030 | `daemon` | Test |
-| `crates/kernels/src/sing_box.rs` | 1,971 | `crates/kernels` | Prod |
 | `daemon/src/handlers/admin/user_detail/render.rs` | 1,877 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
 | `daemon/src/health_monitor/tests.rs` | 1,629 | `daemon` | Prod |
@@ -56,7 +56,7 @@
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
 
-## Database Migrations (54)
+## Database Migrations (55)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -114,6 +114,7 @@
 | `0052` | protocol assurance | `crates/inventory/migrations/0052_protocol_assurance.sql` | 22 |
 | `0053` | server role | `crates/inventory/migrations/0053_server_role.sql` | 37 |
 | `0054` | client detour | `crates/inventory/migrations/0054_client_detour.sql` | 38 |
+| `0055` | vpn counter baselines | `crates/inventory/migrations/0055_vpn_counter_baselines.sql` | 21 |
 
 ## `daemon/src/app/routes.rs` `.route(...)` Registrations (120)
 

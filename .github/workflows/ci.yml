@@ -62,6 +62,32 @@ jobs:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  managed-node-artifacts:
+    name: managed sing-box accounting artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: test and verify stats helper dependencies
+        working-directory: tools/singbox-stats-helper
+        run: |
+          go test -mod=readonly ./...
+          go mod verify
+      - name: build static stats helper
+        run: tools/singbox-stats-helper/build.sh /tmp/singbox-stats-helper
+      - name: build managed sing-box
+        env:
+          OUT: /tmp/sing-box
+        run: tools/singbox-attr-patch/build.sh
+      - name: verify managed features
+        run: |
+          /tmp/sing-box version | grep -q with_v2ray_api
+          test -x /tmp/singbox-stats-helper
+
   # NOTE: a separate `cargo audit` job was removed — the `deny` job above
   # already runs `cargo deny check advisories` against the same RustSec DB,
   # AND honours our deny.toml `[advisories].ignore` list. Having both meant

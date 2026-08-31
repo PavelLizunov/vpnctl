@@ -1,34 +1,9 @@
-//! Track-3 chunk 2 — clash-api poller diff engine.
+//! sing-box telemetry poller.
 //!
-//! Sits between `crate::clash_api::SshClashClient` (chunk 1) and
-//! `vpnctl_inventory::SqliteInventory::record_vpn_stats` (chunk 2 SQL
-//! side). Per server, it remembers the previous snapshot's totals; on
-//! every new snapshot it computes the delta-vs-prior and emits one
-//! `VpnStatsDelta` per active user plus one server-wide row.
-//!
-//! # Restart semantics
-//!
-//! sing-box's clash-api totals reset to 0 every time the daemon
-//! restarts on the VPN node. Without restart detection, the next
-//! delta would be `current - large_prior = negative`, which would
-//! render as "billions of bytes" if we cast naively. The diff engine
-//! detects a restart by comparing the new total against the prior:
-//! if the new total is STRICTLY LESS than the prior, treat the new
-//! total itself as the delta (i.e. "everything since the restart").
-//!
-//! # First snapshot
-//!
-//! On the very first snapshot from a server we have no prior to
-//! diff against. We initialize the prior totals and emit NO rows
-//! (a delta requires two samples). The poller will emit its first
-//! row on the SECOND tick.
-//!
-//! # Quiet ticks
-//!
-//! Ticks where every (user, total) pair didn't move emit zero rows
-//! — quiet nodes don't bloat the table. The poller's `tick` method
-//! returns the rows it WOULD write; the caller decides whether to
-//! call `record_vpn_stats` (skip if empty).
+//! Clash API remains the live-connection/source/destination snapshot. Exact
+//! per-user bytes come from the node-side cumulative V2Ray Stats helper; the
+//! inventory layer persists server and user baselines atomically with interval
+//! deltas, so daemon restarts and short-lived connections do not lose traffic.
 
 use std::collections::HashMap;
 
@@ -39,6 +14,7 @@ use crate::clash_api::Snapshot;
 
 /// Per-server cumulative-totals memory. The diff engine keeps one
 /// per known server.
+#[cfg(test)]
 #[derive(Debug, Default, Clone)]
 struct ServerTotals {
     /// Server-wide bytes since the last sing-box restart.
@@ -59,11 +35,13 @@ struct ServerTotals {
 /// Stateful diff engine. One instance per `vpnctld` process; the
 /// poller calls `tick(server_id, snapshot)` once per server per
 /// poll interval.
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct DiffEngine {
+struct DiffEngine {
     state: HashMap<ServerId, ServerTotals>,
 }
 
+#[cfg(test)]
 impl DiffEngine {
     pub fn new() -> Self {
         Self::default()
@@ -194,6 +172,7 @@ impl DiffEngine {
 
 /// Compute `new - prior`, treating `new < prior` as a restart
 /// (return `new` itself — the new total is the delta from zero).
+#[cfg(test)]
 fn delta(prior: u64, new: u64) -> u64 {
     if new < prior { new } else { new - prior }
 }
@@ -240,10 +219,9 @@ pub(crate) fn poll_interval_secs() -> u64 {
     crate::config::parse_positive_secs("VPNCTLD_POLL_INTERVAL_SECS", DEFAULT_INTERVAL_SECS)
 }
 
-/// Phase Track-3 chunk 4 — daemon-side scheduler that pulls one
-/// clash-api snapshot from each server every `POLL_INTERVAL` and
-/// records the diff. The "engine" half (DiffEngine) lives above;
-/// this is the runtime wiring.
+/// Daemon-side scheduler that pulls one Clash live snapshot and one
+/// cumulative V2Ray Stats snapshot from each server every poll interval,
+/// then commits the derived deltas through the inventory transaction.
 ///
 /// Robustness contract:
 ///
@@ -258,9 +236,8 @@ pub(crate) fn poll_interval_secs() -> u64 {
 ///   poller logs and skips. The user-detail empty-state already
 ///   tells the operator about this prerequisite.
 ///
-/// * **DiffEngine gets `forget()` for removed servers.** Per the
-///   contract pinned in `DiffEngine::forget` — without this the
-///   in-memory state grows monotonically.
+/// * **Removed servers are forgotten.** The live snapshot cache is pruned
+///   against the current inventory on every tick.
 ///
 /// * **One tick per interval, sequentially per server.** Five
 ///   servers × 1 s of SSH each ≈ 5 s per tick. The default
@@ -292,7 +269,7 @@ pub fn spawn_clash_poller(
         // Skip the first immediate tick — daemon startup is hot,
         // and the operator typically wants 5 min of grace.
         tick.tick().await;
-        let mut engine = DiffEngine::new();
+        let mut tracked_servers = std::collections::HashSet::<ServerId>::new();
 
         loop {
             tick.tick().await;
@@ -307,27 +284,18 @@ pub fn spawn_clash_poller(
                     continue;
                 }
             };
-            // forget() any server that vanished from inventory
-            // since last tick (DiffEngine leak guard).
+            // Forget cached snapshots for servers removed from inventory.
             let alive: std::collections::HashSet<ServerId> =
-                servers.iter().map(|s| s.id.clone()).collect();
-            let tracked: Vec<ServerId> = engine
-                .state
-                .keys()
-                .filter(|k| !alive.contains(k))
-                .cloned()
-                .collect();
-            for id in tracked {
+                servers.iter().map(|server| server.id.clone()).collect();
+            for id in tracked_servers.difference(&alive) {
                 tracing::debug!(
                     target = "vpnctld::poller",
                     server = %id.0,
                     "forgetting server (removed from inventory)"
                 );
-                engine.forget(&id);
-                // Mirror the leak guard for the cache's persistent
-                // attribution accumulator + last snapshot.
-                snapshot_cache.forget(&id);
+                snapshot_cache.forget(id);
             }
+            tracked_servers = alive;
 
             // Registered server addresses, so the per-snapshot sharing
             // signal can drop VPN-over-VPN hops — the same `NOT IN
@@ -346,14 +314,7 @@ pub fn spawn_clash_poller(
             };
 
             for server in &servers {
-                poll_one_server(
-                    &inv,
-                    &mut engine,
-                    &snapshot_cache,
-                    server,
-                    &known_server_addrs,
-                )
-                .await;
+                poll_one_server(&inv, &snapshot_cache, server, &known_server_addrs).await;
             }
         }
     })
@@ -365,7 +326,6 @@ pub fn spawn_clash_poller(
 /// hops out of the per-snapshot sharing signal (see [`is_real_client_ip`]).
 async fn poll_one_server(
     inv: &SqliteInventory,
-    engine: &mut DiffEngine,
     snapshot_cache: &crate::snapshot_cache::SnapshotCache,
     server: &vpnctl_core::Server,
     known_server_addrs: &std::collections::HashSet<std::net::IpAddr>,
@@ -441,13 +401,10 @@ async fn poll_one_server(
         }
     };
 
-    // Cache the snapshot for the «Live connections» drill-down. Our
-    // patched sing-box clash-api now emits `metadata.user` per
-    // connection (the NM-11 fix; see `clash_api::ConnectionMeta::user`),
-    // so per-user attribution comes straight off the wire — no sing-box
-    // log scrape needed. That scrape used to pull the full
-    // multi-hundred-MB log over SSH every tick (de's log is ~700 MB);
-    // removing it is the bulk of this poll's I/O savings.
+    // Cache the snapshot for the «Live connections» drill-down. The managed
+    // Clash patch preserves `metadata.user` for live/session/source/destination
+    // views; exact bytes are ingested from cumulative V2Ray Stats below. No
+    // log scraping or active-connection snapshot is used for byte accounting.
     snapshot_cache.store(server.id.clone(), snapshot.clone());
 
     // Phase 5b — record «куда ходит» (destination) AND «откуда
@@ -580,10 +537,8 @@ async fn poll_one_server(
                 &server.id,
                 now_utc,
                 SESSION_GAP_MINS,
-                // bytes_delta = 0 here — the diff engine handles
-                // bytes; sessions track «была активна» windows,
-                // not byte budgets. If we want bytes per session
-                // later, pipe the per-user delta through.
+                // Cumulative inventory ingest handles byte budgets;
+                // sessions track only «была активна» windows.
                 0,
                 *conn_count,
             )
@@ -599,31 +554,83 @@ async fn poll_one_server(
         }
     }
 
-    let deltas = engine.tick(&server.id, &snapshot);
-    if deltas.is_empty() {
+    use crate::singbox_stats::{SshStatsClient, StatsClient};
+    let cumulative = match SshStatsClient::new(&ssh).cumulative_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %error,
+                "cumulative sing-box stats failed; baselines unchanged"
+            );
+            return;
+        }
+    };
+    let tick = vpnctl_inventory::VpnCumulativeTick {
+        server_upload_total: cumulative.server_upload_total,
+        server_download_total: cumulative.server_download_total,
+        uptime_seconds: cumulative.uptime_seconds,
+        active_connections: u32::try_from(snapshot.connections.len()).unwrap_or(u32::MAX),
+        users: cumulative.users,
+    };
+    let rows = match inv.record_vpn_cumulative_stats(&server.id, &tick).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %error,
+                "record_vpn_cumulative_stats failed; baselines unchanged"
+            );
+            return;
+        }
+    };
+    if rows == 0 {
         tracing::debug!(
             target = "vpnctld::poller",
             server = %server.id.0,
-            "first snapshot or quiet tick — nothing to persist"
+            "cumulative baselines seeded or quiet tick"
         );
-        return;
+    } else {
+        tracing::info!(
+            target = "vpnctld::poller",
+            server = %server.id.0,
+            delta_rows = rows,
+            "persisted cumulative sing-box delta"
+        );
     }
 
-    if let Err(e) = inv.record_vpn_stats(&server.id, &deltas).await {
+    // Preserve Clash's live per-user connection counts without using its
+    // snapshot bytes for accounting. Zero-byte rows cannot double-count the
+    // cumulative ingest and remain useful to existing user activity views.
+    let mut live_rows = Vec::with_capacity(per_user_conn_count.len().saturating_add(1));
+    if !snapshot.connections.is_empty() {
+        live_rows.push(VpnStatsDelta {
+            user_id: None,
+            upload_bytes: 0,
+            download_bytes: 0,
+            active_connections: u32::try_from(snapshot.connections.len()).unwrap_or(u32::MAX),
+        });
+    }
+    live_rows.extend(
+        per_user_conn_count
+            .into_iter()
+            .map(|(user_id, active_connections)| VpnStatsDelta {
+                user_id: Some(UserId(user_id)),
+                upload_bytes: 0,
+                download_bytes: 0,
+                active_connections,
+            }),
+    );
+    if let Err(error) = inv.record_vpn_stats(&server.id, &live_rows).await {
         tracing::warn!(
             target = "vpnctld::poller",
             server = %server.id.0,
-            error = %e,
-            "record_vpn_stats failed"
+            error = %error,
+            "recording live Clash connection counts failed"
         );
-        return;
     }
-    tracing::info!(
-        target = "vpnctld::poller",
-        server = %server.id.0,
-        delta_rows = deltas.len(),
-        "persisted clash-api delta"
-    );
 }
 
 #[cfg(test)]

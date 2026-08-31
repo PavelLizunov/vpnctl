@@ -38,6 +38,6 @@ pub use sqlite::{
     ProxyMaskedStats, ServerLiveActivity, ServerRole, SharingSignals, SqliteInventory,
     SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn,
     SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, TrafficBreakdown, UaCluster,
-    UptimeStat, UserLifecycle, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow,
-    VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
+    UptimeStat, UserLifecycle, VpnCumulativeCounter, VpnCumulativeTick, VpnStatsDelta, VpnStatsRow,
+    VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
 };

@@ -35,6 +35,7 @@ pub mod config;
 pub mod handlers;
 pub mod health_monitor;
 pub mod real_ip;
+mod singbox_stats;
 // AmneziaWG per-user source-IP poller — the "amneziawg metrics from wg show"
 // path clash_poller's skip comment names; feeds the sharing verdict for WG.
 pub mod wg_stats_poller;
