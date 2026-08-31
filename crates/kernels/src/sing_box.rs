@@ -49,19 +49,58 @@ impl SingBox {
 const SING_BOX_MIN_VERSION: &str = "1.13.19";
 const DEFAULT_SING_BOX_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/sing-box";
 const DEFAULT_STATS_HELPER_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/singbox-stats-helper";
-const REMOTE_SING_BOX_ARTIFACT: &str = "/tmp/vpnctl-sing-box";
-const REMOTE_STATS_HELPER_ARTIFACT: &str = "/tmp/vpnctl-singbox-stats-helper";
+const REMOTE_SING_BOX_ARTIFACT_PREFIX: &str = "/tmp/vpnctl-sing-box";
+const REMOTE_STATS_HELPER_ARTIFACT_PREFIX: &str = "/tmp/vpnctl-singbox-stats-helper";
+static REMOTE_ARTIFACT_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-const INSTALL_MANAGED_ARTIFACTS_SCRIPT: &str = r#"set -eu
-MANAGED_SB=/tmp/vpnctl-sing-box
-STATS_HELPER=/tmp/vpnctl-singbox-stats-helper
-LIVE_HELPER=/usr/local/libexec/vpnctl/singbox-stats-helper
+fn remote_artifact_paths() -> (String, String) {
+    let sequence = REMOTE_ARTIFACT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let suffix = format!("{}.{}", std::process::id(), sequence);
+    (
+        format!("{REMOTE_SING_BOX_ARTIFACT_PREFIX}.{suffix}"),
+        format!("{REMOTE_STATS_HELPER_ARTIFACT_PREFIX}.{suffix}"),
+    )
+}
+
+fn cleanup_remote_artifacts_script(sing_box: &str, helper: &str) -> String {
+    format!("rm -f {sing_box} {helper}")
+}
+
+fn install_managed_artifacts_script(sing_box: &str, helper: &str) -> String {
+    format!(
+        "set -eu\nUPLOADED_SB={sing_box}\nUPLOADED_HELPER={helper}\n\
+         {INSTALL_MANAGED_ARTIFACTS_SCRIPT_BODY}"
+    )
+}
+
+const INSTALL_MANAGED_ARTIFACTS_SCRIPT_BODY: &str = r#"STAGE_DIR=/usr/local/libexec/vpnctl
+MANAGED_SB="$STAGE_DIR/.sing-box-stage.$$"
+STATS_HELPER="$STAGE_DIR/.singbox-stats-helper-stage.$$"
+LIVE_HELPER="$STAGE_DIR/singbox-stats-helper"
 PREV_SB=/usr/bin/sing-box.vpnctl-prev
-PREV_HELPER=/usr/local/libexec/vpnctl/singbox-stats-helper.prev
+PREV_HELPER="$STAGE_DIR/singbox-stats-helper.prev"
+
+# Hardened nodes mount /tmp noexec. Copy uploads onto an executable filesystem
+# before invoking either artifact, and clean every staging path on early exit.
+cleanup_stages() {
+    rm -f "$MANAGED_SB" "$STATS_HELPER" "$UPLOADED_SB" "$UPLOADED_HELPER"
+}
+cleanup_on_signal() {
+    trap - EXIT HUP INT TERM
+    cleanup_stages
+    exit 1
+}
+trap cleanup_stages EXIT
+trap cleanup_on_signal HUP INT TERM
+exec 9>/run/lock/vpnctl-singbox-install.lock
+flock -w 300 9
+install -d -m 0755 "$STAGE_DIR"
+install -m 0755 "$UPLOADED_SB" "$MANAGED_SB"
+install -m 0755 "$UPLOADED_HELPER" "$STATS_HELPER"
 
 "$MANAGED_SB" version | grep -q 'with_v2ray_api'
 "$MANAGED_SB" check -D /var/lib/sing-box -C /etc/sing-box
-install -d -m 0755 /usr/local/libexec/vpnctl
 if [ ! -e /usr/bin/sing-box.vpnctl-stock ]; then
     cp -a /usr/bin/sing-box /usr/bin/sing-box.vpnctl-stock.new
     mv -f /usr/bin/sing-box.vpnctl-stock.new /usr/bin/sing-box.vpnctl-stock
@@ -78,8 +117,10 @@ else
 fi
 success=0
 rollback() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    set +e
     if [ "$success" -eq 0 ]; then
-        set +e
         restored=1
         install -m 0755 "$PREV_SB" /usr/bin/sing-box.rollback-new && \
             mv -f /usr/bin/sing-box.rollback-new /usr/bin/sing-box || restored=0
@@ -94,8 +135,13 @@ rollback() {
             systemctl restart sing-box >/dev/null 2>&1 || true
         fi
     fi
+    cleanup_stages
+    if [ "$success" -eq 0 ] && [ "$status" -eq 0 ]; then
+        status=1
+    fi
+    exit "$status"
 }
-trap rollback EXIT
+trap rollback EXIT HUP INT TERM
 
 install -m 0755 "$STATS_HELPER" "$LIVE_HELPER.new"
 mv -f "$LIVE_HELPER.new" "$LIVE_HELPER"
@@ -111,8 +157,8 @@ fi
 systemctl is-active --quiet sing-box
 apt-mark hold sing-box >/dev/null
 success=1
-trap - EXIT
-rm -f "$MANAGED_SB" "$STATS_HELPER"
+cleanup_stages
+trap - EXIT HUP INT TERM
 "#;
 
 /// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
@@ -374,11 +420,25 @@ impl Kernel for SingBox {
         // Idempotent base setup keeps the official package as the rollback
         // source; the managed binary then adds with_v2ray_api and the helper.
         ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
-        ssh.upload(REMOTE_SING_BOX_ARTIFACT, &sing_box).await?;
-        ssh.upload(REMOTE_STATS_HELPER_ARTIFACT, &stats_helper)
-            .await?;
-        ssh.exec(INSTALL_MANAGED_ARTIFACTS_SCRIPT).await?;
-        Ok(())
+        let (remote_sing_box, remote_stats_helper) = remote_artifact_paths();
+        let cleanup_script =
+            cleanup_remote_artifacts_script(&remote_sing_box, &remote_stats_helper);
+        let install_script =
+            install_managed_artifacts_script(&remote_sing_box, &remote_stats_helper);
+        ssh.exec(&cleanup_script).await?;
+        let install_result: Result<()> = async {
+            ssh.upload(&remote_sing_box, &sing_box).await?;
+            ssh.upload(&remote_stats_helper, &stats_helper).await?;
+            ssh.exec(&install_script).await?;
+            Ok(())
+        }
+        .await;
+        if install_result.is_err() {
+            // The installer cleans its own paths once its shell starts. Cover
+            // partial uploads and transport failures before that point too.
+            let _ = ssh.exec(&cleanup_script).await;
+        }
+        install_result
     }
 
     fn render_config(
@@ -882,13 +942,18 @@ mod tests {
 
     #[test]
     fn managed_install_requires_v2ray_api_and_blocks_apt_clobber() {
-        let script = INSTALL_MANAGED_ARTIFACTS_SCRIPT;
+        let uploaded_sing_box = "/tmp/vpnctl-sing-box.123.1";
+        let uploaded_helper = "/tmp/vpnctl-singbox-stats-helper.123.1";
+        let script = install_managed_artifacts_script(uploaded_sing_box, uploaded_helper);
+        let cleanup = cleanup_remote_artifacts_script(uploaded_sing_box, uploaded_helper);
         assert!(script.contains("with_v2ray_api"));
         assert!(script.contains("apt-mark hold sing-box"));
         assert!(script.contains("sing-box.vpnctl-stock"));
         assert!(script.contains("sing-box.vpnctl-prev"));
         assert!(script.contains("singbox-stats-helper.prev"));
-        assert!(script.contains("trap rollback EXIT"));
+        assert!(script.contains("trap rollback EXIT HUP INT TERM"));
+        assert!(script.contains("trap cleanup_on_signal HUP INT TERM"));
+        assert!(script.contains("trap - EXIT HUP INT TERM"));
         assert!(
             script.contains("set +e"),
             "rollback must attempt both restores"
@@ -896,10 +961,40 @@ mod tests {
         assert!(script.contains("sing-box.rollback-new"));
         assert!(script.contains("$LIVE_HELPER.rollback-new"));
         assert!(script.contains("systemctl is-active --quiet sing-box"));
+        assert!(script.contains("install -m 0755 \"$UPLOADED_SB\" \"$MANAGED_SB\""));
+        assert!(script.contains("trap cleanup_stages EXIT"));
+        assert!(script.contains("exec 9>/run/lock/vpnctl-singbox-install.lock"));
+        assert!(
+            script.find("flock -w 300 9") < script.find("cp -a /usr/bin/sing-box"),
+            "the node-local lock must cover every shared backup and live path"
+        );
+        assert!(script.contains("UPLOADED_SB=/tmp/vpnctl-sing-box.123.1"));
+        assert!(script.contains("UPLOADED_HELPER=/tmp/vpnctl-singbox-stats-helper.123.1"));
+        assert!(cleanup.contains(uploaded_sing_box));
+        assert!(cleanup.contains(uploaded_helper));
+        assert!(
+            script.find("install -m 0755 \"$UPLOADED_SB\" \"$MANAGED_SB\"")
+                < script.find("\"$MANAGED_SB\" version"),
+            "the uploaded binary must move off noexec /tmp before execution"
+        );
         assert!(
             script.contains("cmp -s"),
             "unchanged binaries must be a no-op"
         );
+    }
+
+    #[test]
+    fn managed_upload_paths_are_unique_and_shell_safe() {
+        let first = remote_artifact_paths();
+        let second = remote_artifact_paths();
+        assert_ne!(first, second);
+        for path in [first.0, first.1, second.0, second.1] {
+            assert!(path.starts_with("/tmp/vpnctl-"));
+            assert!(
+                path.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.'))
+            );
+        }
     }
 
     /// `ensure_installed` must provision the shared self-signed TLS cert
