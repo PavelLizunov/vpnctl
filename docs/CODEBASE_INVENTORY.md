@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 354 (239 prod / 115 test)
-- **Total Rust LOC:** 136,445 (85,735 prod / 50,710 test)
+- **Total Rust LOC:** 136,540 (85,830 prod / 50,710 test)
 - **Database Migrations:** 55
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
 
@@ -20,17 +20,17 @@
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 39 tests | 14,240 (50) | 16,278 (43) | **30,518** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,366 (8) | 113 (1) | **6,479** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,461 (8) | 113 (1) | **6,574** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,265 (17) | 3,928 (11) | **8,193** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,061 (4) | 693 (4) | **2,754** |
 | `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,716 (127) | 28,088 (51) | **75,804** |
-| **Total** | | | | **85,735 (239)** | **50,710 (115)** | **136,445** |
+| **Total** | | | | **85,830 (239)** | **50,710 (115)** | **136,540** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `crates/kernels/src/sing_box.rs` | 2,151 | `crates/kernels` | Prod |
+| `crates/kernels/src/sing_box.rs` | 2,246 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,030 | `daemon` | Test |
 | `daemon/src/handlers/admin/user_detail/render.rs` | 1,877 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
