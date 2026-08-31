@@ -538,6 +538,28 @@ pub struct VpnStatsDelta {
     pub active_connections: u32,
 }
 
+/// One cumulative per-user counter returned by the node-side sing-box
+/// V2Ray Stats helper. Inventory persists the prior value and derives an
+/// exact interval delta atomically with the raw traffic rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnCumulativeCounter {
+    pub user_id: UserId,
+    pub upload_total: u64,
+    pub download_total: u64,
+}
+
+/// One complete cumulative V2Ray Stats observation for a sing-box server.
+/// Inbound server totals and per-user totals come from the same query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnCumulativeTick {
+    pub server_upload_total: u64,
+    pub server_download_total: u64,
+    /// sing-box process uptime from V2Ray `GetSysStats`.
+    pub uptime_seconds: u64,
+    pub active_connections: u32,
+    pub users: Vec<VpnCumulativeCounter>,
+}
+
 /// One row in `node_health` (Phase H chunk 2). Daemon-side poller
 /// writes one per tick per server. Fields are `Option` to mirror
 /// `daemon::node_probe::Probe` — partial-success snapshots

@@ -9,9 +9,8 @@
 //!     write access to the exact durable dir `/var/lib/vpnctl/backups`
 //!     (where the script writes the final encrypted bundle) while the
 //!     rest of `/var/lib/vpnctl` stays read-only.
-//!   * `deploy.sh` installs the daemon AND the CLI from the same revision,
-//!     atomically (temp file + rename), so a failed copy can never leave a
-//!     partial executable nor a stale `/usr/local/bin/vpnctl`.
+//!   * `deploy.sh` installs daemon, CLI, and both managed node artifacts from
+//!     the same revision, atomically per path (temp file + rename).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -72,7 +71,7 @@ fn backup_unit_stays_strict_but_can_write_backups_dir() {
 }
 
 #[test]
-fn deploy_script_installs_both_binaries_atomically() {
+fn deploy_script_installs_revision_coupled_artifacts_atomically() {
     let script = read_script("deploy.sh");
 
     // Daemon and CLI destinations are both the live production paths …
@@ -84,6 +83,11 @@ fn deploy_script_installs_both_binaries_atomically() {
         script.contains("/usr/local/bin/vpnctl"),
         "deploy.sh must target the CLI path /usr/local/bin/vpnctl \
          (the stale-CLI bug it exists to fix)"
+    );
+    assert!(
+        script.contains("/opt/vpnctl/node-artifacts/sing-box")
+            && script.contains("/opt/vpnctl/node-artifacts/singbox-stats-helper"),
+        "deploy.sh must install both managed node artifacts"
     );
 
     // … installed via a temp-file + atomic rename, never an in-place copy
@@ -97,19 +101,37 @@ fn deploy_script_installs_both_binaries_atomically() {
         "deploy.sh must rename the staged binary into place atomically"
     );
 
-    // Both sources are validated before either install, so a missing CLI
-    // binary can never leave a half-upgraded host.
-    let daemon_check = script.find("daemon binary not found");
-    let cli_check = script.find("cli binary not found");
-    let first_install = script.find("install_atomic \"$DAEMON_SRC\"");
+    // Every source is validated before the first install.
+    let checks = [
+        script.find("daemon binary not found"),
+        script.find("cli binary not found"),
+        script.find("sing-box artifact not found"),
+        script.find("stats helper not found"),
+    ];
+    let first_stage = script
+        .find("for i in \"${!SOURCES[@]}\"")
+        .expect("stage loop");
     assert!(
-        daemon_check.is_some() && cli_check.is_some() && first_install.is_some(),
-        "deploy.sh must validate both sources and install the daemon"
+        checks.iter().all(Option::is_some),
+        "deploy.sh must validate all four sources"
     );
     assert!(
-        daemon_check.unwrap() < first_install.unwrap()
-            && cli_check.unwrap() < first_install.unwrap(),
-        "both source checks must precede the first install"
+        checks
+            .into_iter()
+            .flatten()
+            .all(|check| check < first_stage),
+        "all source checks must precede staging"
+    );
+    assert!(
+        script.contains(
+            "DESTINATIONS=(\"$SING_BOX_DST\" \"$STATS_HELPER_DST\" \"$CLI_DST\" \"$DAEMON_DST\")"
+        ),
+        "node artifacts must land before the daemon compatibility switch"
+    );
+    assert!(
+        script.contains("trap rollback EXIT HUP INT TERM")
+            && script.contains("VPNCTL_FAIL_AFTER_SWAP"),
+        "deploy.sh must rollback interrupted multi-artifact swaps"
     );
 
     // Build mode: with no arguments the script builds daemon + CLI from the
@@ -137,6 +159,11 @@ fn deploy_script_installs_both_binaries_atomically() {
         build_line.contains("-p vpnctld") && build_line.contains("-p vpnctl"),
         "cargo build must produce both the daemon and the CLI: {build_line:?}"
     );
+    assert!(
+        script.contains("tools/singbox-attr-patch/build.sh")
+            && script.contains("tools/singbox-stats-helper/build.sh"),
+        "build mode must produce both managed node artifacts"
+    );
 }
 
 /// True when a usable `bash` is on PATH.
@@ -155,7 +182,7 @@ fn bash_path(p: &Path) -> String {
 }
 
 #[test]
-fn deploy_script_functional_both_binaries_land() {
+fn deploy_script_functional_all_artifacts_land() {
     if !bash_available() {
         eprintln!("skip: no bash on PATH (functional deploy.sh check)");
         return;
@@ -163,49 +190,88 @@ fn deploy_script_functional_both_binaries_land() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
 
-    let daemon_src = root.join("vpnctld.src");
-    let cli_src = root.join("vpnctl.src");
-    std::fs::write(&daemon_src, b"DAEMON_FROM_REV_X").unwrap();
-    std::fs::write(&cli_src, b"CLI_FROM_REV_X").unwrap();
-
-    let daemon_dst = root.join("opt").join("vpnctld");
-    let cli_dst = root.join("bin").join("vpnctl");
+    let sources = [
+        (root.join("vpnctld.src"), b"DAEMON_FROM_REV_X".as_slice()),
+        (root.join("vpnctl.src"), b"CLI_FROM_REV_X".as_slice()),
+        (root.join("sing-box.src"), b"SING_BOX_FROM_REV_X".as_slice()),
+        (
+            root.join("stats-helper.src"),
+            b"HELPER_FROM_REV_X".as_slice(),
+        ),
+    ];
+    for (path, content) in &sources {
+        std::fs::write(path, content).unwrap();
+    }
+    let destinations = [
+        root.join("opt").join("vpnctld"),
+        root.join("bin").join("vpnctl"),
+        root.join("artifacts").join("sing-box"),
+        root.join("artifacts").join("singbox-stats-helper"),
+    ];
 
     let script = scripts_dir().join("deploy.sh");
     let status = Command::new("bash")
         .arg(bash_path(&script))
-        .arg(bash_path(&daemon_src))
-        .arg(bash_path(&cli_src))
-        .env("VPNCTL_DAEMON_DST", bash_path(&daemon_dst))
-        .env("VPNCTL_CLI_DST", bash_path(&cli_dst))
-        .env("VPNCTL_INSTALL_OWNER", "") // unprivileged: skip chown
+        .args(sources.iter().map(|(path, _)| bash_path(path)))
+        .env("VPNCTL_DAEMON_DST", bash_path(&destinations[0]))
+        .env("VPNCTL_CLI_DST", bash_path(&destinations[1]))
+        .env("VPNCTL_SING_BOX_ARTIFACT", bash_path(&destinations[2]))
+        .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
+        .env("VPNCTL_INSTALL_OWNER", "")
         .status()
         .expect("spawn bash deploy.sh");
-    assert!(status.success(), "deploy.sh must exit 0 on a valid pair");
-
-    assert_eq!(
-        std::fs::read(&daemon_dst).unwrap(),
-        b"DAEMON_FROM_REV_X",
-        "daemon binary must land at the daemon destination"
-    );
-    assert_eq!(
-        std::fs::read(&cli_dst).unwrap(),
-        b"CLI_FROM_REV_X",
-        "CLI binary must land at the CLI destination"
+    assert!(
+        status.success(),
+        "deploy.sh must exit 0 on four valid artifacts"
     );
 
-    // No staged temp litter may survive a successful install.
-    for parent in [daemon_dst.parent().unwrap(), cli_dst.parent().unwrap()] {
+    for ((_, expected), destination) in sources.iter().zip(&destinations) {
+        assert_eq!(std::fs::read(destination).unwrap(), *expected);
+    }
+    for parent in destinations.iter().filter_map(|path| path.parent()) {
         let leftovers: Vec<_> = std::fs::read_dir(parent)
             .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with('.'))
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
             .collect();
-        assert!(
-            leftovers.is_empty(),
-            "temp litter left in {parent:?}: {leftovers:?}"
-        );
+        assert!(leftovers.is_empty(), "temp litter left in {parent:?}");
+    }
+}
+
+#[test]
+fn deploy_script_rolls_back_every_injected_swap_failure() {
+    if !bash_available() {
+        eprintln!("skip: no bash on PATH (functional deploy.sh check)");
+        return;
+    }
+    let script = scripts_dir().join("deploy.sh");
+    for fail_after in 1..=4 {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let sources: Vec<_> = (0..4).map(|i| root.join(format!("new-{i}"))).collect();
+        let destinations: Vec<_> = (0..4).map(|i| root.join(format!("live-{i}"))).collect();
+        for source in &sources {
+            std::fs::write(source, b"NEW").unwrap();
+        }
+        for destination in &destinations {
+            std::fs::write(destination, b"OLD").unwrap();
+        }
+        let status = Command::new("bash")
+            .arg(bash_path(&script))
+            .args(sources.iter().map(|path| bash_path(path)))
+            .env("VPNCTL_DAEMON_DST", bash_path(&destinations[0]))
+            .env("VPNCTL_CLI_DST", bash_path(&destinations[1]))
+            .env("VPNCTL_SING_BOX_ARTIFACT", bash_path(&destinations[2]))
+            .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
+            .env("VPNCTL_FAIL_AFTER_SWAP", fail_after.to_string())
+            .env("VPNCTL_INSTALL_OWNER", "")
+            .status()
+            .unwrap();
+        assert!(!status.success(), "failure {fail_after} must abort");
+        for destination in &destinations {
+            assert_eq!(std::fs::read(destination).unwrap(), b"OLD");
+        }
     }
 }
 
@@ -230,12 +296,18 @@ fn deploy_script_missing_cli_never_half_upgrades() {
     let daemon_src = root.join("vpnctld.src");
     std::fs::write(&daemon_src, b"NEW_DAEMON").unwrap();
     let cli_src = root.join("does-not-exist");
+    let sing_box_src = root.join("sing-box.src");
+    let helper_src = root.join("stats-helper.src");
+    std::fs::write(&sing_box_src, b"NODE_SING_BOX").unwrap();
+    std::fs::write(&helper_src, b"NODE_HELPER").unwrap();
 
     let script = scripts_dir().join("deploy.sh");
     let status = Command::new("bash")
         .arg(bash_path(&script))
         .arg(bash_path(&daemon_src))
         .arg(bash_path(&cli_src))
+        .arg(bash_path(&sing_box_src))
+        .arg(bash_path(&helper_src))
         .env("VPNCTL_DAEMON_DST", bash_path(&daemon_dst))
         .env("VPNCTL_CLI_DST", bash_path(&cli_dst))
         .env("VPNCTL_INSTALL_OWNER", "")

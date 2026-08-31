@@ -12,7 +12,8 @@ use vpnctl_core::{
 ///
 /// | Feature | Required | Activation |
 /// |---|---|---|
-/// | `experimental.clash_api` block | sing-box ≥ 1.10 | always rendered (Track-3 prep) |
+/// | `experimental.clash_api` block | sing-box ≥ 1.10 | always rendered for live metadata |
+/// | `experimental.v2ray_api` block | build tag `with_v2ray_api` | always rendered for cumulative accounting |
 /// | Hysteria2 `realm` (NAT-traversal via rendezvous + STUN) | sing-box ≥ 1.14 | only when `hysteria2.realm.server_url` is set in `RenderCtx::secrets` |
 ///
 /// On a stale node (1.13.x without the rendered key support), the
@@ -45,7 +46,74 @@ impl SingBox {
 /// presence gates. The floor is a MINIMUM, not an exact pin — we don't
 /// attempt exact-version apt pinning (SagerNet version strings are
 /// brittle), the repo candidate (≥ floor) is acceptable.
-const SING_BOX_MIN_VERSION: &str = "1.13.18";
+const SING_BOX_MIN_VERSION: &str = "1.13.19";
+const DEFAULT_SING_BOX_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/sing-box";
+const DEFAULT_STATS_HELPER_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/singbox-stats-helper";
+const REMOTE_SING_BOX_ARTIFACT: &str = "/tmp/vpnctl-sing-box";
+const REMOTE_STATS_HELPER_ARTIFACT: &str = "/tmp/vpnctl-singbox-stats-helper";
+
+const INSTALL_MANAGED_ARTIFACTS_SCRIPT: &str = r#"set -eu
+MANAGED_SB=/tmp/vpnctl-sing-box
+STATS_HELPER=/tmp/vpnctl-singbox-stats-helper
+LIVE_HELPER=/usr/local/libexec/vpnctl/singbox-stats-helper
+PREV_SB=/usr/bin/sing-box.vpnctl-prev
+PREV_HELPER=/usr/local/libexec/vpnctl/singbox-stats-helper.prev
+
+"$MANAGED_SB" version | grep -q 'with_v2ray_api'
+"$MANAGED_SB" check -D /var/lib/sing-box -C /etc/sing-box
+install -d -m 0755 /usr/local/libexec/vpnctl
+if [ ! -e /usr/bin/sing-box.vpnctl-stock ]; then
+    cp -a /usr/bin/sing-box /usr/bin/sing-box.vpnctl-stock.new
+    mv -f /usr/bin/sing-box.vpnctl-stock.new /usr/bin/sing-box.vpnctl-stock
+fi
+cp -a /usr/bin/sing-box "$PREV_SB.new"
+mv -f "$PREV_SB.new" "$PREV_SB"
+had_helper=0
+if [ -e "$LIVE_HELPER" ]; then
+    cp -a "$LIVE_HELPER" "$PREV_HELPER.new"
+    mv -f "$PREV_HELPER.new" "$PREV_HELPER"
+    had_helper=1
+else
+    rm -f "$PREV_HELPER" "$PREV_HELPER.new"
+fi
+success=0
+rollback() {
+    if [ "$success" -eq 0 ]; then
+        set +e
+        restored=1
+        install -m 0755 "$PREV_SB" /usr/bin/sing-box.rollback-new && \
+            mv -f /usr/bin/sing-box.rollback-new /usr/bin/sing-box || restored=0
+        if [ "$had_helper" -eq 1 ]; then
+            install -m 0755 "$PREV_HELPER" "$LIVE_HELPER.rollback-new" && \
+                mv -f "$LIVE_HELPER.rollback-new" "$LIVE_HELPER" || restored=0
+        else
+            rm -f "$LIVE_HELPER" || restored=0
+        fi
+        rm -f /usr/bin/sing-box.rollback-new "$LIVE_HELPER.rollback-new"
+        if [ "$restored" -eq 1 ]; then
+            systemctl restart sing-box >/dev/null 2>&1 || true
+        fi
+    fi
+}
+trap rollback EXIT
+
+install -m 0755 "$STATS_HELPER" "$LIVE_HELPER.new"
+mv -f "$LIVE_HELPER.new" "$LIVE_HELPER"
+changed=0
+if ! cmp -s "$MANAGED_SB" /usr/bin/sing-box; then
+    install -m 0755 "$MANAGED_SB" /usr/bin/sing-box.vpnctl-new
+    mv -f /usr/bin/sing-box.vpnctl-new /usr/bin/sing-box
+    changed=1
+fi
+if [ "$changed" -eq 1 ]; then
+    systemctl restart sing-box
+fi
+systemctl is-active --quiet sing-box
+apt-mark hold sing-box >/dev/null
+success=1
+trap - EXIT
+rm -f "$MANAGED_SB" "$STATS_HELPER"
+"#;
 
 /// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
 /// EVERY deploy — both the CLI (`vpnctl deploy`) and the daemon web/SSE
@@ -86,6 +154,7 @@ static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock:
         dpkg --compare-versions "$CUR" ge "{min}" || NEED=1
     fi
     if [ "$NEED" = 1 ]; then
+        apt-mark unhold sing-box >/dev/null 2>&1 || true
         apt-get update -qq
         apt-get install -y --no-install-recommends \
             curl gpg ca-certificates
@@ -291,12 +360,24 @@ impl Kernel for SingBox {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // Idempotent node setup — see [`SING_BOX_SETUP_SCRIPT`] for the
-        // full rationale (sing-box install on minimal Debian, log-file
-        // ownership, logrotate, and the shared self-signed TLS cert that
-        // tuic/hy2/trojan/anytls all need). Runs in BOTH the CLI and the
-        // web/SSE deploy paths.
+        let sing_box_path = std::env::var_os("VPNCTL_SING_BOX_ARTIFACT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SING_BOX_ARTIFACT));
+        let helper_path = std::env::var_os("VPNCTL_STATS_HELPER_ARTIFACT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
+        // Validate both local artifacts before changing the node. Packaging
+        // installs these atomically from the same vpnctl revision.
+        let sing_box = std::fs::read(sing_box_path)?;
+        let stats_helper = std::fs::read(helper_path)?;
+
+        // Idempotent base setup keeps the official package as the rollback
+        // source; the managed binary then adds with_v2ray_api and the helper.
         ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
+        ssh.upload(REMOTE_SING_BOX_ARTIFACT, &sing_box).await?;
+        ssh.upload(REMOTE_STATS_HELPER_ARTIFACT, &stats_helper)
+            .await?;
+        ssh.exec(INSTALL_MANAGED_ARTIFACTS_SCRIPT).await?;
         Ok(())
     }
 
@@ -310,6 +391,17 @@ impl Kernel for SingBox {
         for p in protocols {
             inbounds.push(p.server_inbound(ctx, users)?);
         }
+        let stats_users: Vec<&str> = users.iter().map(|user| user.id.0.as_str()).collect();
+        let stats_inbounds: Vec<String> = inbounds
+            .iter()
+            .map(|inbound| {
+                inbound
+                    .get("tag")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| CoreError::Render("sing-box inbound is missing its tag".into()))
+            })
+            .collect::<Result<_>>()?;
         let cfg = json!({
             "log": { "level": "info", "output": "/var/log/sing-box.log", "timestamp": true },
             "inbounds": inbounds,
@@ -332,6 +424,14 @@ impl Kernel for SingBox {
             "experimental": {
                 "clash_api": {
                     "external_controller": "127.0.0.1:9090"
+                },
+                "v2ray_api": {
+                    "listen": "127.0.0.1:10085",
+                    "stats": {
+                        "enabled": true,
+                        "inbounds": stats_inbounds,
+                        "users": stats_users
+                    }
                 }
             }
         });
@@ -512,15 +612,18 @@ fn sing_box_apply_script() -> &'static str {
             chmod 0640 /etc/sing-box/config.json
             systemctl reload-or-restart sing-box
 
-            # Wait up to 8 seconds for the service to settle. systemd's
-            # auto-restart back-off kicks in every 10s, so 8s is past the
-            # first attempt — if we're not "active" by then, we're in a
-            # crash loop.
+            # Wait up to 8 seconds for the service and loopback Stats API.
+            # An active service without Stats means the managed binary/helper
+            # pair is incompatible and must not be accepted.
+            stats_failed=0
             for i in 1 2 3 4 5 6 7 8; do
                 state=$(systemctl is-active sing-box || true)
                 if [ "$state" = "active" ]; then
-                    rm -f /etc/sing-box/config.json.bak
-                    exit 0
+                    if /usr/local/libexec/vpnctl/singbox-stats-helper --timeout 2s >/dev/null 2>&1; then
+                        rm -f /etc/sing-box/config.json.bak
+                        exit 0
+                    fi
+                    stats_failed=1
                 fi
                 sleep 1
             done
@@ -537,6 +640,27 @@ fn sing_box_apply_script() -> &'static str {
                 chown sing-box:sing-box /etc/sing-box/config.json || true
                 chmod 0640 /etc/sing-box/config.json || true
                 systemctl reload-or-restart sing-box || true
+            fi
+            if [ "$stats_failed" -eq 1 ] && [ -x /usr/bin/sing-box.vpnctl-prev ]; then
+                set +e
+                restored=1
+                install -m 0755 /usr/bin/sing-box.vpnctl-prev \
+                    /usr/bin/sing-box.rollback-new && \
+                    mv -f /usr/bin/sing-box.rollback-new /usr/bin/sing-box || restored=0
+                if [ -x /usr/local/libexec/vpnctl/singbox-stats-helper.prev ]; then
+                    install -m 0755 \
+                        /usr/local/libexec/vpnctl/singbox-stats-helper.prev \
+                        /usr/local/libexec/vpnctl/singbox-stats-helper.rollback-new && \
+                        mv -f /usr/local/libexec/vpnctl/singbox-stats-helper.rollback-new \
+                            /usr/local/libexec/vpnctl/singbox-stats-helper || restored=0
+                else
+                    rm -f /usr/local/libexec/vpnctl/singbox-stats-helper || restored=0
+                fi
+                rm -f /usr/bin/sing-box.rollback-new \
+                    /usr/local/libexec/vpnctl/singbox-stats-helper.rollback-new
+                if [ "$restored" -eq 1 ]; then
+                    systemctl restart sing-box || true
+                fi
             fi
             exit 1
         "#
@@ -694,7 +818,7 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::collections::HashMap;
-    use vpnctl_core::{Server, ServerId};
+    use vpnctl_core::{Server, ServerId, UserId};
 
     fn dummy_ctx<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> RenderCtx<'a> {
         RenderCtx::new(server, secrets)
@@ -730,6 +854,51 @@ mod tests {
             v["experimental"]["clash_api"]["external_controller"],
             Value::String("127.0.0.1:9090".into()),
             "clash_api must bind to 127.0.0.1:9090 (loopback only — no external exposure)"
+        );
+    }
+
+    #[test]
+    fn render_config_counts_every_user_on_loopback_v2ray_api() {
+        let s = dummy_server();
+        let secrets = HashMap::new();
+        let ctx = dummy_ctx(&s, &secrets);
+        let users = [User {
+            id: UserId("alice".into()),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        }];
+        let bytes = SingBox::new().render_config(&ctx, &users, &[]).unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let api = &v["experimental"]["v2ray_api"];
+        assert_eq!(api["listen"], "127.0.0.1:10085");
+        assert_eq!(api["stats"]["enabled"], true);
+        assert_eq!(api["stats"]["users"], serde_json::json!(["alice"]));
+    }
+
+    #[test]
+    fn managed_install_requires_v2ray_api_and_blocks_apt_clobber() {
+        let script = INSTALL_MANAGED_ARTIFACTS_SCRIPT;
+        assert!(script.contains("with_v2ray_api"));
+        assert!(script.contains("apt-mark hold sing-box"));
+        assert!(script.contains("sing-box.vpnctl-stock"));
+        assert!(script.contains("sing-box.vpnctl-prev"));
+        assert!(script.contains("singbox-stats-helper.prev"));
+        assert!(script.contains("trap rollback EXIT"));
+        assert!(
+            script.contains("set +e"),
+            "rollback must attempt both restores"
+        );
+        assert!(script.contains("sing-box.rollback-new"));
+        assert!(script.contains("$LIVE_HELPER.rollback-new"));
+        assert!(script.contains("systemctl is-active --quiet sing-box"));
+        assert!(
+            script.contains("cmp -s"),
+            "unchanged binaries must be a no-op"
         );
     }
 
@@ -1891,6 +2060,13 @@ mod tests {
             restart_after_restore,
             "restore branch must reload-or-restart back to the good config"
         );
+        assert!(
+            s[restore..exit1].contains("sing-box.vpnctl-prev")
+                && s[restore..exit1].contains("singbox-stats-helper.prev")
+                && s[restore..exit1].contains("sing-box.rollback-new")
+                && s[restore..exit1].contains("singbox-stats-helper.rollback-new"),
+            "a Stats health failure must atomically restore the previous managed pair"
+        );
         // The restore must run even though an earlier command "failed":
         // it's reached by falling through the poll loop, and each restore
         // step is `|| true`-guarded so it can't short-circuit before exit 1.
@@ -1908,6 +2084,10 @@ mod tests {
         assert!(
             s.contains("rm -f /etc/sing-box/config.json.bak"),
             "success path must clean up the .bak snapshot: {s}"
+        );
+        assert!(
+            s.contains("singbox-stats-helper --timeout 2s"),
+            "success requires the loopback Stats API, not only systemd active"
         );
     }
 

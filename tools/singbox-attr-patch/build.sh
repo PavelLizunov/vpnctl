@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Build a patched sing-box that emits `metadata.user` in the clash-api
-# /connections response — the NM-11 fix that restores per-user traffic
-# attribution in vpnctl's clash poller. See README.md for the why.
+# Build vpnctl's managed sing-box node binary. It retains the tiny
+# clash-api `metadata.user` patch for live metadata and enables the otherwise
+# optional V2Ray Stats API used for exact cumulative per-user accounting.
 #
 # Requirements: Go >= 1.25.x, git, internet (or a proxy via HTTPS_PROXY).
-# Output: a static (CGO-free) linux/amd64 binary `sing-box-<ver>-userattr`.
+# Output: a static (CGO-free) linux/amd64 binary `sing-box-<ver>-vpnctl`.
 set -euo pipefail
 
-VERSION="${SINGBOX_VERSION:-1.13.12}"
+VERSION="${SINGBOX_VERSION:-1.13.19}"
 TAG="v${VERSION}"
-WORK="${WORK:-/tmp/sb-attr-build}"
+WORK="${WORK:-/tmp/sb-vpnctl-build}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="${OUT:-${HERE}/sing-box-${VERSION}-userattr}"
+OUT="${OUT:-${HERE}/sing-box-${VERSION}-vpnctl}"
 
 # Feature tags MATCH the SagerNet release binary's `sing-box version`
 # output, MINUS:
@@ -22,7 +22,7 @@ OUT="${OUT:-${HERE}/sing-box-${VERSION}-userattr}"
 #     at CGO_ENABLED=0.
 # `-checklinkname=0` is required: common/badtls uses //go:linkname into
 # crypto/tls internals, which Go >=1.23 rejects without it.
-TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,badlinkname,tfogo_checklinkname0"
+TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api,with_tailscale,with_ccm,with_ocm,badlinkname,tfogo_checklinkname0"
 
 rm -rf "$WORK"
 git clone --depth 1 -b "$TAG" https://github.com/SagerNet/sing-box "$WORK"
@@ -31,7 +31,7 @@ git -C "$WORK" apply "${HERE}/clash-user.patch"
 cd "$WORK"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
   -tags "$TAGS" \
-  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}-userattr" \
+  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}-vpnctl" \
   -o "$OUT" ./cmd/sing-box
 
 echo "built: $OUT"

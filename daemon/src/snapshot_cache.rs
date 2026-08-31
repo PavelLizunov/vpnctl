@@ -120,9 +120,8 @@ impl SnapshotCache {
         }
     }
 
-    /// Drop a server's cached snapshot. Call when a server leaves
-    /// inventory so the map doesn't grow monotonically — mirrors
-    /// `DiffEngine::forget`.
+    /// Drop a server's cached snapshot when it leaves inventory so the map
+    /// does not grow monotonically.
     pub fn forget(&self, server: &ServerId) {
         match self.inner.write() {
             Ok(mut g) => {

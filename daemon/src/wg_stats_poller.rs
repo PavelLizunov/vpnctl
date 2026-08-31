@@ -1,8 +1,8 @@
 //! AmneziaWG per-user source-IP poller — closes the sharing-detection
 //! blind spot the clash-poller leaves behind.
 //!
-//! sing-box protocols get per-user attribution off clash-api's
-//! `metadata.user` (see [`crate::clash_poller`]). But the `wireguard`
+//! sing-box protocols use cumulative V2Ray Stats counters for per-user bytes
+//! (see [`crate::clash_poller`]). But the `wireguard`
 //! protocol is served by the **amneziawg** kernel (interface `awg0`), which
 //! has no clash-api — so `clash_poller::poll_one_server` skips amneziawg
 //! nodes, and its own comment names THIS path as the intended fix
