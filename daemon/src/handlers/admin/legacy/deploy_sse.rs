@@ -36,13 +36,15 @@ use crate::http_util::form_field;
 /// existing cookie reader in this module is in `theme_accent`, which
 /// also walks the header by hand. Two readers, same pattern.
 fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let kv = piece.trim();
-        if let Some(rest) = kv.strip_prefix(name)
-            && let Some(value) = rest.strip_prefix('=')
-        {
-            return Some(value);
+    for hdr in headers.get_all(header::COOKIE) {
+        let Ok(raw) = hdr.to_str() else { continue };
+        for piece in raw.split(';') {
+            let kv = piece.trim();
+            if let Some(rest) = kv.strip_prefix(name)
+                && let Some(value) = rest.strip_prefix('=')
+            {
+                return Some(value);
+            }
         }
     }
     None
@@ -942,4 +944,27 @@ pub(crate) async fn settings_geoip_update_now_sse(
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_cookie_handles_multiple_headers_and_first_match() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("foo=bar; wiz_id=123"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("wiz_id=456; baz=qux"),
+        );
+
+        assert_eq!(read_cookie(&headers, "wiz_id"), Some("123"));
+        assert_eq!(read_cookie(&headers, "baz"), Some("qux"));
+        assert_eq!(read_cookie(&headers, "missing"), None);
+    }
 }

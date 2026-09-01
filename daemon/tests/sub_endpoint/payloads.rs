@@ -269,9 +269,10 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
     assert_eq!(outbounds[1]["type"], "block");
 }
 
-/// Baseline security response headers (X-Content-Type-Options: nosniff and
-/// X-Frame-Options: DENY) must be attached to public API and subscription
-/// endpoints for defense-in-depth against MIME sniffing and framing.
+/// Baseline security response headers (X-Content-Type-Options: nosniff,
+/// X-Frame-Options: DENY, Referrer-Policy: no-referrer) must be attached to
+/// public API and subscription endpoints for defense-in-depth against MIME
+/// sniffing, framing, and leaking secret subscription tokens / device IDs.
 #[tokio::test]
 async fn public_endpoints_carry_security_response_headers() {
     let dir = TempDir::new().unwrap();
@@ -293,6 +294,10 @@ async fn public_endpoints_carry_security_response_headers() {
         "nosniff"
     );
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
 
     let dir2 = TempDir::new().unwrap();
     let (state2, token2) = seed(&dir2).await;
@@ -312,4 +317,8 @@ async fn public_endpoints_carry_security_response_headers() {
         "nosniff"
     );
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
 }

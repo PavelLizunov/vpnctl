@@ -66,12 +66,14 @@ pub(crate) fn shell(
 }
 
 pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == name {
-                return Some(v);
+    for hdr in headers.get_all(header::COOKIE) {
+        let Ok(raw) = hdr.to_str() else { continue };
+        for part in raw.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k == name {
+                    return Some(v);
+                }
             }
         }
     }
@@ -582,5 +584,30 @@ pub(crate) fn kernel_versions_inline(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn cookie_handles_multiple_headers_and_first_match() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("other=123; vpnctl_theme=dark"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vpnctl_theme=light; vpnctl_accent=blue"),
+        );
+
+        assert_eq!(cookie(&headers, "vpnctl_theme"), Some("dark"));
+        assert_eq!(cookie(&headers, "vpnctl_accent"), Some("blue"));
+        assert_eq!(cookie(&headers, "other"), Some("123"));
+        assert_eq!(cookie(&headers, "nonexistent"), None);
     }
 }

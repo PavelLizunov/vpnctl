@@ -379,11 +379,13 @@ impl BasicAuth {
 /// if present. Returns the FIRST match — cookie shadowing (multiple
 /// values for one name) is not our concern; pick the first.
 fn extract_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in raw.split(';') {
-        let trimmed = kv.trim();
-        if let Some(v) = trimmed.strip_prefix(&format!("{name}=")) {
-            return Some(v);
+    for hdr in headers.get_all(header::COOKIE) {
+        let Ok(raw) = hdr.to_str() else { continue };
+        for kv in raw.split(';') {
+            let trimmed = kv.trim();
+            if let Some(v) = trimmed.strip_prefix(&format!("{name}=")) {
+                return Some(v);
+            }
         }
     }
     None
@@ -840,6 +842,26 @@ mod tests {
             Some("abc.def"),
             "must extract the session cookie value among siblings"
         );
+        assert_eq!(extract_cookie(&hm, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_handles_multiple_headers_and_first_match() {
+        let mut hm = HeaderMap::new();
+        hm.append(
+            header::COOKIE,
+            HeaderValue::from_static("foo=1; vpnctl_admin_session=abc.def; bar=2"),
+        );
+        hm.append(
+            header::COOKIE,
+            HeaderValue::from_static("vpnctl_admin_session=shadowed; baz=3"),
+        );
+        assert_eq!(
+            extract_cookie(&hm, SESSION_COOKIE),
+            Some("abc.def"),
+            "must extract the first session cookie value across multiple headers"
+        );
+        assert_eq!(extract_cookie(&hm, "baz"), Some("3"));
         assert_eq!(extract_cookie(&hm, "missing"), None);
     }
 
