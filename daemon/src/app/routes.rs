@@ -663,6 +663,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
                  font-src 'self' https://fonts.gstatic.com; \
                  connect-src 'self'; \
                  frame-ancestors 'none'; \
+                 object-src 'none'; \
                  base-uri 'self'; \
                  form-action 'self'",
                 ),

@@ -139,6 +139,10 @@ async fn admin_responses_carry_security_headers() {
         csp.contains("frame-ancestors 'none'"),
         "frame-ancestors must be 'none' — clickjacking defense: {csp}"
     );
+    assert!(
+        csp.contains("object-src 'none'"),
+        "object-src must be 'none' — legacy plugin/PDF defense: {csp}"
+    );
     // Companion headers
     assert_eq!(
         headers
