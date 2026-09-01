@@ -226,6 +226,13 @@ pub(crate) async fn get_config(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let want_raw = is_vpn_client_ua(ua);
+    let has_detour_cap = is_vpnrouter_client_ua(ua)
+        && headers
+            .get_all("X-VPNRouter-Capabilities")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|s| s.split(',').flat_map(str::split_whitespace))
+            .any(|token| token == "detour-v1");
     let now = now_unix_secs();
 
     // ── Rate limit (item-3, 2026-06-01) ───────────────────────────
@@ -306,7 +313,9 @@ pub(crate) async fn get_config(
         return empty_response(want_raw, now);
     }
 
-    let mut uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0).await {
+    let mut uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0, has_detour_cap)
+        .await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "uri collection failed");

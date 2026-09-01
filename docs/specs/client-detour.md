@@ -7,7 +7,7 @@
 - Maximum one client hop; self-reference, cycles, and nested chains are rejected.
 - Subscriptions with no client detour remain byte-for-byte unchanged.
 - If the entry server or its usable outbound is unavailable, hidden, suppressed, or not granted, the target is omitted with no direct fallback.
-- URI-only formats that cannot represent chaining omit chained targets instead of leaking a direct route.
+- URI-only formats that cannot represent chaining omit chained targets instead of leaking a direct route; capability-aware VPNRouter app-config is the only URI exception and carries explicit `outbound`/`detour` metadata.
 - Flowpool and VM 226 are outside this feature.
 
 ## 2. Interface / Data Contract
@@ -39,7 +39,7 @@ pub async fn set_client_detour_via_as(
 - [ ] Migration preserves/restores the relationship and rejects self/cycle/nested chains.
 - [ ] `/sub` contains both outbounds and the target has the exact entry outbound tag in `detour`.
 - [ ] The chained target is absent when the entry is unusable and never falls back direct.
-- [ ] V2Ray and `/api/v1/app/config` do not publish a chained target directly.
+- [ ] V2Ray, generic clients, and legacy VPNRouter app-config requests do not publish a chained target; only a VPNRouter request advertising `detour-v1` receives safe chain metadata.
 - [ ] Existing `/sub` and app-config fixtures remain byte-identical without a chain.
 - [ ] Web and CLI set/clear the policy with correct audit behavior.
 - [ ] Independent review, `just ci`, push, and GitHub Actions CI pass.

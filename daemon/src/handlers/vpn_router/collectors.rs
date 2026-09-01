@@ -126,6 +126,7 @@ pub(crate) async fn collect_vless_uris_for_user(
     state: &AppState,
     user_id: &UserId,
     client_name: &str,
+    detour_capable: bool,
 ) -> Result<Vec<String>, String> {
     let servers = state
         .inv
@@ -133,7 +134,14 @@ pub(crate) async fn collect_vless_uris_for_user(
         .await
         .map_err(|e| format!("subscription_servers_for_user: {e}"))?;
 
-    let mut uris: Vec<String> = Vec::with_capacity(servers.len());
+    struct RenderedServer {
+        server_id: vpnctl_core::ServerId,
+        detour_via: Option<vpnctl_core::ServerId>,
+        base_uri: String,
+    }
+
+    let mut rendered: Vec<RenderedServer> = Vec::with_capacity(servers.len());
+    let vless_id = vpnctl_core::ProtocolId("vless+reality".to_string());
     for server in &servers {
         // Auto-suppress (migration 0030): skip a server the health
         // monitor flagged unreachable (per-server opt-in); auto-restores
@@ -146,18 +154,13 @@ pub(crate) async fn collect_vless_uris_for_user(
         {
             continue;
         }
-        // This endpoint emits standalone URIs and cannot encode sing-box's
-        // outbound `detour`. Omit chained targets rather than leaking the
-        // target as a direct connection.
-        if state
+
+        let detour_via = state
             .inv
             .client_detour_via(&server.id)
             .await
-            .map_err(|e| format!("client_detour_via: {e}"))?
-            .is_some()
-        {
-            continue;
-        }
+            .map_err(|e| format!("client_detour_via: {e}"))?;
+
         // Visibility filter (migration 0018): ninitux endpoint emits
         // VLESS+REALITY only, so skip this server if vless+reality is
         // hidden globally OR per-this-user. Skipping = NO URI for this
@@ -169,7 +172,6 @@ pub(crate) async fn collect_vless_uris_for_user(
             .visible_protocols_for_subscription(user_id, &server.id)
             .await
             .map_err(|e| format!("visible_protocols_for_subscription: {e}"))?;
-        let vless_id = vpnctl_core::ProtocolId("vless+reality".to_string());
         if !visible.contains(&vless_id) {
             continue;
         }
@@ -224,7 +226,7 @@ pub(crate) async fn collect_vless_uris_for_user(
             .await
             .map_err(|e| format!("server_display_name: {e}"))?;
         let server_display = server_display_label(&server.id.0, custom_name.as_deref());
-        uris.push(render_vless_uri(
+        let base_uri = render_vless_uri(
             &server.address,
             port,
             sni,
@@ -233,8 +235,78 @@ pub(crate) async fn collect_vless_uris_for_user(
             &client_uuid,
             &server_display,
             client_name,
-        ));
+        );
+
+        rendered.push(RenderedServer {
+            server_id: server.id.clone(),
+            detour_via,
+            base_uri,
+        });
     }
+
+    if !detour_capable {
+        let uris = rendered
+            .into_iter()
+            .filter(|r| r.detour_via.is_none())
+            .map(|r| r.base_uri)
+            .collect();
+        return Ok(uris);
+    }
+
+    // Inventory rejects self/nested chains at mutation time. Keep this
+    // request-time defense too: only an independently rendered direct server
+    // can be referenced as an entry, even if a damaged/restored database
+    // somehow contains an invalid relationship.
+    let direct_entry_ids: std::collections::HashSet<vpnctl_core::ServerId> = rendered
+        .iter()
+        .filter(|r| r.detour_via.is_none())
+        .map(|r| r.server_id.clone())
+        .collect();
+
+    let valid_targets: std::collections::HashSet<vpnctl_core::ServerId> = rendered
+        .iter()
+        .filter_map(|r| {
+            r.detour_via
+                .as_ref()
+                .filter(|entry_id| {
+                    *entry_id != &r.server_id && direct_entry_ids.contains(*entry_id)
+                })
+                .map(|_| r.server_id.clone())
+        })
+        .collect();
+
+    let valid_entries: std::collections::HashSet<vpnctl_core::ServerId> = rendered
+        .iter()
+        .filter_map(|r| {
+            r.detour_via
+                .as_ref()
+                .filter(|entry_id| {
+                    *entry_id != &r.server_id && direct_entry_ids.contains(*entry_id)
+                })
+                .cloned()
+        })
+        .collect();
+
+    let mut uris = Vec::with_capacity(rendered.len());
+    for item in rendered {
+        if let Some(entry_id) = &item.detour_via {
+            if !valid_targets.contains(&item.server_id) {
+                continue;
+            }
+            let outbound_enc = utf8_percent_encode(&item.server_id.0, NINITUX_QUOTE).to_string();
+            let detour_enc = utf8_percent_encode(&entry_id.0, NINITUX_QUOTE).to_string();
+            let uri_with_outbound = add_query_param(&item.base_uri, "outbound", &outbound_enc);
+            let final_uri = add_query_param(&uri_with_outbound, "detour", &detour_enc);
+            uris.push(final_uri);
+        } else if valid_entries.contains(&item.server_id) {
+            let outbound_enc = utf8_percent_encode(&item.server_id.0, NINITUX_QUOTE).to_string();
+            let final_uri = add_query_param(&item.base_uri, "outbound", &outbound_enc);
+            uris.push(final_uri);
+        } else {
+            uris.push(item.base_uri);
+        }
+    }
+
     Ok(uris)
 }
 

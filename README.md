@@ -51,7 +51,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
 | Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
-| Chain-capable stock sing-box subscription — explicit JSON URL, native `detour`, fail-closed entry filtering | ✅ |
+| Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — auto-creates complete users for new paid subscribers, grants every server, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY Strong; tuic/anytls Moderate; rest Weak) | ✅ |
@@ -205,7 +205,7 @@ scripting / disaster recovery.
 - **Client detour** (`client_detour_via`): configures a 2-hop VPN client outbound chain where a target server dials out through an entry server in generated subscriptions. Set via `/admin/servers/<id>` («Client entry / Входной сервер») or `vpnctl server set-client-detour-via <target> <upstream>` (`--clear` to remove).
 - **SSH `jump_via`**: configures an SSH ProxyJump bastion host used exclusively by the control plane for node administration over SSH.
 
-Client detour chaining is independent of SSH `jump_via`. It supports up to one hop across granted `vpn-exit` servers; self-reference, cycles, and nested chains are rejected.
+Client detour chaining is independent of SSH `jump_via`. It supports up to one hop across granted `vpn-exit` servers; self-reference, cycles, and nested chains are rejected. The VPNRouter app-config endpoint publishes a chained VLESS target only when the client advertises `detour-v1`; legacy and generic URI clients continue to receive the unchanged target-omitting response.
 
 ### Boosty status JSON
 
