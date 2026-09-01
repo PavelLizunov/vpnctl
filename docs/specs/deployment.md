@@ -31,10 +31,7 @@ Build: static musl — `just build-release`
 `cargo zigbuild …gnu.2.36` path is retired. Musl verified 2026-08-23 on a
 bookworm build host with `musl-tools` + `cmake` installed and
 `rustup target add x86_64-unknown-linux-musl` (output: `static-pie`); those
-build-host prerequisites are NOT yet covered by CI (see BACKLOG.md). The
-2026-08-23 production update (`e34d657`) shipped a same-distro
-`x86_64-unknown-linux-gnu` build (bookworm worker → bookworm host) ahead of
-that verification.
+build-host prerequisites are NOT yet covered by CI (see BACKLOG.md).
 
 Deploy: `scripts/deploy.sh` on the prod host — builds (or accepts prebuilt)
 daemon + CLI + managed sing-box + node-side stats helper, exports
@@ -49,6 +46,13 @@ loopback Stats API, and only then restart vpnctld; this avoids a collection gap
 during rollout. Then `sudo systemctl restart vpnctld` and verify the changed code path
 with a curl. Before replacing: `sudo cp -a /opt/vpnctl/vpnctld
 /opt/vpnctl/vpnctld.bak-<tag>`.
+
+Managed node artifacts use unique `/tmp/vpnctl-*.{pid}.{seq}` upload paths,
+then move to executable staging under `/usr/local/libexec/vpnctl` before
+validation because hardened nodes may mount `/tmp` `noexec`. Exit and signal
+traps remove both uploads and stages. A node-local
+`/run/lock/vpnctl-singbox-install.lock` (`flock -w 300`) serializes every shared
+backup, install, health-check, and rollback path.
 
 ## 3. Runtime constraints (learned from incidents)
 

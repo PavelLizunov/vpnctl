@@ -22,7 +22,8 @@ action also has a web button.
 ## Status — v0.9 in flight
 
 Operating in production across multiple nodes, with a bilingual EN/RU
-admin UI and per-node clash-api health probing.
+admin UI, cumulative per-user sing-box V2Ray Stats accounting, and per-node
+clash-api health probing.
 
 ### Project size
 
@@ -33,7 +34,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 |---|---|
 | Protocols × Kernels | **10 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
-| Toolchain | Rust **1.85+**, edition **2024** · single static Linux x86_64 binary (glibc 2.36+) |
+| Toolchain | Rust **1.85+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
 ### What ships today
 
@@ -55,6 +56,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY Strong; tuic/anytls Moderate; rest Weak) | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
+| Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
 | Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
 | **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
@@ -63,10 +65,6 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 ### Known gaps (carried into v0.9)
 
-- **Per-user clash-api attribution** — depends on [SagerNet/sing-box#4159](https://github.com/SagerNet/sing-box/pull/4159)
-  (1-line `TrackerMetadata.MarshalJSON` patch to emit `"user"`). Until
-  accepted upstream, `vpn_connection_stats.user_id` is NULL on every
-  row; server-wide totals on the dashboard still work.
 - **Wave-3 EN/RU translation** — server-detail Kernels / Enabled-
   protocols / drift / deploy-key body (~600 lines) and user-detail
   sub-token / WG / traffic-limit / per-protocol grid body (~800 lines)

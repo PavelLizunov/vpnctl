@@ -637,24 +637,20 @@ pub(crate) fn sanitize_header_filename(s: &str) -> String {
 }
 
 /// Quote a single CSV field per RFC 4180. If the field contains
-/// `"`, `,`, `\n`, or `\r` we wrap it in double-quotes and double
-/// any internal quotes; otherwise return the field verbatim.
+/// `"`, `,`, `\n`, `\r`, or ASCII control whitespace we wrap it in
+/// double-quotes and double any internal quotes; otherwise return the field verbatim.
 fn csv_field(s: &str) -> String {
     // Formula-injection guard (audit 2026-06-10, OWASP CSV-injection):
-    // Excel/LibreOffice execute a cell starting with = + - @ as a
-    // formula — an attacker-influenced field (user id, alert summary)
-    // beginning with `=HYPERLINK(...)` would run on the operator's
-    // machine when the export is opened. Standard mitigation: prefix a
-    // single quote, which spreadsheets treat as a text marker. Server
-    // ids may legitimately start with `-` — they render with a visible
-    // leading `'` in a spreadsheet, an accepted cosmetic cost.
-    let injectable = matches!(s.chars().next(), Some('=' | '+' | '-' | '@'));
+    // Excel/LibreOffice may execute = + - @ after leading whitespace.
+    // Prefix a single quote so spreadsheets treat the field as text.
+    let trimmed = s.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\x0b');
+    let injectable = matches!(trimmed.chars().next(), Some('=' | '+' | '-' | '@'));
     let s = if injectable {
         format!("'{s}")
     } else {
         s.to_string()
     };
-    let needs_quote = s.contains(['"', ',', '\n', '\r']);
+    let needs_quote = s.contains(['"', ',', '\n', '\r', '\t', '\x0b', '\x0c']);
     if !needs_quote {
         return s;
     }
@@ -685,9 +681,16 @@ mod csv_tests {
         assert_eq!(csv_field("+1"), "'+1");
         assert_eq!(csv_field("-srv"), "'-srv");
         assert_eq!(csv_field("@cmd"), "'@cmd");
+        assert_eq!(csv_field("  =HYPERLINK(1)"), "'  =HYPERLINK(1)");
+        assert_eq!(csv_field("\t=CMD(1)"), "\"'\t=CMD(1)\"");
+        assert_eq!(csv_field("\r+1"), "\"'\r+1\"");
+        assert_eq!(csv_field("\n@cmd"), "\"'\n@cmd\"");
+        assert_eq!(csv_field("\x0b=CMD(1)"), "\"'\x0b=CMD(1)\"");
+        assert_eq!(csv_field("\x0c+1"), "\"'\x0c+1\"");
         // Quoting still composes with the injection guard.
         assert_eq!(csv_field("=a,b"), "\"'=a,b\"");
         // Plain fields stay untouched.
+        assert_eq!(csv_field("  user.grant"), "  user.grant");
         assert_eq!(csv_field("user.grant"), "user.grant");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
     }

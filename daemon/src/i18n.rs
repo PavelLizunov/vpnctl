@@ -62,8 +62,11 @@ impl Locale {
     pub fn from_request(headers: &HeaderMap) -> Self {
         // 1. Cookie. We hand-parse instead of pulling tower-cookies —
         //    one cookie, one shape, no need for a crate.
-        if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
-            for kv in cookie_hdr.split(';') {
+        for cookie_hdr in headers.get_all("cookie") {
+            let Ok(raw) = cookie_hdr.to_str() else {
+                continue;
+            };
+            for kv in raw.split(';') {
                 let kv = kv.trim();
                 if let Some(val) = kv.strip_prefix("vpnctl_lang=") {
                     return match val {
@@ -396,7 +399,7 @@ mod tests {
                 .expect("test header name must be ASCII");
             let val = axum::http::HeaderValue::from_str(v)
                 .expect("test header value must be valid bytes");
-            h.insert(name, val);
+            h.append(name, val);
         }
         h
     }
@@ -475,6 +478,21 @@ mod tests {
         // Multiple cookies, one valid: still picks up the right one.
         assert_eq!(
             Locale::from_request(&hm(&[("cookie", "foo=bar; vpnctl_lang=ru; baz=qux")])),
+            Locale::Ru
+        );
+    }
+
+    #[test]
+    fn multi_cookie_header_first_match() {
+        assert_eq!(
+            Locale::from_request(&hm(&[
+                ("cookie", "other=123; vpnctl_lang=ru"),
+                ("cookie", "vpnctl_lang=en"),
+            ])),
+            Locale::Ru
+        );
+        assert_eq!(
+            Locale::from_request(&hm(&[("cookie", "foo=bar"), ("cookie", "vpnctl_lang=ru"),])),
             Locale::Ru
         );
     }
