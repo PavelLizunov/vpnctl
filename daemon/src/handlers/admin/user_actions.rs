@@ -89,6 +89,9 @@ pub(crate) async fn user_regen_sub_token(
     .into_response()
 }
 
+
+
+
 /// `POST /admin/users/{id}/tuic-password/mint` — mint a per-user
 /// `tuic_password` for a user that has none. naive + Hysteria2 reuse
 /// this field as their per-user secret, so a user without it silently
@@ -305,12 +308,11 @@ pub(crate) async fn user_wireguard_conf_download(
     // browser would default-name the file `download` (bad UX). Stripping
     // is safer than rejecting because the operator's intent (download
     // SOMETHING) is unambiguous.
-    let safe = |s: &str| -> String {
-        s.chars()
-            .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
-            .collect()
-    };
-    let filename = format!("{}-{}.conf", safe(&user.id.0), safe(&server.id.0));
+    let filename = format!(
+        "{}-{}.conf",
+        super::audit::sanitize_header_filename(&user.id.0),
+        super::audit::sanitize_header_filename(&server.id.0)
+    );
 
     let mut resp = (StatusCode::OK, conf).into_response();
     let headers = resp.headers_mut();
@@ -880,4 +882,18 @@ async fn user_set_disabled_inner(state: AppState, user_id_str: String, target: b
         path_segment_encode(&user_id_str)
     ))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::audit::sanitize_header_filename;
+
+    #[test]
+    fn sanitize_header_filename_sanitizes_unsafe_input() {
+        assert_eq!(sanitize_header_filename("user123"), "user123");
+        assert_eq!(
+            sanitize_header_filename("user\"name\r\n\\test\0"),
+            "usernametest"
+        );
+    }
 }

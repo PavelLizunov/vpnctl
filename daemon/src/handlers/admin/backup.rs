@@ -117,7 +117,8 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+    let safe_name = super::audit::sanitize_header_filename(&name);
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     resp
