@@ -89,9 +89,6 @@ pub(crate) async fn user_regen_sub_token(
     .into_response()
 }
 
-
-
-
 /// `POST /admin/users/{id}/tuic-password/mint` — mint a per-user
 /// `tuic_password` for a user that has none. naive + Hysteria2 reuse
 /// this field as their per-user secret, so a user without it silently
