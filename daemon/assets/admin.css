@@ -1419,3 +1419,83 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
   text-transform: uppercase; color: var(--green); font-weight: 600;
 }
 .ed-toast__d { font-style: italic; color: var(--soft); font-size: 13px; flex: 1 1 auto; }
+
+/* ── Interactive Button Feedback & Loading States ────────────────────────── */
+.ed-abtn {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.08s ease, opacity 0.15s ease;
+}
+.ed-abtn:active {
+  transform: scale(0.98);
+}
+form[data-submitting] {
+  cursor: wait;
+}
+form[data-submitting] .ed-abtn,
+.ed-abtn.is-loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* ── Refined Card Surfaces & Fact Grids ──────────────────────────────────── */
+.ed-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.ed-fact-grid .ed-fact {
+  margin-left: 0;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  padding: 10px 14px;
+  min-width: 0;
+}
+
+/* ── Responsive Safeguards for Screens < 768px ───────────────────────────── */
+@media (max-width: 768px) {
+  .ed-tb {
+    padding: 0 12px;
+  }
+  .ed-tb__nav {
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ed-tb__nav::-webkit-scrollbar {
+    display: none;
+  }
+  .ed-user-overview {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .ed-detail-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .ed-status-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 8px;
+  }
+  .ed-status-strip--activity {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .ed-status-tile {
+    margin-left: 0;
+  }
+  .ed-headrow {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .ed-headrow__actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .ed-grid {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+

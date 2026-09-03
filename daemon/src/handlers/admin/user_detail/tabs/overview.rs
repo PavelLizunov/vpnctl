@@ -62,11 +62,13 @@ pub(crate) async fn render_overview_tab(
             @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
                 (Some(device_id), Some(ninitux), _, _) => {
                     // Primary: ninitux production URL — QR scans this.
-                    div style="padding: 8px 0;" {
-                        (qr_svg(ninitux))
+                    div style="padding: 12px 14px; background: var(--paper-2); border: 1px solid var(--rule); margin-top: 8px;" {
+                        div style="display: flex; justify-content: center; margin-bottom: 12px;" {
+                            (qr_svg(ninitux))
+                        }
                         div style="font-family: var(--mono); font-size: 11px; line-height: 1.7; min-width: 0;" {
-                            div.ed-user-overview__url { (ninitux) }
-                            div.ed-user-overview__url title=(device_id) { "device " (device_id) }
+                            div.ed-user-overview__url style="word-break: break-all; white-space: normal; font-weight: 500;" { (ninitux) }
+                            div.ed-user-overview__url title=(device_id) style="color: var(--mute);" { "device " (device_id) }
                             div style="margin-top: 8px; color: var(--soft); font-family: var(--serif); font-style: italic; font-size: 11px;" {
                                 (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
                                 span.ed-mono { "ninitux.com" }
@@ -241,11 +243,11 @@ pub(crate) async fn render_overview_tab(
                 (crate::i18n::tr(lang, "Access state", "Состояние доступа"))
             }
             @if user.disabled {
-                div style="border: 1px solid var(--acc); background: var(--paper); padding: 12px 14px; margin: 8px 0;" {
+                div style="border: 1px solid var(--acc); background: var(--paper-2); padding: 14px 16px; margin: 12px 0;" {
                     div style="font-family: var(--serif); font-weight: 500; color: var(--acc); font-size: 14px;" {
                         (crate::i18n::tr(lang, "user is DISABLED", "пользователь ОТКЛЮЧЁН"))
                     }
-                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 4px 0 0;" {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 6px 0 10px;" {
                         (crate::i18n::tr(
                             lang,
                             "Subscription endpoints return an empty config. Secrets, sub-token, WG keypair and grants are unchanged — re-enable to restore access byte-for-byte.",
@@ -254,7 +256,7 @@ pub(crate) async fn render_overview_tab(
                     }
                     form method="post"
                          action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0)))
-                         style="display: inline; margin-top: 8px;" {
+                         style="display: inline;" {
                         button type="submit"
                                class="ed-abtn ed-abtn--primary" {
                             (crate::i18n::tr(lang, "enable user", "включить пользователя"))
@@ -262,24 +264,26 @@ pub(crate) async fn render_overview_tab(
                     }
                 }
             } @else {
-                p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-                    (crate::i18n::tr(
-                        lang,
-                        "Pause a user's subscription without rotating secrets or revoking grants. Re-enable later restores access byte-for-byte. Useful for: forgotten phone, paused billing, temporary access freeze.",
-                        "Поставь подписку на паузу без ротации секретов и без отзыва грантов. Повторное включение вернёт доступ байт-в-байт. Полезно для: забытого телефона, паузы в оплате, временной заморозки доступа.",
-                    ))
-                }
-                form method="post"
-                     action=(format!("/admin/users/{}/disable", path_segment_encode(&user.id.0)))
-                     style="display: inline;" {
-                    button type="submit"
-                           title=(crate::i18n::tr(
-                               lang,
-                               "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
-                               "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
-                           ))
-                           class="ed-abtn ed-abtn--warning" {
-                        (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
+                div style="background: var(--paper-2); border: 1px solid var(--rule); padding: 12px 14px; margin: 12px 0;" {
+                    p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin: 0 0 8px;" {
+                        (crate::i18n::tr(
+                            lang,
+                            "Pause a user's subscription without rotating secrets or revoking grants. Re-enable later restores access byte-for-byte. Useful for: forgotten phone, paused billing, temporary access freeze.",
+                            "Поставь подписку на паузу без ротации секретов и без отзыва грантов. Повторное включение вернёт доступ байт-в-байт. Полезно для: забытого телефона, паузы в оплате, временной заморозки доступа.",
+                        ))
+                    }
+                    form method="post"
+                         action=(format!("/admin/users/{}/disable", path_segment_encode(&user.id.0)))
+                         style="display: inline;" {
+                        button type="submit"
+                               title=(crate::i18n::tr(
+                                   lang,
+                                   "Soft mute: /sub/<token> and /api/v1/app/config/<device_id> return an empty config. Everything else is preserved.",
+                                   "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
+                               ))
+                               class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                            (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
+                        }
                     }
                 }
             }
