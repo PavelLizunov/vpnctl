@@ -71,7 +71,7 @@ pub(crate) async fn render_activity_tab(
             }
         }
         // v2 4c — four fact tiles + the geo-resolved fetch log.
-        div.ed-status-strip style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 12px;" {
+        div.ed-status-strip.ed-status-strip--activity style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 16px 0;" {
             @let (verdict_txt, verdict_color, score_note) = match &sharing {
                 Some(sc) if sc.is_flagged() => (
                     crate::i18n::tr(lang, "likely shared", "вероятно расшарен"),

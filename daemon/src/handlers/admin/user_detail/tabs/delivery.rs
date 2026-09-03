@@ -57,7 +57,7 @@ pub(crate) fn render_delivery_tab(
             }
         }
         @if let Some(url) = mihomo_sub_url_str {
-            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule);" {
+            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule); background: var(--paper-2);" {
                 div.ed-art-eyebrow {
                     (crate::i18n::tr(lang, "Mihomo / Omarchy subscription", "Mihomo / Omarchy подписка"))
                 }
@@ -71,7 +71,7 @@ pub(crate) fn render_delivery_tab(
             }
         }
         @if let Some(url) = chain_sub_url_str {
-            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule);" {
+            div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule); background: var(--paper-2);" {
                 div.ed-art-eyebrow {
                     (crate::i18n::tr(lang, "Sing-box chain subscription", "Sing-box подписка с цепочкой"))
                 }

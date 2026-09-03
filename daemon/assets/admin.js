@@ -258,10 +258,40 @@
     });
   }
 
+  // ── form submit feedback & double-click protection ────────────
+  function wireFormSubmitFeedback() {
+    document.addEventListener("submit", function (e) {
+      if (e.defaultPrevented) return;
+      var form = e.target;
+      if (!form || form.tagName !== "FORM") return;
+      if (form.hasAttribute("data-submitting")) {
+        e.preventDefault();
+        return;
+      }
+      form.setAttribute("data-submitting", "true");
+      var btn = e.submitter || form.querySelector("button[type='submit'], button:not([type])");
+      if (btn) {
+        btn.classList.add("is-loading");
+      }
+    });
+
+    window.addEventListener("pageshow", function () {
+      var forms = document.querySelectorAll("form[data-submitting]");
+      for (var i = 0; i < forms.length; i++) {
+        forms[i].removeAttribute("data-submitting");
+      }
+      var btns = document.querySelectorAll(".is-loading");
+      for (var j = 0; j < btns.length; j++) {
+        btns[j].classList.remove("is-loading");
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     wireSearchHotkey();
     wireSelectOnClick();
     wireLowercaseId();
+    wireFormSubmitFeedback();
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
     var autos = document.querySelectorAll("[data-sse-autostart]");
