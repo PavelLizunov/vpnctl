@@ -104,8 +104,20 @@ impl Kernel for Caddy {
         // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
         // cache is present (e.g. a CLI deploy from a host without it).
         let cache = caddy_cache_path();
-        let binary_changed = match std::fs::read(&cache) {
-            Ok(bytes) => {
+        let cache_read = tokio::task::spawn_blocking({
+            let cache = cache.clone();
+            move || {
+                std::fs::read(&cache).map(|bytes| {
+                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                    (bytes, digest)
+                })
+            }
+        })
+        .await
+        .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?;
+
+        let binary_changed = match cache_read {
+            Ok((bytes, digest)) => {
                 // Content-aware idempotency: SHA256 the cache bytes up front
                 // (the same digest fed to `sha256sum -c` on the transfer) and
                 // probe the on-node binary's sha (empty when absent). Reinstall
@@ -114,7 +126,6 @@ impl Kernel for Caddy {
                 // (same path, patched bytes) gets it pushed WITHOUT first
                 // deleting the on-node copy by hand. A bare presence check
                 // would skip the refresh.
-                let digest = format!("{:x}", Sha256::digest(&bytes));
                 let node_sha = ssh
                     .exec("sha256sum /usr/local/bin/caddy 2>/dev/null | cut -d' ' -f1")
                     .await?;

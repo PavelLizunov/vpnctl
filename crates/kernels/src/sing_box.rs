@@ -414,8 +414,14 @@ impl Kernel for SingBox {
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
         // Validate both local artifacts before changing the node. Packaging
         // installs these atomically from the same vpnctl revision.
-        let sing_box = std::fs::read(sing_box_path)?;
-        let stats_helper = std::fs::read(helper_path)?;
+        let (sing_box, stats_helper) = tokio::task::spawn_blocking(move || {
+            let sb = std::fs::read(&sing_box_path)?;
+            let sh = std::fs::read(&helper_path)?;
+            Ok::<_, std::io::Error>((sb, sh))
+        })
+        .await
+        .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?
+        .map_err(CoreError::Io)?;
 
         // Idempotent base setup keeps the official package as the rollback
         // source; the managed binary then adds with_v2ray_api and the helper.

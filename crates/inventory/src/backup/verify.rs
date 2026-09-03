@@ -168,7 +168,14 @@ pub async fn verify_snapshot(snapshot_path: &Path) -> Result<SelfTestReport, Sql
     let tmpfile = tempfile::NamedTempFile::new()
         .map_err(|e| SqliteInventoryError::Invalid(format!("create self-test tmpfile: {e}")))?;
     let tmp_path = tmpfile.path().to_path_buf();
-    std::fs::copy(snapshot_path, &tmp_path).map_err(|e| {
+    tokio::task::spawn_blocking({
+        let snapshot_path = snapshot_path.to_path_buf();
+        let tmp_path = tmp_path.clone();
+        move || std::fs::copy(&snapshot_path, &tmp_path)
+    })
+    .await
+    .map_err(|e| SqliteInventoryError::Invalid(format!("spawn_blocking failed: {e}")))?
+    .map_err(|e| {
         SqliteInventoryError::Invalid(format!(
             "copy {} -> {}: {e}",
             snapshot_path.display(),

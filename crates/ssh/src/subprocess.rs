@@ -72,10 +72,6 @@ impl SubprocessSshTransport {
         self
     }
 
-    pub fn jump_route(&self) -> Option<&PinnedJumpRoute> {
-        self.jump.as_ref()
-    }
-
     pub fn trusted_fingerprint(mut self, fingerprint: Option<String>) -> Self {
         self.target_fingerprint = fingerprint;
         self

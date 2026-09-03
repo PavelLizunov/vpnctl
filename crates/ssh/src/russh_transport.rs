@@ -14,10 +14,10 @@
 //!   записывает его в БД.
 
 use async_trait::async_trait;
+use russh::ChannelMsg;
 use russh::client::{self, Handler};
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
-use russh::{ChannelMsg, Disconnect};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -263,10 +263,6 @@ impl std::fmt::Debug for RusshTransport {
 }
 
 impl RusshTransport {
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
     pub fn user(&self) -> &str {
         &self.user
     }
@@ -283,15 +279,6 @@ impl RusshTransport {
     /// слой выше использует это, чтобы сохранить в inventory.
     pub async fn observed_host_fingerprint(&self) -> Option<String> {
         self.observed_fingerprint.lock().await.clone()
-    }
-
-    pub async fn disconnect(&self) -> Result<()> {
-        let session = self.handle.lock().await;
-        session
-            .disconnect(Disconnect::ByApplication, "", "")
-            .await
-            .map_err(|e| CoreError::Transport(format!("disconnect: {e}")))?;
-        Ok(())
     }
 }
 

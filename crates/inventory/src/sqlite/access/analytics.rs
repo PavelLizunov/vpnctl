@@ -559,14 +559,15 @@ impl SqliteInventory {
             .bind(format!("-{active_days} days"))
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| SubFetchStallUser {
-                user_id: UserId(r.get::<String, _>("user_id")),
-                last_fetch: r.get::<String, _>("last_fetch"),
-                last_traffic: r.get::<Option<String>, _>("last_traffic"),
-                fetch_age_minutes: r.get::<i64, _>("age_min"),
-            })
-            .collect())
+        let mut result = Vec::with_capacity(rows.len());
+        for r in rows {
+            result.push(SubFetchStallUser {
+                user_id: UserId(r.try_get("user_id")?),
+                last_fetch: r.try_get("last_fetch")?,
+                last_traffic: r.try_get("last_traffic")?,
+                fetch_age_minutes: r.try_get("age_min")?,
+            });
+        }
+        Ok(result)
     }
 }
