@@ -1,4 +1,5 @@
 use crate::sqlite::{Result, ServerRole, SqliteInventory, SqliteInventoryError};
+use sqlx::Row;
 use vpnctl_core::{Server, ServerId};
 
 impl SqliteInventory {
@@ -235,14 +236,11 @@ impl SqliteInventory {
             .fetch_all(&self.pool)
             .await?;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let id: String = sqlx::Row::try_get(&r, "id")?;
-            if let Some(s) = self.get_server(&ServerId(id)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     /// Get the client detour entry server for a target server, if set.

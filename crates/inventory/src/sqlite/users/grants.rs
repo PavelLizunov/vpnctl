@@ -254,14 +254,11 @@ impl SqliteInventory {
         .bind(&user.0)
         .fetch_all(&self.pool)
         .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let sid: String = r.try_get("server_id")?;
-            if let Some(s) = self.get_server(&ServerId(sid)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("server_id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     pub async fn subscription_servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {
@@ -274,14 +271,11 @@ impl SqliteInventory {
         .bind(&user.0)
         .fetch_all(&self.pool)
         .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let sid: String = r.try_get("server_id")?;
-            if let Some(s) = self.get_server(&ServerId(sid)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("server_id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     /// Cheap row count of (user, server) grant pairs. `0` on empty table.

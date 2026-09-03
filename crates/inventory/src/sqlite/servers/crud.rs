@@ -1,6 +1,7 @@
 use crate::sqlite::{Result, SqliteInventory, SqliteInventoryError, escape_like, map_unique};
 use sqlx::Row;
-use vpnctl_core::{Server, ServerId};
+use std::collections::{HashMap, HashSet};
+use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
 
 impl SqliteInventory {
     pub async fn add_server(&self, s: &Server) -> Result<()> {
@@ -88,55 +89,119 @@ impl SqliteInventory {
     }
 
     pub async fn get_server(&self, id: &ServerId) -> Result<Option<Server>> {
-        let row_opt = sqlx::query(
-            "SELECT id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient
-             FROM servers WHERE id = ?1",
-        )
-        .bind(&id.0)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        let Some(row) = row_opt else { return Ok(None) };
-
-        let server_id: String = row.try_get("id")?;
-        let protocols = self
-            .list_server_protocols(&ServerId(server_id.clone()))
-            .await?;
-        let kernels = self
-            .list_server_kernels(&ServerId(server_id.clone()))
-            .await?;
-        let s = Server {
-            id: ServerId(server_id),
-            address: row.try_get("address")?,
-            ssh_port: u16::try_from(row.try_get::<i64, _>("ssh_port")?)
-                .map_err(|_| SqliteInventoryError::Invalid("ssh_port out of u16 range".into()))?,
-            ssh_user: row.try_get("ssh_user")?,
-            kernels,
-            enabled_protocols: protocols,
-            trusted_host_fingerprint: row.try_get("trusted_host_fingerprint")?,
-            hoster: row.try_get("hoster")?,
-            jump_via: row.try_get::<Option<String>, _>("jump_via")?.map(ServerId),
-            usage_coefficient: row.try_get("usage_coefficient")?,
-        };
-        Ok(Some(s))
+        let servers = self.get_servers_batch(std::slice::from_ref(id)).await?;
+        Ok(servers.into_iter().next())
     }
 
-    pub async fn list_servers(&self) -> Result<Vec<Server>> {
-        // NOTE(perf): N+1 query — one SELECT id, then per-server get_server
-        // (which itself does 2 queries). For a homelab with <100 servers
-        // this is fine; if it ever matters, switch to a single LEFT JOIN
-        // and aggregate protocols in Rust.
-        let rows = sqlx::query("SELECT id FROM servers ORDER BY id")
-            .fetch_all(&self.pool)
-            .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let id: String = r.try_get("id")?;
-            if let Some(s) = self.get_server(&ServerId(id)).await? {
-                out.push(s);
+    /// Batch-fetches fully populated `Server` structs (with protocols and kernels)
+    /// for a slice of server IDs in 3 batched queries, eliminating the 3N+1 roundtrip loop.
+    /// Preserves the order of `server_ids` and silently skips absent IDs.
+    pub async fn get_servers_batch(&self, server_ids: &[ServerId]) -> Result<Vec<Server>> {
+        if server_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut unique_ids = Vec::with_capacity(server_ids.len());
+        let mut seen = HashSet::with_capacity(server_ids.len());
+        for id in server_ids {
+            if seen.insert(&id.0) {
+                unique_ids.push(&id.0);
+            }
+        }
+
+        let placeholders = (1..=unique_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let server_sql = format!(
+            "SELECT id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient
+             FROM servers WHERE id IN ({placeholders})"
+        );
+
+        let mut server_query = sqlx::query(&server_sql);
+        for &uid in &unique_ids {
+            server_query = server_query.bind(uid);
+        }
+
+        let server_rows = server_query.fetch_all(&self.pool).await?;
+        if server_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let proto_sql = format!(
+            "SELECT server_id, protocol_id FROM server_protocols WHERE server_id IN ({placeholders}) ORDER BY server_id, protocol_id"
+        );
+        let kernel_sql = format!(
+            "SELECT server_id, kernel_id FROM server_kernels WHERE server_id IN ({placeholders}) ORDER BY server_id, kernel_id"
+        );
+
+        let mut proto_query = sqlx::query(&proto_sql);
+        let mut kernel_query = sqlx::query(&kernel_sql);
+
+        for &uid in &unique_ids {
+            proto_query = proto_query.bind(uid);
+            kernel_query = kernel_query.bind(uid);
+        }
+
+        let proto_rows = proto_query.fetch_all(&self.pool).await?;
+        let kernel_rows = kernel_query.fetch_all(&self.pool).await?;
+
+        let mut proto_map: HashMap<ServerId, Vec<ProtocolId>> = HashMap::new();
+        for r in proto_rows {
+            let sid = ServerId(r.try_get("server_id")?);
+            let pid = ProtocolId(r.try_get("protocol_id")?);
+            proto_map.entry(sid).or_default().push(pid);
+        }
+
+        let mut kernel_map: HashMap<ServerId, Vec<KernelId>> = HashMap::new();
+        for r in kernel_rows {
+            let sid = ServerId(r.try_get("server_id")?);
+            let kid = KernelId(r.try_get("kernel_id")?);
+            kernel_map.entry(sid).or_default().push(kid);
+        }
+
+        let mut server_map: HashMap<ServerId, Server> = HashMap::with_capacity(server_rows.len());
+        for row in server_rows {
+            let sid_str: String = row.try_get("id")?;
+            let sid = ServerId(sid_str);
+            let protocols = proto_map.remove(&sid).unwrap_or_default();
+            let kernels = kernel_map.remove(&sid).unwrap_or_default();
+            let s = Server {
+                id: sid.clone(),
+                address: row.try_get("address")?,
+                ssh_port: u16::try_from(row.try_get::<i64, _>("ssh_port")?).map_err(|_| {
+                    SqliteInventoryError::Invalid("ssh_port out of u16 range".into())
+                })?,
+                ssh_user: row.try_get("ssh_user")?,
+                kernels,
+                enabled_protocols: protocols,
+                trusted_host_fingerprint: row.try_get("trusted_host_fingerprint")?,
+                hoster: row.try_get("hoster")?,
+                jump_via: row.try_get::<Option<String>, _>("jump_via")?.map(ServerId),
+                usage_coefficient: row.try_get("usage_coefficient")?,
+            };
+            server_map.insert(sid, s);
+        }
+
+        let mut out = Vec::with_capacity(server_ids.len());
+        for id in server_ids {
+            if let Some(s) = server_map.get(id) {
+                out.push(s.clone());
             }
         }
         Ok(out)
+    }
+
+    pub async fn list_servers(&self) -> Result<Vec<Server>> {
+        let rows = sqlx::query("SELECT id FROM servers ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     pub async fn remove_server(&self, id: &ServerId) -> Result<()> {
@@ -254,13 +319,10 @@ impl SqliteInventory {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        let mut out: Vec<Server> = Vec::with_capacity(rows.len());
-        for r in rows {
-            let id: String = r.try_get("id")?;
-            if let Some(s) = self.get_server(&ServerId(id)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 }
