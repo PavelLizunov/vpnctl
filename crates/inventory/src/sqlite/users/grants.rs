@@ -254,14 +254,11 @@ impl SqliteInventory {
         .bind(&user.0)
         .fetch_all(&self.pool)
         .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let sid: String = r.try_get("server_id")?;
-            if let Some(s) = self.get_server(&ServerId(sid)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("server_id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     pub async fn subscription_servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {
@@ -274,14 +271,11 @@ impl SqliteInventory {
         .bind(&user.0)
         .fetch_all(&self.pool)
         .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let sid: String = r.try_get("server_id")?;
-            if let Some(s) = self.get_server(&ServerId(sid)).await? {
-                out.push(s);
-            }
-        }
-        Ok(out)
+        let sids: Vec<ServerId> = rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("server_id").map(ServerId))
+            .collect::<std::result::Result<_, _>>()?;
+        self.get_servers_batch(&sids).await
     }
 
     /// Cheap row count of (user, server) grant pairs. `0` on empty table.
@@ -304,6 +298,22 @@ impl SqliteInventory {
             let sid: String = r.try_get("server_id")?;
             let n: i64 = r.try_get("n")?;
             out.insert(ServerId(sid), n);
+        }
+        Ok(out)
+    }
+
+    /// Map of `user_id → number of servers granted to it`. Users
+    /// with no grants are absent (callers default to 0). Exactly 1 query,
+    /// no N+1 — call this once and look up by user ID when rendering a user list.
+    pub async fn servers_count_per_user(&self) -> Result<HashMap<UserId, i64>> {
+        let rows = sqlx::query("SELECT user_id, COUNT(*) AS n FROM grants GROUP BY user_id")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let n: i64 = r.try_get("n")?;
+            out.insert(UserId(uid), n);
         }
         Ok(out)
     }

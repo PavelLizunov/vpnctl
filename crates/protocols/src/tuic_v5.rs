@@ -1,37 +1,8 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{FRAGMENT, USERINFO};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
-
-/// Userinfo-safe set: everything that has a structural meaning in
-/// `<userinfo>@<host>` of an authority component (RFC 3986 §3.2.1).
-/// `%` is included so values already containing `%` don't produce
-/// malformed percent-encoding when re-encoded downstream.
-const USERINFO: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b':')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']');
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
 
 /// TUIC v5 на UDP:8443. Self-signed cert — на клиенте `insecure: true`
 /// (UUID+password — настоящая аутентификация, TLS чисто для шифрования).

@@ -16,6 +16,7 @@ serde = { workspace = true }
 # (catches a corrupted/truncated cache file before it's installed as a
 # root systemd service). Already in the workspace lock transitively.
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 # AmneziaWg kernel tests use the real WireGuard Protocol impl to

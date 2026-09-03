@@ -1,4 +1,5 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{FRAGMENT, USERINFO as PASSWORD};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -63,41 +64,6 @@ const VALID_METHODS: &[&str] = &[
 /// Listen port. Public so tests + UI handlers can format share-links
 /// without duplicating the constant.
 pub const SS_2022_PORT: u16 = 8388;
-
-/// Percent-encode set for the **password** segment of a SIP002 SS URI.
-/// Per-spec, AEAD-2022 URIs use plain `method:password` userinfo
-/// with percent encoding (NOT base64url like older AEAD ciphers).
-/// This set escapes everything that has special meaning in the
-/// userinfo / authority / path of a URI **plus `:`** — `:` is the
-/// `method:password` separator, and a literal `:` in a rotated PSK
-/// would otherwise break parsers that split on the first colon.
-const PASSWORD: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']')
-    .add(b':');
-
-/// Fragment-only escape set for the `#tag` portion. `:` and `+`
-/// don't need escaping inside a fragment.
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
 
 impl Protocol for Shadowsocks2022 {
     fn id(&self) -> ProtocolId {

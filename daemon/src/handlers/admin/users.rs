@@ -116,9 +116,12 @@ pub(crate) async fn users(
 
     // list_users + servers_for_user-per-user would be N+1; instead use
     // the inventory's grants-count map (one query) and look up by user.
-    let (users_list, servers_list) =
-        tokio::try_join!(state.inv.list_users(), state.inv.list_servers())
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let (users_list, servers_list, grants_map) = tokio::try_join!(
+        state.inv.list_users(),
+        state.inv.list_servers(),
+        state.inv.servers_count_per_user(),
+    )
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     // Presence is an in-memory fold over the already-polled clash-api
     // snapshots. Patched nodes put the authenticated user directly on
@@ -138,20 +141,10 @@ pub(crate) async fn users(
         }
     }
 
-    // Per-user grants count: the existing aggregations only group by
-    // server_id, not user_id. Since N is small (homelab) we issue one
-    // small query per user — this is bounded by the operator's user
-    // count and will not be a hot path.
-    let mut grants_per_user: Vec<usize> = Vec::with_capacity(users_list.len());
-    for u in &users_list {
-        let n = state
-            .inv
-            .servers_for_user(&u.id)
-            .await
-            .map(|v| v.len())
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-        grants_per_user.push(n);
-    }
+    let grants_per_user: Vec<usize> = users_list
+        .iter()
+        .map(|u| usize::try_from(grants_map.get(&u.id).copied().unwrap_or(0)).unwrap_or(0))
+        .collect();
 
     // Apply Pavel iter C2: search filter + sort. We build a sortable
     // (user, grants_count, original_index) tuple list so the row

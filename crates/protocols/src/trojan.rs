@@ -1,4 +1,5 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{FRAGMENT, USERINFO};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -39,34 +40,6 @@ impl Trojan {
 /// Listen port. Public so admin's drift detector can recognize the
 /// inbound on a probe.
 pub const TROJAN_PORT: u16 = 8643;
-
-/// Percent-encode set for the password embedded in the URI auth.
-/// Same shape as Hysteria2/AnyTLS USERINFO.
-const USERINFO: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b':')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']');
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
 
 impl Protocol for Trojan {
     fn id(&self) -> ProtocolId {

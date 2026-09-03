@@ -176,7 +176,7 @@ impl Protocol for WireGuard {
             "address_cidr": client_cidr,
             "dns": ["1.1.1.1"],
         });
-        if let Some(a) = amnezia.clone()
+        if let Some(a) = amnezia
             && let Some(map) = interface.as_object_mut()
         {
             map.insert("amneziawg".to_string(), a);

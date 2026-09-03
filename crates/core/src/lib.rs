@@ -812,24 +812,13 @@ impl Registry {
         self.kernels.iter().map(|k| k.id()).collect()
     }
 
-    /// Map kernel-id → protocols that kernel can run. Used by UI
-    /// to grey-out incompatible protocols before submission
-    /// (e.g. `wireguard` only under `amneziawg`, not under
-    /// `sing-box`). One row per kernel, in registration order.
-    pub fn kernel_protocol_matrix(&self) -> Vec<(KernelId, Vec<ProtocolId>)> {
-        self.kernels
-            .iter()
-            .map(|k| (k.id(), k.supported_protocols()))
-            .collect()
-    }
-
     /// Kernel/protocol SUPPORT validation only (no port-conflict gate).
     /// For server-CREATE paths (`bootstrap`, `server add`) where no
     /// secrets exist yet: the port-conflict guard is secret-aware
     /// (`vless.listen_port` etc.), and the operator can't set the secret
     /// until the server row exists — validating ports here would reject
     /// exactly the naive+reality topology this guard exists to enable.
-    /// The deploy path runs the full [`validate_server`] with real
+    /// The deploy path runs the full [`Self::validate_server`] with real
     /// secrets; that is the authoritative gate.
     pub fn validate_server_support(&self, server: &Server) -> Result<()> {
         if server.kernels.is_empty() {

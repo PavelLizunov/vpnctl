@@ -58,7 +58,8 @@
 //!
 //! **Stateless**, like every other Protocol in this crate.
 
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{DOMAIN_ILLEGAL, VLESS_FRAGMENT as FRAGMENT};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -78,30 +79,6 @@ pub const DEFAULT_FRONT_PORT: u16 = 8443;
 /// single constant so it can flip fleet-wide (like `REALITY_UTLS_FP` did
 /// on 2026-06-16) if TSPU ever starts fingerprinting the ws ClientHello.
 const WS_UTLS_FP: &str = "chrome";
-
-/// Set of bytes percent-encoded in the `#<name>` URL fragment (RFC 3986):
-/// everything that controls URL parsing plus space/`#`/`?` which would
-/// truncate or open a new component. Mirrors `vless_reality.rs`.
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?')
-    .add(b'/')
-    .add(b'@')
-    .add(b':');
-
-/// Characters that must never appear in a `vlessws.domain` woven into a
-/// CLIENT artefact (share-link) or the Caddyfile. `\n`/`\r`/tab would
-/// forge extra lines into the newline-joined `/api/v1/app/config` base64
-/// blob (line injection) and the URI-structural chars (` /?#@\` etc.)
-/// would corrupt the `vless://…` link. A real hostname contains none.
-/// Mirrors `naive.rs::DOMAIN_ILLEGAL`; the caddy KERNEL guards the server
-/// side, this guards the client side.
-const DOMAIN_ILLEGAL: &[char] = &['\n', '\r', '\t', ' ', '/', '?', '#', '@', '\\', '{', '}'];
 
 #[derive(Debug, Default)]
 pub struct VlessWs;

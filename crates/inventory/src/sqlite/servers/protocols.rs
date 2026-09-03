@@ -91,7 +91,7 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    pub(crate) async fn list_server_protocols(&self, id: &ServerId) -> Result<Vec<ProtocolId>> {
+    pub async fn list_server_protocols(&self, id: &ServerId) -> Result<Vec<ProtocolId>> {
         let rows = sqlx::query(
             "SELECT protocol_id FROM server_protocols WHERE server_id = ?1 ORDER BY protocol_id",
         )

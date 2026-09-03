@@ -1,22 +1,8 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::VLESS_FRAGMENT as FRAGMENT;
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
-
-/// Set of bytes that must be percent-encoded in URL fragments (RFC 3986):
-/// everything that controls URL parsing, plus space/`#`/`?` which would
-/// otherwise truncate or open a new component.
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?')
-    .add(b'/')
-    .add(b'@')
-    .add(b':');
 
 /// uTLS ClientHello fingerprint the client mimics for the REALITY handshake.
 ///

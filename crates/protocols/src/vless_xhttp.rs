@@ -69,7 +69,8 @@
 //!
 //! **Stateless**, like every other Protocol in this crate.
 
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::VLESS_FRAGMENT as FRAGMENT;
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -87,20 +88,6 @@ pub const VLESS_XHTTP_PORT: u16 = 9443;
 /// requires no client-side coordination — sing-box-lx and Xray-core both
 /// accept it without the operator picking a specific mode.
 const DEFAULT_XHTTP_MODE: &str = "auto";
-
-/// Set of bytes percent-encoded in the `#<name>` URL fragment (RFC 3986).
-/// Mirrors `vless_reality.rs` / `vless_ws.rs`.
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?')
-    .add(b'/')
-    .add(b'@')
-    .add(b':');
 
 #[derive(Debug, Default)]
 pub struct VlessXhttp;

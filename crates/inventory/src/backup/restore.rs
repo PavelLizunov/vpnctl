@@ -73,11 +73,20 @@ pub async fn restore_from(
     // sqlx version mismatch, etc) we reject the restore BEFORE
     // touching the live db_path.
     let tmp_path = restore_tmp_path(db_path);
-    if tmp_path.exists() {
-        // Leftover from a previous aborted restore — clean up.
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    std::fs::copy(snapshot_path, &tmp_path).map_err(|e| {
+    tokio::task::spawn_blocking({
+        let snapshot_path = snapshot_path.to_path_buf();
+        let tmp_path = tmp_path.clone();
+        move || {
+            if tmp_path.exists() {
+                // Leftover from a previous aborted restore — clean up.
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+            std::fs::copy(&snapshot_path, &tmp_path)
+        }
+    })
+    .await
+    .map_err(|e| SqliteInventoryError::Invalid(format!("spawn_blocking failed: {e}")))?
+    .map_err(|e| {
         SqliteInventoryError::Invalid(format!(
             "copy {} -> {}: {e}",
             snapshot_path.display(),
@@ -106,14 +115,19 @@ pub async fn restore_from(
     // db_path. Without fsync a power loss between copy and rename
     // can leave the operator with a half-written tmp + a fresh
     // missing-rows db.
-    if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp_path) {
-        let _ = f.sync_all();
-    }
-
-    // Atomic on same FS — at no point is db_path missing if the
-    // rename succeeds. Stale sidecars get stripped AFTER the
-    // rename so they're never paired with a stale db file.
-    std::fs::rename(&tmp_path, db_path).map_err(|e| {
+    tokio::task::spawn_blocking({
+        let tmp_path = tmp_path.clone();
+        let db_path = db_path.to_path_buf();
+        move || {
+            if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp_path) {
+                let _ = f.sync_all();
+            }
+            std::fs::rename(&tmp_path, &db_path)
+        }
+    })
+    .await
+    .map_err(|e| SqliteInventoryError::Invalid(format!("spawn_blocking failed: {e}")))?
+    .map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
         SqliteInventoryError::Invalid(format!(
             "rename {} -> {}: {e}",
