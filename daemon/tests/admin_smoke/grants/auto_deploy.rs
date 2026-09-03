@@ -60,6 +60,7 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         )
         .await
         .unwrap();
+    wait_for_autodeploy_rows(&inv, 1).await;
     let pending = inv
         .servers_pending_deploy_for_user(&UserId("u0".into()), &[ServerId("s0".into())])
         .await
@@ -83,6 +84,7 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         )
         .await
         .unwrap();
+    wait_for_autodeploy_rows(&inv, 2).await;
     let pending = inv
         .servers_pending_deploy_for_user(&UserId("u1".into()), &[ServerId("s1".into())])
         .await
@@ -106,6 +108,7 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         )
         .await
         .unwrap();
+    wait_for_autodeploy_rows(&inv, 3).await;
     let pending = inv
         .servers_pending_deploy_for_user(&UserId("u2".into()), &[ServerId("s2".into())])
         .await
