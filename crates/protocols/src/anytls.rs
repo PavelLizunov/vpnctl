@@ -1,4 +1,5 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{FRAGMENT, USERINFO};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -47,34 +48,6 @@ impl AnyTls {
 /// can format expected-port drift checks without duplicating the
 /// literal.
 pub const ANYTLS_PORT: u16 = 8843;
-
-/// Percent-encode set for the password embedded in the URI auth
-/// portion. Same shape as Hysteria2's USERINFO.
-const USERINFO: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b':')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']');
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
 
 impl Protocol for AnyTls {
     fn id(&self) -> ProtocolId {

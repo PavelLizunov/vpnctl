@@ -301,4 +301,20 @@ impl SqliteInventory {
         }
         Ok(out)
     }
+
+    /// Map of `user_id → number of servers granted to it`. Users
+    /// with no grants are absent (callers default to 0). Exactly 1 query,
+    /// no N+1 — call this once and look up by user ID when rendering a user list.
+    pub async fn servers_count_per_user(&self) -> Result<HashMap<UserId, i64>> {
+        let rows = sqlx::query("SELECT user_id, COUNT(*) AS n FROM grants GROUP BY user_id")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let uid: String = r.try_get("user_id")?;
+            let n: i64 = r.try_get("n")?;
+            out.insert(UserId(uid), n);
+        }
+        Ok(out)
+    }
 }

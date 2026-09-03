@@ -1,6 +1,7 @@
 use super::*;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
+use std::collections::HashMap;
 use vpnctl_core::ServerId;
 
 /// Sum per-interval deltas of cumulative NIC counters, `readings`
@@ -249,6 +250,39 @@ impl SqliteInventory {
         .fetch_optional(&self.pool)
         .await?;
         row_opt.map(row_to_node_health).transpose()
+    }
+
+    /// Map of `server_id -> most recent NodeHealthRow` for all servers with probe data.
+    /// Exactly 1 query using SQLite window functions, eliminating N+1 loops across the fleet.
+    pub async fn latest_node_health_fleet(&self) -> Result<HashMap<ServerId, NodeHealthRow>> {
+        let rows = sqlx::query(
+            "WITH ranked AS (
+                SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
+                       disk_used_mib, disk_total_mib,
+                       mem_available_mib, mem_total_mib,
+                       load_1min_x100, listening_ports_json, sing_box_log_bytes,
+                       kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                       sing_box_nrestarts,
+                       ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY ts DESC, sample_seq DESC) as rn
+                FROM node_health
+             )
+             SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
+                    disk_used_mib, disk_total_mib,
+                    mem_available_mib, mem_total_mib,
+                    load_1min_x100, listening_ports_json, sing_box_log_bytes,
+                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
+                    sing_box_nrestarts
+             FROM ranked WHERE rn = 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = HashMap::with_capacity(rows.len());
+        for r in rows {
+            let row = row_to_node_health(r)?;
+            out.insert(row.server_id.clone(), row);
+        }
+        Ok(out)
     }
 
     /// Traffic accounting breakdown for one server over the window:

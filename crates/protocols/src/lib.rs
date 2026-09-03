@@ -2,6 +2,7 @@
 //! Добавить новый = новый файл + строка регистрации в `cli`.
 
 mod anytls;
+mod encoding;
 mod hysteria2;
 mod naive;
 mod shadowsocks2022;

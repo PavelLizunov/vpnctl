@@ -1,4 +1,5 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{FRAGMENT, QUERY, USERINFO};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
@@ -32,52 +33,6 @@ impl Hysteria2 {
         Self
     }
 }
-
-// `%` is included so a password that already contains `%` doesn't produce
-// malformed pct-encoding when re-encoded by a downstream parser.
-const USERINFO: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b':')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']');
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
-
-/// Strict set for percent-encoding values that land in a URL query
-/// string (after `?`, between `&`s). Includes everything FRAGMENT
-/// does PLUS the application/x-www-form-urlencoded triple
-/// (`+`, `&`, `=`) — `+` is read as a space by lenient form
-/// decoders, and `&`/`=` would split the query.
-const QUERY: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?')
-    .add(b'+')
-    .add(b'&')
-    .add(b'=');
 
 impl Protocol for Hysteria2 {
     fn id(&self) -> ProtocolId {

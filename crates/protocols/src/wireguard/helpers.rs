@@ -1,4 +1,3 @@
-use percent_encoding::{AsciiSet, CONTROLS};
 use std::collections::HashMap;
 use vpnctl_core::{RenderCtx, Result, User};
 
@@ -52,18 +51,7 @@ pub fn is_valid_wg_pubkey(s: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
 }
 
-/// Fragment-only escape set for the user-id tag in `share_link`'s
-/// `#name` portion. Identical to the FRAGMENT set used elsewhere in
-/// this crate.
-pub(crate) const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
+pub(crate) use crate::encoding::FRAGMENT;
 
 /// Compute the per-user `/32` octet for the target user on this
 /// server. Thin wrapper around the shared `wg_addressing` helper.

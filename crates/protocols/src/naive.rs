@@ -1,4 +1,5 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use crate::encoding::{DOMAIN_ILLEGAL, FRAGMENT, USERINFO};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
@@ -56,48 +57,6 @@ impl Naive {
 /// cross-kernel port-conflict preflight that will enforce it is pending
 /// (see docs/NAIVE_CADDY_PLAN.md §3).
 pub const NAIVE_PORT: u16 = 443;
-
-/// Userinfo-safe set for the `<user>:<pass>` segment of the share link.
-const USERINFO: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'@')
-    .add(b'/')
-    .add(b':')
-    .add(b'\\')
-    .add(b'[')
-    .add(b']');
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?');
-
-/// Characters that must never appear in a `naive.domain` when it is woven
-/// into a CLIENT artefact or SERVER inbound. `\n`/`\r`/tab would forge extra lines into the
-/// newline-joined `/api/v1/app/config` base64 blob (see
-/// `daemon/src/handlers/vpn_router.rs::collect_naive_uris_for_user`) —
-/// turning a bad domain into an arbitrary-`vless://`-line injection — and
-/// the URI-structural chars (` /?#@\`) would corrupt the `naive+https://…`
-/// link itself. A real hostname contains none of these.
-///
-/// `naive.domain` is operator-set and NOT validated at the inventory layer
-/// (only the Caddy KERNEL guards the SERVER side — `crates/kernels/src/
-/// caddy.rs`); this is the matching guard for the CLIENT and INBOUND sides. Fail-closed:
-/// a bad domain makes `share_link`/`client_config`/`server_inbound` return `Err`, which the
-/// caller logs + skips. Mirrors the kernel's `ILLEGAL` set, widened for URI context.
-const DOMAIN_ILLEGAL: &[char] = &['\n', '\r', '\t', ' ', '/', '?', '#', '@', '\\', '{', '}'];
 
 /// `RenderCtx::require("naive.domain")` + reject empty/whitespace + reject [`DOMAIN_ILLEGAL`].
 /// Single source of truth for "a domain safe to put in naive artefacts",

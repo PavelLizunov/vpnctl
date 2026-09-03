@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 355 (239 prod / 116 test)
-- **Total Rust LOC:** 134,872 (83,773 prod / 51,099 test)
+- **Tracked Rust Files:** 358 (242 prod / 116 test)
+- **Total Rust LOC:** 136,578 (85,479 prod / 51,099 test)
 - **Database Migrations:** 55
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,830 (5) | 0 (0) | **1,830** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 39 tests | 14,316 (50) | 16,278 (43) | **30,594** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 4,524 (8) | 113 (1) | **4,637** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,265 (17) | 3,928 (11) | **8,193** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 39 tests | 14,366 (50) | 16,278 (43) | **30,644** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,452 (11) | 113 (1) | **6,565** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,001 (17) | 3,928 (11) | **7,929** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,044 (4) | 693 (4) | **2,737** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,548 (127) | 28,477 (52) | **76,025** |
-| **Total** | | | | **83,773 (239)** | **51,099 (116)** | **134,872** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,540 (127) | 28,477 (52) | **76,017** |
+| **Total** | | | | **85,479 (242)** | **51,099 (116)** | **136,578** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -36,6 +36,7 @@
 | `daemon/src/health_monitor/tests.rs` | 1,629 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,519 | `crates/kernels` | Prod |
 | `crates/inventory/src/sqlite/tests.rs` | 1,378 | `crates/inventory` | Prod |
+| `crates/kernels/src/sing_box/tests.rs` | 1,369 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,316 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,306 | `daemon` | Test |
 | `cli/src/cmd/user.rs` | 1,268 | `cli` | Prod |
@@ -54,7 +55,6 @@
 | `daemon/src/node_probe.rs` | 944 | `daemon` | Prod |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
-| `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
 
 ## Database Migrations (55)
 

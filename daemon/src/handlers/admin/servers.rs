@@ -140,18 +140,13 @@ pub(crate) async fn servers(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    let (server_list, user_counts, hidden_matrix) = tokio::try_join!(
+    let (server_list, user_counts, hidden_matrix, latest_health) = tokio::try_join!(
         state.inv.list_servers(),
         state.inv.users_count_per_server(),
         state.inv.list_all_server_protocols_with_hidden(),
+        state.inv.latest_node_health_fleet(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-    let mut latest_health = std::collections::HashMap::new();
-    for server in &server_list {
-        if let Ok(Some(row)) = state.inv.latest_node_health(&server.id).await {
-            latest_health.insert(server.id.clone(), row);
-        }
-    }
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
