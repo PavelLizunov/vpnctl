@@ -7,7 +7,7 @@
 # Output: a static (CGO-free) linux/amd64 binary `sing-box-<ver>-vpnctl`.
 set -euo pipefail
 
-VERSION="${SINGBOX_VERSION:-1.13.19}"
+VERSION="${SINGBOX_VERSION:-1.14.0}"
 TAG="v${VERSION}"
 WORK="${WORK:-/tmp/sb-vpnctl-build}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

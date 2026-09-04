@@ -1,4 +1,4 @@
-pub(super) const SING_BOX_MIN_VERSION: &str = "1.13.19";
+pub(super) const SING_BOX_MIN_VERSION: &str = "1.14.0";
 pub(super) const DEFAULT_SING_BOX_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/sing-box";
 pub(super) const DEFAULT_STATS_HELPER_ARTIFACT: &str =
     "/opt/vpnctl/node-artifacts/singbox-stats-helper";
