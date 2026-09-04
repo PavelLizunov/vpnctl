@@ -286,7 +286,9 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
     inv.add_user(&user("alice")).await.unwrap();
     inv.add_user(&user("bob")).await.unwrap();
     inv.add_server(&server("srv-1")).await.unwrap();
-    inv.grant(&u_alice, &ServerId("srv-1".into())).await.unwrap();
+    inv.grant(&u_alice, &ServerId("srv-1".into()))
+        .await
+        .unwrap();
     inv.grant(&u_bob, &ServerId("srv-1".into())).await.unwrap();
 
     // Alice has recent traffic:
@@ -323,7 +325,11 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
         "bob must not be affected by alice's traffic or server-wide rows"
     );
 
-    let alice_seen = inv.user_last_seen(&u_alice).await.unwrap().expect("alice_seen");
+    let alice_seen = inv
+        .user_last_seen(&u_alice)
+        .await
+        .unwrap()
+        .expect("alice_seen");
     assert_eq!(
         alice_seen.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         "2026-09-04T12:00:00.000Z",
