@@ -19,6 +19,7 @@ pub(crate) async fn render_overview_tab(
     sub_token: &Option<String>,
     sub_url_str: &Option<String>,
     lifecycle: &UserLifecycle,
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
     access_aggregates: &SubAccessAggregates,
     ua_clusters: &[UaCluster],
     traffic_by_server: &[(ServerId, u64, u64)],
@@ -207,7 +208,7 @@ pub(crate) async fn render_overview_tab(
             section {
                 (user_overview_summary(
                     user,
-                    (lifecycle, access_aggregates.last_seen, access_aggregates, ua_clusters),
+                    (lifecycle, last_seen, access_aggregates, ua_clusters),
                     traffic_by_server,
                     (all_servers, granted_ids),
                     lang,
