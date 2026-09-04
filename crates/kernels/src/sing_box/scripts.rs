@@ -1,4 +1,12 @@
-pub(super) const SING_BOX_MIN_VERSION: &str = "1.14.0";
+pub const SING_BOX_MIN_VERSION: &str = "1.14.0";
+pub const SING_BOX_VPNCTL_VERSION: &str = "1.14.0-vpnctl.3";
+pub const SING_BOX_AMD64_SHA256: &str =
+    "3d7fdbbf68f75b74f2bb4451eb2a1ed3421ee3ab6bccfea93f16c0d3eca91e8e";
+pub const SING_BOX_ARM64_SHA256: &str =
+    "dc27c138616698e77c0a78bdedf00c77f41326d11eb8429069d3a8294479f5d2";
+pub const SING_BOX_ARMV7_SHA256: &str =
+    "58dd35d39e337c5f24fa0ee67caa4c843719b9bb51cd2aaf70eb1c97aa2cffa4";
+
 pub(super) const DEFAULT_SING_BOX_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/sing-box";
 pub(super) const DEFAULT_STATS_HELPER_ARTIFACT: &str =
     "/opt/vpnctl/node-artifacts/singbox-stats-helper";

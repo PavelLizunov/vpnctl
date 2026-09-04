@@ -111,6 +111,64 @@ fn managed_install_requires_v2ray_api_and_blocks_apt_clobber() {
 }
 
 #[test]
+fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
+    use super::scripts::{
+        SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256,
+        SING_BOX_VPNCTL_VERSION,
+    };
+    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.0-vpnctl.3");
+    assert_eq!(
+        SING_BOX_AMD64_SHA256,
+        "3d7fdbbf68f75b74f2bb4451eb2a1ed3421ee3ab6bccfea93f16c0d3eca91e8e"
+    );
+    assert_eq!(
+        SING_BOX_ARM64_SHA256,
+        "dc27c138616698e77c0a78bdedf00c77f41326d11eb8429069d3a8294479f5d2"
+    );
+    assert_eq!(
+        SING_BOX_ARMV7_SHA256,
+        "58dd35d39e337c5f24fa0ee67caa4c843719b9bb51cd2aaf70eb1c97aa2cffa4"
+    );
+}
+
+#[test]
+fn resolve_sing_box_artifact_path_resolves_expected_arch_defaults_and_overrides() {
+    use super::arch::resolve_sing_box_artifact_path;
+    use std::path::PathBuf;
+
+    assert_eq!(
+        resolve_sing_box_artifact_path("x86_64"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box")
+    );
+    assert_eq!(
+        resolve_sing_box_artifact_path("amd64"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box")
+    );
+
+    assert_eq!(
+        resolve_sing_box_artifact_path("aarch64"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box-arm64")
+    );
+    assert_eq!(
+        resolve_sing_box_artifact_path("arm64"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box-arm64")
+    );
+
+    assert_eq!(
+        resolve_sing_box_artifact_path("armv7l"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box-armv7")
+    );
+    assert_eq!(
+        resolve_sing_box_artifact_path("armv7"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box-armv7")
+    );
+    assert_eq!(
+        resolve_sing_box_artifact_path("armhf"),
+        PathBuf::from("/opt/vpnctl/node-artifacts/sing-box-armv7")
+    );
+}
+
+#[test]
 fn managed_upload_paths_are_unique_and_shell_safe() {
     let first = remote_artifact_paths();
     let second = remote_artifact_paths();
