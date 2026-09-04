@@ -1,0 +1,4 @@
+## 2026-07-10 - Strict ASCII Sanitization for HTTP Header Filenames
+**Vulnerability:** HTTP `Content-Disposition` attachment filenames derived from dynamic strings (such as user or server IDs) could contain non-ASCII characters or header metacharacters, causing Axum's `HeaderValue` conversion to return `InvalidHeaderValue` errors (resulting in 500 Internal Server Error) or allowing HTTP header parameter injection.
+**Learning:** `HeaderValue` in `http` / `axum` strictly requires printable ASCII (`0x20..=0x7E`). Ad-hoc filters that only strip quotes and control characters still permit non-ASCII Unicode or header punctuation like semicolons and slashes.
+**Prevention:** Always sanitize dynamic strings used in HTTP header parameters by restricting them to ASCII alphanumeric characters (`a-z`, `A-Z`, `0-9`), `-`, `_`, and `.`, providing a safe non-empty fallback like `"download"`.

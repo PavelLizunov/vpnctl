@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
+use super::audit::sanitize_header_filename;
 use super::helpers::{
     bad_request, internal_error, not_found, render_page, theme_accent_lang, user_not_found,
     valid_user_id,
@@ -296,21 +297,11 @@ pub(crate) async fn user_wireguard_conf_download(
         Err(e) => return internal_error(anyhow::anyhow!(e)),
     };
 
-    // Strip every RFC-6266 unsafe set + control bytes from the
-    // filename before quoting. `valid_user_id` (POST /admin/users) IS
-    // the input gate going forward, but old DB rows imported from
-    // legacy bash inventory MAY contain spaces / quotes / CR / LF;
-    // a CR/LF in particular would otherwise make
-    // `HeaderValue::from_str` reject the header entirely and the
-    // browser would default-name the file `download` (bad UX). Stripping
-    // is safer than rejecting because the operator's intent (download
-    // SOMETHING) is unambiguous.
-    let safe = |s: &str| -> String {
-        s.chars()
-            .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
-            .collect()
-    };
-    let filename = format!("{}-{}.conf", safe(&user.id.0), safe(&server.id.0));
+    // Strip every RFC-6266 unsafe set + control bytes + non-ASCII characters
+    // from the filename before quoting using sanitize_header_filename.
+    let safe_user = sanitize_header_filename(&user.id.0);
+    let safe_server = sanitize_header_filename(&server.id.0);
+    let filename = format!("{safe_user}-{safe_server}.conf");
 
     let mut resp = (StatusCode::OK, conf).into_response();
     let headers = resp.headers_mut();

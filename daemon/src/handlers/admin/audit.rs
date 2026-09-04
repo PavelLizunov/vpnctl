@@ -628,12 +628,19 @@ pub(crate) async fn audit_csv(
         .into_response()
 }
 
-/// Strip quotes, backslashes, CR, LF, and control characters from string
-/// before using in HTTP header filenames (e.g. Content-Disposition).
+/// Sanitize dynamic strings before using in HTTP header filenames (e.g. Content-Disposition).
+/// Keeps only ASCII alphanumeric characters, `-`, `_`, and `.`. Falls back to `"download"`
+/// if no valid ASCII characters remain, guaranteeing a valid ASCII HeaderValue.
 pub(crate) fn sanitize_header_filename(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
-        .collect()
+    let clean: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    if clean.is_empty() {
+        "download".to_string()
+    } else {
+        clean
+    }
 }
 
 /// Quote a single CSV field per RFC 4180. If the field contains
@@ -670,6 +677,12 @@ mod csv_tests {
             sanitize_header_filename("user\"name\r\n\\test\0"),
             "usernametest"
         );
+        assert_eq!(
+            sanitize_header_filename("юзер;name=test/foo.bar"),
+            "nametestfoo.bar"
+        );
+        assert_eq!(sanitize_header_filename("!!!"), "download");
+        assert_eq!(sanitize_header_filename(""), "download");
     }
 
     /// OWASP CSV-injection pin (audit 2026-06-10): a field starting
