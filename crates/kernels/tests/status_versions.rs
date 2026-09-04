@@ -92,7 +92,7 @@ fn every_current_kernel_exposes_its_managed_floor_or_pin() {
         (
             Box::new(SingBox::new()),
             KernelVersionPolicy::Floor,
-            "1.13.19",
+            "1.14.0",
         ),
         (
             Box::new(AmneziaWg::new()),

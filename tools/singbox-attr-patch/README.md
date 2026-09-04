@@ -15,7 +15,7 @@ The managed build therefore makes two narrow changes:
 
 1. enables the upstream `with_v2ray_api` build tag; and
 2. applies `clash-user.patch`, a one-line live-metadata patch adding
-   `"user": t.Metadata.User` to `/connections` JSON.
+   `"user": c.Metadata.User` to `/connections` JSON in `experimental/clashapi/connections.go`.
 
 V2Ray Stats is the byte-accounting source. The Clash field remains useful for
 live connection/session/source/destination views; accounting correctness no
@@ -26,7 +26,7 @@ longer depends on observing every connection snapshot.
 Requires Go 1.25 or newer, Git, and network access:
 
 ```bash
-SINGBOX_VERSION=1.13.19 OUT=/tmp/sing-box ./build.sh
+SINGBOX_VERSION=1.14.0 OUT=/tmp/sing-box ./build.sh
 ```
 
 The result is a static linux/amd64 binary whose version suffix is `-vpnctl`.

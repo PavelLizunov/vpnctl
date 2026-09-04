@@ -819,14 +819,14 @@ fn sing_box_setup_script_gate_evaluation() {
     );
     // Above floor -> SKIPPED
     assert_eq!(
-        run_gate("install ok installed", true, "1.14.0"),
+        run_gate("install ok installed", true, "1.15.0"),
         "SKIPPED",
         "installed package above min version must skip apt"
     );
 
     // 2. Manual /usr/local/bin scenario (package not installed in dpkg) -> TRIGGERED
     assert_eq!(
-        run_gate("", true, "1.14.0"),
+        run_gate("", true, "1.15.0"),
         "TRIGGERED",
         "unregistered package state must trigger apt even if executable exists"
     );
@@ -847,12 +847,12 @@ fn sing_box_setup_script_gate_evaluation() {
 
     // 5. Half-installed / config-files package state -> TRIGGERED
     assert_eq!(
-        run_gate("install ok half-installed", true, "1.14.0"),
+        run_gate("install ok half-installed", true, "1.15.0"),
         "TRIGGERED",
         "half-installed package state must trigger apt"
     );
     assert_eq!(
-        run_gate("deinstall ok config-files", true, "1.14.0"),
+        run_gate("deinstall ok config-files", true, "1.15.0"),
         "TRIGGERED",
         "config-files package state must trigger apt"
     );
