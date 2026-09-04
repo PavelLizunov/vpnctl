@@ -404,18 +404,22 @@ pub(crate) async fn user_detail_render(
         }
         out
     };
+    let true_last_seen = state
+        .inv
+        .user_last_seen(&uid)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_last_seen failed");
+            access_aggregates.last_seen
+        })
+        .or(access_aggregates.last_seen);
+
     // PR-User user#1 — render the presence badge here (it does an
     // async cache + fallback-query read, which the maud `html!` block
     // below can't `.await`). Cheap: in-memory cache reads + at most one
     // bounded `users_for_source_ips` query.
-    let online_badge = user_online_badge(
-        &state,
-        &uid,
-        &presence_server_ids,
-        access_aggregates.last_seen,
-        lang,
-    )
-    .await;
+    let online_badge =
+        user_online_badge(&state, &uid, &presence_server_ids, true_last_seen, lang).await;
 
     // Design v2 group C — tab-scoped data loads.
     // 4c Activity: newest geo-resolved fetch rows + this user's
@@ -574,6 +578,7 @@ pub(crate) async fn user_detail_render(
                 &sub_token,
                 &sub_url_str,
                 &lifecycle,
+                true_last_seen,
                 &access_aggregates,
                 &ua_clusters,
                 &traffic_by_server,

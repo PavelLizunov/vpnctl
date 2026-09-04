@@ -197,4 +197,33 @@ impl SqliteInventory {
             age_days,
         })
     }
+
+    /// True last-seen activity timestamp across all user activity sources:
+    /// - `sub_access_log.ts` (subscription config pulls)
+    /// - `vpn_connection_stats.ts` (attributed VPN traffic or active connections)
+    /// - `vpn_user_sessions.last_seen` (VPN session windows)
+    ///
+    /// Returns `None` if the user has never fetched a subscription or connected to the VPN.
+    pub async fn user_last_seen(&self, user: &UserId) -> Result<Option<DateTime<Utc>>> {
+        let row = sqlx::query(
+            "SELECT MAX(latest_ts) AS last_seen FROM (
+                 SELECT MAX(ts) AS latest_ts FROM sub_access_log WHERE user_id = ?1
+                 UNION ALL
+                 SELECT MAX(ts) AS latest_ts FROM vpn_connection_stats
+                  WHERE user_id = ?1 AND (upload_bytes > 0 OR download_bytes > 0 OR active_connections > 0)
+                 UNION ALL
+                 SELECT MAX(last_seen) AS latest_ts FROM vpn_user_sessions WHERE user_id = ?1
+             )",
+        )
+        .bind(&user.0)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let last_seen_str: Option<String> = row.try_get("last_seen")?;
+        Ok(last_seen_str.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        }))
+    }
 }
