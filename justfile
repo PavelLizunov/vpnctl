@@ -32,6 +32,14 @@ project-map:
 project-map-check:
     python3 scripts/project-map.py --check
 
+# Bundle CSS modules into daemon/assets/admin.css
+bundle-css:
+    python3 scripts/bundle-css.py
+
+# Verify daemon/assets/admin.css is up-to-date
+bundle-css-check:
+    python3 scripts/bundle-css.py --check
+
 # Security advisories
 audit:
     cargo audit
@@ -62,7 +70,7 @@ clean:
 
 # Full local CI sweep — run before pushing. `gc` runs first so a
 # bloated target/ is trimmed before the build gates rebuild it.
-ci: gc project-map-check fmt-check clippy test deny
+ci: gc project-map-check bundle-css-check fmt-check clippy test deny
     @echo "✔ all CI gates passed"
 
 # ─── Tools from 2026-05-18 security audit ──────────────────────────
