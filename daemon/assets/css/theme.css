@@ -1,0 +1,132 @@
+/* vpnctl admin · v3 · editorial — full theme system + base styles
+ * Themes (paper):  default (cream) · .ed-newsprint · .ed-foxed · .ed-ink
+ * Accents:         default (ink-blue) · .ed-acc-rust · .ed-acc-forest · .ed-acc-plum
+ *
+ * Every component reads from CSS vars. The Tweaks panel toggles the modifier
+ * classes on .ed (the screen root), so a single artboard can show any combo.
+ */
+
+/* ── default: cream ── */
+:root,
+.ed {
+  --paper:   oklch(0.965 0.012 80);
+  --paper-2: oklch(0.945 0.014 80);
+  --paper-3: oklch(0.925 0.018 80);
+  /* alias — admin.rs log panes have referenced var(--paper-tint) since the
+     first SSE pane; the token was never defined (silent transparent).
+     Per-theme --paper-2 tracks automatically via the cascade. */
+  --paper-tint: var(--paper-2);
+  --ink:     oklch(0.20 0.020 80);
+  --soft:    oklch(0.42 0.018 80);
+  --mute:    oklch(0.58 0.014 80);
+  --dim:     oklch(0.72 0.010 80);
+  --rule:    oklch(0.82 0.014 80);
+  --rule-s:  oklch(0.62 0.018 80);
+
+  --acc:     oklch(0.42 0.10 235);   /* ink-blue */
+  --acc-soft:oklch(0.62 0.10 235);
+  --acc-bg:  oklch(0.92 0.03 235);
+
+  --warm:    oklch(0.55 0.14 50);
+  --green:   oklch(0.46 0.12 155);
+  --red:     oklch(0.50 0.18 25);
+
+  --serif: "Newsreader", "Source Serif Pro", "Iowan Old Style", Georgia, serif;
+  --sans:  "IBM Plex Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --mono:  "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ── newsprint: cooler gray paper, deeper ink ── */
+.ed-newsprint {
+  --paper:   oklch(0.945 0.005 250);
+  --paper-2: oklch(0.925 0.005 250);
+  --paper-3: oklch(0.905 0.006 250);
+  --ink:     oklch(0.15 0.010 250);
+  --soft:    oklch(0.36 0.010 250);
+  --mute:    oklch(0.54 0.008 250);
+  --dim:     oklch(0.70 0.006 250);
+  --rule:    oklch(0.78 0.008 250);
+  --rule-s:  oklch(0.58 0.010 250);
+  --acc-bg:  oklch(0.92 0.025 235);
+}
+
+/* ── foxed: aged sepia ── */
+.ed-foxed {
+  --paper:   oklch(0.938 0.030 70);
+  --paper-2: oklch(0.918 0.034 70);
+  --paper-3: oklch(0.892 0.038 65);
+  --ink:     oklch(0.24 0.030 50);
+  --soft:    oklch(0.44 0.030 60);
+  --mute:    oklch(0.60 0.024 65);
+  --dim:     oklch(0.74 0.020 70);
+  --rule:    oklch(0.80 0.028 65);
+  --rule-s:  oklch(0.62 0.030 60);
+  --acc-bg:  oklch(0.92 0.035 50);
+}
+
+/* ── ink: inverted, near-black with cream type ── */
+.ed-ink {
+  --paper:   oklch(0.165 0.015 60);
+  --paper-2: oklch(0.205 0.018 60);
+  --paper-3: oklch(0.245 0.020 60);
+  --ink:     oklch(0.945 0.018 80);
+  --soft:    oklch(0.78 0.015 80);
+  --mute:    oklch(0.60 0.012 80);
+  --dim:     oklch(0.46 0.010 80);
+  --rule:    oklch(0.32 0.014 60);
+  --rule-s:  oklch(0.48 0.014 60);
+  --acc-bg:  oklch(0.28 0.06 235);
+}
+
+/* ── accent variants — applied on top of any theme ── */
+.ed-acc-rust   { --acc: oklch(0.50 0.14 40);  --acc-soft: oklch(0.66 0.13 40);  --acc-bg: oklch(0.94 0.04 40); }
+.ed-acc-forest { --acc: oklch(0.42 0.10 155); --acc-soft: oklch(0.62 0.10 155); --acc-bg: oklch(0.93 0.04 155); }
+.ed-acc-plum   { --acc: oklch(0.42 0.12 330); --acc-soft: oklch(0.62 0.12 330); --acc-bg: oklch(0.94 0.04 330); }
+
+/* in ink theme the accent-bg needs to be a darker tint */
+.ed-ink                { --acc-bg: oklch(0.28 0.06 235); }
+.ed-ink.ed-acc-rust    { --acc-bg: oklch(0.28 0.07 40); --acc: oklch(0.74 0.14 50); --acc-soft: oklch(0.58 0.13 50); }
+.ed-ink.ed-acc-forest  { --acc-bg: oklch(0.26 0.06 155); --acc: oklch(0.70 0.12 155); --acc-soft: oklch(0.55 0.11 155); }
+.ed-ink.ed-acc-plum    { --acc-bg: oklch(0.28 0.07 330); --acc: oklch(0.74 0.14 330); --acc-soft: oklch(0.58 0.13 330); }
+.ed-ink                { --acc: oklch(0.72 0.10 235); --acc-soft: oklch(0.56 0.10 235); }
+
+/* ─────────────────────────────────────────────
+   Screen frame
+*/
+html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
+#root { width:100%; height:100%; }
+
+.ed {
+  width:100%; height:100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  display:flex; flex-direction: column;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── form controls — token defaults (design review R2 2026-07-10).
+   Raw <input>/<select>/<textarea> rendered browser-white against the
+   cream paper on every page that forgot an inline style (naive config,
+   reserved ports, fingerprint pin, display name, root password, audit
+   selects, notifications form). One rule instead of chasing inline
+   styles; inline `style=` attrs still win where a screen needs to
+   deviate. Buttons/checkboxes excluded on purpose. ── */
+.ed-main input:not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]),
+.ed-main select,
+.ed-main textarea {
+  background: var(--paper);
+  border: 1px solid var(--rule-s);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.ed-main input::placeholder,
+.ed-main textarea::placeholder { color: var(--dim); }
+.ed-main select { cursor: pointer; }
+
