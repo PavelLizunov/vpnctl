@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 373 (256 prod / 117 test)
-- **Total Rust LOC:** 137,262 (85,818 prod / 51,444 test)
+- **Tracked Rust Files:** 374 (257 prod / 117 test)
+- **Total Rust LOC:** 137,359 (85,915 prod / 51,444 test)
 - **Database Migrations:** 55
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
 
@@ -20,11 +20,11 @@
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 40 tests | 14,395 (50) | 16,616 (44) | **31,011** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,452 (11) | 113 (1) | **6,565** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,549 (12) | 113 (1) | **6,662** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,064 (18) | 3,928 (11) | **7,992** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,044 (4) | 693 (4) | **2,737** |
 | `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,769 (133) | 28,484 (52) | **76,253** |
-| **Total** | | | | **85,818 (256)** | **51,444 (117)** | **137,262** |
+| **Total** | | | | **85,915 (257)** | **51,444 (117)** | **137,359** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -34,8 +34,8 @@
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,680 | `daemon` | Test |
 | `daemon/src/health_monitor/tests.rs` | 1,629 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,519 | `crates/kernels` | Prod |
+| `crates/kernels/src/sing_box/tests.rs` | 1,427 | `crates/kernels` | Prod |
 | `crates/inventory/src/sqlite/tests.rs` | 1,378 | `crates/inventory` | Prod |
-| `crates/kernels/src/sing_box/tests.rs` | 1,369 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,316 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,306 | `daemon` | Test |
 | `cli/src/cmd/user.rs` | 1,268 | `cli` | Prod |

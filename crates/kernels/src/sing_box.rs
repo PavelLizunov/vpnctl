@@ -1,16 +1,22 @@
+mod arch;
 mod guards;
 mod scripts;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use arch::resolve_sing_box_artifact_path;
 pub use guards::{live_config_user_uuids, validate_config_excludes_ports};
+pub use scripts::{
+    SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256, SING_BOX_MIN_VERSION,
+    SING_BOX_VPNCTL_VERSION,
+};
 
 use async_trait::async_trait;
 use guards::user_uuid_diff;
 use scripts::{
-    DEFAULT_SING_BOX_ARTIFACT, DEFAULT_STATS_HELPER_ARTIFACT, SING_BOX_MIN_VERSION,
-    SING_BOX_SETUP_SCRIPT, cleanup_remote_artifacts_script, firewall_open_script,
-    install_managed_artifacts_script, remote_artifact_paths, sing_box_apply_script,
+    DEFAULT_STATS_HELPER_ARTIFACT, SING_BOX_SETUP_SCRIPT, cleanup_remote_artifacts_script,
+    firewall_open_script, install_managed_artifacts_script, remote_artifact_paths,
+    sing_box_apply_script,
 };
 use serde_json::json;
 use vpnctl_core::{
@@ -74,9 +80,12 @@ impl Kernel for SingBox {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        let sing_box_path = std::env::var_os("VPNCTL_SING_BOX_ARTIFACT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SING_BOX_ARTIFACT));
+        let arch = ssh
+            .exec("uname -m 2>/dev/null || echo x86_64")
+            .await?
+            .trim()
+            .to_string();
+        let sing_box_path = resolve_sing_box_artifact_path(&arch);
         let helper_path = std::env::var_os("VPNCTL_STATS_HELPER_ARTIFACT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
