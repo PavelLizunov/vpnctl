@@ -394,7 +394,13 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
         return "/admin/".to_string();
     };
     let path_only = path.split(['?', '#']).next().unwrap_or(path);
-    if path_only == "/admin" || path_only.starts_with("/admin/") {
+    // Security: Reject path-traversal (`..`), protocol-relative redirects (`//`),
+    // or backslashes (`\`) to prevent open redirects off-site (e.g. `/admin/../..//evil.com`).
+    if (path_only == "/admin" || path_only.starts_with("/admin/"))
+        && !path_only.contains("..")
+        && !path_only.contains('\\')
+        && !path_only.contains("//")
+    {
         path.to_string()
     } else {
         "/admin/".to_string()
@@ -609,5 +615,40 @@ mod tests {
         assert_eq!(cookie(&headers, "vpnctl_accent"), Some("blue"));
         assert_eq!(cookie(&headers, "other"), Some("123"));
         assert_eq!(cookie(&headers, "nonexistent"), None);
+    }
+
+    #[test]
+    fn sanitize_referer_accepts_valid_admin_paths() {
+        assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
+        assert_eq!(sanitize_referer(Some("/admin/")), "/admin/");
+        assert_eq!(
+            sanitize_referer(Some("http://192.168.0.236:18402/admin/audit")),
+            "/admin/audit"
+        );
+        assert_eq!(
+            sanitize_referer(Some("/admin/users?tab=grants")),
+            "/admin/users?tab=grants"
+        );
+        assert_eq!(
+            sanitize_referer(Some("/admin/settings#backups-section")),
+            "/admin/settings#backups-section"
+        );
+    }
+
+    #[test]
+    fn sanitize_referer_rejects_open_redirect_and_path_traversal() {
+        assert_eq!(sanitize_referer(Some("/admin/../..//evil.com")), "/admin/");
+        assert_eq!(
+            sanitize_referer(Some("http://192.168.0.236:18402/admin/../..//evil.com")),
+            "/admin/"
+        );
+        assert_eq!(sanitize_referer(Some("/admin//evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/\\evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("//evil.com/admin/")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/\\evil.com/admin/")), "/admin/");
+        assert_eq!(
+            sanitize_referer(Some("http://evil.com/admin/../..//evil.com")),
+            "/admin/"
+        );
     }
 }
