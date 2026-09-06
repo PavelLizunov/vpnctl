@@ -63,7 +63,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
 
-### AmneziaWG 2.0 / 3.1 integration (unreleased)
+### AmneziaWG 2.0 / 3.1 integration
 
 The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,
 UDP ports 51821/51822 and address pools 10.72.0.0/16 / 10.73.0.0/16,
@@ -87,7 +87,9 @@ unrelated grant changes do not renumber them, and collisions fail closed.
 **Kernel requirement:** use the pinned `1.14.0-vpnctl.4` release, verified against
 official AmneziaWG 3.1 with real TCP/UDP transfers. `1.14.0-vpnctl.3` accepts
 configuration but fails AWG3 data transfer and must not be used for this integration.
-The integration remains unreleased until its control-plane CI and rollout gates pass. See the
+Protocol changes schedule a targeted automatic deployment using current inventory.
+If a deployment is busy or the inventory changes during preparation, the server
+page provides a manual retry; keys and profiles are preserved. See the
 [AWG specification](docs/specs/amneziawg2-3.md).
 
 ### Known gaps (carried into v0.9)

@@ -265,6 +265,13 @@ async fn redeploy_pipeline(
         }};
     }
 
+    // Callers may have captured this server before the triggering mutation.
+    // Refresh under the deploy guard, before validating or minting secrets.
+    let server = match inv.get_server(&server.id).await {
+        Ok(Some(server)) => server,
+        Ok(None) => fail!("deploy", "server was removed before deploy"),
+        Err(e) => fail!("deploy", "cannot refresh server before bootstrap: {e}"),
+    };
     let redirect = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
     let mut ssh_errors: Vec<String> = Vec::new();
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
@@ -307,11 +314,32 @@ async fn redeploy_pipeline(
         Ok(revision) => revision,
         Err(e) => fail!("deploy", "cannot snapshot deploy inputs: {e}"),
     };
-    let server = match inv.get_server(&server.id).await {
+    let current_server = match inv.get_server(&server.id).await {
         Ok(Some(server)) => server,
         Ok(None) => fail!("deploy", "server was removed before deploy"),
         Err(e) => fail!("deploy", "cannot refresh server before deploy: {e}"),
     };
+    // Never render a different protocol/kernel set from the one bootstrapped.
+    // Concurrent toggles retain their pending state and can retry safely.
+    if current_server.enabled_protocols != server.enabled_protocols
+        || current_server.kernels != server.kernels
+    {
+        write_deploy_audit(
+            &inv,
+            &current_server,
+            &bootstrapped,
+            &[],
+            &[],
+            0,
+            0,
+            None,
+            true,
+            &deploy_revision,
+        )
+        .await;
+        fail!("deploy", "inventory changed while preparing deploy; retry");
+    }
+    let server = current_server;
     let secrets = match inv.list_server_secrets(&server.id).await {
         Ok(secrets) => secrets,
         Err(e) => fail!("deploy", "cannot refresh server secrets: {e}"),
