@@ -38,6 +38,8 @@ pub(crate) fn build() -> anyhow::Result<Registry> {
     // WireGuard wire-format — served by AmneziaWg today, future
     // WireGuardKernel (vanilla wg-quick) too.
     reg.register_protocol(Box::new(WireGuard::new()))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg2::new()))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))?;
     // AnyTLS — REALITY successor; different TLS fingerprint, useful
     // as fallback channel when REALITY gets DPI'd. Sing-box ≥ 1.12.
     reg.register_protocol(Box::new(AnyTls::new()))?;

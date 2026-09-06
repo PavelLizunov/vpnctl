@@ -20,6 +20,7 @@ pub(crate) fn render_delivery_tab(
     chain_sub_url_str: Option<&str>,
     amnezia_links: &[(ServerId, String)],
     awg_links: &[(ServerId, String)],
+    amnezia_files: &[(ServerId, u8, bool)],
     share_links: &[(ServerId, ProtocolId, String)],
     wg_capable_granted: &[&ServerId],
     wg_capable_inventory: &[&ServerId],
@@ -87,6 +88,35 @@ pub(crate) fn render_delivery_tab(
                 }))
             }
         }
+            @if !amnezia_files.is_empty() {
+                div.ed-rule {}
+                div.ed-art-eyebrow { (crate::i18n::tr(lang, "AmneziaWG native files", "Нативные файлы AmneziaWG")) }
+                p.ed-grid__mut {
+                    (crate::i18n::tr(lang,
+                        "Import one file into a client supporting the stated AmneziaWG version, not stock WireGuard. Downloads never generate or rotate keys.",
+                        "Импортируй файл в клиент с поддержкой указанной версии AmneziaWG, не обычный WireGuard. Скачивание не создаёт и не меняет ключи."))
+                }
+                @for (sid, version, ready) in amnezia_files {
+                    div style="margin: 8px 0;" {
+                        span.ed-mono { (sid.0) " · AmneziaWG " (if *version == 2 { "2.0" } else { "3.1" }) " " }
+                        @if *ready {
+                            a.ed-abtn.ed-abtn--secondary href=(format!("/admin/users/{}/amneziawg/{version}/conf/{}",
+                                path_segment_encode(&user.id.0), path_segment_encode(&sid.0))) {
+                                (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                            }
+                        } @else {
+                            span.ed-grid__mut {
+                                (crate::i18n::tr(lang,
+                                    "File not ready. Review the user keypair below and server Settings, then deploy the server.",
+                                    "Файл не готов. Проверь пару ключей ниже и настройки сервера, затем задеплой сервер."))
+                            }
+                            " " a href=(format!("/admin/servers/{}/setup", path_segment_encode(&sid.0))) {
+                                (crate::i18n::tr(lang, "Server Settings", "Настройки сервера"))
+                            }
+                        }
+                    }
+                }
+            }
             div.ed-rule {}
             div.ed-art-eyebrow { (crate::i18n::tr(lang, "WireGuard keypair", "WireGuard-пара ключей")) }
             @match (&user.wireguard_pubkey, &user.wireguard_private) {
@@ -482,17 +512,24 @@ pub(crate) fn render_delivery_tab(
                     }
                 }
                 (Some(pub_b64), None) => {
-                    // Operator-paranoid path (CLI `--wireguard-pubkey`): only
-                    // pubkey present, private stays on the user device. No
-                    // rotate button — that'd overwrite the user's privkey
-                    // pairing. Operator can `vpnctl user remove` + `add`
-                    // to switch flows.
+                    // Public-only imports need an explicit, warned rotation;
+                    // a GET must never silently replace the device-owned pair.
                     div style="padding: 12px 0;" {
                         div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
                             div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
                             div {
                                 span style="color: var(--mute);" { "private " }
                                 span.ed-mono style="color: var(--mute);" { "on user device (operator-paranoid path)" }
+                            }
+                        }
+                        p.ed-grid__mut {
+                            (crate::i18n::tr(lang,
+                                "Ready files require a stored private key. Rotating replaces the existing pair; devices using it must re-import after deployment.",
+                                "Для готового файла нужен сохранённый приватный ключ. Ротация заменит текущую пару; после деплоя устройствам потребуется повторный импорт."))
+                        }
+                        form method="post" action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0))) {
+                            button type="submit" class="ed-abtn ed-abtn--warning" {
+                                (crate::i18n::tr(lang, "rotate WG keypair", "сменить WG-пару ключей"))
                             }
                         }
                     }

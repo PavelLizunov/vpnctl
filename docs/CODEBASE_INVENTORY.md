@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 374 (257 prod / 117 test)
-- **Total Rust LOC:** 137,359 (85,915 prod / 51,444 test)
+- **Tracked Rust Files:** 384 (260 prod / 124 test)
+- **Total Rust LOC:** 140,907 (87,160 prod / 53,747 test)
 - **Database Migrations:** 55
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 120
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 121
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 7,105 (20) | 214 (1) | **7,319** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 7,107 (20) | 214 (1) | **7,321** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,339 (6) | 870 (2) | **2,209** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
-| `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib | 426 (1) | 0 (0) | **426** |
+| `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 40 tests | 14,395 (50) | 16,616 (44) | **31,011** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 1 test | 6,549 (12) | 113 (1) | **6,662** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 11 tests | 4,064 (18) | 3,928 (11) | **7,992** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 41 tests | 14,470 (50) | 17,018 (45) | **31,488** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,737 (13) | 250 (3) | **6,987** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,773 (20) | 4,847 (12) | **9,620** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,044 (4) | 693 (4) | **2,737** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 47,769 (133) | 28,484 (52) | **76,253** |
-| **Total** | | | | **85,915 (257)** | **51,444 (117)** | **137,359** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 48,020 (133) | 29,200 (54) | **77,220** |
+| **Total** | | | | **87,160 (260)** | **53,747 (124)** | **140,907** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -44,6 +44,7 @@
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,179 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,102 | `daemon` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
+| `daemon/src/handlers/admin/user_actions.rs` | 1,046 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
 | `crates/ssh/src/russh_transport.rs` | 1,031 | `crates/ssh` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
@@ -54,7 +55,6 @@
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
-| `crates/ssh/src/subprocess.rs` | 901 | `crates/ssh` | Prod |
 
 ## Database Migrations (55)
 
@@ -116,7 +116,7 @@
 | `0054` | client detour | `crates/inventory/migrations/0054_client_detour.sql` | 38 |
 | `0055` | vpn counter baselines | `crates/inventory/migrations/0055_vpn_counter_baselines.sql` | 21 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (120)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (121)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -216,6 +216,7 @@
 | `GET` | `/admin/users/{id}/access` | `admin::user_detail_access` |
 | `GET` | `/admin/users/{id}/access.csv` | `admin::user_access_csv` |
 | `GET` | `/admin/users/{id}/activity` | `admin::user_detail_activity` |
+| `GET` | `/admin/users/{id}/amneziawg/{version}/conf/{server_id}` | `admin::user_amneziawg_conf_download` |
 | `POST` | `/admin/users/{id}/delete` | `admin::user_delete` |
 | `GET` | `/admin/users/{id}/delete-confirm` | `admin::user_delete_confirm` |
 | `GET` | `/admin/users/{id}/delivery` | `admin::user_detail_delivery` |

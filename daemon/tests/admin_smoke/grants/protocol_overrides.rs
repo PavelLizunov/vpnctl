@@ -702,11 +702,11 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
     // included):
     //   Strong:   vless+reality, naive,
     //             vless-ws, vless+xhttp            (4)
-    //   Moderate: tuic-v5, anytls                  (2)
+    //   Moderate: tuic-v5, anytls, amneziawg2, amneziawg3 (4)
     //   Weak:     shadowsocks-2022, wireguard,
     //             trojan, hysteria2                (4)
     //   ────────────────────────────────────────────
-    //   total                                      (10)
+    //   total                                      (12)
     let strong_count = html.matches("DPI: strong").count();
     let moderate_count = html.matches("DPI: moderate").count();
     let weak_count = html.matches("DPI: weak").count();
@@ -715,8 +715,8 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
         "expected 4 Strong chips (vless+reality, naive, vless-ws, vless+xhttp), got {strong_count}"
     );
     assert_eq!(
-        moderate_count, 2,
-        "expected 2 Moderate chips (tuic-v5, anytls), got {moderate_count}"
+        moderate_count, 4,
+        "expected 4 Moderate chips (tuic-v5, anytls, amneziawg2, amneziawg3), got {moderate_count}"
     );
     assert_eq!(
         weak_count, 4,
@@ -839,15 +839,15 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/unksrv/protocols").await;
-    // 10 registered protocols → 10 chips (Strong + Moderate + Weak
+    // 12 registered protocols → 12 chips (Strong + Moderate + Weak
     // sum). If the chip-or-no-chip decision branches on something
     // OTHER than "registry knows this id", the count drifts.
     let total_chips = html.matches("DPI: strong").count()
         + html.matches("DPI: moderate").count()
         + html.matches("DPI: weak").count();
     assert_eq!(
-        total_chips, 10,
-        "10 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+        total_chips, 12,
+        "12 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
     );
 }
 

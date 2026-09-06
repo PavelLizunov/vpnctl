@@ -59,7 +59,7 @@ pub(super) fn user_uuid_diff(old: &[u8], new: &[u8]) -> Result<HashSet<String>> 
 /// функционала, чтоб через админку нельзя было что-то перетереть»).
 ///
 /// Returns `Err` with the offending port(s) if `config_bytes` (a
-/// rendered sing-box JSON) declares any `inbounds[].listen_port`
+/// rendered sing-box JSON) declares an inbound or endpoint `listen_port`
 /// that intersects `reserved`. Empty `reserved` is a no-op — most
 /// servers in the fleet stay byte-equivalent to pre-0028.
 ///
@@ -84,15 +84,15 @@ pub fn validate_config_excludes_ports(config_bytes: &[u8], reserved: &[u16]) -> 
              refusing to apply"
         ))
     })?;
-    let Some(inbounds) = parsed.get("inbounds").and_then(|v| v.as_array()) else {
-        // No inbounds[] at all — vacuously safe (the renderer may
-        // produce a config with only outbounds for some future
-        // route-only role). Don't false-flag.
-        return Ok(());
-    };
+    // WireGuard-family endpoints listen independently of ordinary inbounds.
+    // Check both collections even when the config has no inbounds at all.
+    let listeners = ["inbounds", "endpoints"]
+        .into_iter()
+        .filter_map(|key| parsed.get(key).and_then(|value| value.as_array()))
+        .flatten();
     let reserved_set: HashSet<u16> = reserved.iter().copied().collect();
     let mut collisions: Vec<u16> = Vec::new();
-    for inbound in inbounds {
+    for inbound in listeners {
         let Some(port_value) = inbound.get("listen_port") else {
             continue;
         };

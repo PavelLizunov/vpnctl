@@ -314,6 +314,178 @@ pub(crate) async fn user_wireguard_conf_download(
     resp
 }
 
+/// Shared delivery-button and direct-download policy. Database failures must
+/// propagate: an unavailable visibility/suppression check is never permission.
+pub(crate) async fn amnezia_conf_available(
+    state: &AppState,
+    user: &vpnctl_core::User,
+    server: &vpnctl_core::Server,
+    peers: &[vpnctl_core::User],
+    version: u8,
+) -> Result<bool, vpnctl_inventory::SqliteInventoryError> {
+    let protocol = match version {
+        2 => vpnctl_core::ProtocolId("amneziawg2".into()),
+        3 => vpnctl_core::ProtocolId("amneziawg3".into()),
+        _ => return Ok(false),
+    };
+    if user.disabled
+        || !peers
+            .iter()
+            .any(|peer| peer.id == user.id && !peer.disabled)
+        || !server.enabled_protocols.contains(&protocol)
+        || state.registry.protocol(&protocol).is_none()
+        || !server.kernels.iter().any(|id| {
+            id.0 == "sing-box"
+                && state
+                    .registry
+                    .kernel(id)
+                    .is_some_and(|kernel| kernel.supported_protocols().contains(&protocol))
+        })
+    {
+        return Ok(false);
+    }
+    if state.inv.get_server_role(&server.id).await? != vpnctl_inventory::ServerRole::VpnExit
+        || state.inv.is_server_auto_suppressed(&server.id).await?
+        || state.inv.client_detour_via(&server.id).await?.is_some()
+    {
+        return Ok(false);
+    }
+    Ok(state
+        .inv
+        .visible_protocols_for_subscription(&user.id, &server.id)
+        .await?
+        .contains(&protocol))
+}
+
+pub(crate) fn amnezia_user_keypair_valid(user: &vpnctl_core::User) -> bool {
+    match (&user.wireguard_private, &user.wireguard_pubkey) {
+        (Some(private), Some(public)) => vpnctl_crypto::wireguard_keypair_matches(private, public),
+        _ => false,
+    }
+}
+
+pub(crate) fn amnezia_server_keypair_valid(
+    version: u8,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    if !matches!(version, 2 | 3) {
+        return false;
+    }
+    match (
+        secrets.get(&format!("amneziawg{version}.server_private_key")),
+        secrets.get(&format!("amneziawg{version}.server_public_key")),
+    ) {
+        (Some(private), Some(public)) => vpnctl_crypto::wireguard_keypair_matches(private, public),
+        _ => false,
+    }
+}
+
+fn amnezia_download_error(status: StatusCode, message: &'static str) -> Response {
+    (status, [(header::CACHE_CONTROL, "no-store")], message).into_response()
+}
+
+/// Read-only native AWG2/3 export. Never mint keys or expose renderer/DB errors.
+pub(crate) async fn user_amneziawg_conf_download(
+    State(state): State<AppState>,
+    Path((user_id, version, server_id)): Path<(String, String, String)>,
+) -> Result<Response, Response> {
+    let version = match version.as_str() {
+        "2" => 2,
+        "3" => 3,
+        _ => {
+            return Err(amnezia_download_error(
+                StatusCode::BAD_REQUEST,
+                "Choose AmneziaWG 2.0 or 3.1 from the user's Delivery page.",
+            ));
+        }
+    };
+    let unavailable = || {
+        amnezia_download_error(
+            StatusCode::NOT_FOUND,
+            "This AmneziaWG download is unavailable. Review user access and the server's protocol settings in the admin UI.",
+        )
+    };
+    let database_error = |_| {
+        amnezia_download_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to verify AmneziaWG download settings. Please try again.",
+        )
+    };
+    let uid = vpnctl_core::UserId(user_id);
+    let sid = vpnctl_core::ServerId(server_id);
+    let user = state
+        .inv
+        .get_user(&uid)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(unavailable)?;
+    let server = state
+        .inv
+        .get_server(&sid)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(unavailable)?;
+    let peers = state
+        .inv
+        .users_for_server(&sid)
+        .await
+        .map_err(database_error)?;
+    if !amnezia_conf_available(&state, &user, &server, &peers, version)
+        .await
+        .map_err(database_error)?
+    {
+        return Err(unavailable());
+    }
+    if !amnezia_user_keypair_valid(&user) {
+        return Err(amnezia_download_error(
+            StatusCode::CONFLICT,
+            "A ready AmneziaWG file needs a matching user keypair. Open Delivery and explicitly Generate or Rotate the WireGuard keypair, then deploy the updated configuration.",
+        ));
+    }
+    let secrets = state
+        .inv
+        .list_server_secrets(&sid)
+        .await
+        .map_err(database_error)?;
+    let ctx = vpnctl_core::RenderCtx::with_peers(&server, &secrets, &peers);
+    if !amnezia_server_keypair_valid(version, &secrets) {
+        return Err(amnezia_download_error(
+            StatusCode::CONFLICT,
+            "A ready AmneziaWG file needs a matching server keypair. Review the server's Settings before deploying; downloading does not repair keys.",
+        ));
+    }
+    let conf = vpnctl_protocols::render_amnezia_conf(version, &ctx, &user).map_err(|_| {
+        amnezia_download_error(
+            StatusCode::CONFLICT,
+            "The AmneziaWG file is not ready. Review keys in user Delivery and server Settings, then deploy the server. Downloading does not generate or repair keys.",
+        )
+    })?;
+    let filename = format!(
+        "{}-{}-amneziawg{version}.conf",
+        sanitize_header_filename(&uid.0),
+        sanitize_header_filename(&sid.0),
+    );
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+        .map_err(|_| {
+            amnezia_download_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to prepare the download. Please try again.",
+            )
+        })?;
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        conf,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(response)
+}
+
 /// `POST /admin/users/{id}/traffic-limit` — set monthly bandwidth
 /// cap + alert threshold for one user. Form fields:
 ///   * `limit_gib` (float) — total upload+download/month in GiB.

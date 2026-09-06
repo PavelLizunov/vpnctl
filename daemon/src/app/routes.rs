@@ -445,6 +445,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             "/admin/users/{id}/wireguard/conf/{server_id}",
             get(admin::user_wireguard_conf_download),
         )
+        .route(
+            "/admin/users/{id}/amneziawg/{version}/conf/{server_id}",
+            get(admin::user_amneziawg_conf_download),
+        )
         // Pavel iter D.6c — per-user monthly bandwidth cap +
         // alert threshold. POST takes limit_gib + threshold_pct;
         // 0 / empty / non-numeric limit clears the cap.

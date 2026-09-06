@@ -29,6 +29,8 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(Hysteria2::new()))?;
     reg.register_protocol(Box::new(Shadowsocks2022::new()))?;
     reg.register_protocol(Box::new(WireGuard::new()))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg2::new()))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))?;
     reg.register_protocol(Box::new(AnyTls::new()))?;
     reg.register_protocol(Box::new(Trojan::new()))?;
     // naive — Chromium-fingerprint proxy served by the Caddy kernel.
@@ -67,6 +69,8 @@ mod registry_drift_guard {
         kernels.sort();
 
         let mut want_protos = [
+            "amneziawg2",
+            "amneziawg3",
             "anytls",
             "hysteria2",
             "naive",
