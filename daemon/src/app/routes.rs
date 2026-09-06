@@ -332,9 +332,9 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             "/admin/servers/{sid}/grants/{uid}/revoke",
             post(admin::server_revoke_user),
         )
-        // Server protocols toggle — inventory-only mutation; the
-        // operator runs `vpnctl deploy <server>` from the CLI to
-        // push. Routes are split into enable/disable rather than
+        // Server protocol mutations schedule a targeted auto-deploy.
+        // The server page also offers a manual deployment retry.
+        // Routes are split into enable/disable rather than
         // a single toggle so the operator's intent is in the URL
         // (audit-friendly + handles double-submit gracefully).
         .route(

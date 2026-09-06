@@ -235,6 +235,106 @@ async fn admin_server_enable_protocol_persists_and_audits() {
     assert!(payload.contains("newly_added"));
 }
 
+/// Router-level coverage only: proves AWG2/AWG3 toggle wiring, independent
+/// mutations, auto-deploy dispatch, and no-op idempotency. The focused
+/// wizard-bootstrap unit test separately proves that redeploy refreshes the
+/// current server snapshot before minting protocol secrets.
+#[tokio::test]
+async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("awg-toggle".into()),
+        address: "198.51.100.23".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+
+    let post = |protocol: &str| {
+        add_same_origin(Request::builder().method("POST").uri(format!(
+            "/admin/servers/awg-toggle/protocols/{protocol}/enable"
+        )))
+        .body(Body::empty())
+        .unwrap()
+    };
+
+    let awg2 = app.clone().oneshot(post("amneziawg2")).await.unwrap();
+    assert_eq!(awg2.status(), StatusCode::SEE_OTHER);
+    wait_for_autodeploy_rows(&inv, 1).await;
+
+    let awg3 = app.clone().oneshot(post("amneziawg3")).await.unwrap();
+    assert_eq!(awg3.status(), StatusCode::SEE_OTHER);
+    let auto_rows = wait_for_autodeploy_rows(&inv, 2).await;
+    assert_eq!(auto_rows.len(), 2);
+    for row in &auto_rows {
+        assert_eq!(row.action, "server.autodeploy");
+        assert_eq!(row.target.as_deref(), Some("awg-toggle"));
+        let payload = row.payload.as_ref().unwrap();
+        assert_eq!(payload["trigger"], "server.protocol.enable");
+        assert_eq!(payload["servers"], serde_json::json!(["awg-toggle"]));
+        assert_eq!(
+            payload["ok"], false,
+            "missing test deploy key must be recorded as an intentional failed dispatch"
+        );
+    }
+
+    let server = inv
+        .get_server(&ServerId("awg-toggle".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        server
+            .enabled_protocols
+            .contains(&ProtocolId("amneziawg2".into()))
+    );
+    assert!(
+        server
+            .enabled_protocols
+            .contains(&ProtocolId("amneziawg3".into()))
+    );
+    let mutation_rows = inv
+        .recent_audit(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.action == "server.protocol.enable")
+        .count();
+    assert_eq!(mutation_rows, 2, "each AWG toggle is one real mutation");
+
+    for protocol in ["amneziawg2", "amneziawg3"] {
+        let response = app.clone().oneshot(post(protocol)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        count_autodeploy_rows(&inv).await,
+        2,
+        "no-op AWG re-enables must not dispatch more auto-deploys"
+    );
+    let mutation_rows_after_reposts = inv
+        .recent_audit(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.action == "server.protocol.enable")
+        .count();
+    assert_eq!(
+        mutation_rows_after_reposts, 2,
+        "no-op AWG re-enables must not add mutation audit rows"
+    );
+}
+
 #[tokio::test]
 async fn admin_server_enable_protocol_rejects_unregistered_protocol_id() {
     let dir = TempDir::new().unwrap();

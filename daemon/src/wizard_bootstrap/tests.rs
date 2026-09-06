@@ -355,19 +355,23 @@ async fn run_redeploy_reports_already_running_when_locked() {
         address: "203.0.113.7".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernels: vec![KernelId("sing-box".into())],
-        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        kernels: vec![],
+        enabled_protocols: vec![],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),
         jump_via: None,
         usage_coefficient: 1.0,
     };
-    // Hold the permit so run_redeploy hits the already-running branch
-    // (and therefore does NOT spawn a real SSH pipeline).
+    inv.add_server(&server).await.unwrap();
+    inv.add_server_protocol(&server.id, &ProtocolId("amneziawg2".into()))
+        .await
+        .unwrap();
+    // Hold the permit so run_redeploy must stop before refreshing the stored
+    // server or bootstrapping its newly enabled protocol.
     let _held = DeployGuard::try_acquire("gate-run-redeploy").expect("hold permit");
     let mut stream = Box::pin(run_redeploy(
-        server,
-        inv,
+        server.clone(),
+        inv.clone(),
         registry,
         PathBuf::from("/nonexistent/key"),
     ));
@@ -381,6 +385,234 @@ async fn run_redeploy_reports_already_running_when_locked() {
     assert!(
         stream.next().await.is_none(),
         "stream must close after the single already-running error"
+    );
+    assert!(
+        inv.list_server_secrets(&server.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "guard rejection must happen before stored-server refresh/bootstrap"
+    );
+}
+
+fn redeploy_test_server(id: &str, enabled_protocols: Vec<ProtocolId>) -> Server {
+    Server {
+        id: ServerId(id.into()),
+        address: "203.0.113.7".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols,
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    }
+}
+
+fn declared_secret_keys(registry: &vpnctl_core::Registry, protocol_id: &str) -> Vec<&'static str> {
+    use vpnctl_core::ServerSecretSpec as S;
+
+    let keys: Vec<_> = registry
+        .protocol(&ProtocolId(protocol_id.into()))
+        .unwrap()
+        .server_secret_specs()
+        .into_iter()
+        .flat_map(|spec| match spec {
+            S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+                vec![key]
+            }
+            S::X25519Keypair {
+                private_key,
+                public_key,
+            }
+            | S::WireguardKeypair {
+                private_key,
+                public_key,
+            } => vec![private_key, public_key],
+        })
+        .collect();
+    let namespace = format!("{protocol_id}.");
+    assert!(
+        !keys.is_empty(),
+        "{protocol_id} must declare server secrets"
+    );
+    assert!(
+        keys.iter().all(|key| key.starts_with(&namespace)),
+        "{protocol_id} secret keys must be namespaced: {keys:?}"
+    );
+    keys
+}
+
+async fn collect_redeploy_bounded(
+    snapshot: Server,
+    inv: vpnctl_inventory::SqliteInventory,
+    registry: Arc<vpnctl_core::Registry>,
+    missing_key: PathBuf,
+) -> Vec<BootstrapEvent> {
+    use std::time::Duration;
+    use tokio_stream::StreamExt;
+
+    let mut stream = Box::pin(run_redeploy(snapshot, inv, registry, missing_key));
+    let mut events = Vec::new();
+    for _ in 0..32 {
+        match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) => return events,
+            Err(_) => panic!("redeploy stream did not terminate within the per-event bound"),
+        }
+    }
+    panic!("redeploy stream exceeded the 32-event test bound");
+}
+
+fn terminal_error(events: &[BootstrapEvent]) -> &str {
+    match events.last() {
+        Some(BootstrapEvent::Error { message, .. }) => message,
+        other => panic!("expected terminal Error event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_redeploy_refreshes_enabled_awg_protocols_before_secret_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let registry = Arc::new(crate::app::build_registry().unwrap());
+    let old = redeploy_test_server("redeploy-refresh-awg-enable", vec![]);
+    inv.add_server(&old).await.unwrap();
+
+    for protocol in ["amneziawg2", "amneziawg3"] {
+        inv.add_server_protocol(&old.id, &ProtocolId(protocol.into()))
+            .await
+            .unwrap();
+    }
+    assert!(
+        inv.list_server_secrets(&old.id).await.unwrap().is_empty(),
+        "precondition: AWG secrets must be minted by run_redeploy"
+    );
+
+    let events = collect_redeploy_bounded(
+        old.clone(),
+        inv.clone(),
+        Arc::clone(&registry),
+        dir.path().join("missing-deploy-key"),
+    )
+    .await;
+    assert!(
+        terminal_error(&events).contains(DEPLOY_KEY_ABSENT_MSG),
+        "nonexistent key must stop before SSH: {events:?}"
+    );
+
+    let secrets = inv.list_server_secrets(&old.id).await.unwrap();
+    for protocol in ["amneziawg2", "amneziawg3"] {
+        for key in declared_secret_keys(&registry, protocol) {
+            assert!(
+                secrets.contains_key(key),
+                "fresh stored {protocol} requires newly minted `{key}`; got {:?}",
+                secrets.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+    let repeated = collect_redeploy_bounded(
+        old.clone(),
+        inv.clone(),
+        registry,
+        dir.path().join("missing-deploy-key"),
+    )
+    .await;
+    assert!(terminal_error(&repeated).contains(DEPLOY_KEY_ABSENT_MSG));
+    assert_eq!(
+        secrets,
+        inv.list_server_secrets(&old.id).await.unwrap(),
+        "retry must not rotate either AWG identity or profile"
+    );
+}
+
+#[tokio::test]
+async fn run_redeploy_does_not_mint_secrets_for_protocol_removed_after_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let registry = Arc::new(crate::app::build_registry().unwrap());
+    let old = redeploy_test_server(
+        "redeploy-refresh-awg-disable",
+        vec![
+            ProtocolId("amneziawg2".into()),
+            ProtocolId("amneziawg3".into()),
+        ],
+    );
+    inv.add_server(&old).await.unwrap();
+    inv.remove_server_protocol(&old.id, &ProtocolId("amneziawg3".into()))
+        .await
+        .unwrap();
+
+    let events = collect_redeploy_bounded(
+        old.clone(),
+        inv.clone(),
+        Arc::clone(&registry),
+        dir.path().join("missing-deploy-key"),
+    )
+    .await;
+    assert!(
+        terminal_error(&events).contains(DEPLOY_KEY_ABSENT_MSG),
+        "nonexistent key must stop before SSH: {events:?}"
+    );
+
+    let secrets = inv.list_server_secrets(&old.id).await.unwrap();
+    for key in declared_secret_keys(&registry, "amneziawg2") {
+        assert!(
+            secrets.contains_key(key),
+            "enabled AWG2 secret `{key}` missing"
+        );
+    }
+    for key in declared_secret_keys(&registry, "amneziawg3") {
+        assert!(
+            !secrets.contains_key(key),
+            "removed AWG3 protocol must not mint `{key}`"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_redeploy_fails_for_removed_server_without_bootstrapping_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let registry = Arc::new(crate::app::build_registry().unwrap());
+    let old = redeploy_test_server(
+        "redeploy-refresh-removed-server",
+        vec![
+            ProtocolId("amneziawg2".into()),
+            ProtocolId("amneziawg3".into()),
+        ],
+    );
+    inv.add_server(&old).await.unwrap();
+    inv.remove_server(&old.id).await.unwrap();
+
+    let events = collect_redeploy_bounded(
+        old.clone(),
+        inv.clone(),
+        registry,
+        dir.path().join("missing-deploy-key"),
+    )
+    .await;
+    let message = terminal_error(&events);
+    assert!(
+        message.contains("removed")
+            || message.contains("no longer exists")
+            || message.contains("not found"),
+        "removed server must fail as stale inventory, got: {message}"
+    );
+    assert!(
+        !message.contains(DEPLOY_KEY_ABSENT_MSG),
+        "server removal must be detected before the missing-key gate"
+    );
+    assert!(
+        inv.list_server_secrets(&old.id).await.unwrap().is_empty(),
+        "removed server must not receive bootstrapped secrets"
     );
 }
 
