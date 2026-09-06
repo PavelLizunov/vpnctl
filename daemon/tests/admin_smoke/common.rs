@@ -38,6 +38,10 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::WireGuard::new()))
         .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg2::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))
+        .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::AnyTls::new()))
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::Trojan::new()))

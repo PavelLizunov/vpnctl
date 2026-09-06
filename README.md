@@ -63,6 +63,33 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
 
+### AmneziaWG 2.0 / 3.1 integration (unreleased)
+
+The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,
+UDP ports 51821/51822 and address pools 10.72.0.0/16 / 10.73.0.0/16,
+with IPv6 pools fd72:72::/64 / fd73:73::/64. Client files route both IP families.
+AWG server deployment requires a literal server IP so private destinations and
+the configured node address can be rejected for VPN peers.
+They do not change the legacy `wireguard` protocol or `amneziawg` kernel.
+The operator enables each version on the server page and downloads its native
+`.conf` from the user's **Delivery** tab. These files require a client supporting
+the specified AmneziaWG version; they are deliberately excluded from generic
+sing-box subscriptions and share links.
+
+Downloads require an enabled, granted user, a visible protocol and complete
+key material. GET requests never generate or rotate keys. User WireGuard keys
+are shared across these protocols: an explicit Generate/Rotate action also
+changes existing WireGuard client identity. Server keys and profile seeds remain
+stable across deploys; a partially stored server keypair is rejected rather than
+silently replaced. Client addresses are derived from the user public key;
+unrelated grant changes do not renumber them, and collisions fail closed.
+
+**Kernel requirement:** use the pinned `1.14.0-vpnctl.4` release, verified against
+official AmneziaWG 3.1 with real TCP/UDP transfers. `1.14.0-vpnctl.3` accepts
+configuration but fails AWG3 data transfer and must not be used for this integration.
+The integration remains unreleased until its control-plane CI and rollout gates pass. See the
+[AWG specification](docs/specs/amneziawg2-3.md).
+
 ### Known gaps (carried into v0.9)
 
 - **Wave-3 EN/RU translation** — server-detail Kernels / Enabled-

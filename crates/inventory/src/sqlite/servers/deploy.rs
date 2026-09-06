@@ -189,6 +189,67 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Initialize one declared secret or a coherent pair without replacing
+    /// existing values. Candidates may have been generated from a stale
+    /// bootstrap snapshot: reread under SQLite's writer lock before deciding.
+    /// Partial sets fail closed; inserts and name-only audits commit together.
+    pub(crate) async fn initialize_server_secret_set(
+        &self,
+        id: &ServerId,
+        candidates: &[(&str, String)],
+    ) -> Result<(HashMap<String, String>, bool)> {
+        // Acquire the writer lock BEFORE reading. A deferred read transaction
+        // can fail to upgrade with SQLITE_BUSY_SNAPSHOT after another bootstrap
+        // commits, even with busy_timeout configured. IMMEDIATE waits instead.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut stored = HashMap::with_capacity(candidates.len());
+        for (key, _) in candidates {
+            let value: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM server_secrets WHERE server_id = ?1 AND key = ?2",
+            )
+            .bind(&id.0)
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(value) = value {
+                stored.insert((*key).to_string(), value);
+            }
+        }
+        if !stored.is_empty() && stored.len() != candidates.len() {
+            let keys: Vec<_> = candidates.iter().map(|(key, _)| *key).collect();
+            return Err(SqliteInventoryError::Invalid(format!(
+                "incomplete server secret set ({}); refusing to replace existing keys",
+                keys.join(", ")
+            )));
+        }
+        let minted = stored.is_empty();
+        if minted {
+            for (key, value) in candidates {
+                // No upsert: the writer lock makes the absence check and all
+                // inserts indivisible, including across independent pools.
+                sqlx::query(
+                    "INSERT INTO server_secrets (server_id, key, value) VALUES (?1, ?2, ?3)",
+                )
+                .bind(&id.0)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO audit_log (actor, action, target, payload)
+                     VALUES ('system', 'server.secret.set', ?1, ?2)",
+                )
+                .bind(&id.0)
+                .bind(serde_json::json!({ "key": key }).to_string())
+                .execute(&mut *tx)
+                .await?;
+                stored.insert((*key).to_string(), value.clone());
+            }
+        }
+        tx.commit().await?;
+        Ok((stored, minted))
+    }
+
     pub async fn get_server_secret(&self, id: &ServerId, key: &str) -> Result<Option<String>> {
         let row = sqlx::query("SELECT value FROM server_secrets WHERE server_id = ?1 AND key = ?2")
             .bind(&id.0)

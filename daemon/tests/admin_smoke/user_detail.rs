@@ -2,6 +2,8 @@
 
 #[path = "user_detail/access_origins_presence.rs"]
 mod access_origins_presence;
+#[path = "user_detail/amneziawg.rs"]
+mod amneziawg;
 #[path = "user_detail/chain_subscription.rs"]
 mod chain_subscription;
 #[path = "user_detail/mihomo_subscription.rs"]

@@ -69,6 +69,8 @@ impl Kernel for SingBox {
             ProtocolId("anytls".to_string()),
             // Trojan — in sing-box since v0.1, no version concern.
             ProtocolId("trojan".to_string()),
+            ProtocolId("amneziawg2".to_string()),
+            ProtocolId("amneziawg3".to_string()),
         ]
     }
 
@@ -131,8 +133,16 @@ impl Kernel for SingBox {
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
         let mut inbounds = Vec::with_capacity(protocols.len());
+        let mut endpoints = Vec::new();
         for p in protocols {
-            inbounds.push(p.server_inbound(ctx, users)?);
+            let fragment = p.server_inbound(ctx, users)?;
+            // WireGuard is a bidirectional endpoint in native sing-box JSON,
+            // not an inbound. Dispatch by wire schema, not protocol identity.
+            if fragment.get("type").and_then(serde_json::Value::as_str) == Some("wireguard") {
+                endpoints.push(fragment);
+            } else {
+                inbounds.push(fragment);
+            }
         }
         let stats_users: Vec<&str> = users.iter().map(|user| user.id.0.as_str()).collect();
         let stats_inbounds: Vec<String> = inbounds
@@ -145,7 +155,7 @@ impl Kernel for SingBox {
                     .ok_or_else(|| CoreError::Render("sing-box inbound is missing its tag".into()))
             })
             .collect::<Result<_>>()?;
-        let cfg = json!({
+        let mut cfg = json!({
             "log": { "level": "info", "output": "/var/log/sing-box.log", "timestamp": true },
             "inbounds": inbounds,
             "outbounds": [
@@ -178,6 +188,42 @@ impl Kernel for SingBox {
                 }
             }
         });
+        // Omit new fields entirely for legacy servers to preserve their bytes.
+        if !endpoints.is_empty() {
+            let endpoint_tags: Vec<&str> = endpoints
+                .iter()
+                .map(|endpoint| {
+                    endpoint
+                        .get("tag")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|tag| !tag.is_empty())
+                        .ok_or_else(|| {
+                            CoreError::Render("sing-box endpoint is missing its tag".into())
+                        })
+                })
+                .collect::<Result<_>>()?;
+            // Userspace endpoints can map their tunnel address to host loopback.
+            // VPN peers must not reach node-local management or private services.
+            let mut rules = vec![json!({
+                "inbound": endpoint_tags, "ip_is_private": true, "action": "reject"
+            })];
+            // A node's own public address is not private, but services bound to
+            // it are still node-local. Reject it explicitly for VPN peers.
+            if let Ok(address) = ctx.server.address.parse::<std::net::IpAddr>() {
+                let prefix = if address.is_ipv4() { 32 } else { 128 };
+                rules.push(json!({
+                    "inbound": endpoint_tags,
+                    "ip_cidr": [format!("{address}/{prefix}")],
+                    "action": "reject"
+                }));
+            } else {
+                return Err(CoreError::Render(
+                    "AWG server isolation requires a literal server IP; set the server address in the admin UI before deploying".into(),
+                ));
+            }
+            cfg["route"] = json!({ "rules": rules, "final": "direct" });
+            cfg["endpoints"] = json!(endpoints);
+        }
         serde_json::to_vec_pretty(&cfg).map_err(CoreError::from)
     }
 

@@ -170,6 +170,26 @@ pub fn gen_wireguard_keypair() -> (String, String) {
     )
 }
 
+/// Check a standard-base64 WireGuard pair without exposing material in errors.
+/// Reject noncanonical, missing, zero, or mismatched material before delivery.
+/// This is read-only: imported keys are never repaired or rotated implicitly.
+pub fn wireguard_keypair_matches(private: &str, public: &str) -> bool {
+    fn decode(value: &str) -> Option<[u8; 32]> {
+        if value.len() != 44 {
+            return None;
+        }
+        let bytes: [u8; 32] = STANDARD.decode(value).ok()?.try_into().ok()?;
+        if bytes == [0; 32] || STANDARD.encode(bytes) != value {
+            return None;
+        }
+        Some(bytes)
+    }
+    let (Some(private), Some(public)) = (decode(private), decode(public)) else {
+        return false;
+    };
+    PublicKey::from(&StaticSecret::from(private)).as_bytes() == &public
+}
+
 /// AmneziaWG obfuscation parameter set, minted PER SERVER. Rendered as
 /// decimal strings into both the server `awg0.conf` (the `amnezia_wg`
 /// kernel) and the client artefact (`.conf` / `vpn://` deep-link).

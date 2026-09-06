@@ -4,6 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "sub_endpoint/awg_compatibility.rs"]
+mod awg_compatibility;
 #[path = "sub_endpoint/client_detour.rs"]
 mod client_detour;
 #[path = "sub_endpoint/common.rs"]

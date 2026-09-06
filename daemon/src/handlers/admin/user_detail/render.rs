@@ -176,6 +176,39 @@ pub(crate) async fn user_detail_render(
         &peers_per_server,
     )
     .await;
+    // Native AWG files cannot encode detours. Use the exact same authorization
+    // policy as the download route, and offer a link only after rendering succeeds.
+    let mut amnezia_files = Vec::new();
+    if tab == UserTab::Delivery {
+        for server in &servers {
+            let (Some(secrets), Some(peers)) = (
+                secrets_per_server.get(&server.id),
+                peers_per_server.get(&server.id),
+            ) else {
+                continue;
+            };
+            for version in [2, 3] {
+                if crate::handlers::admin::user_actions::amnezia_conf_available(
+                    &state, &user, server, peers, version,
+                )
+                .await
+                .map_err(|_| {
+                    internal_error(anyhow::anyhow!(
+                        "Unable to verify AmneziaWG delivery settings"
+                    ))
+                })? {
+                    let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+                    let ready =
+                        crate::handlers::admin::user_actions::amnezia_user_keypair_valid(&user)
+                            && crate::handlers::admin::user_actions::amnezia_server_keypair_valid(
+                                version, secrets,
+                            )
+                            && vpnctl_protocols::render_amnezia_conf(version, &ctx, &user).is_ok();
+                    amnezia_files.push((server.id.clone(), version, ready));
+                }
+            }
+        }
+    }
     let sub_token = user.sub_token.clone();
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     let mihomo_sub_url_str = sub_token.as_deref().map(mihomo_sub_url);
@@ -600,6 +633,7 @@ pub(crate) async fn user_detail_render(
                 chain_sub_url_str.as_deref(),
                 &amnezia_links,
                 &awg_links,
+                &amnezia_files,
                 &share_links,
                 &wg_capable_granted,
                 &wg_capable_inventory,

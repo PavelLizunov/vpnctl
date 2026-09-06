@@ -23,9 +23,9 @@ use crate::SqliteInventory;
 
 /// Mint the per-protocol server-side secrets a Server needs to render
 /// configs. Idempotent: only mints what's missing from
-/// `inv.list_server_secrets`, so re-running against a partially-
-/// bootstrapped server picks up where the last run left off and NEVER
-/// rotates a secret out from under live clients.
+/// `inv.list_server_secrets`. Declared WireGuard pairs initialize atomically
+/// only when both keys are absent; a partial pair fails closed rather than
+/// rotating an existing key. Base64 keys also preserve concurrent winners.
 ///
 /// Returns the full (existing + freshly minted) secret map plus a list
 /// of human-readable "what we minted" labels the caller can surface in
@@ -152,8 +152,14 @@ async fn mint_secret_spec(
             if !secrets.contains_key(key) {
                 let v = vpnctl_crypto::gen_base64_key(key_bytes)
                     .map_err(|e| format!("gen_base64_key {key}: {e}"))?;
-                persist_secret(inv, server_id, key, v, secrets).await?;
-                minted.push(key);
+                let (stored, did_mint) = inv
+                    .initialize_server_secret_set(server_id, &[(key, v)])
+                    .await
+                    .map_err(|e| format!("initialize_server_secret {key}: {e}"))?;
+                secrets.extend(stored);
+                if did_mint {
+                    minted.push(key);
+                }
             }
         }
         S::X25519Keypair {
@@ -173,9 +179,17 @@ async fn mint_secret_spec(
         } => {
             if !secrets.contains_key(private_key) || !secrets.contains_key(public_key) {
                 let (priv_k, pub_k) = vpnctl_crypto::gen_wireguard_keypair();
-                persist_secret(inv, server_id, private_key, priv_k, secrets).await?;
-                persist_secret(inv, server_id, public_key, pub_k, secrets).await?;
-                minted.push(private_key);
+                let (stored, did_mint) = inv
+                    .initialize_server_secret_set(
+                        server_id,
+                        &[(private_key, priv_k), (public_key, pub_k)],
+                    )
+                    .await
+                    .map_err(|e| format!("initialize_server_secret {private_key}: {e}"))?;
+                secrets.extend(stored);
+                if did_mint {
+                    minted.push(private_key);
+                }
             }
         }
         S::ShortId { key } => {

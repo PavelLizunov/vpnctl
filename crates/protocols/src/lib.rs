@@ -1,6 +1,7 @@
 //! Реализации `Protocol`. Каждый протокол — отдельный файл-модуль.
 //! Добавить новый = новый файл + строка регистрации в `cli`.
 
+mod amneziawg;
 mod anytls;
 mod encoding;
 mod hysteria2;
@@ -14,6 +15,7 @@ mod vless_xhttp;
 mod wg_addressing;
 mod wireguard;
 
+pub use amneziawg::{AmneziaWg2, AmneziaWg3, render_amnezia_conf};
 pub use anytls::{ANYTLS_PORT, AnyTls};
 pub use hysteria2::Hysteria2;
 pub use naive::{NAIVE_PORT, Naive};
