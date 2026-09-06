@@ -1114,9 +1114,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
@@ -1233,7 +1233,7 @@ version = "0.17.0-rc.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91bbdd377139884fafcad8dc43a760a3e1e681aa26db910257fa6535b70e1829"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.2",
  "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
@@ -2930,7 +2930,7 @@ version = "0.8.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.2",
  "spki 0.8.0-rc.4",
 ]
 
@@ -2943,7 +2943,7 @@ dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0-rc.3",
  "cbc 0.2.0",
- "der 0.8.0",
+ "der 0.8.2",
  "pbkdf2 0.13.0",
  "rand_core 0.10.1",
  "scrypt",
@@ -2967,7 +2967,7 @@ version = "0.11.0-rc.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12922b6296c06eb741b02d7b5161e3aaa22864af38dfa025a1a3ba3f68c84577"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.2",
  "pkcs5",
  "rand_core 0.10.1",
  "spki 0.8.0-rc.4",
@@ -3629,7 +3629,7 @@ dependencies = [
  "curve25519-dalek 5.0.0-pre.6",
  "data-encoding",
  "delegate",
- "der 0.8.0",
+ "der 0.8.2",
  "digest 0.10.7",
  "ecdsa",
  "ed25519-dalek",
@@ -3959,7 +3959,7 @@ checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct",
  "ctutils",
- "der 0.8.0",
+ "der 0.8.2",
  "hybrid-array",
  "subtle",
  "zeroize",
@@ -4323,7 +4323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8baeff88f34ed0691978ec34440140e1572b68c7dd4a495fd14a3dc1944daa80"
 dependencies = [
  "base64ct",
- "der 0.8.0",
+ "der 0.8.2",
 ]
 
 [[package]]
