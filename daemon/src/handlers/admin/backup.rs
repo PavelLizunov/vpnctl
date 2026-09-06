@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
+use super::audit::sanitize_header_filename;
 use super::helpers::{
     bad_request, error_resp, internal_error, not_found, render_page, theme_accent_lang,
 };
@@ -114,10 +115,11 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     };
     let mut resp = (StatusCode::OK, bytes).into_response();
     let headers = resp.headers_mut();
+    let safe_name = sanitize_header_filename(&name);
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     resp
@@ -357,4 +359,19 @@ fn is_safe_snapshot_name(name: &str) -> bool {
     // Parser is the source of truth for the precise shape
     // (`inv.db.<RFC3339-ish>.bak`).
     vpnctl_inventory::parse_snapshot_filename(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_safe_snapshot_name_validates_and_sanitizes() {
+        assert!(is_safe_snapshot_name("inv.db.2026-05-10T12:00:00Z.bak"));
+        assert!(!is_safe_snapshot_name("../inv.db.bak"));
+        assert_eq!(
+            sanitize_header_filename("inv.db.2026-05-10T12:00:00Z.bak"),
+            "inv.db.2026-05-10T120000Z.bak"
+        );
+    }
 }
