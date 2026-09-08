@@ -595,7 +595,7 @@ pub(crate) async fn audit_csv(
         // Log instead of swallowing so the operator notices.
         let payload_str = match &e.payload {
             None => String::new(),
-            Some(v) => match serde_json::to_string(v) {
+            Some(v) => match serde_json::to_string(&redact_audit_payload(v)) {
                 Ok(s) => s,
                 Err(err) => {
                     tracing::warn!(

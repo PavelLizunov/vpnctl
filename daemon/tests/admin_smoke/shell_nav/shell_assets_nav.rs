@@ -646,6 +646,59 @@ async fn admin_audit_csv_export_returns_well_formed_csv() {
     );
 }
 
+/// CSV export redacts sensitive keys (passwords, private keys, tokens, secret values)
+/// in the payload column.
+#[tokio::test]
+async fn admin_audit_csv_export_redacts_sensitive_payload_fields() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .audit(
+            "admin",
+            "user.sub_token.regen",
+            Some("bob"),
+            Some(&serde_json::json!({
+                "sub_token": "secret-token-12345",
+                "password_hash": "secret-hash-67890",
+                "user": "bob"
+            })),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/audit.csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let csv = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        !csv.contains("secret-token-12345"),
+        "CSV export leaked sub_token secret"
+    );
+    assert!(
+        !csv.contains("secret-hash-67890"),
+        "CSV export leaked password secret"
+    );
+    assert!(
+        csv.contains("<redacted>"),
+        "CSV export missing <redacted> placeholder"
+    );
+    assert!(
+        csv.contains("bob"),
+        "CSV export missing non-secret user field"
+    );
+}
+
 // Audit timeline payload summary — Pavel UX bug 2026-05-16: row
 // said "server.protocol.enable stg by admin" with no hint that
 // the protocol was wireguard. Summary now renders key=value.
