@@ -2,16 +2,22 @@
 
 mod dashboard;
 mod deploy_sse;
+mod kernel_update_sse;
 mod server_detail;
 mod settings;
+mod settings_geoip_sse;
 mod shell;
 mod user_sections;
+mod wizard_ui;
 
 pub(crate) use self::dashboard::*;
 pub(crate) use self::deploy_sse::*;
+pub(crate) use self::kernel_update_sse::*;
 pub(crate) use self::server_detail::*;
 pub(crate) use self::settings::*;
+pub(crate) use self::settings_geoip_sse::*;
 pub(crate) use self::user_sections::*;
+pub(crate) use self::wizard_ui::*;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

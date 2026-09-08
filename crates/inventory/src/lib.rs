@@ -36,8 +36,9 @@ pub use quality::{QUALITY_MIN_SAMPLES, ServiceQualitySample, ServiceQualityScore
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, BoostySettings, HeavyUser, NodeHealthRow,
     ProxyMaskedStats, ServerLiveActivity, ServerRole, SharingSignals, SqliteInventory,
-    SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubDeviceFp, SubOriginAsn,
-    SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, TrafficBreakdown, UaCluster,
-    UptimeStat, UserLifecycle, VpnCumulativeCounter, VpnCumulativeTick, VpnStatsDelta, VpnStatsRow,
-    VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, sum_nic_deltas,
+    SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubAccessEntryInput, SubDeviceFp,
+    SubOriginAsn, SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, TrafficBreakdown,
+    UaCluster, UptimeStat, UserLifecycle, VpnCumulativeCounter, VpnCumulativeTick, VpnStatsDelta,
+    VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow,
+    sum_nic_deltas,
 };

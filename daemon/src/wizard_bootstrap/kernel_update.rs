@@ -89,62 +89,82 @@ async fn update_kernels_all_pipeline(
 ) {
     use tokio_stream::StreamExt;
     let total = servers.len();
-    let mut ok_count = 0usize;
-    let mut failed: Vec<String> = Vec::new();
+    let concurrency_limit = std::env::var("VPNCTL_FLEET_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4)
+        .max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency_limit));
+    let mut tasks = tokio::task::JoinSet::new();
 
     for server in servers {
         let sid = server.id.0.clone();
-        let _ = tx
-            .send(BootstrapEvent::Step {
-                phase: "server",
-                message: format!("── updating kernels on {sid} ──"),
-            })
-            .await;
-        // Drive this server's kernel update to completion, forwarding its
-        // events as Step lines (prefixed with the server id). A per-server
-        // Ok/Error becomes a ✓/✗ summary line — NOT a stream terminal.
-        let mut stream = Box::pin(run_update_kernels(
-            server,
-            inv.clone(),
-            Arc::clone(&registry),
-            deploy_key_path.clone(),
-        ));
-        let mut had_error = false;
-        while let Some(ev) = stream.next().await {
-            match ev {
-                BootstrapEvent::Step { phase, message } => {
-                    let _ = tx
-                        .send(BootstrapEvent::Step {
-                            phase,
-                            message: format!("{sid}: {message}"),
-                        })
-                        .await;
-                }
-                BootstrapEvent::Ok { .. } => {
-                    let _ = tx
-                        .send(BootstrapEvent::Step {
-                            phase: "done",
-                            message: format!("✓ {sid} kernels updated"),
-                        })
-                        .await;
-                }
-                BootstrapEvent::Error { message, .. } => {
-                    had_error = true;
-                    let _ = tx
-                        .send(BootstrapEvent::Step {
-                            phase: "done",
-                            message: format!("✗ {sid}: {message}"),
-                        })
-                        .await;
+        let inv = inv.clone();
+        let registry = Arc::clone(&registry);
+        let deploy_key_path = deploy_key_path.clone();
+        let tx = tx.clone();
+        let sem = Arc::clone(&semaphore);
+
+        tasks.spawn(async move {
+            let _permit = sem.acquire().await.ok();
+            let _ = tx
+                .send(BootstrapEvent::Step {
+                    phase: "server",
+                    message: format!("── updating kernels on {sid} ──"),
+                })
+                .await;
+            let mut stream = Box::pin(run_update_kernels(server, inv, registry, deploy_key_path));
+            let mut had_error = false;
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    BootstrapEvent::Step { phase, message } => {
+                        let _ = tx
+                            .send(BootstrapEvent::Step {
+                                phase,
+                                message: format!("{sid}: {message}"),
+                            })
+                            .await;
+                    }
+                    BootstrapEvent::Ok { .. } => {
+                        let _ = tx
+                            .send(BootstrapEvent::Step {
+                                phase: "done",
+                                message: format!("✓ {sid} kernels updated"),
+                            })
+                            .await;
+                    }
+                    BootstrapEvent::Error { message, .. } => {
+                        had_error = true;
+                        let _ = tx
+                            .send(BootstrapEvent::Step {
+                                phase: "done",
+                                message: format!("✗ {sid}: {message}"),
+                            })
+                            .await;
+                    }
                 }
             }
-        }
-        if had_error {
-            failed.push(sid);
-        } else {
-            ok_count += 1;
+            (sid, had_error)
+        });
+    }
+
+    let mut ok_count = 0usize;
+    let mut failed = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok((sid, had_error)) => {
+                if had_error {
+                    failed.push(sid);
+                } else {
+                    ok_count += 1;
+                }
+            }
+            Err(e) => {
+                failed.push(format!("panicked_task: {e}"));
+            }
         }
     }
+    failed.sort();
 
     let summary = if failed.is_empty() {
         format!("done — updated kernels on {total}/{total} servers.")

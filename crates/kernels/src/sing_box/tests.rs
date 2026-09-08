@@ -1425,3 +1425,57 @@ async fn open_firewall_uses_effective_listen_ports() {
         "static default must NOT be opened once overridden: {script}"
     );
 }
+
+#[test]
+fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
+    use super::is_artifact_up_to_date;
+
+    let sb = "5f98eacc95b9ed9c1d53592605d812d9d2cb8c496fa95723cfb7c5f9447fe46e";
+    let sh = "adfcc59728309f6e5bda548d402b3284fe97bdd9216b04933d1b97b4a2531ddc";
+
+    // 1. Happy path: both checksums match and service is active
+    let valid_output = format!(
+        "{sb}  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
+    );
+    assert!(
+        is_artifact_up_to_date(&valid_output, sb, sh),
+        "must be up to date when both checksums match and service is active"
+    );
+
+    // 2. Binary mismatch (e.g. sing-box upgraded)
+    let mismatched_sb = format!(
+        "different_sha  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
+    );
+    assert!(
+        !is_artifact_up_to_date(&mismatched_sb, sb, sh),
+        "must not be up to date when sing-box binary sha differs"
+    );
+
+    // 3. Stats helper mismatch
+    let mismatched_sh = format!(
+        "{sb}  /usr/bin/sing-box\ndifferent_sh  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
+    );
+    assert!(
+        !is_artifact_up_to_date(&mismatched_sh, sb, sh),
+        "must not be up to date when stats-helper sha differs"
+    );
+
+    // 4. Inactive service
+    let inactive_service = format!(
+        "{sb}  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\ninactive\n"
+    );
+    assert!(
+        !is_artifact_up_to_date(&inactive_service, sb, sh),
+        "must not be up to date when service is inactive"
+    );
+
+    // 5. Truncated or failed remote execution output
+    assert!(
+        !is_artifact_up_to_date("", sb, sh),
+        "empty output must fail safely"
+    );
+    assert!(
+        !is_artifact_up_to_date("error: command not found", sb, sh),
+        "error output must fail safely"
+    );
+}

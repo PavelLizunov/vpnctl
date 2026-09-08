@@ -121,90 +121,95 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
         );
     }
 
-    while let Some(mut rec) = rx.recv().await {
-        // Enrich with GeoIP before persisting (handler always sends
-        // None for these two; we fill them here so handler latency
-        // is unaffected by DB lookups).
-        if geoip.is_loaded() {
-            if let Ok(parsed_ip) = rec.ip.parse() {
-                if let Some(info) = geoip.lookup(parsed_ip) {
-                    // Compute asn_label first so the partial-move of
-                    // `info.country_iso` below doesn't surprise the
-                    // reader. (Borrow ends at the `;`, so order isn't
-                    // strictly necessary — just easier to follow.)
-                    let asn_label = info.asn_label();
-                    if rec.geo_country.is_none() {
-                        rec.geo_country = info.country_iso;
-                    }
-                    if rec.geo_asn.is_none() {
-                        rec.geo_asn = asn_label;
+    let mut batch = Vec::with_capacity(50);
+    while let Some(rec) = rx.recv().await {
+        batch.push(rec);
+        while batch.len() < 50 {
+            match rx.try_recv() {
+                Ok(r) => batch.push(r),
+                Err(_) => break,
+            }
+        }
+
+        for r in &mut batch {
+            // Enrich with GeoIP before persisting (handler always sends
+            // None for these two; we fill them here so handler latency
+            // is unaffected by DB lookups).
+            if geoip.is_loaded() {
+                if let Ok(parsed_ip) = r.ip.parse() {
+                    if let Some(info) = geoip.lookup(parsed_ip) {
+                        let asn_label = info.asn_label();
+                        if r.geo_country.is_none() {
+                            r.geo_country = info.country_iso;
+                        }
+                        if r.geo_asn.is_none() {
+                            r.geo_asn = asn_label;
+                        }
                     }
                 }
             }
         }
-        let log_result = inv
-            .log_sub_access_rich(
-                &rec.user_id,
-                &rec.ip,
-                rec.ua.as_deref(),
-                rec.status,
-                rec.bytes,
-                rec.accept_language.as_deref(),
-                rec.http_version.as_deref(),
-                rec.device_class.as_deref(),
-                rec.geo_country.as_deref(),
-                rec.geo_asn.as_deref(),
-                rec.tls_ja3.as_deref(),
-                rec.tls_ja4.as_deref(),
-            )
-            .await;
-        match log_result {
+
+        let inputs: Vec<vpnctl_inventory::SubAccessEntryInput> = batch
+            .iter()
+            .map(|r| vpnctl_inventory::SubAccessEntryInput {
+                user_id: r.user_id.clone(),
+                ip: r.ip.clone(),
+                ua: r.ua.clone(),
+                status: r.status,
+                bytes: r.bytes,
+                accept_language: r.accept_language.clone(),
+                http_version: r.http_version.clone(),
+                device_class: r.device_class.clone(),
+                geo_country: r.geo_country.clone(),
+                geo_asn: r.geo_asn.clone(),
+                tls_ja3: r.tls_ja3.clone(),
+                tls_ja4: r.tls_ja4.clone(),
+            })
+            .collect();
+
+        match inv.log_sub_access_batch(&inputs).await {
             Ok(()) => {
-                // Pavel 2026-05-21: «если видим 127.0.0.1 или любой из
-                // 192.168/10/172.16-31 (метка LAN) и 169.254.* — это
-                // инцидент, который требует разбирательства». The
-                // writer is the right hook site — handler stays
-                // latency-stable, the persisted row is linkable from
-                // the alert payload, the predicate is a pure match on
-                // `IpKind` + a `&str` compare on `device_class`.
-                //
-                // Dedup bucket is per-user (`sub_access.suspicious_local_ip:<user_id>`)
-                // so one chatty user can't swallow another user's
-                // alert via the partial UNIQUE index on
-                // (kind, COALESCE(server_id,'__GLOBAL__')) WHERE
-                // acked_at IS NULL. The single allowlist entry today
-                // is the phase6-monitor canary (see
-                // /etc/cron.d/phase6-monitor on the daemon host; UA
-                // tagged `phase6-monitor/1.0 (…-compat probe)` →
-                // `parse_ua_short` returns `Some("phase6-monitor (canary)")`).
-                let kind = crate::ip_kind::classify_ip(&rec.ip);
-                if kind.is_lan_or_loopback()
-                    && !is_lan_alert_allowed(rec.device_class.as_deref())
-                    && !is_trusted_reverse_proxy(&rec.ip)
-                    && !is_allowlisted_service_ip(&rec.ip)
-                {
-                    if let Err(e) = fire_suspicious_local_ip_alert(&inv, &rec, kind).await {
-                        tracing::warn!(
-                            target = "vpnctld::access_log_writer",
-                            user = %rec.user_id,
-                            ip = %rec.ip,
-                            kind = kind.label(),
-                            error = %e,
-                            "sub_access.suspicious_local_ip alert insert failed (row persisted, no alert raised this time)"
-                        );
+                for r in &batch {
+                    let kind = crate::ip_kind::classify_ip(&r.ip);
+                    if kind.is_lan_or_loopback()
+                        && !is_lan_alert_allowed(r.device_class.as_deref())
+                        && !is_trusted_reverse_proxy(&r.ip)
+                        && !is_allowlisted_service_ip(&r.ip)
+                    {
+                        if let Err(e) = fire_suspicious_local_ip_alert(&inv, r, kind).await {
+                            tracing::warn!(
+                                target = "vpnctld::access_log_writer",
+                                user = %r.user_id,
+                                ip = %r.ip,
+                                kind = kind.label(),
+                                error = %e,
+                                "sub_access.suspicious_local_ip alert insert failed (row persisted, no alert raised this time)"
+                            );
+                        }
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(
                     target = "vpnctld::access_log_writer",
-                    user = %rec.user_id,
-                    ip = %rec.ip,
+                    batch_len = batch.len(),
                     error = %e,
-                    "log_sub_access write failed (record dropped)"
+                    "batch log_sub_access write failed; falling back to per-record insert"
                 );
+                for input in &inputs {
+                    if let Err(err) = inv.log_sub_access_batch(std::slice::from_ref(input)).await {
+                        tracing::warn!(
+                            target = "vpnctld::access_log_writer",
+                            user = %input.user_id,
+                            error = %err,
+                            "fallback log_sub_access record write failed"
+                        );
+                    }
+                }
             }
         }
+        batch.clear();
     }
     tracing::info!(
         target = "vpnctld::access_log_writer",

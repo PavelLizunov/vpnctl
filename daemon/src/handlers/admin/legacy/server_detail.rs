@@ -2,8 +2,11 @@
 
 mod activity;
 mod config;
+mod config_protocols;
 mod drift;
 mod grants;
+mod protocol_grid;
+mod protocols_section;
 mod render;
 mod routes;
 mod telemetry;
