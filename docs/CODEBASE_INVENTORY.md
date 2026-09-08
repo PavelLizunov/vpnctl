@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 383 (259 prod / 124 test)
-- **Total Rust LOC:** 137,322 (83,475 prod / 53,847 test)
+- **Tracked Rust Files:** 396 (269 prod / 127 test)
+- **Total Rust LOC:** 141,536 (85,901 prod / 55,635 test)
 - **Database Migrations:** 55
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 121
 
@@ -14,17 +14,17 @@
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 6,351 (20) | 214 (1) | **6,565** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 6,351 (20) | 969 (2) | **7,320** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,339 (6) | 870 (2) | **2,209** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 41 tests | 14,516 (50) | 17,018 (45) | **31,534** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 250 (3) | **6,599** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,773 (20) | 4,847 (12) | **9,620** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 693 (4) | **2,179** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 45,991 (132) | 29,300 (54) | **75,291** |
-| **Total** | | | | **83,475 (259)** | **53,847 (124)** | **137,322** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 48,417 (142) | 29,300 (54) | **77,717** |
+| **Total** | | | | **85,901 (269)** | **55,635 (127)** | **141,536** |
 
 ## Largest Rust Modules (Top 25)
 
