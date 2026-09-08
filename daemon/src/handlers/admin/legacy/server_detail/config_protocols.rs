@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use crate::handlers::vpn_router::server_display_label;
 use crate::http_util::path_segment_encode;
 use maud::{Markup, html};
@@ -62,7 +63,7 @@ pub(crate) fn server_detail_naive_config_section(
             button type="submit"
                    title=(tr(lang, "Save naive domain + ACME email", "Сохранить домен naive + ACME почту"))
                    style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (tr(lang, "save naive config", "сохранить конфиг"))
+                (icon("save")) (tr(lang, "save naive config", "сохранить конфиг"))
             }
         }
     }
@@ -146,7 +147,7 @@ pub(crate) fn server_detail_vlessws_config_section(
             button type="submit"
                    title=(tr(lang, "Save vless-ws domain + front port + ACME email", "Сохранить домен vless-ws + фронт-порт + ACME почту"))
                    style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (tr(lang, "save vless-ws config", "сохранить конфиг"))
+                (icon("save")) (tr(lang, "save vless-ws config", "сохранить конфиг"))
             }
         }
     }
@@ -201,7 +202,7 @@ pub(crate) fn server_detail_reality_config_section(
             button type="submit"
                    title=(tr(lang, "Save the REALITY listen port", "Сохранить порт REALITY"))
                    style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (tr(lang, "save reality port", "сохранить порт"))
+                (icon("save")) (tr(lang, "save reality port", "сохранить порт"))
             }
         }
     }
@@ -254,7 +255,7 @@ pub(crate) fn server_detail_display_name_section(
                        "Сохранить отображаемую метку этого сервера. Применится при следующем обновлении подписки у каждого клиента; на кэшированные URI не влияет.",
                    ))
                    style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (tr(lang, "save name", "сохранить"))
+                (icon("save")) (tr(lang, "save name", "сохранить"))
             }
         }
     }
@@ -292,7 +293,7 @@ pub(crate) fn server_detail_auto_suppress_section(
         }
         @if let Some(ts) = suppressed_at {
             div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--acc); color: var(--acc); margin: 8px 0 12px;" {
-                (tr(lang, "● currently SUPPRESSED since ", "● сейчас СКРЫТ с ")) (ts)
+                (icon("eye-off")) (tr(lang, "currently SUPPRESSED since ", "сейчас СКРЫТ с ")) (ts)
                 (tr(lang, " — hidden from subscriptions; auto-restores on recovery.", " — скрыт из подписок; вернётся автоматически при восстановлении."))
             }
         } @else {
@@ -311,9 +312,9 @@ pub(crate) fn server_detail_auto_suppress_section(
             button type="submit"
                    style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
                 @if opt_in {
-                    (tr(lang, "turn off auto-suppress", "выключить авто-скрытие"))
+                    (icon("eye")) (tr(lang, "turn off auto-suppress", "выключить авто-скрытие"))
                 } @else {
-                    (tr(lang, "turn on auto-suppress", "включить авто-скрытие"))
+                    (icon("eye-off")) (tr(lang, "turn on auto-suppress", "включить авто-скрытие"))
                 }
             }
         }
@@ -361,9 +362,9 @@ pub(crate) fn server_detail_udp_pair_section(
             button type="submit"
                    style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
                 @if enabled {
-                    (tr(lang, "turn off pairing", "выключить пару"))
+                    (icon("unlink")) (tr(lang, "turn off pairing", "выключить пару"))
                 } @else {
-                    (tr(lang, "turn on pairing", "включить пару"))
+                    (icon("link")) (tr(lang, "turn on pairing", "включить пару"))
                 }
             }
         }
@@ -441,7 +442,7 @@ pub(crate) fn server_detail_reserved_ports_section(
                        "Заменить список зарезервированных портов значениями выше. Будущие деплои sing-box откажутся занимать любой порт из списка.",
                    ))
                    style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (tr(lang, "save", "сохранить"))
+                (icon("save")) (tr(lang, "save", "сохранить"))
             }
         }
     }

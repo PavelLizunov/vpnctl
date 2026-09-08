@@ -13,6 +13,8 @@ mod dashboard;
 mod deploy_actions;
 #[path = "admin_smoke/grants.rs"]
 mod grants;
+#[path = "admin_smoke/icon_fixtures.rs"]
+mod icon_fixtures;
 #[path = "admin_smoke/monitoring.rs"]
 mod monitoring;
 #[path = "admin_smoke/server_detail.rs"]

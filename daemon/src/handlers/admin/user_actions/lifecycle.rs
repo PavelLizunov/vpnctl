@@ -2,6 +2,7 @@ use crate::AppState;
 use crate::handlers::admin::helpers::{
     bad_request, internal_error, render_page, theme_accent_lang, user_not_found, valid_user_id,
 };
+use crate::handlers::admin::icons::{icon, status};
 use crate::handlers::admin::legacy::{DEFAULT_TRAFFIC_THRESHOLD_PCT, spawn_user_servers_redeploy};
 use crate::http_util::{form_field, path_segment_encode};
 use axum::extract::{Path, State};
@@ -320,7 +321,7 @@ pub(crate) async fn user_delete_confirm(
     let body = html! {
         nav.ed-crumb {
             a href=(format!("/admin/users/{uid_enc}")) style="color: var(--mute); text-decoration: none;" {
-                "← " (tr(lang, "back to ", "назад к ")) (user_id_str)
+                (icon("arrow-left")) " " (tr(lang, "back to ", "назад к ")) (user_id_str)
             }
         }
         div.ed-headrow {
@@ -328,7 +329,7 @@ pub(crate) async fn user_delete_confirm(
         }
         // Point-of-no-return banner (red family, not warm).
         div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 9px 12px; margin: 10px 0 16px; font-family: var(--mono); font-size: 11px; color: var(--red);" {
-            "✗ " b { (tr(lang, "Point of no return.", "Точка невозврата.")) }
+            (icon("circle-x")) " " b { (tr(lang, "Point of no return.", "Точка невозврата.")) }
             (tr(
                 lang,
                 " This removes the user, all keys, all grants — and queues a deploy on each granted server so the node configs drop the entries.",
@@ -341,11 +342,11 @@ pub(crate) async fn user_delete_confirm(
                 table.ed-feed style="margin-top: 8px;" {
                     tbody {
                         tr {
-                            td style="width: 20px; color: var(--red);" { "−" }
+                            td style="width: 20px; color: var(--red);" { (status("minus", lang, "Will be removed", "Будет удалено")) }
                             td { "uuid " span.ed-grid__mut { (user.uuid) } }
                         }
                         tr {
-                            td style="color: var(--red);" { "−" }
+                            td style="color: var(--red);" { (status("minus", lang, "Will be removed", "Будет удалено")) }
                             td {
                                 (tr(lang, "keys: ", "ключи: "))
                                 @let keys = {
@@ -360,7 +361,7 @@ pub(crate) async fn user_delete_confirm(
                             }
                         }
                         tr {
-                            td style="color: var(--red);" { "−" }
+                            td style="color: var(--red);" { (status("minus", lang, "Will be removed", "Будет удалено")) }
                             td {
                                 (granted.len()) " " (tr(lang, "grants", "грантов"))
                                 @if !granted.is_empty() {
@@ -370,14 +371,14 @@ pub(crate) async fn user_delete_confirm(
                             }
                         }
                         tr {
-                            td style="color: var(--red);" { "−" }
+                            td style="color: var(--red);" { (status("minus", lang, "Will be removed", "Будет удалено")) }
                             td {
                                 (tr(lang, "subscription URL", "URL подписки"))
                                 " " span.ed-grid__mut { "· " (tr(lang, "the mobile app gets 404 on next poll", "приложение получит 404 при следующем опросе")) }
                             }
                         }
                         tr {
-                            td style="color: var(--green);" { "✓" }
+                            td style="color: var(--green);" { (status("check", lang, "Kept", "Сохраняется")) }
                             td {
                                 b { (tr(lang, "kept: ", "остаётся: ")) }
                                 (tr(
@@ -397,7 +398,7 @@ pub(crate) async fn user_delete_confirm(
                         lang,
                         "Same guard as the CLI: the typed value is re-checked server-side; a mismatch submits nothing.",
                         "Тот же предохранитель, что в CLI: введённое перепроверяется на сервере; несовпадение ничего не отправит.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 form method="post"
                      action=(format!("/admin/users/{uid_enc}/delete")) {
@@ -408,12 +409,12 @@ pub(crate) async fn user_delete_confirm(
                     div style="display: flex; gap: 8px;" {
                         a href=(format!("/admin/users/{uid_enc}"))
                           class="ed-abtn ed-abtn--secondary" style="flex: 1; text-align: center;" {
-                            (tr(lang, "cancel — keep the user", "отмена — оставить"))
+                            (icon("x")) (tr(lang, "cancel — keep the user", "отмена — оставить"))
                         }
                         button type="submit"
                                title=(format!("Delete user {user_id_str} permanently"))
                                class="ed-abtn ed-abtn--danger-solid" style="flex: 1;" {
-                            (tr(lang, "delete forever", "удалить навсегда"))
+                            (icon("trash-2")) (tr(lang, "delete forever", "удалить навсегда"))
                         }
                     }
                 }

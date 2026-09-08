@@ -187,24 +187,39 @@ async fn user_detail_tab_labels_copy_contract() {
     seed(&s.inv, 1, 1, &[]).await;
     let app = router(s);
     let en = fetch_html(app.clone(), "/admin/users/u0").await;
-    for label in [
-        ">Overview</a>",
-        ">Delivery</a>",
-        ">Access · 0</a>",
-        ">Activity</a>",
-        ">Traffic</a>",
-    ] {
-        assert!(en.contains(label), "EN tab label drifted: {label:?}");
-    }
     let ru = fetch_html_with_cookie(app, "/admin/users/u0", "vpnctl_lang=ru").await;
-    for label in [
-        ">Обзор</a>",
-        ">Выдача</a>",
-        ">Доступ · 0</a>",
-        ">Активность</a>",
-        ">Трафик</a>",
+    for (slug, icon, en_label, ru_label) in [
+        ("overview", "layout-dashboard", "Overview", "Обзор"),
+        ("delivery", "send", "Delivery", "Выдача"),
+        ("access", "key-round", "Access · 0", "Доступ · 0"),
+        ("activity", "activity", "Activity", "Активность"),
+        ("traffic", "chart-no-axes-combined", "Traffic", "Трафик"),
     ] {
-        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+        for (html, label) in [(&en, en_label), (&ru, ru_label)] {
+            let tabs = html
+                .split_once(r#"class="ed-tabs""#)
+                .unwrap()
+                .1
+                .split_once("</div>")
+                .unwrap()
+                .0;
+            let link = tabs
+                .split_once(&format!(r#"href="/admin/users/u0/{slug}""#))
+                .unwrap()
+                .1
+                .split_once("</a>")
+                .unwrap()
+                .0;
+            assert!(
+                link.contains(&format!(r#"<use href="/admin/assets/icons.svg#{icon}""#)),
+                "{slug}: tab icon missing"
+            );
+            assert_eq!(
+                link.split_once("</svg>").unwrap().1.trim(),
+                label,
+                "{slug}: tab label drifted"
+            );
+        }
     }
 }
 

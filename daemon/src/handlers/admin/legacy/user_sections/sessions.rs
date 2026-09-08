@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::handlers::admin::icons::icon;
 use chrono::{Duration, Utc};
 use maud::{Markup, html};
 
@@ -100,7 +101,7 @@ pub(crate) async fn user_sessions_section(
                                 (format_msk(r.last_seen))
                                 @if is_live {
                                     " " span style="color: var(--green); font-weight: 600;" {
-                                        "● " (tr(lang, "live", "активна"))
+                                        (icon("circle")) (tr(lang, "live", "активна"))
                                     }
                                 }
                             }

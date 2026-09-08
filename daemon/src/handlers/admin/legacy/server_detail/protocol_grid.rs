@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use crate::http_util::path_segment_encode;
 use maud::{Markup, html};
 use std::collections::HashMap;
@@ -101,7 +102,7 @@ pub(crate) fn user_detail_per_protocol_grid(
                                                "Очистить override этого пользователя. Флаг server-hidden останется — правится на странице сервера.",
                                            ))
                                            style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        (tr(lang, "unblock (user)", "разблокировать (юзер)"))
+                                        (icon("lock-keyhole-open")) (tr(lang, "unblock (user)", "разблокировать (юзер)"))
                                     }
                                 }
                             } @else if is_hidden {
@@ -110,7 +111,7 @@ pub(crate) fn user_detail_per_protocol_grid(
                                 }
                             } @else if is_user_blocked {
                                 span style="color: var(--acc);" {
-                                    (tr(lang, "✗ user-blocked", "✗ заблокирован у юзера"))
+                                    (icon("x")) (tr(lang, "user-blocked", "заблокирован у юзера"))
                                 }
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/enable"))
@@ -122,11 +123,11 @@ pub(crate) fn user_detail_per_protocol_grid(
                                     button type="submit"
                                            title=(unblock_title)
                                            style="padding: 1px 6px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        (tr(lang, "unblock", "разблокировать"))
+                                        (icon("lock-keyhole-open")) (tr(lang, "unblock", "разблокировать"))
                                     }
                                 }
                             } @else {
-                                span style="color: var(--acc);" { (tr(lang, "✓ delivered", "✓ доставляется")) }
+                                span style="color: var(--acc);" { (icon("check")) (tr(lang, "delivered", "доставляется")) }
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/protocols/{pid_enc}/disable"))
                                      style="margin: 0;" {
@@ -137,7 +138,7 @@ pub(crate) fn user_detail_per_protocol_grid(
                                     button type="submit"
                                            title=(block_title)
                                            style="padding: 1px 6px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 10px; cursor: pointer;" {
-                                        (tr(lang, "block", "заблокировать"))
+                                        (icon("lock-keyhole")) (tr(lang, "block", "заблокировать"))
                                     }
                                 }
                             }

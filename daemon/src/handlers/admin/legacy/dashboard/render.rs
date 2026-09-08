@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -79,7 +80,7 @@ fn dashboard_summary_bar(
                 (tr(lang, "homelab ", "homelab "))
                 em { (tr(lang, "at a glance", "одним взглядом")) }
             }
-            span.ed-tip title=(tip) { "ⓘ" }
+            span.ed-tip title=(tip) { (status("info", lang, "Information", "Информация")) }
             span.ed-sumbar__stat {
                 b { (stats.servers) } " "
                 (crate::i18n::noun_for(lang, stats.servers as u64, "server", "servers", "сервер", "сервера", "серверов"))
@@ -109,7 +110,7 @@ fn dashboard_summary_bar(
             }
             span.ed-sumbar__stat { b { (conns_now) } " " (tr(lang, "conns now", "подкл. сейчас")) }
             span.ed-sumbar__live {
-                span.ed-sumbar__dot {}
+                (icon("circle"))
                 "vpnctld " b { (vpnctl_core::build_version()) } " "
                 em { (tr(lang, "live", "активен")) }
             }
@@ -440,6 +441,7 @@ async fn dashboard_render(
                 ("activity", crate::i18n::tr(lang, "Activity", "Активность")),
                 ("sharing", crate::i18n::tr(lang, "Sharing risk", "Риск расшаривания")),
             ],
+            lang,
         ))
 
         // ── OVERVIEW (default) — dashboard 1b two-panel row: what looks
@@ -461,10 +463,11 @@ async fn dashboard_render(
             div style="margin-top: 14px;" {
                 a href="/admin/activity#vpn-traffic"
                   style="display: inline-block; font-family: var(--mono); font-size: 12px; color: var(--mute); text-decoration: none; border: 1px solid var(--rule); border-radius: 3px; padding: 4px 10px;" {
+                    (icon("history"))
                     (crate::i18n::tr(
                         lang,
-                        "Traffic history · 1 / 7 / 30 days →",
-                        "История трафика · 1 / 7 / 30 дней →",
+                        "Traffic history · 1 / 7 / 30 days",
+                        "История трафика · 1 / 7 / 30 дней",
                     ))
                 }
             }

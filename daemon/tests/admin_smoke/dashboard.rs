@@ -566,12 +566,36 @@ async fn dashboard_fleet_table_renders_row_per_server() {
     );
     // The seeded sing-box version shows in s0's version cell.
     assert!(html.contains("1.13.12"), "s0 sing-box version cell missing");
-    // Disk% (20) stays a plain cell; mem% (75) crosses the 70% watermark
-    // and must render as a warm heat cell with the ⚠ marker.
-    assert!(html.contains("20%"), "s0 disk% cell missing");
+    // Disk% (20) stays plain; mem% (75) crosses the 70% watermark.
+    let fleet = html
+        .split_once(r#"id="fleet-at-a-glance""#)
+        .unwrap()
+        .1
+        .split_once("</table>")
+        .unwrap()
+        .0;
+    let row = fleet
+        .split("<tr>")
+        .find(|row| row.contains(r#"href="/admin/servers/s0""#))
+        .unwrap()
+        .split_once("</tr>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains(r#"class="num warn""#) && html.contains("75% ⚠"),
-        "s0 mem% above 70 must render the heat cell + ⚠"
+        row.contains(r#"<td class="num">20%</td>"#),
+        "s0 disk% cell must stay plain"
+    );
+    let mem = row
+        .split_once(r#"<td class="num warn">75%"#)
+        .unwrap()
+        .1
+        .split_once("</td>")
+        .unwrap()
+        .0;
+    assert!(
+        mem.contains(r#"aria-label="High usage""#)
+            && mem.contains(r#"<use href="/admin/assets/icons.svg#triangle-alert""#),
+        "s0 mem% above 70 must render the heat cell and high-usage warning icon"
     );
 }
 
@@ -606,14 +630,44 @@ async fn dashboard_fleet_table_marks_version_drift() {
             .unwrap();
     }
     let html = fetch_html(router(s), "/admin/").await;
-    assert!(
-        html.contains("1.13.14 ≠"),
-        "minority version must carry the ≠ drift marker"
-    );
-    assert!(
-        !html.contains("1.13.12 ≠"),
-        "majority version must NOT be flagged"
-    );
+    let fleet = html
+        .split_once(r#"id="fleet-at-a-glance""#)
+        .unwrap()
+        .1
+        .split_once("</table>")
+        .unwrap()
+        .0;
+    for (sid, version, drifted) in [
+        ("s0", "1.13.12", false),
+        ("s1", "1.13.12", false),
+        ("s2", "1.13.14", true),
+    ] {
+        let row = fleet
+            .split("<tr>")
+            .find(|row| row.contains(&format!(r#"href="/admin/servers/{sid}""#)))
+            .unwrap()
+            .split_once("</tr>")
+            .unwrap()
+            .0;
+        let value = row
+            .split_once(&format!(r#"class="ed-kvers__value" title="{version}">"#))
+            .unwrap()
+            .1
+            .split_once("</td>")
+            .unwrap()
+            .0;
+        assert!(value.starts_with(version), "{sid}: version label drifted");
+        assert_eq!(
+            value.contains(r#"<use href="/admin/assets/icons.svg#equal-not""#),
+            drifted,
+            "{sid}: only minority versions must carry the drift icon"
+        );
+        assert_eq!(
+            value.contains(r#"aria-label="Version differs / Версия отличается""#),
+            drifted,
+            "{sid}: drift status must be accessible"
+        );
+    }
 }
 
 /// dash#1 — empty fleet renders no at-a-glance table at all (the metrics
@@ -642,11 +696,28 @@ async fn dashboard_fleet_traffic_totals_render_beside_chart() {
         html.contains("vs prior"),
         "dash#2 'vs prior' delta tile missing"
     );
-    // The upload/download window tiles use the ↑/↓ glyphs.
-    assert!(
-        html.contains("↑ upload") && html.contains("↓ download"),
-        "dash#2 ↑↓ window tiles missing"
-    );
+    // Direction icons belong to the corresponding window-total labels.
+    let traffic = html
+        .split_once(r#"id="vpn-traffic""#)
+        .unwrap()
+        .1
+        .split_once(r#"id="kernel-rollup""#)
+        .unwrap()
+        .0;
+    for (direction, label) in [("arrow-up", "upload 24h"), ("arrow-down", "download 24h")] {
+        assert!(
+            traffic
+                .split(r#"class="ed-status-tile__k">"#)
+                .skip(1)
+                .any(|tile| {
+                    let heading = tile.split_once("</div>").unwrap().0;
+                    heading.contains(&format!(
+                        r#"<use href="/admin/assets/icons.svg#{direction}""#
+                    )) && heading.split_once("</svg>").map(|(_, text)| text.trim()) == Some(label)
+                }),
+            "{label}: direction icon and exact window label missing from the same tile"
+        );
+    }
 }
 
 /// Issue 2 (Activity) — the fleet traffic totals beside the chart must
@@ -807,17 +878,52 @@ async fn dashboard_health_feed_renders_alert_row() {
         html.contains("open 1"),
         "health-feed eyebrow must show the unacked total"
     );
-    // The seeded critical alert renders as a feed row: ✖ mark + kind +
-    // the server target linked.
-    assert!(html.contains("✖"), "critical alert must show the ✖ mark");
+    // The seeded critical alert keeps severity, kind and target together.
+    let feed = html
+        .split_once("Health feed · open 1</div>")
+        .unwrap()
+        .1
+        .split_once(r#"<table class="ed-feed""#)
+        .unwrap()
+        .1
+        .split_once("</table>")
+        .unwrap()
+        .0;
+    let row = feed
+        .split("<tr>")
+        .find(|row| row.contains(">disk_pressure</td>"))
+        .unwrap()
+        .split_once("</tr>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains("disk_pressure"),
-        "feed row must name the alert kind"
+        row.contains(r#"<use href="/admin/assets/icons.svg#circle-x""#)
+            && row.contains(r#"aria-label="Critical""#),
+        "critical feed row must show the accessible critical icon"
     );
     assert!(
-        html.contains("full feed →") || html.contains("весь поток →"),
-        "feed must link to /admin/alerts"
+        row.contains(r#"href="/admin/servers/s0""#),
+        "feed row must link the affected server"
     );
+    let link = html
+        .split("<a ")
+        .skip(1)
+        .find(|link| {
+            link.split_once("</a>")
+                .unwrap()
+                .0
+                .contains("</svg>full feed")
+        })
+        .unwrap()
+        .split_once("</a>")
+        .unwrap()
+        .0;
+    assert!(
+        link.contains(r#"href="/admin/alerts""#)
+            && link.contains(r#"<use href="/admin/assets/icons.svg#arrow-right""#),
+        "full feed control must carry its own arrow and alerts destination"
+    );
+    assert_eq!(link.split_once("</svg>").unwrap().1.trim(), "full feed");
 }
 
 /// Dashboard 1b — quiet contract: no health feed when zero unacked alerts.
@@ -1083,13 +1189,37 @@ async fn dashboard_tab_labels_copy_contract() {
     seed(&s.inv, 1, 1, &[]).await;
     let app = router(s);
     let en = fetch_html(app.clone(), "/admin/").await;
-    for label in [">Overview</a>", ">Activity</a>", ">Sharing risk</a>"] {
-        assert!(en.contains(label), "EN tab label drifted: {label:?}");
-    }
     let ru = fetch_html_with_cookie(app, "/admin/", "vpnctl_lang=ru").await;
-    for label in [">Обзор</a>", ">Активность</a>", ">Риск расшаривания</a>"]
-    {
-        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+    for (slug, icon, en_label, ru_label) in [
+        ("overview", "layout-dashboard", "Overview", "Обзор"),
+        ("activity", "activity", "Activity", "Активность"),
+        ("sharing", "shield", "Sharing risk", "Риск расшаривания"),
+    ] {
+        for (html, label) in [(&en, en_label), (&ru, ru_label)] {
+            let tabs = html
+                .split_once(r#"class="ed-tabs""#)
+                .unwrap()
+                .1
+                .split_once("</div>")
+                .unwrap()
+                .0;
+            let link = tabs
+                .split_once(&format!(r#"href="/admin/{slug}""#))
+                .unwrap()
+                .1
+                .split_once("</a>")
+                .unwrap()
+                .0;
+            assert!(
+                link.contains(&format!(r#"<use href="/admin/assets/icons.svg#{icon}""#)),
+                "{slug}: tab icon missing"
+            );
+            assert_eq!(
+                link.split_once("</svg>").unwrap().1.trim(),
+                label,
+                "{slug}: tab label drifted"
+            );
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
@@ -471,7 +472,7 @@ pub(super) async fn server_detail_render(
     let body = html! {
         nav.ed-crumb {
             a href="/admin/servers" style="color: var(--mute); text-decoration: none;" {
-                "← " (crate::i18n::tr(lang, "all servers", "все серверы"))
+                (icon("arrow-left")) (crate::i18n::tr(lang, "all servers", "все серверы"))
             }
         }
         div.ed-headrow {
@@ -479,21 +480,21 @@ pub(super) async fn server_detail_render(
             @if let Some(h) = latest.as_ref() {
                 @if h.sing_box_active == Some(true) {
                     span.ed-stat.ed-stat--active {
-                        span.ed-stat__dot {}
+                        (icon("circle"))
                         (crate::i18n::tr(lang, "up", "работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
                         (humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else if h.sing_box_active == Some(false) {
                     span.ed-stat.ed-stat--failed {
-                        span.ed-stat__dot {}
+                        (icon("circle-x"))
                         (crate::i18n::tr(lang, "down", "не работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
                         (humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else {
                     span.ed-stat.ed-stat--unknown {
-                        span.ed-stat__dot {}
+                        (icon("circle-dashed"))
                         (crate::i18n::tr(lang, "unknown", "неизвестно"))
                     }
                 }
@@ -510,7 +511,7 @@ pub(super) async fn server_detail_render(
                            "Обновить только бинарники ядер: с живым логом — снять версию каждого ядра, обновить пакет (apt upgrade), перезапустить сервис и снять версию снова. Рабочий конфиг не меняется, поэтому действие безопасно при дрейфе инвентаря.",
                        ))
                        class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                    (crate::i18n::tr(lang, "update kernels", "обновить ядра"))
+                    (icon("rotate-cw")) span data-icon-label { (crate::i18n::tr(lang, "update kernels", "обновить ядра")) }
                 }
                 button id="deploy-button" type="button"
                        data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
@@ -522,14 +523,14 @@ pub(super) async fn server_detail_render(
                            "Полный деплой с живым логом: дораздать недостающие секреты, подключиться к ноде по SSH, выполнить ensure_installed + apply_config для каждого включённого ядра и перезапустить сервисы. Каждый шаг и итог появятся в логе ниже. Повторный клик безопасен.",
                        ))
                        class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                    (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                    (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
                 }
                 noscript {
                     form method="post"
                          action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                          style="display: inline;" {
                         button type="submit" class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                            (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                            (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
                         }
                     }
                 }
@@ -568,7 +569,7 @@ pub(super) async fn server_detail_render(
         @if pending_deploy {
             div id="pending-deploy-banner"
                 style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
-                b style="color: var(--warm);" { "⚠ " (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
+                b style="color: var(--warm);" { (icon("triangle-alert")) (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
                 " — "
                 (crate::i18n::tr(
                     lang,
@@ -603,7 +604,7 @@ pub(super) async fn server_detail_render(
             ("protocols", protocols_tab_label.as_str()),
             ("grants", grants_tab_label.as_str()),
             ("setup", crate::i18n::tr(lang, "Setup", "Настройка")),
-        ]))
+        ], lang))
 
         // ── STATUS (default) — "is the node healthy, what changed".
         @if tab == ServerTab::Status {
@@ -650,7 +651,7 @@ pub(super) async fn server_detail_render(
                     " · " (crate::i18n::tr(lang, "by ", "запустил ")) (last_deploy.actor)
                     " · "
                     a href="/admin/audit" style="color: var(--acc);" {
-                        (crate::i18n::tr(lang, "audit with this filter →", "аудит с этим фильтром →"))
+                        (icon("history")) (crate::i18n::tr(lang, "audit with this filter", "аудит с этим фильтром"))
                     }
                 }
             }
@@ -719,7 +720,7 @@ pub(super) async fn server_detail_render(
                         lang,
                         "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy. «on node» means the deployed config actually contains the user — grant + forget-to-deploy is the #1 silent failure, the banner below tracks it.",
                         "Грант записывает пару в инвентарь; ключи чеканятся по протоколам на следующем деплое. «на ноде» значит, что задеплоенный конфиг реально содержит юзера — грант без деплоя это тихий сбой №1, баннер ниже его отслеживает.",
-                    )) { "ⓘ" }
+                    )) { (status("info", lang, "Information", "Информация")) }
                 }
                 span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len())
@@ -735,7 +736,7 @@ pub(super) async fn server_detail_render(
             @if !pending_users.is_empty() {
                 div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 10px 0;" {
                     span style="font-family: var(--mono); font-size: 11px; color: var(--warm);" {
-                        "⚠ " b {
+                        (icon("triangle-alert")) b {
                             (pending_users.len())
                             (crate::i18n::tr(lang, " grant(s) not yet deployed: ", " грант(ов) ещё не задеплоено: "))
                         }
@@ -747,7 +748,7 @@ pub(super) async fn server_detail_render(
                                 data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
                                 data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
                                 class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "deploy now →", "задеплоить сейчас →"))
+                            (icon("rocket")) span data-icon-label { (crate::i18n::tr(lang, "deploy now", "задеплоить сейчас")) }
                         }
                     }
                 }
@@ -775,14 +776,14 @@ pub(super) async fn server_detail_render(
                           placeholder=(crate::i18n::tr(lang, "user id…", "id пользователя…"))
                           style="width: 150px;";
                     button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "grant", "выдать"))
+                        (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                     }
                 }
                 span.ed-tip title=(crate::i18n::tr(
                     lang,
                     "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy (auto-deploy runs after).",
                     "Грант пишет пару в инвентарь; ключи чеканятся на следующем деплое (авто-деплой запускается сам).",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
                 div style="margin-left: auto; display: flex; gap: 8px;" {
                     @if !ungranted.is_empty() {
                         form method="post"
@@ -795,7 +796,7 @@ pub(super) async fn server_detail_render(
                                        "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно.",
                                    ))
                                    class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                (crate::i18n::tr(lang, "grant all ", "выдать всем "))
+                                (icon("plus")) (crate::i18n::tr(lang, "grant all ", "выдать всем "))
                                 "(" (ungranted.len()) ")"
                             }
                         }
@@ -823,7 +824,7 @@ pub(super) async fn server_detail_render(
                                        "Отозвать доступ у всех юзеров с текущим грантом. Деструктивно — нужно подтверждение.",
                                    ))
                                    class="ed-abtn ed-abtn--danger ed-abtn--sm" {
-                                (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
+                                (icon("unlink")) (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
                                 "(" (granted_count) ")…"
                             }
                         }
@@ -840,11 +841,13 @@ pub(super) async fn server_detail_render(
             };
             div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: 2px 0 6px;" {
                 (crate::i18n::tr(lang, "sort: ", "сортировка: "))
-                @for (kind, label) in [("id", "id ↑"), ("presence", crate::i18n::tr(lang, "online ↓", "онлайн ↓")), ("traffic", crate::i18n::tr(lang, "traffic ↓", "трафик ↓"))] {
+                @for (kind, label) in [("id", "id"), ("presence", crate::i18n::tr(lang, "online", "онлайн")), ("traffic", crate::i18n::tr(lang, "traffic", "трафик"))] {
+                    @let direction = if kind == "id" { "arrow-up" } else { "arrow-down" };
+                    @let sort_name = if kind == "id" { crate::i18n::tr(lang, "Ascending", "По возрастанию") } else { crate::i18n::tr(lang, "Descending", "По убыванию") };
                     @if grant_sort == kind {
-                        span style="color: var(--ink); text-decoration: underline; margin-right: 8px;" { (label) }
+                        span style="color: var(--ink); text-decoration: underline; margin-right: 8px;" { (label) span role="img" aria-label=(sort_name) { (icon(direction)) } }
                     } @else {
-                        a href=(sort_href(kind)) style="color: var(--mute); margin-right: 8px;" { (label) }
+                        a href=(sort_href(kind)) style="color: var(--mute); margin-right: 8px;" { (label) span role="img" aria-label=(sort_name) { (icon(direction)) } }
                     }
                 }
             }
@@ -891,7 +894,7 @@ pub(super) async fn server_detail_render(
                             td.ed-grid__sm {
                                 @if conns > 0 {
                                     span.ed-stat.ed-stat--active {
-                                        span.ed-stat__dot {}
+                                        (icon("circle"))
                                         (crate::i18n::tr(lang, "online", "онлайн")) " · " (conns)
                                     }
                                 } @else {
@@ -904,9 +907,9 @@ pub(super) async fn server_detail_render(
                             }
                             td.ed-grid__sm {
                                 @if is_pending {
-                                    span.ed-grid__flag { "⚠ " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
+                                    span.ed-grid__flag { (icon("triangle-alert")) (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
                                 } @else {
-                                    span style="color: var(--green);" { "✓ " (crate::i18n::tr(lang, "on node", "на ноде")) }
+                                    span style="color: var(--green);" { (icon("check")) (crate::i18n::tr(lang, "on node", "на ноде")) }
                                 }
                             }
                             td.ed-grid__mut.ed-grid__sm {
@@ -929,7 +932,7 @@ pub(super) async fn server_detail_render(
                                                crate::i18n::Locale::Ru => format!("Отозвать доступ {} на {}", u.id.0, server.id.0),
                                            })
                                            class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                        (crate::i18n::tr(lang, "revoke →", "отозвать →"))
+                                        (icon("unlink")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                     }
                                 }
                             }
@@ -953,7 +956,7 @@ pub(super) async fn server_detail_render(
                                        crate::i18n::Locale::Ru => format!("Выдать {} доступ на {}", u.id.0, server.id.0),
                                    })
                                    class="ed-grant-chip off" style="cursor: pointer;" {
-                                (u.id.0) " — " (crate::i18n::tr(lang, "grant →", "выдать →"))
+                                (icon("plus")) (u.id.0) " — " (crate::i18n::tr(lang, "grant", "выдать"))
                             }
                         }
                     }
@@ -977,11 +980,11 @@ pub(super) async fn server_detail_render(
                     lang,
                     "Each row is re-checked on every probe. A ⚠ here means the node drifted from its bootstrapped state.",
                     "Каждая строка перепроверяется каждой пробой. ⚠ значит, что нода уехала от состояния после bootstrap.",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
             }
             @let ok = |b: bool| -> Markup {
-                if b { html! { span style="color: var(--green);" { "✓" } } }
-                else { html! { span style="color: var(--warm);" { "⚠" } } }
+                if b { html! { span style="color: var(--green);" { (status("check", lang, "Verified", "Проверено")) } } }
+                else { html! { span style="color: var(--warm);" { (status("triangle-alert", lang, "Not verified", "Не проверено")) } } }
             };
             @let kernels_reported = latest.as_ref()
                 .and_then(|h| h.kernel_versions_json.as_deref())
@@ -1093,7 +1096,7 @@ pub(super) async fn server_detail_render(
                       "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
                   ))
                   class="ed-abtn ed-abtn--danger" {
-                    (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
+                    (icon("trash-2")) (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
                 }
             }
         }

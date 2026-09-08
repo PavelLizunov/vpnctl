@@ -95,22 +95,38 @@ async fn settings_tab_labels_copy_contract() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let en = fetch_html(app.clone(), "/admin/settings").await;
-    for label in [
-        ">Appearance</a>",
-        ">Backups</a>",
-        ">Notifications</a>",
-        ">System</a>",
-    ] {
-        assert!(en.contains(label), "EN tab label drifted: {label:?}");
-    }
     let ru = fetch_html_with_cookie(app, "/admin/settings", "vpnctl_lang=ru").await;
-    for label in [
-        ">Внешний вид</a>",
-        ">Бэкапы</a>",
-        ">Уведомления</a>",
-        ">Система</a>",
+    for (slug, icon, en_label, ru_label) in [
+        ("appearance", "palette", "Appearance", "Внешний вид"),
+        ("backups", "archive", "Backups", "Бэкапы"),
+        ("notifications", "bell", "Notifications", "Уведомления"),
+        ("system", "settings-2", "System", "Система"),
     ] {
-        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+        for (html, label) in [(&en, en_label), (&ru, ru_label)] {
+            let tabs = html
+                .split_once(r#"class="ed-tabs""#)
+                .unwrap()
+                .1
+                .split_once("</div>")
+                .unwrap()
+                .0;
+            let link = tabs
+                .split_once(&format!(r#"href="/admin/settings/{slug}""#))
+                .unwrap()
+                .1
+                .split_once("</a>")
+                .unwrap()
+                .0;
+            assert!(
+                link.contains(&format!(r#"<use href="/admin/assets/icons.svg#{icon}""#)),
+                "{slug}: tab icon missing"
+            );
+            assert_eq!(
+                link.split_once("</svg>").unwrap().1.trim(),
+                label,
+                "{slug}: tab label drifted"
+            );
+        }
     }
 }
 

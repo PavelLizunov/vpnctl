@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::kernel_priority;
@@ -37,10 +38,11 @@ pub(super) fn server_detail_kernels_section(
         }
         div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
+                (icon("triangle-alert"))
                 (tr(
                     lang,
-                    "⚠ toggle here = inventory only",
-                    "⚠ тогл здесь = только инвентарь",
+                    "toggle here = inventory only",
+                    "тогл здесь = только инвентарь",
                 ))
             }
             (tr(
@@ -50,7 +52,7 @@ pub(super) fn server_detail_kernels_section(
             ))
             a href="#deploy-button"
               style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { (tr(lang, "deploy →", "деплой →")) }
+                span.ed-mono { (icon("rocket")) (tr(lang, "deploy", "деплой")) }
             }
             (tr(
                 lang,
@@ -78,7 +80,7 @@ pub(super) fn server_detail_kernels_section(
                     }
                     @if is_on {
                         span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                            (tr(lang, "✓ on", "✓ вкл"))
+                            (icon("check")) (tr(lang, "on", "вкл"))
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/kernels/{}/disable", sid_enc, path_segment_encode(&kid.0)))
@@ -90,7 +92,7 @@ pub(super) fn server_detail_kernels_section(
                             button type="submit"
                                    title=(dis_title)
                                    class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                (crate::i18n::t(lang, crate::i18n::K::BtnDisable))
+                                (icon("pause")) (crate::i18n::t(lang, crate::i18n::K::BtnDisable))
                             }
                         }
                     } @else {
@@ -107,7 +109,7 @@ pub(super) fn server_detail_kernels_section(
                             button type="submit"
                                    title=(en_title)
                                    class="ed-abtn ed-abtn--sm" {
-                                (crate::i18n::t(lang, crate::i18n::K::BtnEnable))
+                                (icon("power")) (crate::i18n::t(lang, crate::i18n::K::BtnEnable))
                             }
                         }
                     }
@@ -173,7 +175,7 @@ pub(super) fn server_detail_push_deploy_key_section(
 
         @if reference_ok {
             p style="font-family: var(--mono); font-size: 11px; color: var(--ink); margin: 0 0 12px; padding: 8px 12px; background: var(--paper); border-left: 3px solid var(--acc); max-width: 760px;" {
-                "✓ " b { (tr(lang, "reference SSH key configured", "reference SSH-ключ настроен")) }
+                (icon("check")) b { (tr(lang, "reference SSH key configured", "reference SSH-ключ настроен")) }
                 " (" span.ed-mono { (reference_key.as_deref().unwrap_or("")) } "). "
                 (tr(lang, "Click ", "Клик "))
                 b { (tr(lang, "push deploy key", "запушить deploy-ключ")) }
@@ -248,7 +250,7 @@ pub(super) fn server_detail_push_deploy_key_section(
                            "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. С заполненным паролем подключается через sshpass; оставь пароль пустым, чтобы использовать настроенный reference-key.",
                        ))
                        class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                    (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
+                    (icon("key-round")) (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
                     (crate::i18n::tr(lang, "Connects to ", "Подключение к "))
@@ -296,7 +298,7 @@ pub(super) fn server_detail_routing_policy_section(
                     }
                 }
                 button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
-                    (crate::i18n::tr(lang, "save routing policy", "сохранить политику"))
+                    (icon("save")) (crate::i18n::tr(lang, "save routing policy", "сохранить политику"))
                 }
             }
         }
@@ -340,7 +342,7 @@ pub(super) fn server_detail_client_detour_section(
                     }
                 }
                 button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
-                    (tr(lang, "save client entry", "сохранить входной сервер"))
+                    (icon("save")) (tr(lang, "save client entry", "сохранить входной сервер"))
                 }
             }
         }
@@ -426,7 +428,7 @@ pub(super) fn server_detail_fingerprint_section(
                            "Запустить ssh-keyscan + ssh-keygen -lf - на хосте демона и закрепить полученный отпечаток.",
                        ))
                        class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                    (tr(lang, "auto-detect via ssh-keyscan →", "автоопределить через ssh-keyscan →"))
+                    (icon("scan")) (tr(lang, "auto-detect via ssh-keyscan", "автоопределить через ssh-keyscan"))
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                     (tr(lang, "(daemon will SSH-keyscan ", "(демон сделает ssh-keyscan "))
@@ -449,7 +451,7 @@ pub(super) fn server_detail_fingerprint_section(
                            "Сохранить вставленный выше SHA256-отпечаток как доверенный host-ключ для этого сервера (TOFU pin). Будущие SSH-коннекты откажутся если нода предъявит другой ключ — защита от MITM после первичного доверия.",
                        ))
                        style="padding: 4px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (tr(lang, "pin manually", "закрепить вручную"))
+                    (icon("shield-check")) (tr(lang, "pin manually", "закрепить вручную"))
                 }
             }
         }

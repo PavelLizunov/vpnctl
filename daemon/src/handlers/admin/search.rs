@@ -4,6 +4,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::icon;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -81,7 +82,7 @@ pub(crate) async fn search(
                 lang,
                 "Substring match across user ids / UUIDs / sub_tokens / device_ids, server ids / addresses, and alert kinds / summaries. Case-insensitive. Cap of 50 hits per group.",
                 "Подстрочный поиск по id / UUID / sub_token / device_id пользователей, по id / адресам серверов, по kind / summary алертов. Регистронезависимо. Не больше 50 совпадений в каждой группе.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             @if !query.is_empty() {
                 span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (users.len()) " " (crate::i18n::tr(lang, "users", "польз."))
@@ -89,7 +90,7 @@ pub(crate) async fn search(
                     " · " (alerts.len()) " " (crate::i18n::tr(lang, "alerts", "алертов"))
                     " · "
                     a href=(format!("/admin/audit?target={}", path_segment_encode(query))) style="color: var(--acc);" {
-                        (crate::i18n::tr(lang, "audit events →", "события аудита →"))
+                        (icon("history")) (crate::i18n::tr(lang, "audit events", "события аудита"))
                     }
                 }
             }
@@ -103,7 +104,7 @@ pub(crate) async fn search(
                   style="flex: 1; padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
             button type="submit"
                    style="padding: 6px 16px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 12px; cursor: pointer;" {
-                (crate::i18n::tr(lang, "search", "искать"))
+                (icon("search")) (crate::i18n::tr(lang, "search", "искать"))
             }
         }
 
@@ -208,7 +209,7 @@ pub(crate) async fn search(
                             // open-vs-historical context.
                             a href="/admin/alerts"
                               style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                b title=(a.kind) { (rendered.icon) " " (crate::alert_text::to_plain(&rendered.title)) }
+                                b title=(a.kind) { (icon(match rendered.icon { "🟢" => "check", "🔴" => "circle-x", "🟠" | "🟡" => "triangle-alert", _ => "info" })) " " (crate::alert_text::to_plain(&rendered.title)) }
                             }
                             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                                 (a.severity) " · "

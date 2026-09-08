@@ -17,15 +17,7 @@ const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
 /// `Glyph()` from the design source.
 #[allow(dead_code)]
 fn glyph(size: u32) -> Markup {
-    let stroke = (size as f32 / 12.0).max(1.5);
-    let r = (size as f32 / 9.0).max(1.6);
-    html! {
-        svg width=(size) height=(size) viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:block" {
-            path d="M8 4 H5 V20 H8" stroke="currentColor" stroke-width=(stroke) stroke-linecap="square" fill="none" {}
-            path d="M16 4 H19 V20 H16" stroke="currentColor" stroke-width=(stroke) stroke-linecap="square" fill="none" {}
-            circle cx="12" cy="12" r=(r) fill="currentColor" {}
-        }
-    }
+    crate::handlers::admin::ui::glyph(size)
 }
 
 #[derive(Clone, Copy)]
@@ -221,7 +213,7 @@ pub(super) fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale
     html! {
         div style="display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--rule); background: var(--paper); font-family: var(--mono); font-size: 11px; color: var(--soft); max-width: 480px;" {
             form method="post" action="/admin/tweak/theme" style="display: flex; gap: 6px; align-items: baseline;" {
-                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (tr(lang, "paper", "бумага")) }
+                span style="width: 60px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" { (crate::handlers::admin::icons::icon("palette")) " " (tr(lang, "paper", "бумага")) }
                 @for &name in VALID_THEMES {
                     button name="value" value=(name)
                            title=(format!("{} {name}", tr(lang, "Switch paper theme to", "Переключить тему бумаги на")))

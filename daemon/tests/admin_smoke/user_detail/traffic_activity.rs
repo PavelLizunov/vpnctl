@@ -928,9 +928,22 @@ async fn v2_user_activity_log_pagination_and_csv() {
         html.contains("showing ") && html.contains(" of "),
         "log must show the «showing N of M» counter"
     );
+    let link = html
+        .split_once(r#"href="/admin/users/u0/activity?log_page=1""#)
+        .unwrap()
+        .1
+        .split_once("</a>")
+        .unwrap()
+        .0;
+    let content = link.split_once('>').unwrap().1;
+    assert_eq!(
+        content.split_once("<svg ").unwrap().0.trim(),
+        "older",
+        "page 1 of 2 must offer the exact older label"
+    );
     assert!(
-        html.contains("older →") || html.contains("старше →"),
-        "page 1 of 2 must offer an older→ link"
+        content.contains(r#"<use href="/admin/assets/icons.svg#arrow-right""#),
+        "older-page link must carry its own arrow icon"
     );
     assert!(
         html.contains("/admin/users/u0/access.csv"),

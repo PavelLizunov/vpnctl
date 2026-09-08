@@ -50,12 +50,23 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         html.contains("/admin/users/carol/wireguard/regenerate"),
         "rotate-keypair form must POST to the regenerate route"
     );
-    // Private value MUST NOT leak into the HTML — only the marker.
-    // maud escapes `<` → `&lt;` in attribute-free text, so check
-    // the unambiguous substring before the escape.
+    // Private value MUST NOT leak into the HTML — only the exact marker.
+    let keypair = html.split_once("WireGuard keypair</div>").unwrap().1;
+    let private = keypair
+        .split_once(">private </span>")
+        .unwrap()
+        .1
+        .split_once("</div>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains("✓ stored — served via /sub/"),
-        "private must be marker-only ('✓ stored'), never the value itself"
+        private.contains(r#"<use href="/admin/assets/icons.svg#check""#),
+        "private-key marker must carry its own check icon"
+    );
+    assert_eq!(
+        private.split_once("</svg>").unwrap().1,
+        "stored — served via /sub/&lt;token&gt; only</span>",
+        "private must be marker-only, never the value itself"
     );
     // Hard assertion: actual private bytes are NEVER in the HTML.
     let priv_ = inv

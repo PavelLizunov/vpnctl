@@ -8,6 +8,236 @@ use vpnctld::router;
 
 use crate::common::*;
 
+/// Static sprite grammar deliberately admits only geometry, not SVG's active
+/// elements, event attributes, URLs, entities, styles or external references.
+fn assert_inert_icon_sprite(svg: &str) -> std::collections::BTreeSet<&str> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut rest = svg;
+    while !rest.trim().is_empty() {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            rest = comment.split_once("-->").expect("closed comment").1;
+            continue;
+        }
+        let (tag, tail) = rest
+            .strip_prefix('<')
+            .expect("sprite contains only markup")
+            .split_once('>')
+            .expect("closed SVG tag");
+        rest = tail;
+        let tag = tag.trim_start_matches('/').trim_end_matches('/').trim();
+        let (name, mut attrs) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
+        assert!(
+            [
+                "svg", "symbol", "path", "circle", "ellipse", "rect", "line", "polyline", "polygon"
+            ]
+            .contains(&name),
+            "unexpected/active SVG element: {name}"
+        );
+        while !attrs.trim().is_empty() {
+            let (attr, value) = attrs.trim_start().split_once('=').expect("SVG attribute");
+            let attr = attr.trim();
+            assert!(
+                [
+                    "xmlns",
+                    "id",
+                    "viewBox",
+                    "fill",
+                    "stroke",
+                    "stroke-width",
+                    "stroke-linecap",
+                    "stroke-linejoin",
+                    "d",
+                    "cx",
+                    "cy",
+                    "r",
+                    "rx",
+                    "ry",
+                    "x",
+                    "y",
+                    "x1",
+                    "x2",
+                    "y1",
+                    "y2",
+                    "width",
+                    "height",
+                    "points"
+                ]
+                .contains(&attr),
+                "unexpected/active SVG attribute: {attr}"
+            );
+            let value = value.trim_start();
+            let quote = value.chars().next().expect("quoted attribute");
+            assert!(matches!(quote, '\'' | '"'));
+            let (value, tail) = value[1..].split_once(quote).expect("closed attribute");
+            attrs = tail;
+            if attr == "xmlns" {
+                assert_eq!(value, "http://www.w3.org/2000/svg");
+            } else {
+                assert!(
+                    !value.contains(['&', '<', ':', '/']),
+                    "external/entity value: {value}"
+                );
+                assert!(!value.to_ascii_lowercase().contains("url("));
+            }
+            if attr == "id" {
+                assert_eq!(name, "symbol");
+                assert!(ids.insert(value), "duplicate icon ID: {value}");
+            }
+            if attr == "viewBox" {
+                assert_eq!(value, "0 0 24 24");
+            }
+        }
+    }
+    for required in [
+        "layout-dashboard",
+        "activity",
+        "server",
+        "users",
+        "history",
+        "bell",
+        "settings-2",
+        "link",
+        "search",
+        "plus",
+        "check",
+        "triangle-alert",
+        "circle-x",
+        "download",
+        "list-filter",
+        "rotate-cw",
+        "save",
+        "arrow-left",
+        "arrow-right",
+    ] {
+        assert!(ids.contains(required), "missing icon symbol: {required}");
+    }
+    ids
+}
+
+#[tokio::test]
+async fn admin_icon_sprite_served_with_svg_mime_and_no_active_content() {
+    let dir = TempDir::new().unwrap();
+    let response = router(state(&dir).await)
+        .oneshot(
+            Request::builder()
+                .uri("/admin/assets/icons.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_inert_icon_sprite(std::str::from_utf8(&body).unwrap());
+}
+
+#[tokio::test]
+async fn admin_nav_icons_keep_visible_localized_labels_in_every_theme() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for theme in ["default", "newsprint", "foxed", "ink"] {
+        for lang in ["en", "ru"] {
+            let html = fetch_html_with_cookie(
+                app.clone(),
+                "/admin/",
+                &format!("vpnctl_theme={theme}; vpnctl_lang={lang}"),
+            )
+            .await;
+            let nav = html
+                .split_once(r#"<nav class="ed-tb__nav">"#)
+                .unwrap()
+                .1
+                .split_once("</nav>")
+                .unwrap()
+                .0;
+            let anchors: Vec<_> = nav
+                .split("<a ")
+                .skip(1)
+                .map(|part| part.split_once("</a>").unwrap().0)
+                .collect();
+            assert_eq!(anchors.len(), 8, "all main navigation items remain");
+            for (path, icon, en, ru) in [
+                ("/admin/", "layout-dashboard", "Dashboard", "Дашборд"),
+                ("/admin/monitoring", "activity", "Monitoring", "Мониторинг"),
+                ("/admin/servers", "server", "Servers", "Серверы"),
+                ("/admin/users", "users", "Users", "Пользователи"),
+                ("/admin/audit", "history", "Audit", "Аудит"),
+                ("/admin/alerts", "bell", "Alerts", "Алерты"),
+                ("/admin/settings", "settings-2", "Settings", "Настройки"),
+                ("/admin/boosty", "link", "Boosty", "Boosty"),
+            ] {
+                let anchor = anchors
+                    .iter()
+                    .find(|a| a.contains(&format!("href=\"{path}\"")))
+                    .unwrap_or_else(|| panic!("missing navigation {path}"));
+                assert!(anchor.contains(&format!("/admin/assets/icons.svg#{icon}")));
+                assert!(anchor.contains(r#"aria-hidden="true""#));
+                assert!(anchor.contains(r#"focusable="false""#));
+                let label = if lang == "en" { en } else { ru };
+                // Label must be a visible text sibling after the SVG, not only
+                // an aria-label/title or screen-reader-only replacement.
+                assert_eq!(anchor.split_once("</svg>").unwrap().1.trim(), label);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn admin_page_icons_are_decorative_and_reference_existing_symbols() {
+    let ids = assert_inert_icon_sprite(include_str!("../../../assets/icons.svg"));
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_dashboard_signals(&s.inv).await;
+    let session = s
+        .wizard
+        .insert("192.0.2.42".into(), "root".into(), "synthetic".into(), 22);
+    let app = router(s);
+    for &(_, path) in crate::icon_fixtures::ICON_PAGES {
+        // Settings GET reads host-local key/backup files; the ignored exporter
+        // exercises those routes only after its explicit isolation guards.
+        if path.starts_with("/admin/settings") {
+            continue;
+        }
+        for lang in ["en", "ru"] {
+            let html = fetch_html_with_cookie(
+                app.clone(),
+                path,
+                &format!("vpnctl_lang={lang}; vpnctl_wizard={session}"),
+            )
+            .await;
+            let mut count = 0;
+            for svg in html.split("<svg").skip(1) {
+                let (attrs, body) = svg.split_once('>').unwrap();
+                if !attrs.contains("ed-icon") {
+                    continue;
+                }
+                count += 1;
+                assert!(
+                    attrs.contains(r#"aria-hidden="true""#),
+                    "{path}: decorative icon exposed"
+                );
+                assert!(
+                    attrs.contains(r#"focusable="false""#),
+                    "{path}: icon is focusable"
+                );
+                let body = body.split_once("</svg>").unwrap().0;
+                let id = body
+                    .split_once("/admin/assets/icons.svg#")
+                    .expect("local icon reference")
+                    .1
+                    .split_once('"')
+                    .unwrap()
+                    .0;
+                assert!(ids.contains(id), "{path}: unknown symbol {id}");
+            }
+            assert!(count >= 8, "{path}: icons missing");
+        }
+    }
+}
+
 #[tokio::test]
 async fn admin_root_renders_editorial_shell() {
     let dir = TempDir::new().unwrap();

@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use maud::Markup;
 
 use crate::handlers::admin::helpers::format_msk_iso;
@@ -132,7 +133,7 @@ pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                        "Spawn the geoip-update subprocess on the daemon host and stream its progress here. Same action the monthly timer fires.",
                        "Запустить подпроцесс geoip-update на хосте демона и показать прогресс здесь. То же действие, что и ежемесячный таймер.",
                    )) {
-                (tr(lang, "update now", "обновить сейчас"))
+                (icon("rotate-cw")) span data-icon-label { (tr(lang, "update now", "обновить сейчас")) }
             }
             pre id="geoip-update-now-log" hidden
                 style="margin: 10px 0 0; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}

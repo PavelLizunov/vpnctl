@@ -750,6 +750,43 @@ async fn admin_alerts_ack_unknown_id_returns_redirect_not_500() {
 // ────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn monitoring_acknowledgment_icon_does_not_claim_recovery() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let id = s
+        .inv
+        .insert_alert(
+            "server.unreachable",
+            None,
+            "critical",
+            "still unreachable fixture",
+            None,
+        )
+        .await
+        .unwrap();
+    s.inv.ack_alert(id).await.unwrap();
+    let app = router(s);
+    for (lang, expected) in [("en", "Acknowledged"), ("ru", "Принят")] {
+        let html = fetch_html_with_cookie(
+            app.clone(),
+            "/admin/monitoring",
+            &format!("vpnctl_lang={lang}"),
+        )
+        .await;
+        let row = html
+            .split("<tr")
+            .find(|row| row.contains("still unreachable fixture"))
+            .unwrap()
+            .split("</tr>")
+            .next()
+            .unwrap();
+        assert!(row.contains(&format!("aria-label=\"{expected}\"")));
+        assert!(row.contains("icons.svg#check"));
+        assert!(!row.contains("Resolved") && !row.contains("Закрыт"));
+    }
+}
+
+#[tokio::test]
 async fn admin_monitoring_renders_fleet_health() {
     // Design v2 3a — monitoring is the fleet-health surface: six
     // status tiles, per-node uptime + trend tables, the monitor's

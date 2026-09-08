@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
+use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 
 use crate::http_util::path_segment_encode;
@@ -199,7 +200,7 @@ pub(super) fn server_detail_drift_detail_section(
                 p style="font-family: var(--mono); font-size: 12px; margin: 8px 0;" {
                     a href=(format!("/admin/servers/{sid_enc}/protocols?drift=live#drift-detail"))
                       style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
-                        (tr(lang, "check live drift →", "проверить живой дрейф →"))
+                        (icon("scan")) (tr(lang, "check live drift", "проверить живой дрейф"))
                     }
                 }
                 p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 4px 0 0;" {
@@ -303,15 +304,16 @@ pub(super) fn server_detail_drift_summary(
                 }
             } @else if missing.is_empty() && extra.is_empty() {
                 span style="color: var(--soft);" {
+                    (icon("check"))
                     (tr(
                         lang,
-                        "✓ Declared and observed match. No drift.",
-                        "✓ Заявленное и наблюдаемое совпадают. Дрейфа нет.",
+                        "Declared and observed match. No drift.",
+                        "Заявленное и наблюдаемое совпадают. Дрейфа нет.",
                     ))
                 }
             } @else {
                 span style="color: var(--acc);" {
-                    "⚠ " (tr(lang, "drift — ", "дрейф — "))
+                    (icon("triangle-alert")) (tr(lang, "drift — ", "дрейф — "))
                     (missing.len()) " " (tr(lang, "declared-but-silent", "заявлено-но-молчит"))
                     " · "
                     (extra.len()) " " (tr(lang, "listening-but-undeclared", "слушает-но-не-заявлено"))
@@ -319,7 +321,7 @@ pub(super) fn server_detail_drift_summary(
                 " "
                 a href=(format!("{base}/protocols#drift-detail"))
                   style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
-                    (tr(lang, "full grid on protocols tab →", "полная таблица на вкладке протоколы →"))
+                    (icon("arrow-right")) (tr(lang, "full grid on protocols tab", "полная таблица на вкладке протоколы"))
                 }
             }
         }
@@ -369,7 +371,7 @@ pub(super) fn server_detail_drift_section(
                 lang,
                 "Declared = protocol in the inventory for this node. Listening = the latest probe found the port open (ss -tlnup). A declared-but-silent port is the dangerous drift; undeclared listeners are usually per-user wg peers.",
                 "Заявлено = протокол в инвентаре этой ноды. Слушает = последняя проба нашла порт открытым (ss -tlnup). Заявлено-но-молчит — опасный дрейф; незаявленные слушатели обычно пер-пировые wg-порты.",
-            )) { "ⓘ" }
+            )) { (status("info", lang, "Information", "Информация")) }
         }
         @if !have_probe {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); margin-top: 8px;" {
@@ -401,7 +403,7 @@ pub(super) fn server_detail_drift_section(
                                     }
                                 }
                             }
-                            td { span style="color: var(--green);" { "✓" } }
+                            td { span style="color: var(--green);" { (status("check", lang, "Declared", "Заявлен")) } }
                             td.ed-grid__sm {
                                 @if ports.is_empty() {
                                     span.ed-grid__mut { (tr(lang, "n/a (no fixed port)", "н/д (нет фикс. порта)")) }
@@ -409,9 +411,9 @@ pub(super) fn server_detail_drift_section(
                                     @for (i, pp) in ports.iter().enumerate() {
                                         @if i > 0 { " · " }
                                         @if observed.contains(pp) {
-                                            span style="color: var(--green);" { "✓" }
+                                            span style="color: var(--green);" { (status("check", lang, "Listening", "Слушает")) }
                                         } @else {
-                                            span.ed-grid__flag { "✗ " (tr(lang, "silent", "молчит")) }
+                                            span.ed-grid__flag { (icon("x")) (tr(lang, "silent", "молчит")) }
                                         }
                                     }
                                 }
@@ -422,7 +424,7 @@ pub(super) fn server_detail_drift_section(
             }
             @if !missing.is_empty() {
                 p style="font-family: var(--mono); font-size: 11px; color: var(--warm); margin-top: 8px;" {
-                    "⚠ " (tr(lang, "declared but NOT listening: ", "заявлено, но НЕ слушает: "))
+                    (icon("triangle-alert")) (tr(lang, "declared but NOT listening: ", "заявлено, но НЕ слушает: "))
                     @for (i, (proto, port)) in missing.iter().enumerate() {
                         @if i > 0 { ", " }
                         (proto) "/" (port)
@@ -438,7 +440,7 @@ pub(super) fn server_detail_drift_section(
                         lang,
                         "Per-user AmneziaWG peers each bind their own UDP port — expected, but the inventory doesn't model them yet (NM-14). This grouping keeps the wall readable; there's nothing to click.",
                         "Каждый пер-пировый порт AmneziaWG — свой UDP-сокет: ожидаемо, но инвентарь их пока не моделирует (NM-14). Группировка держит стену читабельной; кликать тут нечего.",
-                    )) { "ⓘ" }
+                    )) { (status("info", lang, "Information", "Информация")) }
                 }
                 table.ed-grid style="margin-top: 8px;" {
                     thead {
@@ -453,7 +455,7 @@ pub(super) fn server_detail_drift_section(
                             tr {
                                 td { b { (tr(lang, "wg per-user peers", "wg пер-пировые порты")) } }
                                 td.num { (wg_peers) }
-                                td.ed-grid__sm { span.ed-grid__flag { "⚠ " (tr(lang, "expected · unmodelled (NM-14)", "ожидаемо · не смоделировано (NM-14)")) } }
+                                td.ed-grid__sm { span.ed-grid__flag { (icon("triangle-alert")) (tr(lang, "expected · unmodelled (NM-14)", "ожидаемо · не смоделировано (NM-14)")) } }
                             }
                         }
                         @if !caddy_internals.is_empty() {

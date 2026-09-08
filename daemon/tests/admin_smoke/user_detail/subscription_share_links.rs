@@ -918,9 +918,28 @@ async fn v2_user_delivery_renders_subscription_recap() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     let html = fetch_html(router(s), "/admin/users/u0/delivery").await;
+    let recap = html
+        .split_once(r#"class="ed-inbar""#)
+        .unwrap()
+        .1
+        .split_once("</div>")
+        .unwrap()
+        .0;
+    let link = recap
+        .split_once(r#"href="/admin/users/u0">"#)
+        .unwrap()
+        .1
+        .split_once("</a>")
+        .unwrap()
+        .0;
+    assert_eq!(
+        link.split_once("<svg ").unwrap().0.trim(),
+        "QR on Overview",
+        "recap must link the Overview QR with its exact label"
+    );
     assert!(
-        html.contains("QR on Overview →") || html.contains("QR на Обзоре →"),
-        "recap must link the Overview QR"
+        link.contains(r#"<use href="/admin/assets/icons.svg#arrow-right""#),
+        "Overview QR link must carry its own arrow icon"
     );
     assert!(
         html.contains("LAN-only fallback"),

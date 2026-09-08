@@ -4,6 +4,7 @@
 //! paths gain audit-logging (CLAUDE.md invariant). Extracted from
 //! `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -64,7 +65,7 @@ fn user_row(
             td {
                 @if live_conns > 0 {
                     span.ed-stat.ed-stat--active {
-                        span.ed-stat__dot {}
+                        (icon("circle"))
                         (tr(lang, "online", "онлайн")) " · " (live_conns) " "
                         @if live_conns == 1 { (tr(lang, "conn", "соединение")) }
                         @else { (tr(lang, "conns", "соединений")) }
@@ -82,13 +83,13 @@ fn user_row(
             }
             td.num { b { (grants_count) } }
             td.ed-grid__sm {
-                @if u.tuic_password.is_some() { span style="color: var(--green);" { "tuic ✓" } }
+                @if u.tuic_password.is_some() { span style="color: var(--green);" { "tuic " (status("check", lang, "Key stored", "Ключ сохранён")) } }
                 @else { span.ed-grid__mut { "tuic —" } }
                 " · "
-                @if u.wireguard_pubkey.is_some() { span style="color: var(--green);" { "wg ✓" } }
+                @if u.wireguard_pubkey.is_some() { span style="color: var(--green);" { "wg " (status("check", lang, "Key stored", "Ключ сохранён")) } }
                 @else { span.ed-grid__mut { "wg —" } }
             }
-            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "detail · QR →", "детали · QR →")) } }
+            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "detail · QR", "детали · QR")) (icon("arrow-right")) } }
         }
     }
 }
@@ -188,7 +189,7 @@ pub(crate) async fn users(
         html! {
             a href=(make_sort_href(kind))
               style=(if active { "color: var(--ink); text-decoration: underline; margin-left: 8px;" } else { "color: var(--mute); margin-left: 8px;" }) {
-                (label)
+                (label) (status(if kind.ends_with("-desc") { "arrow-down" } else { "arrow-up" }, lang, if kind.ends_with("-desc") { "Descending" } else { "Ascending" }, if kind.ends_with("-desc") { "По убыванию" } else { "По возрастанию" }))
             }
         }
     };
@@ -205,7 +206,7 @@ pub(crate) async fn users(
                 lang,
                 "Each user has a public subscription URL at https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
                 "У каждого пользователя есть публичный URL подписки https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             @if !users_list.is_empty() {
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
@@ -213,9 +214,9 @@ pub(crate) async fn users(
                     // sort vocabulary (`id ↑ · online ↓ · traffic ↓`).
                     // `?sort=id-desc` still parses for old bookmarks;
                     // it just isn't offered.
-                    (sort_link("id", "id ↑"))
-                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers ↓", "серверы ↓")))
-                    (sort_link("servers", crate::i18n::tr(lang, "servers ↑", "серверы ↑")))
+                    (sort_link("id", "id"))
+                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers", "серверы")))
+                    (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
                 }
             }
         }
@@ -232,11 +233,11 @@ pub(crate) async fn users(
                           autofocus;
                     @if sort_kind != "id" { input type="hidden" name="sort" value=(sort_kind); }
                     button.ed-abtn.ed-abtn--secondary.ed-abtn--sm type="submit" {
-                        (crate::i18n::tr(lang, "go", "ок"))
+                        (icon("search")) (crate::i18n::tr(lang, "go", "ок"))
                     }
                     @if !q_lower.is_empty() {
                         a href=(make_sort_href(sort_kind)) style="color: var(--mute);" {
-                            (crate::i18n::tr(lang, "× clear", "× очистить"))
+                            (icon("x")) (crate::i18n::tr(lang, "clear", "очистить"))
                         }
                     }
                 }
@@ -280,13 +281,13 @@ pub(crate) async fn users(
                            "Mint UUID + tuic_password + sub_token + WG keypair, optionally grant all servers; redirect to /admin/users/<id> where keys are visible",
                            "Сгенерирует UUID + tuic_password + sub_token + WG-пару, по-желанию выдаст все серверы; редирект на /admin/users/<id> где ключи видны",
                        )) {
-                    (crate::i18n::tr(lang, "create → mints uuid + keys", "создать → uuid + ключи"))
+                    (icon("plus")) (crate::i18n::tr(lang, "create", "создать")) " " (icon("arrow-right")) " " (crate::i18n::tr(lang, "mints uuid + keys", "uuid + ключи"))
                 }
                 span.ed-tip title=(crate::i18n::tr(
                     lang,
                     "all keys are auto-generated and shown on the user page.",
                     "Все ключи генерируются автоматически и видны на странице пользователя.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             }
         }
 
@@ -302,7 +303,7 @@ pub(crate) async fn users(
                 span.ed-mono { "q=" (q_lower) }
                 (crate::i18n::tr(lang, ". Loosen the search above or ", ". Расслабь поиск выше или "))
                 a href="/admin/users" style="color: var(--ink);" {
-                    (crate::i18n::tr(lang, "clear it", "очисти его"))
+                    (icon("x")) (crate::i18n::tr(lang, "clear it", "очисти его"))
                 }
                 "."
             }

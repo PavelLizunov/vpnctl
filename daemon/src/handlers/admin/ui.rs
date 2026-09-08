@@ -1,15 +1,17 @@
 //! UI Primitives and Page Components for admin HTML generation.
 
+use super::icons::icon;
 use maud::{Markup, html};
 
 pub(crate) fn glyph(size: u32) -> Markup {
-    let stroke = (size as f32 / 12.0).max(1.5);
-    let r = (size as f32 / 9.0).max(1.6);
+    // Geometry stays fixed in the viewBox, including at favicon sizes.
+    let stroke = 1.8;
+    let r = 2.4;
     html! {
         svg width=(size) height=(size) viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:block" {
-            path d="M8 4 H5 V20 H8" stroke="currentColor" stroke-width=(stroke) stroke-linecap="square" fill="none" {}
-            path d="M16 4 H19 V20 H16" stroke="currentColor" stroke-width=(stroke) stroke-linecap="square" fill="none" {}
-            circle cx="12" cy="12" r=(r) fill="currentColor" {}
+            path d="M8 4 H5 V20 H8" stroke="currentColor" stroke-width=(stroke) stroke-linecap="round" fill="none" {}
+            path d="M16 4 H19 V20 H16" stroke="currentColor" stroke-width=(stroke) stroke-linecap="round" fill="none" {}
+            circle cx="12" cy="12" r=(r) fill="currentColor" style="fill: color-mix(in oklab, var(--acc) 55%, var(--paper))" {}
         }
     }
 }
@@ -72,7 +74,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
     html! {
         div.ed-tb {
             a.ed-tb__logo href="/admin/" {
-                span style="color: var(--acc); display: flex;" { (glyph(18)) }
+                span.ed-brand { (glyph(20)) }
                 "vpnctl"
             }
             nav.ed-tb__nav {
@@ -84,12 +86,32 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                     };
                     @if it.key == active {
                         a.on href=(nav_href(it.key)) {
-                            (t(lang, it.label_key))
+                            (icon(match it.key {
+                                "dashboard" => "layout-dashboard",
+                                "monitoring" => "activity",
+                                "servers" => "server",
+                                "users" => "users",
+                                "audit" => "history",
+                                "alerts" => "bell",
+                                "settings" => "settings-2",
+                                _ => "link",
+                            }))
+                            " " (t(lang, it.label_key))
                             @if let Some(c) = count { " " span.ct { (c) } }
                         }
                     } @else {
                         a href=(nav_href(it.key)) {
-                            (t(lang, it.label_key))
+                            (icon(match it.key {
+                                "dashboard" => "layout-dashboard",
+                                "monitoring" => "activity",
+                                "servers" => "server",
+                                "users" => "users",
+                                "audit" => "history",
+                                "alerts" => "bell",
+                                "settings" => "settings-2",
+                                _ => "link",
+                            }))
+                            " " (t(lang, it.label_key))
                             @if let Some(c) = count { " " span.ct { (c) } }
                         }
                     }
@@ -97,6 +119,10 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
             }
             span.ed-tb__r {
                 form method="get" action="/admin/search" style="display: flex; margin: 0;" {
+                    label.ed-tb__search-label for="tb-search" {
+                        (icon("search"))
+                        span.ed-sr-only { (crate::i18n::tr(lang, "Search", "Поиск")) }
+                    }
                     input.ed-tb__search type="search" name="q" id="tb-search"
                           title=(match lang {
                               Locale::En => "Fleet-wide search — press / to focus",
@@ -117,7 +143,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                                    Locale::En => "Switch admin UI to English",
                                    Locale::Ru => "Переключить админку на русский",
                                }) {
-                            (other.cookie_value().to_uppercase())
+                            (icon("languages")) " " (other.cookie_value().to_uppercase())
                         }
                     }
                     span.ed-tb__host { " · " (t(lang, K::NavOperator)) }
@@ -128,7 +154,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                                    Locale::En => "Sign out of the admin UI on this device",
                                    Locale::Ru => "Выйти из админки на этом устройстве",
                                }) {
-                            (match lang { Locale::En => "logout", Locale::Ru => "выйти" })
+                            (icon("log-out")) " " (match lang { Locale::En => "logout", Locale::Ru => "выйти" })
                         }
                     }
                 }
@@ -178,7 +204,7 @@ pub(crate) fn status_tile_with_warn(
             div.ed-status-tile__k { (label) }
             div.ed-status-tile__v style=(format!("color: {value_color};")) {
                 (value)
-                @if warn { " ⚠" }
+                @if warn { " " span role="img" aria-label="Warning / Предупреждение" { (icon("triangle-alert")) } }
             }
         }
     }

@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::{icon, status};
 use chrono::{DateTime, Utc};
 use maud::{Markup, html};
 use std::collections::{HashMap, HashSet};
@@ -32,13 +33,12 @@ pub(crate) fn render_access_tab(
                 lang,
                 "Keys are minted at grant time; «on node» means the deployed config actually contains them. Grant + forget-to-deploy is the #1 silent failure — the banner above tracks it.",
                 "Ключи чеканятся при гранте; «на ноде» значит, что задеплоенный конфиг реально их содержит. Грант без деплоя — тихий сбой №1, баннер выше его отслеживает.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
         }
-        @let keys_str = {
-            let mut parts = vec!["uuid ✓"];
-            if user.tuic_password.is_some() { parts.push("tuic ✓"); }
-            if user.wireguard_pubkey.is_some() { parts.push("wg ✓"); }
-            parts.join(" · ")
+        @let keys_str = html! {
+            "uuid " (status("check", lang, "Key minted", "Ключ создан"))
+            @if user.tuic_password.is_some() { " · tuic " (status("check", lang, "Key minted", "Ключ создан")) }
+            @if user.wireguard_pubkey.is_some() { " · wg " (status("check", lang, "Key minted", "Ключ создан")) }
         };
         table.ed-grid style="margin-top: 8px;" {
             thead {
@@ -61,7 +61,7 @@ pub(crate) fn render_access_tab(
                         td { b { (srv.id.0) } }
                         td.ed-grid__sm {
                             @if is_granted {
-                                span style="color: var(--green);" { "✓ " }
+                                span style="color: var(--green);" { (status("check", lang, "Granted", "Выдан")) " " }
                                 span.ed-grid__mut {
                                     @match user_grant_dates.get(&srv.id).copied().flatten() {
                                         Some(ts) => (format_msk_iso(ts)),
@@ -79,9 +79,9 @@ pub(crate) fn render_access_tab(
                         td.ed-grid__sm {
                             @if !is_granted { span.ed-grid__mut { "—" } }
                             @else if is_pending {
-                                span.ed-grid__flag { "⚠ " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
+                                span.ed-grid__flag { (icon("triangle-alert")) " " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
                             } @else {
-                                span style="color: var(--green);" { "✓" }
+                                span style="color: var(--green);" { (status("check", lang, "Deployed", "Развёрнут")) }
                             }
                         }
                         td.ed-grid__mut.ed-grid__sm {
@@ -96,7 +96,7 @@ pub(crate) fn render_access_tab(
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/revoke"))
                                      style="margin: 0; padding: 0; display: inline;" {
                                     button type="submit" class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                        (crate::i18n::tr(lang, "revoke →", "отозвать →"))
+                                        (icon("minus")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                     }
                                 }
                             } @else {
@@ -104,7 +104,7 @@ pub(crate) fn render_access_tab(
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}"))
                                      style="margin: 0; padding: 0; display: inline;" {
                                     button type="submit" class="ed-abtn ed-abtn--sm" {
-                                        (crate::i18n::tr(lang, "grant →", "выдать →"))
+                                        (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                                     }
                                 }
                             }
@@ -204,7 +204,7 @@ pub(crate) fn render_access_tab(
                                 }
                                 @if granted_ids.contains(&s.id) {
                                     span style="font-family: var(--mono); font-size: 11px; color: var(--acc);" {
-                                        (crate::i18n::tr(lang, "✓ access", "✓ доступ"))
+                                        (icon("check")) (crate::i18n::tr(lang, "access", "доступ"))
                                     }
                                     form method="post"
                                          action=(format!("/admin/users/{}/grants/{}/revoke",
@@ -218,7 +218,7 @@ pub(crate) fn render_access_tab(
                                         button type="submit"
                                                title=(title_str)
                                                style="padding: 2px 8px; border: 1px solid var(--rule-s); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--mute); cursor: pointer;" {
-                                            (crate::i18n::tr(lang, "revoke", "отозвать"))
+                                            (icon("minus")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                         }
                                     }
                                 } @else {
@@ -235,7 +235,7 @@ pub(crate) fn render_access_tab(
                                         button type="submit"
                                                title=(title_str)
                                                style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                            (crate::i18n::tr(lang, "grant", "выдать"))
+                                            (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                                         }
                                     }
                                 }
