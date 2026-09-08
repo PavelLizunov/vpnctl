@@ -231,6 +231,23 @@ pub struct SubAccessEntry {
     pub is_vpn_egress: bool,
 }
 
+/// Unsaved sub_access_log record used for single and batched ingestion.
+#[derive(Debug, Clone)]
+pub struct SubAccessEntryInput {
+    pub user_id: vpnctl_core::UserId,
+    pub ip: String,
+    pub ua: Option<String>,
+    pub status: u16,
+    pub bytes: u64,
+    pub accept_language: Option<String>,
+    pub http_version: Option<String>,
+    pub device_class: Option<String>,
+    pub geo_country: Option<String>,
+    pub geo_asn: Option<String>,
+    pub tls_ja3: Option<String>,
+    pub tls_ja4: Option<String>,
+}
+
 /// Aggregates over a user's `sub_access_log` rows for the
 /// per-user-detail summary cards. Phase 4a — Pavel needs «I've
 /// reset the iPhone, what was its last seen IP?» / «how many

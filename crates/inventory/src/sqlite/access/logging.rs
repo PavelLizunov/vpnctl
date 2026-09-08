@@ -1,5 +1,7 @@
 use crate::sqlite::base::{canonical_ip_text, real_client_ip_predicate};
-use crate::sqlite::models::{AccessBucket, ProxyMaskedStats, SubAccessAggregates, SubAccessEntry};
+use crate::sqlite::models::{
+    AccessBucket, ProxyMaskedStats, SubAccessAggregates, SubAccessEntry, SubAccessEntryInput,
+};
 use crate::sqlite::{Result, SqliteInventory, SqliteInventoryError};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -95,29 +97,55 @@ impl SqliteInventory {
         tls_ja3: Option<&str>,
         tls_ja4: Option<&str>,
     ) -> Result<()> {
-        let ip = canonical_ip_text(ip);
-        sqlx::query(
-            "INSERT INTO sub_access_log
-             (user_id, ip, ua, status, bytes,
-              accept_language, http_version, device_class,
-              geo_country, geo_asn, tls_ja3, tls_ja4)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        )
-        .bind(&user_id.0)
-        .bind(ip)
-        .bind(ua)
-        // SQLite has no u16 affinity; cast through i64.
-        .bind(i64::from(status))
-        .bind(i64::try_from(bytes).unwrap_or(i64::MAX))
-        .bind(accept_language)
-        .bind(http_version)
-        .bind(device_class)
-        .bind(geo_country)
-        .bind(geo_asn)
-        .bind(tls_ja3)
-        .bind(tls_ja4)
-        .execute(&self.pool)
-        .await?;
+        let entry = SubAccessEntryInput {
+            user_id: user_id.clone(),
+            ip: ip.to_string(),
+            ua: ua.map(str::to_string),
+            status,
+            bytes,
+            accept_language: accept_language.map(str::to_string),
+            http_version: http_version.map(str::to_string),
+            device_class: device_class.map(str::to_string),
+            geo_country: geo_country.map(str::to_string),
+            geo_asn: geo_asn.map(str::to_string),
+            tls_ja3: tls_ja3.map(str::to_string),
+            tls_ja4: tls_ja4.map(str::to_string),
+        };
+        self.log_sub_access_batch(&[entry]).await
+    }
+
+    /// Ingest a batch of sub_access_log entries in a single SQLite transaction.
+    /// Eliminates transaction lock contention and WAL write syncs under burst traffic.
+    pub async fn log_sub_access_batch(&self, records: &[SubAccessEntryInput]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for r in records {
+            let ip = canonical_ip_text(&r.ip);
+            sqlx::query(
+                "INSERT INTO sub_access_log
+                 (user_id, ip, ua, status, bytes,
+                  accept_language, http_version, device_class,
+                  geo_country, geo_asn, tls_ja3, tls_ja4)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )
+            .bind(&r.user_id.0)
+            .bind(ip)
+            .bind(r.ua.as_deref())
+            .bind(i64::from(r.status))
+            .bind(i64::try_from(r.bytes).unwrap_or(i64::MAX))
+            .bind(r.accept_language.as_deref())
+            .bind(r.http_version.as_deref())
+            .bind(r.device_class.as_deref())
+            .bind(r.geo_country.as_deref())
+            .bind(r.geo_asn.as_deref())
+            .bind(r.tls_ja3.as_deref())
+            .bind(r.tls_ja4.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

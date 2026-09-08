@@ -203,7 +203,7 @@ pub enum ProbeError {
 pub const PROBE_SCRIPT: &str = r#"
 set -e
 # systemd services we care about
-for s in sing-box fail2ban; do
+for s in sing-box xray caddy fail2ban; do
     state=$(systemctl is-active "$s" 2>/dev/null || true)
     echo "SVC $s ${state:-unknown}"
 done
@@ -257,6 +257,7 @@ fi
 # by the admin UI's drift-detail card to compare on-node vs fleet-target.
 sb_ver=$(sing-box version 2>/dev/null | awk '/version/{print $NF; exit}')
 [ -n "$sb_ver" ] && echo "VER sing-box $sb_ver"
+command -v xray >/dev/null 2>&1 && xr_ver=$(xray version 2>/dev/null | awk 'NR==1{print $2; exit}') && [ -n "$xr_ver" ] && echo "VER xray $xr_ver"
 command -v caddy >/dev/null 2>&1 && echo "VER caddy $(caddy version 2>/dev/null | awk '{print $1; exit}')"
 # Public-interface byte counters — server-wide traffic ground truth.
 # Catches ALL protocols (incl. non-sing-box: naive/Caddy)
@@ -340,13 +341,22 @@ pub fn parse_probe_output(raw: &str) -> Result<Probe, ProbeError> {
                 match name {
                     Some("sing-box") => {
                         probe.sing_box_active = active;
+                        if let Some(act) = active {
+                            probe.kernel_active.insert("sing-box".to_string(), act);
+                        }
                         any_parsed = true;
                     }
                     Some("fail2ban") => {
                         probe.fail2ban_active = active;
                         any_parsed = true;
                     }
-                    _ => continue,
+                    Some(other) => {
+                        if let Some(act) = active {
+                            probe.kernel_active.insert(other.to_string(), act);
+                        }
+                        any_parsed = true;
+                    }
+                    None => continue,
                 }
             }
             "DISK" => {

@@ -19,6 +19,7 @@ use scripts::{
     sing_box_apply_script,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use vpnctl_core::{
     CoreError, Kernel, KernelId, KernelStatus, KernelVersionPolicy, KernelVersionRequirement,
     Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
@@ -93,24 +94,37 @@ impl Kernel for SingBox {
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
         // Validate both local artifacts before changing the node. Packaging
         // installs these atomically from the same vpnctl revision.
-        let (sing_box, stats_helper) = tokio::task::spawn_blocking(move || {
-            let sb = std::fs::read(&sing_box_path)?;
-            let sh = std::fs::read(&helper_path)?;
-            Ok::<_, std::io::Error>((sb, sh))
-        })
-        .await
-        .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?
-        .map_err(CoreError::Io)?;
+        let (sing_box, stats_helper, sb_digest, sh_digest) =
+            tokio::task::spawn_blocking(move || {
+                let sb = std::fs::read(&sing_box_path)?;
+                let sh = std::fs::read(&helper_path)?;
+                let sb_digest = format!("{:x}", Sha256::digest(&sb));
+                let sh_digest = format!("{:x}", Sha256::digest(&sh));
+                Ok::<_, std::io::Error>((sb, sh, sb_digest, sh_digest))
+            })
+            .await
+            .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?
+            .map_err(CoreError::Io)?;
 
         // Idempotent base setup keeps the official package as the rollback
         // source; the managed binary then adds with_v2ray_api and the helper.
         ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
+
+        // Content-aware idempotency: probe on-node binary checksums and status.
+        // If /usr/bin/sing-box and the live stats helper already match our target
+        // digests and the service is active, skip the 30+ MB transfer and reinstall.
+        let check_cmd = "sha256sum /usr/bin/sing-box /usr/local/libexec/vpnctl/singbox-stats-helper 2>/dev/null; systemctl is-active --quiet sing-box 2>/dev/null && echo 'active' || true";
+        if let Ok(output) = ssh.exec(check_cmd).await {
+            if is_artifact_up_to_date(&output, &sb_digest, &sh_digest) {
+                return Ok(());
+            }
+        }
+
         let (remote_sing_box, remote_stats_helper) = remote_artifact_paths();
         let cleanup_script =
             cleanup_remote_artifacts_script(&remote_sing_box, &remote_stats_helper);
         let install_script =
             install_managed_artifacts_script(&remote_sing_box, &remote_stats_helper);
-        ssh.exec(&cleanup_script).await?;
         let install_result: Result<()> = async {
             ssh.upload(&remote_sing_box, &sing_box).await?;
             ssh.upload(&remote_stats_helper, &stats_helper).await?;
@@ -354,4 +368,21 @@ impl Kernel for SingBox {
             uptime_seconds: None,
         })
     }
+}
+
+pub(crate) fn is_artifact_up_to_date(
+    node_check_output: &str,
+    sb_digest: &str,
+    sh_digest: &str,
+) -> bool {
+    let lines: Vec<&str> = node_check_output.trim().lines().map(str::trim).collect();
+    if lines.len() >= 3 && lines[2] == "active" {
+        let node_sb_sha = lines[0].split_whitespace().next().unwrap_or("");
+        let node_sh_sha = lines[1].split_whitespace().next().unwrap_or("");
+        return !sb_digest.is_empty()
+            && !sh_digest.is_empty()
+            && node_sb_sha == sb_digest
+            && node_sh_sha == sh_digest;
+    }
+    false
 }

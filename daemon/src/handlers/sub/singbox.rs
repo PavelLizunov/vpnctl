@@ -134,6 +134,14 @@ async fn render_singbox_with(
         let visible_set: std::collections::HashSet<&vpnctl_core::ProtocolId> =
             visible_protocols.iter().collect();
 
+        let custom_name = state
+            .inv
+            .server_display_name(&server.id)
+            .await
+            .map_err(|e| SubError::Internal(format!("server_display_name: {e}")))?;
+        let server_display =
+            crate::handlers::vpn_router::server_display_label(&server.id.0, custom_name.as_deref());
+
         for pid in &server.enabled_protocols {
             if !visible_set.contains(pid) {
                 continue;
@@ -173,15 +181,6 @@ async fn render_singbox_with(
                     // `tuic-v5`, `hysteria2`, …) — we transform to the
                     // user-facing label here so the Protocol trait
                     // doesn't need to know about display strings.
-                    let custom_name = state
-                        .inv
-                        .server_display_name(&server.id)
-                        .await
-                        .map_err(|e| SubError::Internal(format!("server_display_name: {e}")))?;
-                    let server_display = crate::handlers::vpn_router::server_display_label(
-                        &server.id.0,
-                        custom_name.as_deref(),
-                    );
                     let proto_display = protocol_display_name(&pid.0);
                     let tag = format!(
                         "{server_display} {proto_display} ~{user_id}",

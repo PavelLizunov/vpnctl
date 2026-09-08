@@ -237,38 +237,98 @@ async fn dashboard_render(
         Vec::new()
     });
 
-    let fleet_uptime = {
-        let mut rows: Vec<(
-            vpnctl_core::ServerId,
-            [Option<vpnctl_inventory::UptimeStat>; 3],
-        )> = Vec::with_capacity(server_list_fleet.len());
+    let fleet_uptime: Vec<(
+        vpnctl_core::ServerId,
+        [Option<vpnctl_inventory::UptimeStat>; 3],
+    )> = {
+        let mut set = tokio::task::JoinSet::new();
         for s in &server_list_fleet {
-            let u24h = state.inv.uptime_for_server(&s.id, 24).await.ok();
-            let u7d = state.inv.uptime_for_server(&s.id, 24 * 7).await.ok();
-            let u30d = state.inv.uptime_for_server(&s.id, 24 * 30).await.ok();
-            rows.push((s.id.clone(), [u24h, u7d, u30d]));
+            let inv = state.inv.clone();
+            let sid = s.id.clone();
+            set.spawn(async move {
+                let (u24h, u7d, u30d) = tokio::join!(
+                    inv.uptime_for_server(&sid, 24),
+                    inv.uptime_for_server(&sid, 24 * 7),
+                    inv.uptime_for_server(&sid, 24 * 30),
+                );
+                (sid, [u24h.ok(), u7d.ok(), u30d.ok()])
+            });
         }
-        rows
+        let mut results = std::collections::HashMap::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok((sid, stats)) = res {
+                results.insert(sid, stats);
+            }
+        }
+        server_list_fleet
+            .iter()
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    results.remove(&s.id).unwrap_or([None, None, None]),
+                )
+            })
+            .collect()
     };
 
-    let mut fleet_quality = Vec::with_capacity(server_list_fleet.len());
-    for server in &server_list_fleet {
-        let q24 = state
-            .inv
-            .service_quality_for_server(&server.id, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
-            .await
-            .unwrap_or_else(|_| {
-                vpnctl_inventory::score_samples(&[], 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+    let fleet_quality: Vec<(
+        vpnctl_core::ServerId,
+        vpnctl_inventory::ServiceQualityScore,
+        vpnctl_inventory::ServiceQualityScore,
+    )> = {
+        let mut set = tokio::task::JoinSet::new();
+        for s in &server_list_fleet {
+            let inv = state.inv.clone();
+            let sid = s.id.clone();
+            set.spawn(async move {
+                let (q24_res, q7_res) = tokio::join!(
+                    inv.service_quality_for_server(&sid, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES),
+                    inv.service_quality_for_server(
+                        &sid,
+                        24 * 7,
+                        vpnctl_inventory::QUALITY_MIN_SAMPLES
+                    ),
+                );
+                let q24 = q24_res.unwrap_or_else(|_| {
+                    vpnctl_inventory::score_samples(&[], 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+                });
+                let q7 = q7_res.unwrap_or_else(|_| {
+                    vpnctl_inventory::score_samples(
+                        &[],
+                        24 * 7,
+                        vpnctl_inventory::QUALITY_MIN_SAMPLES,
+                    )
+                });
+                (sid, q24, q7)
             });
-        let q7 = state
-            .inv
-            .service_quality_for_server(&server.id, 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
-            .await
-            .unwrap_or_else(|_| {
-                vpnctl_inventory::score_samples(&[], 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
-            });
-        fleet_quality.push((server.id.clone(), q24, q7));
-    }
+        }
+        let mut results = std::collections::HashMap::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok((sid, q24, q7)) = res {
+                results.insert(sid, (q24, q7));
+            }
+        }
+        server_list_fleet
+            .iter()
+            .map(|s| {
+                let (q24, q7) = results.remove(&s.id).unwrap_or_else(|| {
+                    (
+                        vpnctl_inventory::score_samples(
+                            &[],
+                            24,
+                            vpnctl_inventory::QUALITY_MIN_SAMPLES,
+                        ),
+                        vpnctl_inventory::score_samples(
+                            &[],
+                            24 * 7,
+                            vpnctl_inventory::QUALITY_MIN_SAMPLES,
+                        ),
+                    )
+                });
+                (s.id.clone(), q24, q7)
+            })
+            .collect()
+    };
 
     // PR-Dash — newest kernel-versions JSON per server (Q-4e). Backs
     // BOTH the fleet-at-a-glance "sing-box version" column (dash#1) AND
@@ -279,21 +339,23 @@ async fn dashboard_render(
     });
 
     // PR-Dash dash#1 — latest node-health snapshot per server, for the
-    // at-a-glance disk%/mem%/up/last-probe columns. Reuses the existing
-    // fleet loop budget (same `server_list_fleet`, no extra list query).
-    let latest_health_per_server = {
-        let mut out: Vec<(
-            vpnctl_core::ServerId,
-            Option<vpnctl_inventory::NodeHealthRow>,
-        )> = Vec::with_capacity(server_list_fleet.len());
-        for s in &server_list_fleet {
-            let h = state.inv.latest_node_health(&s.id).await.unwrap_or_else(|e| {
-                tracing::warn!(target = "vpnctld::admin", server = %s.id, error = %e, "latest_node_health failed");
-                None
+    // at-a-glance disk%/mem%/up/last-probe columns. Batch query replaces N+1 lookups.
+    let latest_health_per_server: Vec<(
+        vpnctl_core::ServerId,
+        Option<vpnctl_inventory::NodeHealthRow>,
+    )> = {
+        let health_map = state
+            .inv
+            .latest_node_health_fleet()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target = "vpnctld::admin", error = %e, "latest_node_health_fleet failed");
+                std::collections::HashMap::new()
             });
-            out.push((s.id.clone(), h));
-        }
-        out
+        server_list_fleet
+            .iter()
+            .map(|s| (s.id.clone(), health_map.get(&s.id).cloned()))
+            .collect()
     };
 
     // PR-Dash dash#1 — "active conns now" per server, read from the

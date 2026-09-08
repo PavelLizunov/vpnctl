@@ -222,6 +222,12 @@ async fn collect_declared_kernel_statuses(
     ssh: &dyn SshTransport,
 ) {
     for kid in &server.kernels {
+        // Fast path: if the single probe script already captured both active state
+        // and version for this kernel, skip redundant SSH executions.
+        if probe.kernel_active.contains_key(&kid.0) && probe.kernel_versions.contains_key(&kid.0) {
+            continue;
+        }
+
         let Some(kernel) = registry.kernel(kid) else {
             tracing::warn!(
                 target = "vpnctld::node_probe",
