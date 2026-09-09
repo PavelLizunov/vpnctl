@@ -37,3 +37,4 @@ Two kinds of documents live here:
    | `abuse-detection.md` | three-layer visibility model |
    | `migration-compatibility.md` | byte-for-byte client compatibility |
    | `backup-restore.md` | backup bundle, restore drill, invariants |
+    | [commercial-operations.md](commercial-operations.md) | RU operator policy: update risks, rollout/rollback, incident response, commercial go-live gates |
