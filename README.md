@@ -68,6 +68,27 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
 
+### Deployment state and service quality
+
+Automatic deploy requests coalesce per server and reconcile the latest saved
+configuration with bounded follow-up attempts. The server page distinguishes
+queued, applying, failed/pending, unknown, and audit-confirmed application.
+After a daemon restart, pending changes remain visible; unfinished jobs are not
+automatically replayed. Use the web Deploy button to retry.
+
+Quality starts only after the first successful deployment and compares one
+measured target set and vantage at a time. Ordinary redeploys do not reset
+failures. Legacy samples remain stored as history but cannot be pooled into a
+known current population. The failure percentage measures **TCP connection
+attempts**, not packet loss or authenticated VPN connectivity. Configuration
+application is separate from external protocol-assurance evidence; absent
+external evidence remains **not checked**.
+
+See the [deployment/readiness contract](docs/specs/deploy-readiness-quality.md).
+Migration 0056 is additive; binary rollback must use the documented
+[pre-upgrade snapshot restore procedure](docs/specs/backup-restore.md), not assume
+an older binary accepts a database containing a newer migration.
+
 ### AmneziaWG 2.0 / 3.1 integration
 
 The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,
@@ -233,6 +254,18 @@ scripting / disaster recovery.
 | Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (global `--output json` for automation) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+
+### Connect with an already-installed deploy key
+
+On `/admin/servers/<id>/setup`, use **Deploy key already installed**, enter the
+SSH user (for example `debian`), and click **Check key and save**. No password or
+reference key is required. The server must have a trusted host fingerprint pinned
+in setup; non-root accounts must support passwordless `sudo`.
+The daemon checks its existing deploy key and privileges before saving the user;
+a failed check keeps the previous login. This action does not install keys,
+deploy VPN configuration, grant access, or restart services. Key installation
+via password/reference key remains a separate form on the same page. See the
+[setup contract](docs/specs/setup-existing-deploy-key.md).
 
 ### Client detour vs SSH jump_via
 

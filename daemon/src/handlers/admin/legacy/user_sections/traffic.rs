@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::handlers::admin::icons::icon;
 use chrono::{Datelike, DurationRound, TimeDelta, Utc};
 use maud::{Markup, html};
 
@@ -655,7 +656,7 @@ pub(crate) async fn user_traffic_limit_section(
                        "Сохраняет оба поля. 0 GiB = снять лимит.",
                    ))
                    style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer; margin-left: auto;" {
-                (t(lang, K::BtnSave))
+                (icon("save")) (t(lang, K::BtnSave))
             }
         }
     }

@@ -150,6 +150,23 @@ async fn sample_server(
     registry: &Registry,
     server: &Server,
 ) -> Result<Option<ServiceQualityScore>, anyhow::Error> {
+    // Check before resolving targets, TCP, ICMP, or producing alert input.
+    // Failed/skipped/stale deploy audits do not establish provisioning.
+    if inv
+        .service_quality_measurement_for_server(&server.id)
+        .await?
+        .provisioned_at
+        .is_none()
+    {
+        return Ok(None);
+    }
+    if server
+        .enabled_protocols
+        .iter()
+        .any(|pid| registry.protocol(pid).is_none())
+    {
+        anyhow::bail!("cannot resolve every enabled protocol's quality targets");
+    }
     let secrets = inv.list_server_secrets(&server.id).await?;
     let ports = declared_tcp_ports(registry, server, &secrets);
     let ips = inv.resolved_ips_for_server(&server.id).await?;
@@ -212,9 +229,10 @@ async fn sample_server(
         icmp_successes: icmp_available.then_some(icmp_successes),
         icmp_rtt_ms: icmp_available.then_some(icmp_rtts),
     };
-    inv.record_service_quality_sample(&sample).await?;
+    inv.record_service_quality_sample_for_targets(&sample, &service_targets, &control_targets)
+        .await?;
     let score = inv
-        .service_quality_for_server(&server.id, 24, QUALITY_MIN_SAMPLES)
+        .provisioned_service_quality_for_server(&server.id, 24, QUALITY_MIN_SAMPLES)
         .await?;
     Ok(Some(score))
 }
@@ -326,9 +344,13 @@ async fn dispatch_quality_alert(
     match state.observe(&server.id, score.score) {
         QualityTransition::Degraded | QualityTransition::StillDegraded => {
             let summary = format!(
-                "service-path quality {} / 100 from {} (availability {:.1}%, loss {:.1}%, p95 {} ms)",
+                "service-path quality {} / 100 from {} over {}h, checked {} (availability {:.1}%, failed TCP connections {:.1}%, p95 {} ms)",
                 score.score.unwrap_or(0),
                 score.vantage.as_deref().unwrap_or("unknown vantage"),
+                score.window_hours,
+                score
+                    .last_sample_at
+                    .map_or_else(|| "unknown".to_string(), |ts| ts.to_rfc3339()),
                 score.availability_pct.unwrap_or(0.0),
                 score.packet_loss_pct.unwrap_or(100.0),
                 score
@@ -339,6 +361,9 @@ async fn dispatch_quality_alert(
                 "score": score.score,
                 "availability_pct": score.availability_pct,
                 "packet_loss_pct": score.packet_loss_pct,
+                "failed_tcp_connection_pct": score.packet_loss_pct,
+                "window_hours": score.window_hours,
+                "last_sample_at": score.last_sample_at,
                 "p95_rtt_ms": score.p95_rtt_ms,
                 "jitter_ms": score.jitter_ms,
                 "samples": score.sample_count,
@@ -399,6 +424,9 @@ async fn dispatch_quality_alert(
                     "score": score.score,
                     "availability_pct": score.availability_pct,
                     "packet_loss_pct": score.packet_loss_pct,
+                "failed_tcp_connection_pct": score.packet_loss_pct,
+                "window_hours": score.window_hours,
+                "last_sample_at": score.last_sample_at,
                     "p95_rtt_ms": score.p95_rtt_ms,
                     "jitter_ms": score.jitter_ms,
                     "samples": score.sample_count,
@@ -440,6 +468,64 @@ pub async fn purge_old(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unprovisioned_server_never_reaches_target_resolution_or_sampling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = Server {
+            id: ServerId("not-provisioned".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![vpnctl_core::ProtocolId("unknown-protocol".into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        inv.add_server(&server).await.unwrap();
+        for action in [
+            "server.deploy.failed",
+            "server.deploy.skipped",
+            "server.deploy.stale",
+        ] {
+            inv.audit("test", action, Some(&server.id.0), None)
+                .await
+                .unwrap();
+        }
+        // Unknown protocol would error if target construction were reached.
+        assert_eq!(
+            sample_server(&inv, &Registry::new(), &server)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            inv.service_quality_samples_for_server(&server.id, 24)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inv.recent_alerts(10, true).await.unwrap().is_empty());
+        inv.audit("test", "server.deploy", Some(&server.id.0), None)
+            .await
+            .unwrap();
+        assert!(
+            sample_server(&inv, &Registry::new(), &server)
+                .await
+                .is_err()
+        );
+        assert!(
+            inv.service_quality_samples_for_server(&server.id, 24)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn sampling_budget_stays_low_load() {
@@ -567,6 +653,8 @@ mod tests {
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].kind, "server.quality.degraded");
         assert_eq!(open[0].severity, "warning");
+        assert!(open[0].summary.contains("failed TCP connections"));
+        assert!(open[0].summary.contains("from RU-MOW over 24h, checked"));
 
         let alert_id = open[0].id;
         inv.set_alert_telegram_message_id(alert_id, "tg-msg-456")

@@ -24,9 +24,10 @@
         log.hidden = false;
         log.textContent = "";
       }
-      var idleLabel = btn.textContent;
+      var label = btn.querySelector("[data-icon-label]") || btn;
+      var idleLabel = label.textContent;
       btn.disabled = true;
-      btn.textContent = btn.getAttribute("data-busy-label") || "working…";
+      label.textContent = btn.getAttribute("data-busy-label") || "working…";
 
       var done = false; // set once a terminal (ok|error) event arrives
 
@@ -70,7 +71,9 @@
         // operator cancels the reload.
         line("✓ " + (okMsg || "complete."), "var(--acc-good, #2c5f2d)");
         es.close();
-        btn.textContent = "✓ done — reloading…";
+        label.textContent = document.documentElement.lang === "ru" ? "готово — перезагрузка…" : "done — reloading…";
+        var iconUse = btn.querySelector(".ed-icon use");
+        if (iconUse) iconUse.setAttribute("href", "/admin/assets/icons.svg#check");
         // `data-reload-self` reloads the CURRENT page (ignoring the
         // server-provided redirect) — used by the deploy-all button on a
         // user page so its "pending deploy" banner re-computes + clears,
@@ -100,7 +103,7 @@
         }
         es.close();
         btn.disabled = false;
-        btn.textContent = btn.getAttribute("data-retry-label") || idleLabel;
+        label.textContent = btn.getAttribute("data-retry-label") || idleLabel;
       });
     });
   }
@@ -174,7 +177,13 @@
       for (var k = 0; k <= idx; k++) {
         var el = steps.querySelector('[data-step-phase="' + order[k] + '"] .step-mark');
         if (el) {
-          el.textContent = "✓";
+          var mark = el.querySelector(".ed-icon use");
+          if (mark) {
+            mark.setAttribute("href", "/admin/assets/icons.svg#check");
+          } else {
+            el.textContent = "✓";
+          }
+          el.setAttribute("aria-label", document.documentElement.lang === "ru" ? "Готово" : "Complete");
           el.style.color = "var(--green)";
         }
       }

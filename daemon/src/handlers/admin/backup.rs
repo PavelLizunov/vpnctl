@@ -3,6 +3,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -324,12 +325,12 @@ fn render_self_test_report(
             form method="post" action="/admin/backup/self-test" style="display: inline;" {
                 button type="submit"
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (tr(lang, "run again", "запустить снова"))
+                    (icon("rotate-cw")) (tr(lang, "run again", "запустить снова"))
                 }
             }
             a href="/admin/settings/backups#backups-section"
               style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                (tr(lang, "back to Settings", "назад к настройкам"))
+                (icon("arrow-left")) (tr(lang, "back to Settings", "назад к настройкам"))
             }
         }
     }

@@ -1,4 +1,5 @@
 use crate::handlers::admin::helpers::ordered_kernel_ids;
+use crate::handlers::admin::icons::icon;
 use crate::http_util::path_segment_encode;
 use maud::{Markup, html};
 use std::collections::{HashMap, HashSet};
@@ -54,12 +55,12 @@ pub(crate) fn server_detail_protocols_section(
         // on one screen read as a copy-paste bug.
         div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
-                (tr(lang, "⚠ toggle here = inventory only", "⚠ тогл здесь = только инвентарь"))
+                (icon("triangle-alert")) (tr(lang, "toggle here = inventory only", "тогл здесь = только инвентарь"))
             }
             (tr(lang, " — goes live on ", " — вступает в силу по "))
             a href="#deploy-button"
               style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { (t(lang, K::BtnDeploy)) }
+                span.ed-mono { (icon("rocket")) (t(lang, K::BtnDeploy)) }
             }
             (tr(lang, " (details in the note under Kernels).", " (подробности — в заметке под Ядрами)."))
         }
@@ -131,11 +132,11 @@ pub(crate) fn server_detail_protocols_section(
                     @if is_on {
                         @if is_hidden {
                             span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                (tr(lang, "✓ on · hidden", "✓ вкл · скрыт"))
+                                (icon("check")) (tr(lang, "on · hidden", "вкл · скрыт"))
                             }
                         } @else {
                             span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                (tr(lang, "✓ on", "✓ вкл"))
+                                (icon("check")) (tr(lang, "on", "вкл"))
                             }
                         }
                         form method="post"
@@ -148,7 +149,7 @@ pub(crate) fn server_detail_protocols_section(
                             button type="submit"
                                    title=(dis_proto_title)
                                    class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                (t(lang, K::BtnDisable))
+                                (icon("pause")) (t(lang, K::BtnDisable))
                             }
                         }
                         @if !compatible {
@@ -166,7 +167,7 @@ pub(crate) fn server_detail_protocols_section(
                                 button type="submit"
                                        title=(unhide_title)
                                        class="ed-abtn ed-abtn--sm" {
-                                    (t(lang, K::BtnUnhide))
+                                    (icon("eye")) (t(lang, K::BtnUnhide))
                                 }
                             }
                         } @else {
@@ -180,7 +181,7 @@ pub(crate) fn server_detail_protocols_section(
                                 button type="submit"
                                        title=(hide_title)
                                        class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                    (t(lang, K::BtnHide))
+                                    (icon("eye-off")) (t(lang, K::BtnHide))
                                 }
                             }
                         }
@@ -198,7 +199,7 @@ pub(crate) fn server_detail_protocols_section(
                             button type="submit"
                                    title=(en_proto_title)
                                    class="ed-abtn ed-abtn--sm" {
-                                (t(lang, K::BtnEnable))
+                                (icon("power")) (t(lang, K::BtnEnable))
                             }
                         }
                     } @else {

@@ -384,10 +384,9 @@ impl SqliteInventory {
     /// server deployed since then has a fresher `server.deploy` row
     /// anyway.
     ///
-    /// Scope is membership only (grant/revoke). Other user mutations
-    /// (disable, device-id) surface through the per-user banner on
-    /// every granted server — duplicating them here would make the
-    /// server banner near-permanent on busy inventories.
+    /// Also covers audited protocol/kernel and current granted-user changes.
+    /// Operation hints are process-local, so this durable detector must retain
+    /// pending state for credential/enable changes after daemon restart.
     ///
     /// Only the canonical successful `server.deploy` action counts as a
     /// baseline, matching `servers_pending_deploy_for_user`.
@@ -397,8 +396,13 @@ impl SqliteInventory {
              WHERE (action IN ('user.grant', 'user.revoke')
                     AND json_extract(payload, '$.server') = ?1)
                 OR (action IN ('server.protocol.enable', 'server.protocol.disable',
-                               'server.kernel.enable', 'server.kernel.disable')
-                    AND target = ?1)",
+                               'server.kernel.enable', 'server.kernel.disable',
+                               'server.reserved_ports.set', 'server.udp_pair.set')
+                    AND target = ?1)
+                OR (action IN ('user.add', 'user.set_vpn_router_device_id',
+                               'user.disable', 'user.enable', 'user.wireguard.regen',
+                               'user.mint_tuic_password', 'boosty.disable', 'boosty.enable')
+                    AND target IN (SELECT user_id FROM grants WHERE server_id = ?1))",
         )
         .bind(&server_id.0)
         .fetch_one(&self.pool)

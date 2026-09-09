@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
 use std::collections::HashSet;
 use vpnctl_core::{Server, ServerId, User};
@@ -58,7 +59,7 @@ pub(crate) async fn render_overview_tab(
                     lang,
                     "The QR and URL are the same ready-to-import artefact. ninitux.com is the production endpoint; the legacy token endpoint is the LAN fallback.",
                     "QR и URL — один готовый к импорту артефакт. ninitux.com — production endpoint; старый token endpoint — LAN fallback.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             }
             @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
                 (Some(device_id), Some(ninitux), _, _) => {
@@ -91,7 +92,7 @@ pub(crate) async fn render_overview_tab(
                     // muted styling, only useful for LAN debugging.
                     @if let (Some(token), Some(legacy_url)) = (sub_token.as_ref(), sub_url_str.as_ref()) {
                         details style="margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                            summary style="cursor: pointer;" { "legacy /sub/<token> fallback (LAN-only)" }
+                            summary style="cursor: pointer;" { (icon("link")) "legacy /sub/<token> fallback (LAN-only)" }
                             div style="padding: 8px 0 0 16px; line-height: 1.7;" {
                                 div { span style="color: var(--mute);" { "url   " } (legacy_url) }
                                 div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
@@ -105,7 +106,7 @@ pub(crate) async fn render_overview_tab(
                                                "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
                                            ))
                                            class="ed-abtn ed-abtn--secondary" {
-                                        (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
+                                        (icon("rotate-cw")) (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                     }
                                 }
                             }
@@ -145,7 +146,7 @@ pub(crate) async fn render_overview_tab(
                                            "Сгенерировать новый sub_token; предыдущий URL перестанет работать немедленно",
                                        ))
                                        class="ed-abtn ed-abtn--warning" {
-                                    (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
+                                    (icon("rotate-cw")) (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
                                 }
                             }
                         }
@@ -160,7 +161,7 @@ pub(crate) async fn render_overview_tab(
                             button type="submit"
                                    title="Generate this user's FIRST sub-token + the public /sub/<token> URL. Safe — no existing config to invalidate; the user's QR + clients will start working after this."
                                    class="ed-abtn ed-abtn--recovery" {
-                                    "mint sub-token"
+                                    (icon("key-round")) "mint sub-token"
                                 }
                         }
                     }
@@ -176,10 +177,11 @@ pub(crate) async fn render_overview_tab(
                 div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
                 div style="padding: 12px 0;" {
                     p style="font-family: var(--serif); color: var(--acc); font-size: 13px; line-height: 1.6;" {
+                        (icon("triangle-alert"))
                         (crate::i18n::tr(
                             lang,
-                            "⚠ No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
-                            "⚠ Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
+                            "No tuic_password — TUIC, naive and Hysteria2 links can't be minted for this user, so those protocols silently won't appear in their config (VLESS is unaffected).",
+                            "Нет tuic_password — ссылки TUIC, naive и Hysteria2 для этого юзера не собираются, поэтому эти протоколы молча не попадают в его конфиг (VLESS не затронут).",
                         ))
                     }
                     form method="post"
@@ -192,7 +194,7 @@ pub(crate) async fn render_overview_tab(
                                    "Сгенерировать per-user пароль для TUIC / naive / Hysteria2. Безопасно — нечего инвалидировать. Затем передеплой серверы юзера, чтобы узел принял пароль.",
                                ))
                                class="ed-abtn ed-abtn--recovery" {
-                            (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
+                            (icon("key-round")) (crate::i18n::tr(lang, "mint tuic password", "сгенерировать tuic-пароль"))
                         }
                     }
                     p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
@@ -260,7 +262,7 @@ pub(crate) async fn render_overview_tab(
                          style="display: inline;" {
                         button type="submit"
                                class="ed-abtn ed-abtn--primary" {
-                            (crate::i18n::tr(lang, "enable user", "включить пользователя"))
+                            (icon("power")) (crate::i18n::tr(lang, "enable user", "включить пользователя"))
                         }
                     }
                 }
@@ -283,7 +285,7 @@ pub(crate) async fn render_overview_tab(
                                    "Мягкое отключение: /sub/<token> и /api/v1/app/config/<device_id> возвращают пустой config. Всё остальное сохраняется.",
                                ))
                                class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
+                            (icon("pause")) (crate::i18n::tr(lang, "disable user", "отключить пользователя"))
                         }
                     }
                 }

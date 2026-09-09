@@ -287,9 +287,21 @@ async fn server_detail_renders_push_deploy_key_section() {
         html.contains(r#"name="ssh_user""#) && html.contains(r#"value="root""#),
         "form must include the current SSH user"
     );
+    let verify_form = html
+        .split("<form")
+        .find(|form| form.contains("verify_ssh_user"))
+        .unwrap();
+    let verify_form = verify_form.split("</form>").next().unwrap();
+    assert!(verify_form.contains(r#"name="auth_method" value="deploy-key""#));
+    assert!(verify_form.contains(r#"name="ssh_user" value="root""#));
+    assert!(verify_form.contains("Check key and save"));
+    assert!(
+        !verify_form.contains("root_password"),
+        "verification must be password-free"
+    );
     assert!(
         html.contains(r#"name="root_password""#),
-        "form must include the password input"
+        "separate installation form must retain the password input"
     );
     assert!(
         html.contains("root@203.0.113.7:2222"),

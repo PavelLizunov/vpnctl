@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
+use crate::handlers::admin::icons::{icon, status};
 use chrono::{DateTime, Utc};
 use maud::{Markup, html};
 
@@ -126,7 +127,7 @@ pub(crate) async fn user_online_badge(
                     "Presence — live from each node's clash-api snapshot (≤5 min old). NM-11 fallback attributes unresolved connections by source IP; unseen IPs remain uncounted.",
                     "Присутствие — live-снимок clash-api каждой ноды (не старше 5 мин). NM-11 fallback атрибутирует соединения по source IP; незнакомые IP не учитываются.",
                 )) {
-                span.ed-stat__dot {}
+                (icon("circle"))
                 b { (tr(lang, "online", "онлайн")) }
                 " · " (total_conns) " "
                 @if total_conns == 1 { (tr(lang, "conn", "соединение")) }
@@ -139,7 +140,7 @@ pub(crate) async fn user_online_badge(
         } @else {
             span.ed-stat.ed-stat--unknown
                 title=(tr(lang, "Presence — no live connection in the latest clash-api snapshots.", "Присутствие — в последних снимках clash-api нет активных соединений.")) {
-                span.ed-stat__dot {}
+                (icon("circle-dashed"))
                 (tr(lang, "offline", "офлайн"))
                 " · "
                 @match last_seen {
@@ -328,7 +329,7 @@ pub(crate) fn user_subscription_origins_section(
                     lang,
                     "«Client families» collapse app-version churn — four Streisand builds count as one client. The raw user-agent count is the upper bound (each version is a distinct string). Clients the UA parser doesn't recognise (the custom ninitux app) leave device_class NULL, so families under-count. TLS fingerprints (JA4) aren't captured — no fingerprint-forwarding proxy is wired.",
                     "«Клиентские семейства» схлопывают версии приложения — четыре сборки Streisand считаются одним клиентом. Сырое число user-agent — верхняя граница (каждая версия — отдельная строка). Клиенты, которых парсер UA не узнаёт (кастомный ninitux), оставляют device_class NULL, поэтому семейства недосчитывают. TLS-отпечатки (JA4) не снимаются — прокси с их форвардингом не подключён.",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
                 @if has_families {
                     " " span style="color: var(--mute);" {
                         "(" (device_fp.distinct_uas) " " (tr(lang, "distinct UA", "уник. UA")) ")"

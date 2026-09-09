@@ -124,16 +124,47 @@ async fn admin_server_detail_with_probe_renders_kpis() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/servers/s0").await;
-    // Dense six-tile hero strip visible.
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/servers/s0").await;
+    let ru = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
+    // Dense six-tile hero strip visible, with non-color warning semantics.
     assert!(html.contains("ed-status-strip"));
     assert!(html.contains("active"), "sing-box active visible");
-    assert!(html.contains("48%"), "disk pct visible (9876/20480)");
-    assert!(html.contains("76%"), "mem pct visible (1 - 231/960 = 76)");
-    assert!(
-        html.contains(r#"class="ed-status-tile warn""#),
-        "memory above 70% must render the warm heat tile"
-    );
+    for (page, disk_label, memory_label, warning) in [
+        (&html, "disk used", "memory used", "Warning"),
+        (&ru, "диск занят", "память занята", "Предупреждение"),
+    ] {
+        for (label, value, warned) in [(disk_label, "48%", false), (memory_label, "76%", true)] {
+            let (before, value_tail) = page
+                .split_once(&format!(r#"<div class="ed-status-tile__k">{label}</div>"#))
+                .unwrap();
+            let tile_open = before.rsplit_once("<div ").unwrap().1;
+            assert_eq!(
+                tile_open,
+                if warned {
+                    r#"class="ed-status-tile warn">"#
+                } else {
+                    r#"class="ed-status-tile">"#
+                },
+                "{label}: heat style must match warning state"
+            );
+            let value_cell = value_tail.split_once("</div>").unwrap().0;
+            assert!(
+                value_cell.split_once('>').unwrap().1.starts_with(value),
+                "{label}: percentage drifted"
+            );
+            assert_eq!(
+                value_cell.contains(r#"<use href="/admin/assets/icons.svg#triangle-alert""#),
+                warned,
+                "{label}: only warning telemetry gets the alert icon"
+            );
+            assert_eq!(
+                value_cell.contains(&format!(r#"role="img" aria-label="{warning}""#)),
+                warned,
+                "{label}: warning must have a localized accessible name in the value cell"
+            );
+        }
+    }
     // No empty-state once we have data
     assert!(!html.contains("No probes yet"));
 }
@@ -536,23 +567,38 @@ async fn server_detail_tab_labels_copy_contract() {
     seed(&s.inv, 1, 0, &[]).await;
     let app = router(s);
     let en = fetch_html(app.clone(), "/admin/servers/s0").await;
-    for label in [
-        ">Status</a>",
-        ">Activity</a>",
-        ">Protocols</a>",
-        ">Grants · 0</a>",
-        ">Setup</a>",
-    ] {
-        assert!(en.contains(label), "EN tab label drifted: {label:?}");
-    }
     let ru = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
-    for label in [
-        ">Статус</a>",
-        ">Активность</a>",
-        ">Протоколы</a>",
-        ">Гранты · 0</a>",
-        ">Настройка</a>",
+    for (slug, icon, en_label, ru_label) in [
+        ("status", "activity", "Status", "Статус"),
+        ("activity", "activity", "Activity", "Активность"),
+        ("protocols", "network", "Protocols", "Протоколы"),
+        ("grants", "key-round", "Grants · 0", "Гранты · 0"),
+        ("setup", "settings-2", "Setup", "Настройка"),
     ] {
-        assert!(ru.contains(label), "RU tab label drifted: {label:?}");
+        for (html, label) in [(&en, en_label), (&ru, ru_label)] {
+            let tabs = html
+                .split_once(r#"class="ed-tabs""#)
+                .unwrap()
+                .1
+                .split_once("</div>")
+                .unwrap()
+                .0;
+            let link = tabs
+                .split_once(&format!(r#"href="/admin/servers/s0/{slug}""#))
+                .unwrap()
+                .1
+                .split_once("</a>")
+                .unwrap()
+                .0;
+            assert!(
+                link.contains(&format!(r#"<use href="/admin/assets/icons.svg#{icon}""#)),
+                "{slug}: tab icon missing"
+            );
+            assert_eq!(
+                link.split_once("</svg>").unwrap().1.trim(),
+                label,
+                "{slug}: tab label drifted"
+            );
+        }
     }
 }

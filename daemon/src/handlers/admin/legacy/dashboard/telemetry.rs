@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::{format_msk, humanize_bytes};
@@ -273,10 +274,10 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
                             (tr(lang, "User", "Пользователь"))
                         }
                         th style="text-align: right; padding: 4px 10px; font-weight: 600;" {
-                            "↑ " (tr(lang, "Upload", "Отдача"))
+                            (icon("arrow-up")) (tr(lang, "Upload", "Отдача"))
                         }
                         th style="text-align: right; padding: 4px 10px; font-weight: 600;" {
-                            "↓ " (tr(lang, "Download", "Приём"))
+                            (icon("arrow-down")) (tr(lang, "Download", "Приём"))
                         }
                         th style="text-align: right; padding: 4px 0; font-weight: 600;" {
                             "Σ " (tr(lang, "Total", "Всего"))

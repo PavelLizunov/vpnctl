@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::format_msk_iso;
@@ -212,7 +213,7 @@ pub(crate) fn settings_disaster_recovery_section(
             form method="post" action="/admin/backup/self-test" style="display: inline;" {
                 button type="submit"
                        class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                    (tr(lang, "run self-test now", "запустить self-test сейчас"))
+                    (icon("shield-check")) (tr(lang, "run self-test now", "запустить self-test сейчас"))
                 }
             }
             // `?action=` is the real filter param (audit 2026-06-10:
@@ -222,7 +223,7 @@ pub(crate) fn settings_disaster_recovery_section(
             // backup.snapshot + backup.self_test.
             a href="/admin/audit?action=backup."
               style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                (tr(lang, "self-test history", "история self-test"))
+                (icon("history")) (tr(lang, "self-test history", "история self-test"))
             }
         }
 
@@ -266,7 +267,7 @@ pub(crate) fn settings_disaster_recovery_section(
                      style="display: inline;" {
                     button type="submit"
                            style="border: none; background: none; padding: 0; color: var(--ink); font: inherit; text-decoration: underline; cursor: pointer;" {
-                        (tr(lang, "run self-test", "run self-test"))
+                        (icon("shield-check")) (tr(lang, "run self-test", "run self-test"))
                     }
                 }
                 (tr(lang, " on the restored daemon, then for each server in ", " на восстановленном демоне, потом для каждого сервера в "))

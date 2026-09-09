@@ -471,6 +471,42 @@ impl SqliteInventory {
         &self,
         sample: &crate::quality::ServiceQualitySample,
     ) -> Result<()> {
+        self.record_quality_sample(sample, None).await
+    }
+
+    /// Persist a completed poll with its exact service/control TCP population.
+    /// Sorting makes order irrelevant; vantage changes also start a new period.
+    /// Pre-provisioning rows remain raw evidence, never eligible service quality.
+    pub async fn record_service_quality_sample_for_targets(
+        &self,
+        sample: &crate::quality::ServiceQualitySample,
+        service_targets: &[std::net::SocketAddr],
+        control_targets: &[std::net::SocketAddr],
+    ) -> Result<()> {
+        let canonical = |targets: &[std::net::SocketAddr]| {
+            targets
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let service_targets = canonical(service_targets);
+        let control_targets = canonical(control_targets);
+        if service_targets.len() as u64 != u64::from(sample.target_count)
+            || (service_targets.is_empty() && control_targets.is_empty())
+        {
+            return Err(SqliteInventoryError::Invalid(
+                "quality target population missing or inconsistent with sample".into(),
+            ));
+        }
+        let identity = serde_json::to_string(&(&sample.vantage, service_targets, control_targets))?;
+        self.record_quality_sample(sample, Some(&identity)).await
+    }
+
+    async fn record_quality_sample(
+        &self,
+        sample: &crate::quality::ServiceQualitySample,
+        identity: Option<&str>,
+    ) -> Result<()> {
         let tcp_json = serde_json::to_string(&sample.tcp_rtt_ms)?;
         let control_json = serde_json::to_string(&sample.control_rtt_ms)?;
         let icmp_json = sample
@@ -478,13 +514,47 @@ impl SqliteInventory {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        // Serialize population selection with insertion: two concurrent writers
+        // cannot join an obsolete epoch. Only completed polls change periods.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let provisioned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM audit_log
+             WHERE target = ?1 AND action = 'server.deploy'
+               AND id > (SELECT quality_deploy_audit_floor FROM servers WHERE id = ?1)
+               AND julianday(ts) <= julianday(?2))",
+        )
+        .bind(&sample.server_id.0)
+        .bind(sample.ts.to_rfc3339())
+        .fetch_one(&mut *tx)
+        .await?;
+        let epoch = if provisioned && identity.is_some() {
+            let previous: Option<(String, String)> = sqlx::query_as(
+                "SELECT target_identity, measurement_epoch FROM server_quality_samples
+                 WHERE server_id = ?1 AND measurement_epoch IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(&sample.server_id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+            Some(match previous {
+                Some((previous_identity, epoch))
+                    if Some(previous_identity.as_str()) == identity =>
+                {
+                    epoch
+                }
+                _ => vpnctl_crypto::gen_uuid(),
+            })
+        } else {
+            None
+        };
         sqlx::query(
             "INSERT INTO server_quality_samples
              (ts, server_id, vantage, target_count, available_targets,
               attempts, successes, tcp_rtt_ms_json,
               control_attempts, control_successes, control_rtt_ms_json,
-              icmp_attempts, icmp_successes, icmp_rtt_ms_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              icmp_attempts, icmp_successes, icmp_rtt_ms_json,
+              target_identity, measurement_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .bind(
             sample
@@ -504,13 +574,16 @@ impl SqliteInventory {
         .bind(sample.icmp_attempts.map(i64::from))
         .bind(sample.icmp_successes.map(i64::from))
         .bind(icmp_json)
-        .execute(&self.pool)
+        .bind(identity)
+        .bind(epoch)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    /// Raw batches in chronological order for exact percentile/jitter
-    /// aggregation over a rolling 24h or 7d window.
+    /// Raw retained evidence in chronological order, including legacy and
+    /// pre-provisioning rows. Use the provisioned variant for current quality.
     pub async fn service_quality_samples_for_server(
         &self,
         server_id: &ServerId,
@@ -535,6 +608,8 @@ impl SqliteInventory {
             .collect()
     }
 
+    /// Legacy raw-history aggregation. Its rows may have unknown populations;
+    /// use `provisioned_service_quality_for_server` for current service quality.
     pub async fn service_quality_for_server(
         &self,
         server_id: &ServerId,
@@ -551,6 +626,105 @@ impl SqliteInventory {
         ))
     }
 
+    /// Current identified population only. Legacy and pre-provisioning rows
+    /// remain available through `service_quality_samples_for_server`, but must
+    /// not feed readiness, current charts, or quality alerts.
+    pub async fn provisioned_service_quality_samples_for_server(
+        &self,
+        server_id: &ServerId,
+        window_hours: u32,
+    ) -> Result<Vec<crate::quality::ServiceQualitySample>> {
+        let rows = sqlx::query(
+            "SELECT * FROM server_quality_samples
+             WHERE server_id = ?1
+               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+               AND measurement_epoch = (
+                   SELECT measurement_epoch FROM server_quality_samples
+                   WHERE server_id = ?1 AND measurement_epoch IS NOT NULL
+                   ORDER BY id DESC LIMIT 1)
+               AND EXISTS(SELECT 1 FROM audit_log
+                          WHERE target = ?1 AND action = 'server.deploy'
+                            AND id > (SELECT quality_deploy_audit_floor FROM servers WHERE id = ?1))
+             ORDER BY ts ASC, id ASC",
+        )
+        .bind(&server_id.0)
+        .bind(format!("-{window_hours} hours"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(row_to_service_quality_sample)
+            .collect()
+    }
+
+    /// Rolling score from a single provisioned measurement period.
+    pub async fn provisioned_service_quality_for_server(
+        &self,
+        server_id: &ServerId,
+        window_hours: u32,
+        min_samples: u64,
+    ) -> Result<crate::quality::ServiceQualityScore> {
+        let samples = self
+            .provisioned_service_quality_samples_for_server(server_id, window_hours)
+            .await?;
+        Ok(crate::quality::score_samples(
+            &samples,
+            window_hours,
+            min_samples,
+        ))
+    }
+
+    /// Canonical deploy is provisioning evidence, not external reachability.
+    /// Query failures propagate; absence is explicitly unknown, never healthy.
+    pub async fn service_quality_measurement_for_server(
+        &self,
+        server_id: &ServerId,
+    ) -> Result<crate::quality::ServiceQualityMeasurement> {
+        let row = sqlx::query(
+            "WITH latest AS (
+                SELECT target_identity, measurement_epoch FROM server_quality_samples
+                WHERE server_id = ?1 AND measurement_epoch IS NOT NULL
+                ORDER BY id DESC LIMIT 1
+             )
+             SELECT
+               (SELECT ts FROM audit_log WHERE target = ?1 AND action = 'server.deploy'
+                AND id > (SELECT quality_deploy_audit_floor FROM servers WHERE id = ?1)
+                ORDER BY id ASC LIMIT 1) AS provisioned_at,
+               (SELECT MIN(ts) FROM server_quality_samples
+                WHERE server_id = ?1 AND measurement_epoch =
+                    (SELECT measurement_epoch FROM latest)) AS measurement_started_at,
+               (SELECT target_identity FROM latest) AS target_identity",
+        )
+        .bind(&server_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        let parse = |column: &str| -> Result<Option<DateTime<Utc>>> {
+            let value: Option<String> = row.try_get(column)?;
+            value
+                .map(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .map(|ts| ts.with_timezone(&Utc))
+                        .map_err(|e| {
+                            SqliteInventoryError::Invalid(format!("quality {column}: {e}"))
+                        })
+                })
+                .transpose()
+        };
+        let provisioned_at = parse("provisioned_at")?;
+        Ok(crate::quality::ServiceQualityMeasurement {
+            provisioned_at,
+            measurement_started_at: if provisioned_at.is_some() {
+                parse("measurement_started_at")?
+            } else {
+                None
+            },
+            target_identity: if provisioned_at.is_some() {
+                row.try_get("target_identity")?
+            } else {
+                None
+            },
+        })
+    }
+
     pub async fn purge_service_quality_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM server_quality_samples
@@ -560,5 +734,419 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod quality_tests {
+    use super::*;
+    use crate::quality::ServiceQualitySample;
+    use std::net::SocketAddr;
+
+    fn sample(ts: DateTime<Utc>, success: bool) -> ServiceQualitySample {
+        ServiceQualitySample {
+            ts,
+            server_id: ServerId("quality-test".into()),
+            vantage: "test-control".into(),
+            target_count: 1,
+            available_targets: u32::from(success),
+            attempts: 3,
+            successes: if success { 3 } else { 0 },
+            tcp_rtt_ms: if success { vec![10, 10, 10] } else { vec![] },
+            control_attempts: 3,
+            control_successes: 3,
+            control_rtt_ms: vec![1, 1, 1],
+            icmp_attempts: None,
+            icmp_successes: None,
+            icmp_rtt_ms: None,
+        }
+    }
+
+    async fn fixture() -> (tempfile::TempDir, SqliteInventory, DateTime<Utc>) {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        inv.add_server(&vpnctl_core::Server {
+            id: ServerId("quality-test".into()),
+            address: "203.0.113.10".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        // One captured clock and wide boundaries: no timing sleeps or races.
+        let now = Utc::now();
+        (dir, inv, now)
+    }
+
+    async fn deploy(inv: &SqliteInventory, ts: DateTime<Utc>, action: &str) {
+        sqlx::query("INSERT INTO audit_log(ts, actor, action, target) VALUES (?1, 'test', ?2, 'quality-test')")
+            .bind(ts.to_rfc3339()).bind(action).execute(&inv.pool).await.unwrap();
+    }
+
+    fn target(port: u16) -> [SocketAddr; 1] {
+        [SocketAddr::from(([203, 0, 113, 10], port))]
+    }
+
+    #[tokio::test]
+    async fn canonical_deploy_gates_quality_without_destroying_raw_evidence() {
+        let (_dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        for action in [
+            "server.deploy.failed",
+            "server.deploy.stale",
+            "server.deploy.skipped",
+        ] {
+            deploy(&inv, now - chrono::Duration::hours(4), action).await;
+        }
+        inv.record_service_quality_sample_for_targets(
+            &sample(now - chrono::Duration::hours(3), false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            inv.service_quality_measurement_for_server(&sid)
+                .await
+                .unwrap()
+                .provisioned_at,
+            None
+        );
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 1)
+                .await
+                .unwrap()
+                .sample_count,
+            0
+        );
+        deploy(&inv, now - chrono::Duration::hours(2), "server.deploy").await;
+        // Old samples are not retroactively attached after provisioning.
+        inv.record_service_quality_sample_for_targets(
+            &sample(now - chrono::Duration::hours(3), false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        let mut failed = sample(now - chrono::Duration::hours(1), false);
+        inv.record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
+            .await
+            .unwrap();
+        deploy(&inv, now - chrono::Duration::minutes(30), "server.deploy").await;
+        failed.ts = now;
+        inv.record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
+            .await
+            .unwrap();
+        for hours in [24, 168] {
+            let score = inv
+                .provisioned_service_quality_for_server(&sid, hours, 2)
+                .await
+                .unwrap();
+            assert_eq!(score.sample_count, 2);
+            assert_eq!(score.score, Some(0));
+            assert_eq!(score.packet_loss_pct, Some(100.0));
+        }
+        assert_eq!(
+            inv.service_quality_samples_for_server(&sid, 24)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+        let period = inv
+            .service_quality_measurement_for_server(&sid)
+            .await
+            .unwrap();
+        assert_eq!(
+            period.measurement_started_at.unwrap().timestamp_millis(),
+            (now - chrono::Duration::hours(1)).timestamp_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_time_population_changes_and_reopen_preserve_partition_boundaries() {
+        let (dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        deploy(&inv, now - chrono::Duration::days(10), "server.deploy").await;
+        let failed = sample(now, false);
+        let good = sample(now, true);
+        inv.record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
+            .await
+            .unwrap();
+        inv.record_service_quality_sample_for_targets(&good, &target(8443), &target(22))
+            .await
+            .unwrap();
+        inv.record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
+            .await
+            .unwrap();
+        // A→B→A at the same timestamp starts a third epoch, not a reunion of A.
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 1)
+                .await
+                .unwrap()
+                .sample_count,
+            1
+        );
+        let reopened = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        reopened
+            .record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
+            .await
+            .unwrap();
+        let score = reopened
+            .provisioned_service_quality_for_server(&sid, 168, 2)
+            .await
+            .unwrap();
+        assert_eq!(score.sample_count, 2);
+        assert_eq!(score.score, Some(0));
+        assert_eq!(
+            reopened
+                .service_quality_samples_for_server(&sid, 168)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_unidentified_ticks_do_not_reset_current_failure_evidence() {
+        let (_dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        deploy(&inv, now - chrono::Duration::days(10), "server.deploy").await;
+        inv.record_service_quality_sample_for_targets(
+            &sample(now, false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        let before = inv
+            .service_quality_measurement_for_server(&sid)
+            .await
+            .unwrap();
+        assert!(
+            inv.record_service_quality_sample_for_targets(&sample(now, true), &[], &[])
+                .await
+                .is_err()
+        );
+        // A failed insertion for a changed population must roll back its epoch.
+        let mut invalid = sample(now, true);
+        invalid.successes = 100;
+        assert!(
+            inv.record_service_quality_sample_for_targets(&invalid, &target(8443), &target(22))
+                .await
+                .is_err()
+        );
+        inv.record_service_quality_sample(&sample(now, true))
+            .await
+            .unwrap();
+        assert_eq!(
+            inv.service_quality_measurement_for_server(&sid)
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 1)
+                .await
+                .unwrap()
+                .score,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_windows_filter_within_one_population_not_across_populations() {
+        let (_dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        deploy(&inv, now - chrono::Duration::days(10), "server.deploy").await;
+        for (hours, good) in [(8 * 24, true), (25, false), (23, true)] {
+            inv.record_service_quality_sample_for_targets(
+                &sample(now - chrono::Duration::hours(hours), good),
+                &target(443),
+                &target(22),
+            )
+            .await
+            .unwrap();
+        }
+        let day = inv
+            .provisioned_service_quality_for_server(&sid, 24, 1)
+            .await
+            .unwrap();
+        let week = inv
+            .provisioned_service_quality_for_server(&sid, 168, 1)
+            .await
+            .unwrap();
+        assert_eq!(day.sample_count, 1);
+        assert_eq!(day.packet_loss_pct, Some(0.0));
+        assert_eq!(week.sample_count, 2);
+        assert_eq!(week.packet_loss_pct, Some(50.0));
+        assert_eq!(inv.purge_service_quality_older_than(7).await.unwrap(), 1);
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 168, 1)
+                .await
+                .unwrap(),
+            week
+        );
+    }
+
+    #[tokio::test]
+    async fn target_order_is_irrelevant_but_vantage_and_control_population_are_not() {
+        let (_dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        deploy(&inv, now - chrono::Duration::days(1), "server.deploy").await;
+        let mut tick = sample(now, false);
+        tick.target_count = 2;
+        tick.attempts = 6;
+        let a = target(443)[0];
+        let b = target(8443)[0];
+        inv.record_service_quality_sample_for_targets(&tick, &[a, b], &target(22))
+            .await
+            .unwrap();
+        inv.record_service_quality_sample_for_targets(&tick, &[b, a, a], &target(22))
+            .await
+            .unwrap();
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 2)
+                .await
+                .unwrap()
+                .sample_count,
+            2
+        );
+        tick.vantage = "another-control-host".into();
+        inv.record_service_quality_sample_for_targets(&tick, &[a, b], &target(22))
+            .await
+            .unwrap();
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 2)
+                .await
+                .unwrap()
+                .sample_count,
+            1
+        );
+        inv.record_service_quality_sample_for_targets(&tick, &[a, b], &target(2222))
+            .await
+            .unwrap();
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 2)
+                .await
+                .unwrap()
+                .sample_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recreated_id_requires_new_deploy_even_with_equal_audit_timestamps() {
+        let (_dir, inv, now) = fixture().await;
+        let sid = ServerId("quality-test".into());
+        let server = inv.get_server(&sid).await.unwrap().unwrap();
+        deploy(&inv, now, "server.deploy").await;
+        inv.record_service_quality_sample_for_targets(
+            &sample(now, false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        inv.remove_server(&sid).await.unwrap();
+        inv.add_server(&server).await.unwrap();
+        inv.record_service_quality_sample_for_targets(
+            &sample(now, false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            inv.service_quality_measurement_for_server(&sid)
+                .await
+                .unwrap()
+                .provisioned_at,
+            None
+        );
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 1)
+                .await
+                .unwrap()
+                .sample_count,
+            0
+        );
+        // Same timestamp as the previous incarnation; only its new audit ID matters.
+        deploy(&inv, now, "server.deploy").await;
+        inv.record_service_quality_sample_for_targets(
+            &sample(now, false),
+            &target(443),
+            &target(22),
+        )
+        .await
+        .unwrap();
+        assert!(
+            inv.service_quality_measurement_for_server(&sid)
+                .await
+                .unwrap()
+                .provisioned_at
+                .is_some()
+        );
+        assert_eq!(
+            inv.provisioned_service_quality_for_server(&sid, 24, 1)
+                .await
+                .unwrap()
+                .sample_count,
+            1
+        );
+        assert_eq!(
+            inv.service_quality_samples_for_server(&sid, 24)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_adds_nullable_partitions_without_changing_legacy_samples() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE servers(id TEXT PRIMARY KEY, created_at TEXT); CREATE TABLE audit_log(id INTEGER PRIMARY KEY, ts TEXT, target TEXT); INSERT INTO servers VALUES ('quality-test', '2026-09-09T00:00:00Z'); INSERT INTO audit_log VALUES (1, '2026-09-08T00:00:00Z', 'quality-test'), (2, '2026-09-09T00:00:00Z', 'quality-test'), (3, '2026-09-09T01:00:00Z', 'quality-test');").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0048_server_quality_samples.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql("INSERT INTO server_quality_samples(ts, server_id, vantage, target_count, available_targets, attempts, successes, tcp_rtt_ms_json, control_attempts, control_successes, control_rtt_ms_json) VALUES ('2026-09-09T00:00:00Z','quality-test','legacy',1,0,3,0,'[]',3,3,'[1]');").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0056_quality_measurement_population.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let row: (i64, i64, Option<String>, Option<String>) = sqlx::query_as("SELECT attempts, successes, target_identity, measurement_epoch FROM server_quality_samples").fetch_one(&pool).await.unwrap();
+        assert_eq!(row, (3, 0, None, None));
+        let floor: i64 = sqlx::query_scalar(
+            "SELECT quality_deploy_audit_floor FROM servers WHERE id = 'quality-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            floor, 2,
+            "exclude older and ambiguous equal-time audits but preserve strictly later evidence"
+        );
     }
 }

@@ -8,6 +8,7 @@ pub(crate) mod audit;
 pub(crate) mod backup;
 pub(crate) mod boosty;
 pub(crate) mod helpers;
+pub(crate) mod icons;
 pub(crate) mod legacy;
 pub(crate) mod monitoring;
 pub(crate) mod search;

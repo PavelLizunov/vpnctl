@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
 use vpnctl_core::{ProtocolId, Server, ServerId, User};
 
@@ -42,13 +43,13 @@ pub(crate) fn render_delivery_tab(
                 },
             }
             a.ed-grid__open href=(format!("/admin/users/{}", path_segment_encode(&user.id.0))) {
-                (crate::i18n::tr(lang, "QR on Overview →", "QR на Обзоре →"))
+                (crate::i18n::tr(lang, "QR on Overview", "QR на Обзоре")) (icon("arrow-right"))
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
                 "The mobile app polls this URL on a fixed schedule; rotating the sub-token below invalidates the old URL immediately.",
                 "Приложение опрашивает этот URL по расписанию; ротация sub-token ниже мгновенно гасит старый URL.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             @if let Some(t) = sub_token {
                 span.ed-grid__mut style="margin-left: auto; font-family: var(--mono); font-size: 10px;" {
                     (crate::i18n::tr(lang, "legacy /sub/", "легаси /sub/"))
@@ -102,7 +103,7 @@ pub(crate) fn render_delivery_tab(
                         @if *ready {
                             a.ed-abtn.ed-abtn--secondary href=(format!("/admin/users/{}/amneziawg/{version}/conf/{}",
                                 path_segment_encode(&user.id.0), path_segment_encode(&sid.0))) {
-                                (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                                (icon("download")) (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
                             }
                         } @else {
                             span.ed-grid__mut {
@@ -111,7 +112,7 @@ pub(crate) fn render_delivery_tab(
                                     "Файл не готов. Проверь пару ключей ниже и настройки сервера, затем задеплой сервер."))
                             }
                             " " a href=(format!("/admin/servers/{}/setup", path_segment_encode(&sid.0))) {
-                                (crate::i18n::tr(lang, "Server Settings", "Настройки сервера"))
+                                (icon("settings-2")) (crate::i18n::tr(lang, "Server Settings", "Настройки сервера"))
                             }
                         }
                     }
@@ -126,7 +127,7 @@ pub(crate) fn render_delivery_tab(
                             div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
                             div {
                                 span style="color: var(--mute);" { "private " }
-                                span.ed-mono style="color: var(--acc);" { "✓ stored — served via /sub/<token> only" }
+                                span.ed-mono style="color: var(--acc);" { (icon("check")) "stored — served via /sub/<token> only" }
                             }
                         }
                         p style="font-family: var(--serif); font-style: italic; color: var(--soft); font-size: 12px; margin-top: 8px;" {
@@ -138,7 +139,7 @@ pub(crate) fn render_delivery_tab(
                             button type="submit"
                                    title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
                                    class="ed-abtn ed-abtn--warning" {
-                                "rotate WG keypair"
+                                (icon("rotate-cw")) "rotate WG keypair"
                             }
                         }
 
@@ -343,7 +344,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, _pid, link) in &wg_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -355,7 +356,7 @@ pub(crate) fn render_delivery_tab(
                                                                     path_segment_encode(&sid.0)))
                                                       download=(format!("{}-{}.conf", user.id.0, sid.0))
                                                       style="color: var(--mute); text-decoration: underline;" {
-                                                        (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                                                        (icon("download")) (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
                                                     }
                                                 }
                                                 (share_link_card(link, &html! {
@@ -439,7 +440,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, link) in amnezia_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -451,7 +452,7 @@ pub(crate) fn render_delivery_tab(
                                                                     path_segment_encode(&sid.0)))
                                                       download=(format!("{}-{}.conf", user.id.0, sid.0))
                                                       style="color: var(--mute); text-decoration: underline;" {
-                                                        (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
+                                                        (icon("download")) (crate::i18n::tr(lang, "download .conf", "скачать .conf"))
                                                     }
                                                 }
                                                 (share_link_card(link, &html! {
@@ -490,7 +491,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, link) in awg_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -529,7 +530,7 @@ pub(crate) fn render_delivery_tab(
                         }
                         form method="post" action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0))) {
                             button type="submit" class="ed-abtn ed-abtn--warning" {
-                                (crate::i18n::tr(lang, "rotate WG keypair", "сменить WG-пару ключей"))
+                                (icon("rotate-cw")) (crate::i18n::tr(lang, "rotate WG keypair", "сменить WG-пару ключей"))
                             }
                         }
                     }
@@ -553,7 +554,7 @@ pub(crate) fn render_delivery_tab(
                             button type="submit"
                                    title="Mint a fresh Curve25519 keypair for this user (legacy self-heal — only shown when the user has no key on file). No existing WireGuard client config to break."
                                    style="padding: 4px 10px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
-                                "generate WG keypair"
+                                (icon("key-round")) "generate WG keypair"
                             }
                         }
                     }
@@ -576,7 +577,7 @@ pub(crate) fn render_delivery_tab(
                 details style="margin-top: 24px;" {
                     summary style="cursor: pointer;" {
                         span.ed-art-eyebrow {
-                            (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
+                            (icon("link")) (crate::i18n::tr(lang, "Per-protocol share links", "Ссылки на отдельные протоколы"))
                         }
                     }
                     @if share_links.is_empty() {

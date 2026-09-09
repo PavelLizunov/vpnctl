@@ -1,5 +1,6 @@
 //! Admin monitoring page handlers (fleet health surface, v2 3a).
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -152,7 +153,7 @@ pub(crate) async fn monitoring(
                 lang,
                 "node_probe runs on a fixed tick over SSH: service state per kernel, disk/mem/load, log sizes, listening ports. Unknown probes are excluded from uptime denominators.",
                 "node_probe ходит по SSH с фиксированным тиком: состояние сервисов по каждому ядру, диск/память/load, размеры логов, слушающие порты. Неопределённые пробы не входят в знаменатель uptime.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (probeable_total) " " (tr(lang, "nodes", "нод"))
                 " · " (tr(lang, "probe tick ", "тик проб ")) (probe_tick_min) " " (tr(lang, "min", "мин"))
@@ -170,7 +171,7 @@ pub(crate) async fn monitoring(
                                "Runs the full probe sweep immediately instead of waiting for the next tick. SSH into every node — takes a few seconds per node; a down node adds its connect timeout.",
                                "Запускает полный обход проб немедленно, не дожидаясь следующего тика. SSH на каждую ноду — несколько секунд на ноду; упавшая нода добавляет свой connect-timeout.",
                            )) {
-                        (tr(lang, "probe all now", "опросить все сейчас"))
+                        (icon("activity")) (tr(lang, "probe all now", "опросить все сейчас"))
                     }
                 }
             }
@@ -222,7 +223,7 @@ pub(crate) async fn monitoring(
             " — " (tr(lang, "mem: ", "память: ")) (mem_watermark_note)
             " — " (tr(lang, "disk: ", "диск: ")) (disk_watermark_note)
             @if let Some((sid, v)) = drifted.first() {
-                " — " (tr(lang, "drift: ", "дрейф: ")) (sid) " · " (v) " ≠"
+                " — " (tr(lang, "drift: ", "дрейф: ")) (sid) " · " (v) " " (icon("equal-not"))
             }
         }
 
@@ -233,7 +234,7 @@ pub(crate) async fn monitoring(
                     lang,
                     "Rolling-window aggregate over sing_box_active from the node_probe poller. «up» = the service reports active at probe time; unknown probes are excluded from the denominator.",
                     "Скользящие окна sing_box_active от node_probe-поллера. «up» = сервис показал active в момент пробы; неопределённые пробы не входят в знаменатель.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             }
             table.ed-grid style="margin-top: 8px;" {
                 thead {
@@ -264,7 +265,7 @@ pub(crate) async fn monitoring(
                             td {
                                 a.ed-grid__id href=(detail_href) { (s.id.0) }
                                 @if mem_hot {
-                                    " " span.ed-grid__flag title=(tr(lang, "Memory above the 70% heat watermark", "Память выше тепловой отметки 70%")) { "⚠" }
+                                    " " span.ed-grid__flag title=(tr(lang, "Memory above the 70% heat watermark", "Память выше тепловой отметки 70%")) { (status("triangle-alert", lang, "Warning", "Предупреждение")) }
                                 }
                             }
                             td.num { b { (pct_cell(u24)) } }
@@ -279,7 +280,7 @@ pub(crate) async fn monitoring(
                                     None => "—",
                                 }
                             }
-                            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "open →", "открыть →")) } }
+                            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "open", "открыть")) (icon("arrow-right")) } }
                         }
                     }
                 }
@@ -293,7 +294,7 @@ pub(crate) async fn monitoring(
                     lang,
                     "10-min probe snapshots, oldest → newest. A climbing line = slow leak; flat with one spike = transient burst. A warm max = the metric crossed its watermark inside the window.",
                     "10-минутные снимки проб, старое → новое. Растущая линия = медленная утечка; плоская с одним пиком = кратковременный всплеск. Тёплый max = метрика пересекла отметку внутри окна.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             }
             table.ed-grid style="margin-top: 8px;" {
                 thead {
@@ -336,7 +337,7 @@ pub(crate) async fn monitoring(
                                     (sparkline_svg_scaled(series, 200, 30, y_max, false))
                                     div style=(if warm { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
                                         "max " b { (format!("{max:.0}")) } (unit)
-                                        @if warm { " ⚠" }
+                                        @if warm { " " (status("triangle-alert", lang, "Watermark exceeded", "Порог превышен")) }
                                     }
                                 }
                             }
@@ -366,7 +367,7 @@ pub(crate) async fn monitoring(
                         lang,
                         "Watermarks the health monitor evaluates on every probe. Crossing one opens an alert; recovery auto-resolves it (with hysteresis on disk/mem). The 70% warm tint in tables is a visual watermark only — alerts fire at the values below.",
                         "Отметки, которые монитор здоровья проверяет на каждой пробе. Пересечение открывает алерт; восстановление закрывает его само (с гистерезисом на диске/памяти). Тёплые ячейки от 70% в таблицах — только визуальная отметка; алерты срабатывают на значениях ниже.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 table.ed-grid style="margin-top: 8px;" {
                     thead {
@@ -381,7 +382,7 @@ pub(crate) async fn monitoring(
                     tbody {
                         @let state_cell = |open: bool| -> Markup {
                             if open {
-                                html! { span style="color: var(--warm);" { "⚠ " (tr(lang, "open", "открыт")) } }
+                                html! { span style="color: var(--warm);" { (icon("triangle-alert")) " " (tr(lang, "open", "открыт")) } }
                             } else {
                                 html! { span style="color: var(--green);" { "ok" } }
                             }
@@ -435,7 +436,7 @@ pub(crate) async fn monitoring(
                             }
                             td {
                                 @if drifted.is_empty() { (state_cell(false)) }
-                                @else { span style="color: var(--warm);" { "≠ " (tr(lang, "drifted", "дрейф")) } }
+                                @else { span style="color: var(--warm);" { (icon("equal-not")) " " (tr(lang, "drifted", "дрейф")) } }
                             }
                         }
                     }
@@ -464,8 +465,8 @@ pub(crate) async fn monitoring(
                                     }
                                     td.ed-grid__mut.ed-grid__sm { (a.summary) }
                                     td.num {
-                                        @if a.acked_at.is_some() { span style="color: var(--green);" { "✓" } }
-                                        @else { span style="color: var(--warm);" { "⚠" } }
+                                        @if a.acked_at.is_some() { span style="color: var(--green);" { (status("check", lang, "Acknowledged", "Принят")) } }
+                                        @else { span style="color: var(--warm);" { (status("triangle-alert", lang, "Warning", "Предупреждение")) } }
                                     }
                                 }
                             }
@@ -479,7 +480,7 @@ pub(crate) async fn monitoring(
                         lang,
                         "MMDB city+ASN files enrich every new sub_access_log row offline. Refresh from Settings — new DBs load on next vpnctld restart.",
                         "MMDB-файлы city+ASN обогащают каждую новую строку sub_access_log оффлайн. Обновление — в Настройках; новые базы подхватываются при рестарте vpnctld.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 6px;" {
                     "city db "
@@ -494,7 +495,7 @@ pub(crate) async fn monitoring(
                     }
                     " · "
                     a href="/admin/settings/system#geoip" style="color: var(--acc);" {
-                        (tr(lang, "update in Settings →", "обновить в Настройках →"))
+                        (icon("rotate-cw")) (tr(lang, "update in Settings", "обновить в Настройках"))
                     }
                 }
             }

@@ -134,6 +134,7 @@ pub fn network_key(ip: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct SqliteInventory {
     pub(crate) pool: SqlitePool,
+    coordination_identity: std::sync::Arc<String>,
 }
 
 impl SqliteInventory {
@@ -178,7 +179,41 @@ impl SqliteInventory {
         // rest of the code can rely on `User.sub_token` being Some.
         backfill_sub_tokens(&pool).await?;
 
-        Ok(Self { pool })
+        // SQLite exposes the actual main database path (empty for memory),
+        // avoiding assumptions about SQLx's generated in-memory filenames.
+        let filename: String =
+            sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+                .fetch_one(&pool)
+                .await?;
+        let identity = if filename.is_empty() {
+            static NEXT_MEMORY_ID: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            format!(
+                "memory:{}",
+                NEXT_MEMORY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        } else {
+            let canonical = std::fs::canonicalize(&filename).map_err(|error| {
+                SqliteInventoryError::Invalid(format!("cannot resolve inventory identity: {error}"))
+            })?;
+            format!(
+                "file:{}",
+                canonical.to_str().ok_or_else(|| {
+                    SqliteInventoryError::Invalid("non-utf8 canonical inventory path".into())
+                })?
+            )
+        };
+        Ok(Self {
+            pool,
+            coordination_identity: std::sync::Arc::new(identity),
+        })
+    }
+
+    /// Process coordination scope: clones and reopened canonical file paths
+    /// share identity; independent in-memory inventories do not. Not a secret
+    /// token or persistent inventory identifier; never use this as authorization.
+    pub fn coordination_identity(&self) -> &str {
+        &self.coordination_identity
     }
 
     /// Force-close all pooled connections. Useful in tests.

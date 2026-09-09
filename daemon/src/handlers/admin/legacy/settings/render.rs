@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -180,7 +181,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 ))
             }
 
-    (detail_tabs("/admin/settings", tab.slug(), &[("appearance", crate::i18n::tr(lang, "Appearance", "Внешний вид")), ("backups", crate::i18n::tr(lang, "Backups", "Бэкапы")), ("notifications", crate::i18n::tr(lang, "Notifications", "Уведомления")), ("system", crate::i18n::tr(lang, "System", "Система"))]))
+    (detail_tabs("/admin/settings", tab.slug(), &[("appearance", crate::i18n::tr(lang, "Appearance", "Внешний вид")), ("backups", crate::i18n::tr(lang, "Backups", "Бэкапы")), ("notifications", crate::i18n::tr(lang, "Notifications", "Уведомления")), ("system", crate::i18n::tr(lang, "System", "Система"))], lang))
     @if tab == SettingsTab::Appearance {
             // No ed-rule here — the tab row above already draws its own
             // bottom border; stacking both produced a double line
@@ -254,7 +255,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     }
                     button type="submit"
                            style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        (crate::i18n::tr(lang, "save", "сохранить"))
+                        (icon("save")) (crate::i18n::tr(lang, "save", "сохранить"))
                     }
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                         (crate::i18n::tr(
@@ -300,7 +301,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                "Сделать снэпшот сейчас (вдобавок к часовому расписанию). Безопасно нажимать в любой момент.",
                            ))
                            class="ed-abtn ed-abtn--secondary ed-abtn--lg" {
-                        (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас"))
+                        (icon("archive")) (crate::i18n::tr(lang, "snapshot now", "снэпшот сейчас"))
                     }
                 }
                 // Phase 5c — restore self-test button. Operator clicks →
@@ -315,7 +316,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                "Запустить проверку восстановления на последнем снэпшоте — реально ли он восстанавливается в рабочую БД? Безопасно нажимать в любой момент; живую inv.db не трогает.",
                            ))
                            class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                        (crate::i18n::tr(lang, "run restore self-test", "проверить восстановление"))
+                        (icon("shield-check")) (crate::i18n::tr(lang, "run restore self-test", "проверить восстановление"))
                     }
                 }
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
@@ -395,7 +396,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                                    "Скачать этот снэпшот на локальный диск для off-site хранения",
                                                ))
                                                style="color: var(--ink); text-decoration: underline;" {
-                                                (crate::i18n::tr(lang, "download", "скачать"))
+                                                (icon("download")) (crate::i18n::tr(lang, "download", "скачать"))
                                             }
                                         }
                                     }
@@ -639,7 +640,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                "Сохранить все три поля. Пустой токен = оставить как есть (если chat-id ТОЖЕ пуст, тогда очистить). Пустой chat-id = очистить. Egress dropdown всегда переписывается выбранным значением.",
                            ))
                            style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                        (crate::i18n::t(lang, crate::i18n::K::BtnSave))
+                        (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
                     }
                 }
             }
@@ -659,7 +660,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                    "Отправить тестовое сообщение в настроенный чат. Ошибки curl / Telegram-API показываются прямо здесь.",
                                ))
                                style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                            (crate::i18n::tr(lang, "send test message", "отправить тестовое сообщение"))
+                            (icon("send")) (crate::i18n::tr(lang, "send test message", "отправить тестовое сообщение"))
                         }
                         span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
                             (crate::i18n::tr(
@@ -679,7 +680,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                    "Отправить дайджест по флоту сейчас: всё спокойно или список открытых проблем. Также шлётся раз в сутки.",
                                ))
                                style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                            (crate::i18n::tr(lang, "send digest now", "отправить дайджест"))
+                            (icon("send")) (crate::i18n::tr(lang, "send digest now", "отправить дайджест"))
                         }
                         span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
                             (crate::i18n::tr(
@@ -729,7 +730,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                                } else {
                                    "padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;"
                                }) {
-                            (label)
+                            (icon("languages")) (label)
                         }
                     }
                 }
@@ -776,7 +777,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         }
                         td.num.ed-grid__mut.ed-grid__sm {
                             a href="/admin/settings/notifications" style="color: var(--acc);" {
-                                (crate::i18n::tr(lang, "configure →", "настроить →"))
+                                (icon("settings-2")) (crate::i18n::tr(lang, "configure", "настроить"))
                             }
                         }
                     }

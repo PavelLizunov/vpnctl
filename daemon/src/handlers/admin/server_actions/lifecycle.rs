@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -272,7 +273,7 @@ pub(crate) async fn server_delete_confirm(
     let back = format!("/admin/servers/{}", path_segment_encode(&server_id_str));
     let body = html! {
         div.ed-art-eyebrow {
-            a href=(back) style="color: var(--mute); text-decoration: none;" { "← back to server" }
+            a href=(back) style="color: var(--mute); text-decoration: none;" { (icon("arrow-left")) "back to server" }
             "  ·  delete"
         }
         h1.ed-art-h1 { "delete " em { (server_id_str) } " — really?" }
@@ -314,11 +315,11 @@ pub(crate) async fn server_delete_confirm(
             button type="submit"
                    title=(format!("Delete server {server_id_str} from the inventory permanently"))
                    class="ed-abtn ed-abtn--danger-solid" {
-                "delete forever"
+                (icon("trash-2")) "delete forever"
             }
             a href=(back)
               class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                "cancel"
+                (icon("x")) "cancel"
             }
         }
     };

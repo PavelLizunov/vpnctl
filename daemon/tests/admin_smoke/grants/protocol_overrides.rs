@@ -39,11 +39,23 @@ async fn nm10_server_detail_visible_protocol_shows_hide_button() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/hidesrv/protocols").await;
-    // Visible (hidden=0) protocol: shows "✓ on" without the "· hidden"
-    // suffix AND offers a hide button (no unhide).
+    // Visible (hidden=0) protocol: exact "on" label + check icon,
+    // without the hidden suffix, in this protocol's row.
+    let row = html
+        .split("<li ")
+        .find(|row| {
+            row.split("</li>")
+                .next()
+                .unwrap()
+                .contains("/admin/servers/hidesrv/protocols/vless%2Breality/hide")
+        })
+        .unwrap()
+        .split("</li>")
+        .next()
+        .unwrap();
     assert!(
-        html.contains("✓ on") && !html.contains("✓ on · hidden"),
-        "visible enabled protocol should show plain ✓ on marker"
+        row.contains(r#"icons.svg#check"></use></svg>on</span>"#) && !row.contains("on · hidden"),
+        "visible enabled protocol should show the check icon and plain on label"
     );
     assert!(
         html.contains(r#"/admin/servers/hidesrv/protocols/vless%2Breality/hide"#),
@@ -83,9 +95,21 @@ async fn nm10_server_detail_hidden_protocol_shows_unhide_button() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/hidesrv/protocols").await;
+    let row = html
+        .split("<li ")
+        .find(|row| {
+            row.split("</li>")
+                .next()
+                .unwrap()
+                .contains("/admin/servers/hidesrv/protocols/tuic-v5/unhide")
+        })
+        .unwrap()
+        .split("</li>")
+        .next()
+        .unwrap();
     assert!(
-        html.contains("✓ on · hidden"),
-        "hidden protocol must surface the · hidden suffix on its status chip"
+        row.contains(r#"icons.svg#check"></use></svg>on · hidden</span>"#),
+        "hidden protocol must surface the check icon and exact on · hidden label"
     );
     assert!(
         html.contains(r#"/admin/servers/hidesrv/protocols/tuic-v5/unhide"#),
@@ -202,11 +226,21 @@ async fn nm10_user_detail_per_protocol_grid_renders_for_granted_server() {
         html.contains("Per-protocol delivery"),
         "grid heading must appear under the granted server's row"
     );
-    // Default state = delivered + block button per protocol.
-    assert!(
-        html.contains("✓ delivered"),
-        "default delivery state should be ✓ delivered"
-    );
+    // Default state = delivered + block button in each protocol row.
+    for protocol in ["vless%2Breality", "tuic-v5"] {
+        let action = format!("/admin/users/alice/grants/gridsrv/protocols/{protocol}/disable");
+        let row = html
+            .rsplit("<li ")
+            .find(|row| row.split("</li>").next().unwrap().contains(&action))
+            .unwrap()
+            .split("</li>")
+            .next()
+            .unwrap();
+        assert!(
+            row.contains(r#"icons.svg#check"></use></svg>delivered</span>"#),
+            "{protocol}: default delivery state must have the check icon and delivered label"
+        );
+    }
     assert!(
         html.contains(r#"/admin/users/alice/grants/gridsrv/protocols/vless%2Breality/disable"#),
         "vless+reality must have a disable (block) form"
@@ -362,9 +396,21 @@ async fn nm10_user_detail_grid_shows_user_blocked_marker_and_unblock_form() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/users/dave/access").await;
+    let row = html
+        .rsplit("<li ")
+        .find(|row| {
+            row.split("</li>")
+                .next()
+                .unwrap()
+                .contains("/admin/users/dave/grants/dsrv/protocols/vless%2Breality/enable")
+        })
+        .unwrap()
+        .split("</li>")
+        .next()
+        .unwrap();
     assert!(
-        html.contains("✗ user-blocked"),
-        "user-blocked override must surface the ✗ marker"
+        row.contains(r#"icons.svg#x"></use></svg>user-blocked</span>"#),
+        "user-blocked override must surface the x icon and exact user-blocked label"
     );
     assert!(
         html.contains(r#"/admin/users/dave/grants/dsrv/protocols/vless%2Breality/enable"#),
@@ -798,9 +844,25 @@ async fn nm12_server_detail_hidden_weak_protocol_still_shows_chip() {
         html.contains("DPI: weak"),
         "hidden Weak protocol must STILL show the chip — chip is about the wire format, not visibility"
     );
+    let row = html
+        .split("<li ")
+        .find(|row| {
+            row.split("</li>")
+                .next()
+                .unwrap()
+                .contains("/admin/servers/hwsrv/protocols/shadowsocks-2022/unhide")
+        })
+        .unwrap()
+        .split("</li>")
+        .next()
+        .unwrap();
     assert!(
-        html.contains("✓ on · hidden"),
-        "hidden status marker must also appear alongside the chip"
+        row.contains("DPI: weak"),
+        "weak DPI chip must belong to the hidden protocol row"
+    );
+    assert!(
+        row.contains(r#"icons.svg#check"></use></svg>on · hidden</span>"#),
+        "hidden status check icon and exact label must appear alongside the chip"
     );
 }
 

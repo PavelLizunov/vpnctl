@@ -61,14 +61,35 @@ impl ServerTab {
 /// `active` is the current tab's slug (its link gets `.ed-tab--on`).
 /// `cursor`/`text-decoration` are set inline because the dead CSS was
 /// authored for JS toggles (cursor:default, no link reset).
-pub(crate) fn detail_tabs(base: &str, active: &str, tabs: &[(&str, &str)]) -> Markup {
+pub(crate) fn detail_tabs(
+    base: &str,
+    active: &str,
+    tabs: &[(&str, &str)],
+    lang: crate::i18n::Locale,
+) -> Markup {
     html! {
         div.ed-tabs {
             @for (slug, label) in tabs {
                 a class=(if *slug == active { "ed-tab ed-tab--on" } else { "ed-tab" })
                   href=(format!("{base}/{slug}"))
                   style="cursor: pointer; text-decoration: none;" {
-                    (label)
+                    (crate::handlers::admin::icons::icon(match *slug {
+                        "overview" => "layout-dashboard",
+                        "status" | "activity" => "activity",
+                        "protocols" => "network",
+                        "access" | "grants" => "key-round",
+                        "delivery" => "send",
+                        "traffic" => "chart-no-axes-combined",
+                        "appearance" => "palette",
+                        "backups" => "archive",
+                        "notifications" => "bell",
+                        "abuse" | "sharing" => "shield",
+                        _ => "settings-2",
+                    }))
+                    " " (label.strip_suffix(" ⚠").unwrap_or(label))
+                    @if label.ends_with(" ⚠") {
+                        " " (crate::handlers::admin::icons::status("triangle-alert", lang, "Warning", "Предупреждение"))
+                    }
                 }
             }
         }

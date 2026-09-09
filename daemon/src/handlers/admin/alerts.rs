@@ -4,6 +4,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -84,7 +85,7 @@ pub(crate) async fn alerts(
             html! {
                 form method="post" action=(format!("/admin/alerts/{}/ack", a.id))
                      style="margin: 0; padding: 0; display: inline;" {
-                    button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" { "ack" }
+                    button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" { (icon("check")) "ack" }
                 }
             }
         }
@@ -102,7 +103,7 @@ pub(crate) async fn alerts(
                 lang,
                 "Opened by the health monitor and the sub-access analyzer. Node alerts auto-resolve on recovery; sub-access alerts stay until acked. Ack is idempotent and audited; acked rows stay under «show all» for 30 days.",
                 "Открываются монитором здоровья и анализатором обращений. Нодовые алерты закрываются сами при восстановлении; sub-access висят до ack. Ack идемпотентен и аудируется; принятые видны в «показать всё» 30 дней.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (sub_rows.iter().filter(|a| a.acked_at.is_none()).count()) " sub-access · "
                 (node_rows.iter().filter(|a| a.acked_at.is_none()).count()) " "
@@ -111,11 +112,11 @@ pub(crate) async fn alerts(
             div.ed-headrow__actions {
                 @if include_acked {
                     a href="/admin/alerts" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
-                        (crate::i18n::tr(lang, "← only unacked", "← только непринятые"))
+                        (icon("arrow-left")) (crate::i18n::tr(lang, "only unacked", "только непринятые"))
                     }
                 } @else {
                     a href="/admin/alerts?show=all" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
-                        (crate::i18n::tr(lang, "show all →", "показать всё →"))
+                        (crate::i18n::tr(lang, "show all", "показать всё")) (icon("arrow-right"))
                     }
                 }
                 @if unacked_total > 0 {
@@ -135,7 +136,7 @@ pub(crate) async fn alerts(
                                    "Отметить все непринятые как просмотренные одним кликом. Не чинит условия — лишь обнуляет тайл дашборда.",
                                ))
                                class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "ack all", "принять все"))
+                            (icon("check")) (crate::i18n::tr(lang, "ack all", "принять все"))
                             " (" (unacked_total) ")…"
                         }
                     }
@@ -164,7 +165,7 @@ pub(crate) async fn alerts(
                             "нет непринятых алертов. Пусто значит всё хорошо (либо все условия приняты). Посмотреть историю: ",
                         ))
                         a href="/admin/alerts?show=all" {
-                            (crate::i18n::tr(lang, "show all →", "показать всё →"))
+                            (crate::i18n::tr(lang, "show all", "показать всё")) (icon("arrow-right"))
                         }
                     }
                 }
@@ -179,7 +180,7 @@ pub(crate) async fn alerts(
                         lang,
                         "A /sub fetch arrived from a private-range source IP. Usually a client refreshing over its own tunnel; occasionally a proxy hiding the real origin. Ack after review — a repeat fetch reopens.",
                         "Обращение к /sub пришло с приватного диапазона. Обычно клиент обновлялся через собственный туннель; изредка — прокси, скрывающий источник. Ack после просмотра — повторное обращение переоткроет.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 @if sub_unacked > 0 {
                     // v2 5a — ack the whole family in one click.
@@ -190,7 +191,7 @@ pub(crate) async fn alerts(
                              "Принять все непринятые sub_access-алерты? Останутся в «показать всё» 30 дней.",
                          )) {
                         button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "ack all ", "принять все ")) "(" (sub_unacked) ")"
+                            (icon("check")) (crate::i18n::tr(lang, "ack all ", "принять все ")) "(" (sub_unacked) ")"
                         }
                     }
                 }
@@ -218,7 +219,7 @@ pub(crate) async fn alerts(
                     @for a in &sub_rows {
                         @let fields = sub_access_detail_fields(a);
                         tr class=(if a.acked_at.is_some() { "" } else { "on-warn" }) {
-                            td { span style="color: var(--warm);" { "⚠" } }
+                            td { span style="color: var(--warm);" { (status("triangle-alert", lang, "Warning", "Предупреждение")) } }
                             td.ed-grid__mut.ed-grid__sm { (humanize_age(now - a.created_at, lang)) }
                             td { (subject_cell(a)) }
                             td.ed-grid__sm title=(a.summary) {
@@ -255,9 +256,9 @@ pub(crate) async fn alerts(
                         tr class=(if a.acked_at.is_some() { "" } else if a.severity.eq_ignore_ascii_case("critical") { "on-warn" } else { "" }) {
                             td {
                                 @if a.severity.eq_ignore_ascii_case("critical") {
-                                    span style="color: var(--red);" { "✖" }
+                                    span style="color: var(--red);" { (status("circle-x", lang, "Critical alert", "Критический алерт")) }
                                 } @else {
-                                    span style="color: var(--warm);" { "⚠" }
+                                    span style="color: var(--warm);" { (status("triangle-alert", lang, "Warning", "Предупреждение")) }
                                 }
                             }
                             td.ed-grid__mut.ed-grid__sm {

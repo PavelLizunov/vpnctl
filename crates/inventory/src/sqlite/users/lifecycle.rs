@@ -17,8 +17,10 @@ impl SqliteInventory {
     ) -> Result<Vec<UserId>> {
         let rows = sqlx::query(
             "SELECT DISTINCT a.target AS uid FROM audit_log a
-             WHERE a.action = 'user.grant'
-               AND json_extract(a.payload, '$.server') = ?1
+             WHERE ((a.action = 'user.grant' AND json_extract(a.payload, '$.server') = ?1)
+                    OR a.action IN ('user.add', 'user.set_vpn_router_device_id',
+                                    'user.disable', 'user.enable', 'user.wireguard.regen',
+                                    'user.mint_tuic_password', 'boosty.disable', 'boosty.enable'))
                AND a.target IN (SELECT user_id FROM grants WHERE server_id = ?1)
                AND a.id > COALESCE(
                      (SELECT MAX(d.id) FROM audit_log d
