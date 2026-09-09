@@ -173,6 +173,23 @@ pub(super) fn server_detail_push_deploy_key_section(
             ))
         }
 
+        form method="post" action=(format!("/admin/servers/{sid_enc}/push-deploy-key")) {
+            h4 { (tr(lang, "Deploy key already installed", "Deploy-ключ уже установлен")) }
+            p class="ed-muted" {
+                (tr(lang,
+                    "Check the existing deploy key and save the SSH user. No password or reference key needed. Non-root users need passwordless sudo. Does not install keys or deploy the server.",
+                    "Проверить установленный deploy-ключ и сохранить SSH-пользователя. Пароль и reference-key не нужны. Для non-root необходим sudo без пароля. Ключи не устанавливаются, деплой не запускается."))
+            }
+            input type="hidden" name="auth_method" value="deploy-key";
+            label for="verify_ssh_user" { (tr(lang, "SSH user", "SSH-пользователь")) }
+            input id="verify_ssh_user" type="text" name="ssh_user" value=(server.ssh_user)
+                required autocomplete="username" autocapitalize="none" spellcheck="false"
+                pattern="[A-Za-z0-9_-]+" maxlength="32";
+            button type="submit" class="ed-abtn ed-abtn--recovery" {
+                (tr(lang, "Check key and save", "Проверить ключ и сохранить"))
+            }
+        }
+
         @if reference_ok {
             p style="font-family: var(--mono); font-size: 11px; color: var(--ink); margin: 0 0 12px; padding: 8px 12px; background: var(--paper); border-left: 3px solid var(--acc); max-width: 760px;" {
                 (icon("check")) b { (tr(lang, "reference SSH key configured", "reference SSH-ключ настроен")) }
