@@ -5,9 +5,9 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 399 (270 prod / 129 test)
-- **Total Rust LOC:** 143,216 (86,095 prod / 57,121 test)
-- **Database Migrations:** 55
+- **Tracked Rust Files:** 404 (271 prod / 133 test)
+- **Total Rust LOC:** 145,877 (87,254 prod / 58,623 test)
+- **Database Migrations:** 56
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 121
 
 ## Workspace Crates & Targets
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 41 tests | 14,516 (50) | 17,018 (45) | **31,534** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 42 tests | 15,169 (50) | 17,727 (46) | **32,896** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,773 (20) | 4,847 (12) | **9,620** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 48,611 (143) | 30,786 (56) | **79,397** |
-| **Total** | | | | **86,095 (270)** | **57,121 (129)** | **143,216** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 49,117 (144) | 31,579 (59) | **80,696** |
+| **Total** | | | | **87,254 (271)** | **58,623 (133)** | **145,877** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -38,25 +38,25 @@
 | `crates/inventory/src/sqlite/tests.rs` | 1,378 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,368 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,328 | `daemon` | Test |
-| `daemon/tests/admin_smoke/dashboard.rs` | 1,309 | `daemon` | Test |
+| `daemon/tests/admin_smoke/dashboard.rs` | 1,315 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,239 | `daemon` | Test |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,105 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,177 | `daemon` | Prod |
+| `crates/inventory/src/sqlite/health.rs` | 1,152 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
+| `daemon/src/quality_poller.rs` | 1,010 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 958 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
-| `daemon/src/quality_poller.rs` | 922 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
 | `crates/protocols/tests/spec_amneziawg_versions.rs` | 919 | `crates/protocols` | Test |
 | `crates/ssh/src/subprocess.rs` | 901 | `crates/ssh` | Prod |
 | `daemon/src/handlers/auth.rs` | 896 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/servers.rs` | 876 | `daemon` | Test |
 
-## Database Migrations (55)
+## Database Migrations (56)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -115,6 +115,7 @@
 | `0053` | server role | `crates/inventory/migrations/0053_server_role.sql` | 37 |
 | `0054` | client detour | `crates/inventory/migrations/0054_client_detour.sql` | 38 |
 | `0055` | vpn counter baselines | `crates/inventory/migrations/0055_vpn_counter_baselines.sql` | 21 |
+| `0056` | quality measurement population | `crates/inventory/migrations/0056_quality_measurement_population.sql` | 24 |
 
 ## `daemon/src/app/routes.rs` `.route(...)` Registrations (121)
 

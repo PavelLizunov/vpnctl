@@ -37,14 +37,13 @@ pub(crate) fn spawn_user_servers_redeploy(
     } else {
         "user.autodeploy"
     };
+    // Register synchronously: the worker cannot retire between this mutation's
+    // dispatch and a detached observer first getting polled. Node writes are
+    // coalesced; this lightweight observer preserves per-mutation audit rows.
+    let completion =
+        crate::wizard_bootstrap::queue_servers_redeploy(servers, &inv, &registry, &key_path);
     tokio::spawn(async move {
-        let errors = crate::wizard_bootstrap::redeploy_servers_collect_errors(
-            servers,
-            inv.clone(),
-            registry,
-            key_path,
-        )
-        .await;
+        let errors = completion.await;
         if errors.is_empty() {
             tracing::info!(
                 target = "vpnctld::admin",

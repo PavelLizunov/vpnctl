@@ -18,6 +18,7 @@ pub(crate) fn render_access_tab(
     all_servers: &[Server],
     granted_ids: &HashSet<ServerId>,
     pending_deploy_servers: &[ServerId],
+    pending_deploy_known: bool,
     user_grant_dates: &HashMap<ServerId, Option<DateTime<Utc>>>,
     access_protos: &HashMap<ServerId, Vec<String>>,
     hidden_per_server: &HashMap<ServerId, HashMap<ProtocolId, bool>>,
@@ -31,8 +32,8 @@ pub(crate) fn render_access_tab(
             (crate::i18n::tr(lang, "Grants · per-server key state", "Гранты · состояние ключей по серверам")) " "
             span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "Keys are minted at grant time; «on node» means the deployed config actually contains them. Grant + forget-to-deploy is the #1 silent failure — the banner above tracks it.",
-                "Ключи чеканятся при гранте; «на ноде» значит, что задеплоенный конфиг реально их содержит. Грант без деплоя — тихий сбой №1, баннер выше его отслеживает.",
+                "Application is derived from the deployment audit, not a live node inspection or VPN connection test.",
+                "Применение определяется по журналу деплоя, а не по проверке живой ноды или VPN-подключения.",
             )) { (icon("info")) }
         }
         @let keys_str = html! {
@@ -46,7 +47,7 @@ pub(crate) fn render_access_tab(
                     th style="width: 70px;" { (crate::i18n::tr(lang, "server", "сервер")) }
                     th { (crate::i18n::tr(lang, "granted", "выдан")) }
                     th { (crate::i18n::tr(lang, "keys minted", "ключи")) }
-                    th { (crate::i18n::tr(lang, "on node", "на ноде")) }
+                    th { (crate::i18n::tr(lang, "application per audit", "применение по журналу")) }
                     th { (crate::i18n::tr(lang, "protocols available", "доступные протоколы")) }
                     th.num style="width: 110px;" {}
                 }
@@ -78,7 +79,9 @@ pub(crate) fn render_access_tab(
                         }
                         td.ed-grid__sm {
                             @if !is_granted { span.ed-grid__mut { "—" } }
-                            @else if is_pending {
+                            @else if !pending_deploy_known {
+                                span.ed-grid__mut { (crate::i18n::tr(lang, "application unknown", "применение неизвестно")) }
+                            } @else if is_pending {
                                 span.ed-grid__flag { (icon("triangle-alert")) " " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
                             } @else {
                                 span style="color: var(--green);" { (status("check", lang, "Deployed", "Развёрнут")) }

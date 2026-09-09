@@ -283,8 +283,12 @@ async fn dashboard_render(
             let sid = s.id.clone();
             set.spawn(async move {
                 let (q24_res, q7_res) = tokio::join!(
-                    inv.service_quality_for_server(&sid, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES),
-                    inv.service_quality_for_server(
+                    inv.provisioned_service_quality_for_server(
+                        &sid,
+                        24,
+                        vpnctl_inventory::QUALITY_MIN_SAMPLES
+                    ),
+                    inv.provisioned_service_quality_for_server(
                         &sid,
                         24 * 7,
                         vpnctl_inventory::QUALITY_MIN_SAMPLES

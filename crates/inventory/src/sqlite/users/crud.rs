@@ -168,10 +168,24 @@ impl SqliteInventory {
     }
 
     pub async fn remove_user(&self, id: &UserId) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Preserve affected servers before FK cascade removes the only linkage.
+        // These revoke rows and deletion commit together, so failed application
+        // and daemon restart cannot falsely report the old access as removed.
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             SELECT 'inventory', 'user.revoke', ?1,
+                    json_object('server', server_id, 'reason', 'user.remove')
+             FROM grants WHERE user_id = ?1",
+        )
+        .bind(&id.0)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM users WHERE id = ?1")
             .bind(&id.0)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 

@@ -50,11 +50,15 @@ pub(crate) async fn user_detail_render(
     // the server's most recent deploy. Surfaces as an amber banner
     // at the top of user-detail so the operator notices BEFORE the
     // user reports «connected but no traffic».
-    let pending_deploy_servers: Vec<vpnctl_core::ServerId> = state
+    let pending_deploy_result = state
         .inv
-        .servers_pending_deploy_for_user(&uid, &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
-        .await
-        .unwrap_or_else(|e| {
+        .servers_pending_deploy_for_user(
+            &uid,
+            &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        )
+        .await;
+    let pending_deploy_known = pending_deploy_result.is_ok();
+    let pending_deploy_servers = pending_deploy_result.unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid.0, error = %e, "servers_pending_deploy_for_user failed");
 
             Vec::new()
@@ -652,6 +656,7 @@ pub(crate) async fn user_detail_render(
                 &all_servers,
                 &granted_ids,
                 &pending_deploy_servers,
+                pending_deploy_known,
                 &user_grant_dates,
                 &access_protos,
                 &hidden_per_server,

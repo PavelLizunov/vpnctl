@@ -1281,15 +1281,21 @@ async fn kernel_quality_release_renders_dashboard_ranking_and_detail() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 2, 0, &[]).await;
-    for minute in 1..=12 {
+    for (id, healthy) in [("s0", true), ("s1", false)] {
         s.inv
-            .record_service_quality_sample(&release_quality_sample("s0", minute, true))
+            .audit("test", "server.deploy", Some(id), None)
             .await
             .unwrap();
-        s.inv
-            .record_service_quality_sample(&release_quality_sample("s1", minute, false))
-            .await
-            .unwrap();
+        let target = ["192.0.2.1:443".parse().unwrap()];
+        let control = ["192.0.2.1:22".parse().unwrap()];
+        for minute in 1..=12 {
+            let mut sample = release_quality_sample(id, minute, healthy);
+            sample.ts = chrono::Utc::now();
+            s.inv
+                .record_service_quality_sample_for_targets(&sample, &target, &control)
+                .await
+                .unwrap();
+        }
     }
 
     let dashboard = fetch_html(router(s.clone()), "/admin/").await;

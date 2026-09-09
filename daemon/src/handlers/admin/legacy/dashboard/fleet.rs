@@ -578,8 +578,8 @@ pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
             p style="font-family:var(--serif);font-style:italic;font-size:12px;color:var(--mute);margin:6px 0 12px;" {
                 (tr(
                     lang,
-                    "TCP connects to every declared ingress port from vpnctld. Service quality and SSH/control availability are scored separately.",
-                    "TCP-подключения ко всем объявленным ingress-портам с vpnctld. Качество сервиса и доступность SSH/control оцениваются отдельно.",
+                    "TCP connection attempts from vpnctld after provisioning, for one measured target set. Failures are not packet loss or a VPN handshake test. Service and SSH/control are scored separately; older samples remain historical evidence.",
+                    "TCP-подключения с vpnctld после ввода в работу, для одного набора целей. Неудачные подключения — не потери пакетов и не проверка VPN-handshake. Сервис и SSH/control оцениваются отдельно; старые замеры сохраняются в истории.",
                 ))
             }
             table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px;" {
@@ -589,7 +589,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
                     th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 24h", "сервис 24ч")) }
                     th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 7d", "сервис 7д")) }
                     th style="text-align:right;padding:5px 8px;" { (tr(lang, "availability", "доступность")) }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "loss", "потери")) }
+                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "TCP connection failures · 24h", "Неудачные TCP-подключения · 24ч")) }
                     th style="text-align:right;padding:5px 8px;" { "p95" }
                     th style="text-align:right;padding:5px 8px;" { (tr(lang, "control 24h", "control 24ч")) }
                 } }
@@ -597,7 +597,17 @@ pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
                     @for (index, (id, q24, q7)) in rows.iter().enumerate() {
                         tr data-quality-server=(id.0) style="border-bottom:1px dotted var(--rule);" {
                             td style="text-align:right;padding:5px 8px;color:var(--mute);" { (index + 1) }
-                            td style="padding:5px 8px;" { a href=(format!("/admin/servers/{}", path_segment_encode(&id.0))) style="color:var(--ink);" { (id.0) } }
+                            td style="padding:5px 8px;" {
+                                a href=(format!("/admin/servers/{}", path_segment_encode(&id.0))) style="color:var(--ink);" { (id.0) }
+                                div style="font-size:9px;color:var(--mute);" {
+                                    (q24.vantage.as_deref().unwrap_or("unknown")) " · "
+                                    (tr(lang, "checked: ", "проверено: "))
+                                    @match q24.last_sample_at {
+                                        Some(ts) => { time datetime=(ts.to_rfc3339()) { (ts.to_rfc3339()) } }
+                                        None => { (tr(lang, "no measurements", "измерений нет")) }
+                                    }
+                                }
+                            }
                             td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
                             td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q7.score))) { (q7.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
                             td style="text-align:right;padding:5px 8px;" { (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
@@ -620,7 +630,11 @@ pub(in crate::handlers::admin::legacy) fn server_detail_quality_section(
 ) -> Markup {
     use crate::i18n::tr;
     let Some(q24) = q24 else {
-        return html! {};
+        return html! {
+            section id="server-quality" {
+                p { (tr(lang, "Quality unknown: measurements could not be read.", "Качество неизвестно: не удалось прочитать измерения.")) }
+            }
+        };
     };
     html! {
         section id="server-quality" style="margin-top:18px;" {
@@ -629,12 +643,20 @@ pub(in crate::handlers::admin::legacy) fn server_detail_quality_section(
                 (tr(lang, "Small TCP probes to real declared ingress ports from ", "Небольшие TCP-пробы реальных объявленных ingress-портов из "))
                 span.ed-mono { (q24.vantage.as_deref().unwrap_or("unknown")) }
                 " · " (history.len()) " " (tr(lang, "samples in 24h", "замеров за 24ч"))
+                " · " (tr(lang, "last checked: ", "последняя проверка: "))
+                @match history.last() {
+                    Some(sample) => { time datetime=(sample.ts.to_rfc3339()) { (sample.ts.to_rfc3339()) } }
+                    None => { (tr(lang, "no measurements", "измерений нет")) }
+                }
+            }
+            p class="ed-grid__mut" {
+                (tr(lang, "Only the current measured target set after provisioning is included. Historical samples are retained. TCP results do not verify VPN authentication or data transfer.", "Учтён только текущий измеряемый набор целей после ввода в работу. Исторические замеры сохранены. TCP-результаты не подтверждают VPN-аутентификацию или передачу данных."))
             }
             div style="display:flex;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;" {
                 span { "24h " b style=(format!("color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) } }
                 span { "7d " b style=(format!("color:{};", quality_score_color(q7.and_then(|q| q.score)))) { (q7.and_then(|q| q.score).map_or_else(|| "—".into(), |v| format!("{v}/100"))) } }
                 span { (tr(lang, "availability ", "доступность ")) (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
-                span { (tr(lang, "loss ", "потери ")) (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                span { (tr(lang, "TCP connection failures · 24h ", "Неудачные TCP-подключения · 24ч ")) (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
                 span { "p95 " (q24.p95_rtt_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
                 span { "control " (q24.control_score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
             }

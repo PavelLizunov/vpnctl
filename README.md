@@ -63,6 +63,27 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
 
+### Deployment state and service quality
+
+Automatic deploy requests coalesce per server and reconcile the latest saved
+configuration with bounded follow-up attempts. The server page distinguishes
+queued, applying, failed/pending, unknown, and audit-confirmed application.
+After a daemon restart, pending changes remain visible; unfinished jobs are not
+automatically replayed. Use the web Deploy button to retry.
+
+Quality starts only after the first successful deployment and compares one
+measured target set and vantage at a time. Ordinary redeploys do not reset
+failures. Legacy samples remain stored as history but cannot be pooled into a
+known current population. The failure percentage measures **TCP connection
+attempts**, not packet loss or authenticated VPN connectivity. Configuration
+application is separate from external protocol-assurance evidence; absent
+external evidence remains **not checked**.
+
+See the [deployment/readiness contract](docs/specs/deploy-readiness-quality.md).
+Migration 0056 is additive; binary rollback must use the documented
+[pre-upgrade snapshot restore procedure](docs/specs/backup-restore.md), not assume
+an older binary accepts a database containing a newer migration.
+
 ### AmneziaWG 2.0 / 3.1 integration
 
 The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,

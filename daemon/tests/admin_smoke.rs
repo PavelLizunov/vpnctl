@@ -17,6 +17,8 @@ mod grants;
 mod icon_fixtures;
 #[path = "admin_smoke/monitoring.rs"]
 mod monitoring;
+#[path = "admin_smoke/readiness_quality_spec.rs"]
+mod readiness_quality_spec;
 #[path = "admin_smoke/server_detail.rs"]
 mod server_detail;
 #[path = "admin_smoke/servers.rs"]
