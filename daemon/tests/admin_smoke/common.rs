@@ -287,8 +287,10 @@ pub(crate) async fn enqueue_one_and_drain(
     ip: &str,
     device_class: Option<&str>,
 ) {
-    let _ = vpnctld::access_log::try_enqueue(
-        &s.access_log_tx,
+    // Own this writer's sender so channel close is a real drain barrier.
+    let (tx, mut writer) = vpnctld::access_log::spawn_writer(s.inv.clone());
+    assert!(vpnctld::access_log::try_enqueue(
+        &tx,
         vpnctld::access_log::AccessLogRecord {
             user_id: vpnctl_core::UserId(user_id.to_string()),
             ip: ip.to_string(),
@@ -303,10 +305,16 @@ pub(crate) async fn enqueue_one_and_drain(
             tls_ja3: None,
             tls_ja4: None,
         },
-    );
-    // Writer is async; small sleep + drain is the same pattern the
-    // existing `sub_access_writer_persists_one_hit` test uses.
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    ));
+    drop(tx);
+    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut writer).await {
+        Ok(result) => result.expect("access-log writer must finish without panic"),
+        Err(_) => {
+            writer.abort();
+            let _ = writer.await;
+            panic!("access-log writer did not drain within 10 seconds");
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
