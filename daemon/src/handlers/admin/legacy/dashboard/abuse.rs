@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 
 use crate::http_util::path_segment_encode;
@@ -119,7 +120,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_abuse_summary(
                     lang,
                     "Risk score weights the TYPICAL simultaneous ISP-scale network count + impossible travel far above mere network diversity. One-off peaks and adjacent mobile-carrier subnets no longer trip it. Open a row to inspect the exact VPN source IPs.",
                     "Риск-скор сильнее всего учитывает ТИПИЧНОЕ число одновременных сетей масштаба ISP и невозможные перемещения. Разовые пики и соседние подсети мобильного оператора больше не срабатывают. Открой строку, чтобы увидеть реальные source IP VPN.",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
             }
             table.ed-feed style="margin-top: 8px;" {
                 tbody {
@@ -130,7 +131,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_abuse_summary(
                 div style="margin-top: 8px;" {
                     a href="/admin/sharing"
                       style="font-family: var(--mono); font-size: 10px; color: var(--acc); text-decoration: none;" {
-                        "+" (n - 6) " " (tr(lang, "more flagged · open full list →", "ещё под флагом · открыть весь список →"))
+                        (icon("arrow-right")) "+" (n - 6) " " (tr(lang, "more flagged · open full list", "ещё под флагом · открыть весь список"))
                     }
                 }
             }
@@ -197,10 +198,10 @@ pub(in crate::handlers::admin::legacy) fn sharing_review(
                       value=(min_score.map(|v| v.to_string()).unwrap_or_default());
             }
             button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
+                (icon("list-filter")) (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
             }
             a href="/admin/sharing" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnReset))
+                (icon("rotate-cw")) (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
         }
         @if rows.is_empty() {

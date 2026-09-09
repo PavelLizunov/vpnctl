@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
@@ -124,7 +125,7 @@ pub(crate) fn server_detail_uptime_section(
                     lang,
                     "Rolling-window aggregate over sing_box_active from the node_probe poller (10-min default tick). Up means the service reported active at probe time; unknown probes are excluded from the denominator.",
                     "Скользящие окна sing_box_active от node_probe-поллера (тик по умолчанию 10 минут). Up означает, что сервис показал active; неопределённые пробы не входят в знаменатель.",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
             }
             table.ed-grid style="margin-top: 8px;" {
                 tbody {
@@ -260,18 +261,19 @@ pub(super) fn server_detail_hero(
 
     html! {
         div.ed-status-strip title=(format!("{} · {}", tr(lang, "last probe", "последняя проба"), format_msk_iso(h.ts))) {
-            (status_tile_with_warn("sing-box", sb, sb_color, h.sing_box_active == Some(false)))
-            (status_tile_with_warn("fail2ban", f2b, f2b_color, h.fail2ban_active == Some(false)))
-            (status_tile_with_warn(tr(lang, "disk used", "диск занят"), &disk_pct, "var(--ink)", disk_used_pct.is_some_and(|v| v > 70)))
-            (status_tile_with_warn(tr(lang, "memory used", "память занята"), &mem_pct, "var(--ink)", mem_used_pct.is_some_and(|v| v > 70)))
-            (status_tile_with_warn(tr(lang, "1-min load", "load 1мин"), &load, "var(--ink)", false))
-            (status_tile_with_warn(tr(lang, "sing-box log", "лог sing-box"), &log_size, log_alert_color, h.sing_box_log_bytes.is_some_and(|b| b > 500 * 1024 * 1024)))
+            (status_tile_with_warn("sing-box", sb, sb_color, h.sing_box_active == Some(false), lang))
+            (status_tile_with_warn("fail2ban", f2b, f2b_color, h.fail2ban_active == Some(false), lang))
+            (status_tile_with_warn(tr(lang, "disk used", "диск занят"), &disk_pct, "var(--ink)", disk_used_pct.is_some_and(|v| v > 70), lang))
+            (status_tile_with_warn(tr(lang, "memory used", "память занята"), &mem_pct, "var(--ink)", mem_used_pct.is_some_and(|v| v > 70), lang))
+            (status_tile_with_warn(tr(lang, "1-min load", "load 1мин"), &load, "var(--ink)", false, lang))
+            (status_tile_with_warn(tr(lang, "sing-box log", "лог sing-box"), &log_size, log_alert_color, h.sing_box_log_bytes.is_some_and(|b| b > 500 * 1024 * 1024), lang))
         }
     }
 }
 
 pub(crate) fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
-    status_tile_with_warn(label, value, value_color, false)
+    // No localized warning is emitted on this path.
+    status_tile_with_warn(label, value, value_color, false, crate::i18n::Locale::En)
 }
 
 pub(crate) fn status_tile_with_warn(
@@ -279,13 +281,21 @@ pub(crate) fn status_tile_with_warn(
     value: &str,
     value_color: &str,
     warn: bool,
+    lang: crate::i18n::Locale,
 ) -> Markup {
+    let (direction, label) = if let Some(text) = label.strip_prefix("↑ ") {
+        (Some("arrow-up"), text)
+    } else if let Some(text) = label.strip_prefix("↓ ") {
+        (Some("arrow-down"), text)
+    } else {
+        (None, label)
+    };
     html! {
         div class=(if warn { "ed-status-tile warn" } else { "ed-status-tile" }) {
-            div.ed-status-tile__k { (label) }
+            div.ed-status-tile__k { @if let Some(name) = direction { (icon(name)) } (label) }
             div.ed-status-tile__v style=(format!("color: {value_color};")) {
                 (value)
-                @if warn { " ⚠" }
+                @if warn { (status("triangle-alert", lang, "Warning", "Предупреждение")) }
             }
         }
     }
@@ -367,7 +377,7 @@ pub(super) fn server_detail_resource_trend_section(
                     lang,
                     "10-min probe snapshots over the last 24h. Sparkline reads left-to-right (oldest → newest); the «max» label on each chart is the peak in the window. Use these to tell a slow leak (climbing line) from a transient burst (flat line, one spike).",
                     "10-минутные снимки probe за последние 24 часа. Sparkline читается слева-направо (старое → новое); метка «max» в каждом графике — пик за окно. Помогает отличить медленную утечку (растущая линия) от кратковременного всплеска (плоская линия с одним пиком).",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
             }
             div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 8px;" {
                 div {
@@ -387,7 +397,7 @@ pub(super) fn server_detail_resource_trend_section(
                     (sparkline_svg_scaled(&mem_used_pct_series, 280, 60, Some(100.0), false))
                     div style=(if mem_max > 70.0 { "font-family: var(--mono); font-size: 10px; color: var(--warm); font-weight: 600;" } else { "font-family: var(--mono); font-size: 10px; color: var(--mute);" }) {
                         (tr(lang, "max ", "макс ")) (format!("{mem_max:.0}%"))
-                        @if mem_max > 70.0 { " ⚠" }
+                        @if mem_max > 70.0 { (status("triangle-alert", lang, "High memory usage", "Высокая нагрузка памяти")) }
                         " · " (mem_used_pct_series.len()) " " (tr(lang, "samples", "точек"))
                     }
                 }

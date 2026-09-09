@@ -177,18 +177,62 @@ async fn admin_user_detail_renders_grant_revoke_buttons() {
         html.contains(r#"action="/admin/users/u0/grants/s0/revoke""#),
         "revoke form for granted server s0 must render"
     );
+    let granted = html
+        .split_once(r#"id="server-access""#)
+        .unwrap()
+        .1
+        .split_once(r#"href="/admin/servers/s0""#)
+        .unwrap()
+        .1
+        .split_once("</div>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains("✓ access"),
-        "✓ access marker for granted row missing"
+        granted.contains(r#"icons.svg#check"></use></svg>access</span>"#),
+        "granted s0 row must show the check icon and exact access label"
     );
-    assert!(html.contains(">revoke<"), "revoke button label drifted");
+    let revoke = granted
+        .split_once(r#"action="/admin/users/u0/grants/s0/revoke""#)
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
+    assert!(
+        revoke.contains(r#"icons.svg#minus"></use></svg>revoke</button>"#),
+        "s0 revoke button label and icon drifted"
+    );
 
     // Ungranted row: grant form, no ✓ marker for s1's row.
     assert!(
         html.contains(r#"action="/admin/users/u0/grants/s1""#),
         "grant form for ungranted server s1 must render"
     );
-    assert!(html.contains(">grant<"), "grant button label drifted");
+    let ungranted = html
+        .split_once(r#"id="server-access""#)
+        .unwrap()
+        .1
+        .split_once(r#"href="/admin/servers/s1""#)
+        .unwrap()
+        .1
+        .split_once("</div>")
+        .unwrap()
+        .0;
+    assert!(
+        !ungranted.contains("</svg>access</span>"),
+        "ungranted s1 must not show access"
+    );
+    let grant = ungranted
+        .split_once(r#"action="/admin/users/u0/grants/s1""#)
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
+    assert!(
+        grant.contains(r#"icons.svg#plus"></use></svg>grant</button>"#),
+        "s1 grant button label and icon drifted"
+    );
 }
 
 /// Design v2 4b — the user Access tab opens with the per-server
@@ -205,7 +249,32 @@ async fn v2_user_access_renders_grant_state_table_and_identities() {
         html.contains("Grants · per-server key state"),
         "grant-state eyebrow missing"
     );
-    assert!(html.contains("uuid ✓"), "keys-minted cell missing");
+    let table = html
+        .split_once("Grants · per-server key state")
+        .unwrap()
+        .1
+        .split_once("</table>")
+        .unwrap()
+        .0;
+    let row = table
+        .split("<tr ")
+        .find(|row| row.contains("<b>s0</b>"))
+        .unwrap()
+        .split_once("</tr>")
+        .unwrap()
+        .0;
+    let keys = row
+        .split_once(r#"<td class="ed-grid__sm">uuid "#)
+        .unwrap()
+        .1
+        .split_once("</td>")
+        .unwrap()
+        .0;
+    assert!(
+        keys.contains(r#"aria-label="Key minted""#)
+            && keys.contains(r#"<use href="/admin/assets/icons.svg#check""#),
+        "s0 uuid keys-minted cell must show the accessible check icon"
+    );
     // granted s0 row has a revoke form; ungranted s1 row has a grant form.
     assert!(
         html.contains(r#"action="/admin/users/u0/grants/s0/revoke""#),

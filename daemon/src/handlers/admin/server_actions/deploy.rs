@@ -303,7 +303,11 @@ pub(crate) async fn server_deploy(
 /// action for servers added via quick-add / migrate-from-bash
 /// (Phase E wizard does this automatically as step 3 of bootstrap).
 ///
-/// ## Two egress paths, tried in order
+/// `auth_method=deploy-key` verifies an already-installed deploy key and saves
+/// the chosen SSH login only after key/sudo verification. It never pushes keys;
+/// only an actual login change is audited. Omitting the method keeps installation.
+///
+/// ## Installation egress paths, tried in order
 ///
 /// 1. **Reference SSH key** (preferred) — if `VPNCTLD_REFERENCE_SSH_KEY`
 ///    env var points at a readable private key on the daemon host AND
@@ -348,78 +352,105 @@ pub(crate) async fn server_push_deploy_key(
         Err(why) => return bad_request(&format!("invalid ssh_user — {why}")),
     };
 
-    // ─── Credentials gate (BEFORE expensive pubkey read) ─────────
-    // 400 ASAP if operator gave neither a password nor a usable
-    // reference key on the daemon host — otherwise a missing
-    // deploy-pubkey file (read step below) would surface as a
-    // misleading 500 hiding the real «no creds» bug.
-    let reference_key_path = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
-    let try_reference = reference_key_path
-        .as_ref()
-        .is_some_and(|p| !p.is_empty() && std::path::Path::new(p).exists());
-    if password.is_empty() && !try_reference {
-        return bad_request(
-            "ssh password is required (or set VPNCTLD_REFERENCE_SSH_KEY \
-             on the daemon host to use a pre-authorised key instead)",
-        );
-    }
-
-    // Read the daemon's deploy pubkey from disk. Same path the
-    // Settings page surfaces + the wizard's BootstrapPlan uses.
-    let key_path = crate::app::deploy_key_path();
-    let pubkey = match crate::ssh_subprocess::read_public_key(&key_path) {
-        Ok(p) => p,
-        Err(e) => {
-            return error_resp(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(
-                    "deploy pubkey unreadable at {}: {e}. \
-                     Check /admin/settings (Deploy SSH key section) for the root cause.",
-                    crate::ssh_subprocess::public_key_path(&key_path).display()
-                ),
-            );
-        }
+    let verify_only = match form_field(&body, "auth_method").as_deref() {
+        None => false,
+        Some("deploy-key") => true,
+        _ => return bad_request("invalid auth_method"),
     };
-
-    // Idempotent remote append + chmod. Byte-identical to the
-    // wizard's step 3 (push-key).
-    let push_cmd = format!(
-        "set -eu; \
-         mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
-         touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys; \
-         grep -qxF {pk_q} ~/.ssh/authorized_keys || echo {pk_q} >> ~/.ssh/authorized_keys; \
-         echo done",
-        pk_q = vpnctl_core::shell::single_quote(&pubkey),
-    );
-
-    let mut method = "sshpass";
+    let key_path = crate::app::deploy_key_path();
     let jump = match state.inv.resolve_jump_host(&server).await {
         Ok(value) => value,
         Err(error) => return bad_request(&format!("jump host validation failed: {error}")),
     };
-    if jump.is_some() && !try_reference {
+    if verify_only && server.trusted_host_fingerprint.is_none() {
         return bad_request(
-            "password deploy-key push through a jump host is not supported; use the existing reference/deploy key path",
+            "Pin the server's trusted SSH host key on its setup page before checking the deploy key.",
         );
     }
-    let mut push_result: std::result::Result<(), String>;
-    if let Some(ref_key) = reference_key_path.clone().filter(|_| try_reference) {
-        method = "reference-key";
-        let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
-            server.address.clone(),
-            ssh_user.clone(),
-            std::path::PathBuf::from(&ref_key),
-        )
-        .port(server.ssh_port)
-        .trusted_fingerprint(server.trusted_host_fingerprint.clone())
-        .with_jump(jump.clone());
-        push_result = ssh
-            .exec_unprivileged(&push_cmd)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-        if push_result.is_err() && !password.is_empty() && jump.is_none() {
-            method = "sshpass";
+    let (method, push_result) = if verify_only {
+        // The key is already installed: no public-key read or remote mutation.
+        ("deploy-key", Ok(()))
+    } else {
+        // ─── Credentials gate (BEFORE expensive pubkey read) ─────────
+        // 400 ASAP if operator gave neither a password nor a usable
+        // reference key on the daemon host — otherwise a missing
+        // deploy-pubkey file (read step below) would surface as a
+        // misleading 500 hiding the real «no creds» bug.
+        let reference_key_path = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
+        let try_reference = reference_key_path
+            .as_ref()
+            .is_some_and(|p| !p.is_empty() && std::path::Path::new(p).exists());
+        if password.is_empty() && !try_reference {
+            return bad_request(
+                "ssh password is required (or set VPNCTLD_REFERENCE_SSH_KEY \
+             on the daemon host to use a pre-authorised key instead)",
+            );
+        }
+
+        // Read the daemon's deploy pubkey from disk. Same path the
+        // Settings page surfaces + the wizard's BootstrapPlan uses.
+        let pubkey = match crate::ssh_subprocess::read_public_key(&key_path) {
+            Ok(p) => p,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "deploy pubkey unreadable at {}: {e}. \
+                     Check /admin/settings (Deploy SSH key section) for the root cause.",
+                        crate::ssh_subprocess::public_key_path(&key_path).display()
+                    ),
+                );
+            }
+        };
+
+        // Idempotent remote append + chmod. Byte-identical to the
+        // wizard's step 3 (push-key).
+        let push_cmd = format!(
+            "set -eu; \
+         mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
+         touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys; \
+         grep -qxF {pk_q} ~/.ssh/authorized_keys || echo {pk_q} >> ~/.ssh/authorized_keys; \
+         echo done",
+            pk_q = vpnctl_core::shell::single_quote(&pubkey),
+        );
+
+        let mut method = "sshpass";
+        if jump.is_some() && !try_reference {
+            return bad_request(
+                "password deploy-key push through a jump host is not supported; use the existing reference/deploy key path",
+            );
+        }
+        let mut push_result: std::result::Result<(), String>;
+        if let Some(ref_key) = reference_key_path.clone().filter(|_| try_reference) {
+            method = "reference-key";
+            let ssh = crate::ssh_subprocess::SubprocessSshTransport::new(
+                server.address.clone(),
+                ssh_user.clone(),
+                std::path::PathBuf::from(&ref_key),
+            )
+            .port(server.ssh_port)
+            .trusted_fingerprint(server.trusted_host_fingerprint.clone())
+            .with_jump(jump.clone());
+            push_result = ssh
+                .exec_unprivileged(&push_cmd)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            if push_result.is_err() && !password.is_empty() && jump.is_none() {
+                method = "sshpass";
+                let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
+                push_result = crate::wizard_bootstrap::ssh_password_run(
+                    &server.address,
+                    server.ssh_port,
+                    &ssh_user,
+                    &password,
+                    &known_hosts,
+                    &push_cmd,
+                )
+                .await
+                .map(|_| ());
+            }
+        } else {
             let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
             push_result = crate::wizard_bootstrap::ssh_password_run(
                 &server.address,
@@ -432,19 +463,9 @@ pub(crate) async fn server_push_deploy_key(
             .await
             .map(|_| ());
         }
-    } else {
-        let known_hosts = std::path::PathBuf::from("/var/lib/vpnctl/.ssh/known_hosts");
-        push_result = crate::wizard_bootstrap::ssh_password_run(
-            &server.address,
-            server.ssh_port,
-            &ssh_user,
-            &password,
-            &known_hosts,
-            &push_cmd,
-        )
-        .await
-        .map(|_| ());
-    }
+
+        (method, push_result)
+    };
 
     // Do not persist a changed login until the daemon proves that its own
     // deploy key works for that account. For non-root users `exec("true")`
@@ -477,6 +498,39 @@ pub(crate) async fn server_push_deploy_key(
         {
             return internal_error(anyhow::Error::new(e));
         }
+    }
+
+    if verify_only {
+        return match result {
+            Ok(()) => Redirect::to(&format!(
+                "/admin/servers/{}/setup#push-deploy-key",
+                path_segment_encode(&server_id_str)
+            ))
+            .into_response(),
+            Err(error) => {
+                // Never echo remote stderr: even a failed SSH command can print secrets.
+                let reason = if error.contains("sudo:") {
+                    "Passwordless sudo verification failed."
+                } else if error.contains("Permission denied") {
+                    "SSH key authentication was rejected for this username."
+                } else if error.contains("fingerprint")
+                    || error.contains("pinned host key")
+                    || error.contains("Host key verification failed")
+                {
+                    "Trusted SSH host-key verification failed."
+                } else if error.contains("timed out") {
+                    "SSH verification timed out."
+                } else {
+                    "Deploy-key verification failed; check the SSH username, installed key and server reachability."
+                };
+                error_resp(
+                    StatusCode::BAD_GATEWAY,
+                    &format!(
+                        "{reason} The SSH username was not changed. Non-root accounts need passwordless sudo; if access needs repair, use the hoster's console."
+                    ),
+                )
+            }
+        };
     }
 
     // Audit either way. Payload: server id, success, optional error.
@@ -542,6 +596,9 @@ pub(crate) async fn server_push_deploy_key(
         ),
     }
 }
+
+#[cfg(test)]
+mod existing_key_spec_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

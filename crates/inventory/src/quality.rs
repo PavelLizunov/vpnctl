@@ -26,6 +26,16 @@ pub struct ServiceQualitySample {
     pub icmp_rtt_ms: Option<Vec<u32>>,
 }
 
+/// Readiness and the start of the latest contiguous, identified TCP population.
+/// Missing provisioning is not a failure; legacy unpartitioned history is not
+/// evidence for the current population. The identity is opaque to UI callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceQualityMeasurement {
+    pub provisioned_at: Option<DateTime<Utc>>,
+    pub measurement_started_at: Option<DateTime<Utc>>,
+    pub target_identity: Option<String>,
+}
+
 /// Rolling-window service-path score. `score=None` until `min_samples`
 /// batches exist; the component metrics may still be shown as provisional.
 #[derive(Debug, Clone, PartialEq)]

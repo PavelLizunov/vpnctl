@@ -5,6 +5,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -213,7 +214,7 @@ pub(crate) async fn audit(
                       "Snapshots are hidden. Click to show every row again.",
                       "Снапшоты скрыты. Кликни, чтобы снова показать все строки.",
                   )) {
-                    (crate::i18n::tr(lang, "show snapshots →", "показать снапшоты →"))
+                    (icon("eye")) (crate::i18n::tr(lang, "show snapshots", "показать снапшоты"))
                 }
             } @else {
                 a href=(audit_url("/admin/audit", actor, action, target, true, None))
@@ -223,7 +224,7 @@ pub(crate) async fn audit(
                       "Hide the hourly backup.snapshot housekeeping rows so real changes surface.",
                       "Скрыть почасовые housekeeping-строки backup.snapshot, чтобы всплыли реальные изменения.",
                   )) {
-                    (crate::i18n::tr(lang, "hide snapshots →", "скрыть снапшоты →"))
+                    (icon("eye-off")) (crate::i18n::tr(lang, "hide snapshots", "скрыть снапшоты"))
                 }
             }
         }
@@ -277,7 +278,7 @@ pub(crate) async fn audit(
                        "Применить фильтры по автору + префиксу действия. URL сохраняет их — страницу можно бookmark-нуть.",
                    ))
                    style="padding: 3px 10px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
+                (icon("list-filter")) (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
             }
             a href="/admin/audit"
               title=(crate::i18n::tr(
@@ -286,7 +287,7 @@ pub(crate) async fn audit(
                   "Очистить все фильтры и вернуться к нефильтрованной ленте.",
               ))
               style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnReset))
+                (icon("x")) (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
             a href=(audit_url("/admin/audit.csv", actor, action, target, hiding, None))
               title=(crate::i18n::tr(
@@ -295,7 +296,7 @@ pub(crate) async fn audit(
                   "Скачать текущую выборку как CSV (до 10000 строк). Учитывает оба фильтра.",
               ))
               style="margin-left: auto; padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnExportCsv))
+                (icon("download")) (crate::i18n::t(lang, crate::i18n::K::BtnExportCsv))
             }
         }
 
@@ -323,11 +324,11 @@ pub(crate) async fn audit(
             @if has_prev {
                 a href=(audit_url("/admin/audit", actor, action, target, hiding, Some(page - 1)))
                   style="color: var(--ink); text-decoration: none;" {
-                    (crate::i18n::tr(lang, "← prev", "← назад"))
+                    (icon("arrow-left")) (crate::i18n::tr(lang, "prev", "назад"))
                 }
             } @else {
                 span style="color: var(--mute);" {
-                    (crate::i18n::tr(lang, "← prev", "← назад"))
+                    (icon("arrow-left")) (crate::i18n::tr(lang, "prev", "назад"))
                 }
             }
             @let page_title = match lang {
@@ -346,11 +347,11 @@ pub(crate) async fn audit(
             @if has_next {
                 a href=(audit_url("/admin/audit", actor, action, target, hiding, Some(page + 1)))
                   style="color: var(--ink); text-decoration: none;" {
-                    (crate::i18n::tr(lang, "next →", "вперёд →"))
+                    (crate::i18n::tr(lang, "next", "вперёд")) (icon("arrow-right"))
                 }
             } @else {
                 span style="color: var(--mute);" {
-                    (crate::i18n::tr(lang, "next →", "вперёд →"))
+                    (crate::i18n::tr(lang, "next", "вперёд")) (icon("arrow-right"))
                 }
             }
         }
@@ -485,7 +486,7 @@ fn audit_timeline_grouped(
                             // <details> expander (CSP-safe, no JS).
                             " "
                             details style="display: inline-block; vertical-align: baseline;" {
-                                summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { "{…}" }
+                                summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { (icon("code")) "{…}" }
                                 pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10px; white-space: pre-wrap; max-width: 680px;" {
                                     (serde_json::to_string_pretty(&redact_audit_payload(p)).unwrap_or_default())
                                 }

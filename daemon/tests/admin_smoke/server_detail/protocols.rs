@@ -157,7 +157,22 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
         html.contains(r#"/admin/servers/nowg/protocols/vless%2Breality/disable"#),
         "enabled protocol must have a disable form (vless+reality URL-encoded)"
     );
-    assert!(html.contains("✓ on"), "enabled marker missing");
+    let enabled_row = html
+        .split("<li ")
+        .find(|row| {
+            row.split("</li>")
+                .next()
+                .unwrap()
+                .contains("/admin/servers/nowg/protocols/vless%2Breality/disable")
+        })
+        .unwrap()
+        .split("</li>")
+        .next()
+        .unwrap();
+    assert!(
+        enabled_row.contains(r#"icons.svg#check"></use></svg>on</span>"#),
+        "enabled protocol must have the check icon and exact on label"
+    );
     // A compatible-but-not-yet-enabled one has an enable button.
     assert!(
         html.contains(r#"/admin/servers/nowg/protocols/hysteria2/enable"#),

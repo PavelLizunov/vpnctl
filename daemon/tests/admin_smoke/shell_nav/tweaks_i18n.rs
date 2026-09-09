@@ -403,15 +403,57 @@ async fn i18n_default_locale_is_english_with_english_nav() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/").await;
+    let nav = html
+        .split_once(r#"class="ed-tb__nav""#)
+        .unwrap()
+        .1
+        .split_once("</nav>")
+        .unwrap()
+        .0;
+    let dashboard = nav
+        .split_once(r#"href="/admin/""#)
+        .unwrap()
+        .1
+        .split_once("</a>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains(">Dashboard<"),
+        dashboard.contains(r#"<use href="/admin/assets/icons.svg#layout-dashboard""#),
+        "Dashboard nav must carry its own icon"
+    );
+    assert_eq!(
+        dashboard.split_once("</svg>").unwrap().1.trim(),
+        "Dashboard",
         "nav must render Dashboard label in English by default"
     );
     // The lang switch button shows the OTHER locale (`RU` when active
     // is `EN`); the active locale renders as bold text next to it.
+    let toggle = html
+        .split_once(r#"action="/admin/tweak/lang""#)
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains(">RU<"),
-        "topbar toggle button must offer the alternate locale (RU when EN active)"
+        toggle.contains(r#"name="value" value="ru""#),
+        "language toggle must submit the alternate locale"
+    );
+    let button = toggle
+        .split_once("<button ")
+        .unwrap()
+        .1
+        .split_once("</button>")
+        .unwrap()
+        .0;
+    assert!(
+        button.contains(r#"<use href="/admin/assets/icons.svg#languages""#),
+        "locale button must carry the languages icon"
+    );
+    assert_eq!(
+        button.split_once("</svg>").unwrap().1.trim(),
+        "RU",
+        "topbar toggle must offer RU when EN is active"
     );
 }
 
@@ -438,14 +480,34 @@ async fn i18n_ru_cookie_renders_russian_nav_and_subtitle() {
             .to_vec(),
     )
     .unwrap();
-    assert!(
-        html.contains(">Дашборд<"),
-        "ru cookie must render the nav Dashboard label as Дашборд"
-    );
-    assert!(
-        html.contains(">Серверы<"),
-        "ru cookie must render Servers as Серверы"
-    );
+    let nav = html
+        .split_once(r#"class="ed-tb__nav""#)
+        .unwrap()
+        .1
+        .split_once("</nav>")
+        .unwrap()
+        .0;
+    for (href, icon, label) in [
+        ("/admin/", "layout-dashboard", "Дашборд"),
+        ("/admin/servers", "server", "Серверы"),
+    ] {
+        let link = nav
+            .split_once(&format!(r#"href="{href}""#))
+            .unwrap()
+            .1
+            .split_once("</a>")
+            .unwrap()
+            .0;
+        assert!(
+            link.contains(&format!(r#"<use href="/admin/assets/icons.svg#{icon}""#)),
+            "{href}: Russian nav icon missing"
+        );
+        assert_eq!(
+            link.split_once("</svg>").unwrap().1.trim(),
+            label,
+            "{href}: Russian nav label drifted"
+        );
+    }
     assert!(
         html.contains(r#"<html lang="ru""#) || html.contains(r#"<html lang=\"ru\""#),
         "ru cookie must set `<html lang=\"ru\">` for hyphenation + screen readers"

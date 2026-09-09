@@ -3,6 +3,7 @@ use crate::AppState;
 use crate::handlers::admin::helpers::{
     bad_request, internal_error, render_page, theme_accent_lang,
 };
+use crate::handlers::admin::icons::{icon, status};
 use crate::http_util::form_field;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, header};
@@ -129,11 +130,11 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                            "Проверить ввод и продолжить к bootstrap-логу",
                        ))
                        style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (tr(lang, "continue →", "продолжить →"))
+                    (icon("arrow-right")) (tr(lang, "continue", "продолжить"))
                 }
                 a href="/admin/servers"
                   style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none; padding: 6px 8px;" {
-                    (tr(lang, "cancel", "отмена"))
+                    (icon("x")) (tr(lang, "cancel", "отмена"))
                 }
             }
         }
@@ -272,7 +273,7 @@ pub(crate) async fn wizard_step2_stub(
                 lang,
                 "SSHes in with the supplied user and password once, installs the deploy key, discards the password, installs kernels, mints secrets, deploys, probes. Non-root users are elevated with passwordless sudo. Don't close this tab — the live log attaches once; the bootstrap finishes server-side either way and the result lands on the server's detail page + audit timeline.",
                 "Заходит по SSH под указанным пользователем и паролем один раз, ставит deploy-ключ, забывает пароль, ставит ядра, чеканит секреты, деплоит, пробит. Пользователь не root повышается через беспарольный sudo. Не закрывай вкладку — живой лог подключается один раз; bootstrap всё равно доработает серверно, результат будет на странице сервера и в audit-таймлайне.",
-            )) { "ⓘ" }
+            )) { (status("info", lang, "Information", "Информация")) }
             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (session.address) ":" (session.ssh_port) " · " (session.ssh_user) " " (crate::i18n::tr(lang, "· password used once", "· пароль одноразово"))
             }
@@ -297,7 +298,7 @@ pub(crate) async fn wizard_step2_stub(
                         @let step_row = |phase: &str, label: &str| -> Markup {
                             html! {
                                 tr data-step-phase=(phase) {
-                                    td.step-mark style="width: 20px; color: var(--mute);" { "•" }
+                                    td.step-mark style="width: 20px; color: var(--mute);" role="img" aria-label=(crate::i18n::tr(lang, "Pending", "Ожидание")) { (icon("circle-dashed")) }
                                     td { (label) }
                                 }
                             }
@@ -312,7 +313,7 @@ pub(crate) async fn wizard_step2_stub(
                 div style="margin-top: 12px;" {
                     a href="/admin/servers/new"
                       style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-decoration: none;" {
-                        "← " (crate::i18n::tr(lang, "start over", "начать заново"))
+                        (icon("arrow-left")) (crate::i18n::tr(lang, "start over", "начать заново"))
                     }
                 }
             }

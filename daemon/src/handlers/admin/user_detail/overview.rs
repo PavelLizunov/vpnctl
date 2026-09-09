@@ -1,5 +1,6 @@
 //! Overview summary card for user-detail right column.
 
+use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
@@ -36,7 +37,7 @@ pub(crate) fn user_overview_summary(
     html! {
         div.ed-fact-grid aria-label=(tr(lang, "Lifecycle and sharing summary", "Жизненный цикл и sharing summary")) {
             div.ed-fact title=(tr(lang, "Heuristic over the 30-day subscription-access window; cross-check Activity before acting.", "Эвристика по 30-дневному окну обращений к подписке; перед действием сверься с Activity.")) {
-                div.ed-fact__k { (tr(lang, "Sharing verdict", "Вердикт по расшариванию")) " ⓘ" }
+                div.ed-fact__k { (tr(lang, "Sharing verdict", "Вердикт по расшариванию")) " " (icon("info")) }
                 div.ed-fact__v style=(if likely_shared { "color: var(--warm); font-weight: 600;" } else { "color: var(--green);" }) {
                     @if likely_shared { (tr(lang, "likely shared", "вероятно расшарен")) }
                     @else { (tr(lang, "single-user", "один пользователь")) }
@@ -73,7 +74,7 @@ pub(crate) fn user_overview_summary(
         section style="margin-top: 18px;" {
             div.ed-art-eyebrow {
                 (tr(lang, "Traffic by server · 24h", "Трафик по серверам · 24ч")) " "
-                span.ed-tip title=(tr(lang, "Per-server upload and download attributed to this user from clash-api ticks.", "Upload и download по серверам, атрибутированные этому пользователю из clash-api тиков.")) { "ⓘ" }
+                span.ed-tip title=(tr(lang, "Per-server upload and download attributed to this user from clash-api ticks.", "Upload и download по серверам, атрибутированные этому пользователю из clash-api тиков.")) { (icon("info")) }
             }
             @if traffic.is_empty() {
                 p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
@@ -104,11 +105,11 @@ pub(crate) fn user_overview_summary(
             div.ed-grants-summary {
                 @for server in all_servers {
                     @if granted_ids.contains(&server.id) {
-                        a.ed-grant-chip.on href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) { "✓ " (server.id.0) }
+                        a.ed-grant-chip.on href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) { (status("check", lang, "Granted", "Выдан")) " " (server.id.0) }
                     } @else {
                         form method="post" action=(format!("/admin/users/{}/grants/{}", path_segment_encode(&user.id.0), path_segment_encode(&server.id.0))) {
                             button.ed-grant-chip.off type="submit" title=(tr(lang, "Grant this server", "Выдать этот сервер")) {
-                                (server.id.0) " — " (tr(lang, "not granted · grant →", "не выдан · выдать →"))
+                                (icon("plus")) (server.id.0) " — " (tr(lang, "not granted · grant", "не выдан · выдать"))
                             }
                         }
                     }

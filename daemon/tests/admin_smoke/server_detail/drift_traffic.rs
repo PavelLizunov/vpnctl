@@ -60,11 +60,34 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
     let html = fetch_html(router(s), "/admin/servers/driftnode/protocols").await;
     // v2 3c grid: the silent tuic port renders the warm flag + the
     // declared-but-NOT-listening line names it.
+    let row = html
+        .split("<tr ")
+        .find(|row| {
+            row.split("</tr>")
+                .next()
+                .unwrap()
+                .contains("<b>tuic-v5</b>")
+        })
+        .unwrap()
+        .split_once("</tr>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains("✗ silent") || html.contains("✗ молчит"),
-        "silent declared port must carry the ✗ flag; got: {}",
-        &html[..html.len().min(400)]
+        row.contains("8443/udp"),
+        "silent row must identify the declared tuic port"
     );
+    let flag = row
+        .split_once(r#"class="ed-grid__flag">"#)
+        .unwrap()
+        .1
+        .split_once("</span>")
+        .unwrap()
+        .0;
+    assert!(
+        flag.contains(r#"<use href="/admin/assets/icons.svg#x""#),
+        "silent declared port must carry its own x icon"
+    );
+    assert_eq!(flag.split_once("</svg>").unwrap().1.trim(), "silent");
     assert!(
         html.contains("declared but NOT listening"),
         "missing-port warning line must render"
@@ -588,9 +611,21 @@ async fn server_detail_drift_detail_default_shows_check_link_no_ssh() {
         html.contains("Drift detail · on-node UUIDs"),
         "drift-detail eyebrow missing on default load"
     );
+    let link = html
+        .split_once(r#"href="/admin/servers/s0/protocols?drift=live#drift-detail""#)
+        .unwrap()
+        .1
+        .split_once("</a>")
+        .unwrap()
+        .0;
     assert!(
-        html.contains("check live drift →"),
-        "default load must offer the [check live drift] link"
+        link.contains(r#"<use href="/admin/assets/icons.svg#scan""#),
+        "live drift control must carry the scan icon"
+    );
+    assert_eq!(
+        link.split_once("</svg>").unwrap().1.trim(),
+        "check live drift",
+        "default load must offer the exact live drift label"
     );
     assert!(
         html.contains("?drift=live#drift-detail"),
@@ -733,10 +768,27 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
         html.contains("Server traffic · "),
         "server-traffic eyebrow missing"
     );
-    assert!(
-        html.contains("↑ upload") && html.contains("↓ download"),
-        "server-traffic ↑↓ totals tiles missing"
-    );
+    let traffic = html
+        .split_once(r#"id="server-traffic""#)
+        .unwrap()
+        .1
+        .split_once("</section>")
+        .unwrap()
+        .0;
+    for (direction, label) in [("arrow-up", "upload"), ("arrow-down", "download")] {
+        assert!(
+            traffic
+                .split(r#"class="ed-status-tile__k">"#)
+                .skip(1)
+                .any(|tile| {
+                    let heading = tile.split_once("</div>").unwrap().0;
+                    heading.contains(&format!(
+                        r#"<use href="/admin/assets/icons.svg#{direction}""#
+                    )) && heading.split_once("</svg>").map(|(_, text)| text.trim()) == Some(label)
+                }),
+            "{label}: server traffic tile must carry its own direction icon and exact label"
+        );
+    }
     // Window picker links scoped to THIS server.
     assert!(
         html.contains("/admin/servers/s0/activity?vpn_window=7d"),

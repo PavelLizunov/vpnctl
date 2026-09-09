@@ -6,6 +6,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -130,11 +131,11 @@ pub(crate) async fn boosty_page(
                 lang,
                 "The poller reconciles vpnctl access with Boosty subscription state on its own interval: active subscribers get their VPN user enabled, lapses are surfaced here to disable (or auto-disabled). This page renders the LAST APPLIED sync — a GET never triggers a live pass (it would rotate the refresh token and race the poller).",
                 "Поллер сам сверяет доступ vpnctl со статусом подписки Boosty по своему интервалу: активным подписчикам включается VPN-юзер, отвалившиеся всплывают здесь для отключения (или отключаются авто). Страница показывает ПОСЛЕДНИЙ применённый синк — GET не запускает живой проход (он бы ротировал refresh-токен и гонялся с поллером).",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
             // Live enabled/disabled pill.
             span.ed-stat style=(if settings.enabled { "color: var(--green);" } else { "color: var(--mute);" }) {
                 @if settings.enabled {
-                    span.ed-stat__dot style="background: var(--green);" {}
+                    (icon("circle"))
                     (tr(lang, "polling on", "опрос включён"))
                 } @else {
                     (tr(lang, "polling off", "опрос выключен"))
@@ -149,7 +150,7 @@ pub(crate) async fn boosty_page(
                                "Прогнать один проход сверки сейчас (POST — безопасно). Включает активных; отвалившиеся появятся ниже.",
                            ))
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                        (tr(lang, "sync now →", "синхронизировать →"))
+                        (icon("rotate-cw")) (tr(lang, "sync now", "синхронизировать"))
                     }
                 }
             }
@@ -164,7 +165,7 @@ pub(crate) async fn boosty_page(
         @if let Some(r) = report {
             @if !r.suppressed_disables.is_empty() {
                 div style="border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 8px 12px; margin: 12px 0; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
-                    b style="color: var(--red);" { (tr(lang, "⚠ Empty roster — disables suppressed.", "⚠ Пустой ростер — отключения подавлены.")) }
+                    b style="color: var(--red);" { (icon("triangle-alert")) (tr(lang, "Empty roster — disables suppressed.", "Пустой ростер — отключения подавлены.")) }
                     " "
                     (tr(lang,
                         "The last sync got zero subscribers back (likely a wrong blog url or expired token). No one was disabled. Untouched: ",
@@ -249,7 +250,7 @@ pub(crate) async fn boosty_page(
                         lang,
                         "Active Boosty subscribers the last sync found that aren't linked to a vpnctl user yet. Pick a user to bind them — access then follows the subscription automatically.",
                         "Активные подписчики Boosty из последнего синка, ещё не привязанные к юзеру vpnctl. Выбери юзера — дальше доступ следует за подпиской автоматически.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 table.ed-grid style="margin-top: 8px;" {
                     thead { tr {
@@ -278,7 +279,7 @@ pub(crate) async fn boosty_page(
                                 }
                                 td.num {
                                     button type="submit" form=(form_id) class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                        (tr(lang, "link →", "привязать →"))
+                                        (icon("link")) (tr(lang, "link", "привязать"))
                                     }
                                 }
                             }
@@ -296,7 +297,7 @@ pub(crate) async fn boosty_page(
                         lang,
                         "Linked users whose Boosty subscription has lapsed. With auto-disable OFF you confirm each one here; disabling cuts their VPN access (reversible — re-subscribing re-enables on the next sync).",
                         "Привязанные юзеры, чья подписка Boosty истекла. При выключенном авто-отключении подтверждаешь каждого здесь; отключение режет VPN-доступ (обратимо — при возобновлении подписки включится на следующем синке).",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;" {
                     @for uid in &r.lapsed_pending {
@@ -304,7 +305,7 @@ pub(crate) async fn boosty_page(
                             button type="submit"
                                    title=(tr(lang, "Disable this user's VPN access (subscription lapsed).", "Отключить VPN-доступ юзера (подписка истекла)."))
                                    class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                (uid) " · " (tr(lang, "disable", "отключить"))
+                                (icon("pause")) (uid) " · " (tr(lang, "disable", "отключить"))
                             }
                         }
                     }
@@ -378,7 +379,7 @@ pub(crate) async fn boosty_page(
                                     button type="submit"
                                            title=(tr(lang, "Remove the Boosty↔user link. Does NOT disable the VPN user; just stops the subscription driving their access.", "Убрать связь Boosty↔юзер. НЕ отключает VPN-юзера; лишь перестаёт управлять доступом по подписке."))
                                            class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                        (tr(lang, "unlink →", "отвязать →"))
+                                        (icon("unlink")) (tr(lang, "unlink", "отвязать"))
                                     }
                                 }
                             }
@@ -454,7 +455,7 @@ pub(crate) async fn boosty_page(
         div.ed-rule {}
         div.ed-art-eyebrow {
             (tr(lang, "Boosty events · latest 50", "События Boosty · последние 50"))
-            " · " a href="/admin/audit?action=boosty." { (tr(lang, "full audit →", "полный аудит →")) }
+            " · " a href="/admin/audit?action=boosty." { (icon("history")) (tr(lang, "full audit", "полный аудит")) }
         }
         @if boosty_events.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
@@ -472,7 +473,7 @@ pub(crate) async fn boosty_page(
                                 (summarize_audit_payload(payload))
                                 " "
                                 details style="display: inline-block; vertical-align: baseline;" {
-                                    summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { "{…}" }
+                                    summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { (icon("code")) "{…}" }
                                     pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10px; white-space: pre-wrap; max-width: 680px;" {
                                         (serde_json::to_string_pretty(&redact_audit_payload(payload)).unwrap_or_default())
                                     }
@@ -492,7 +493,7 @@ pub(crate) async fn boosty_page(
                 lang,
                 "Boosty API credentials + poll cadence. Secret fields are masked after save; leave blank to keep the stored value, clear + save to remove. Interval applies after a daemon restart.",
                 "Учётные данные API Boosty + интервал опроса. Секретные поля маскируются после сохранения; пусто = оставить, очистить + сохранить = удалить. Интервал применяется после рестарта демона.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
         }
         // Current credential state (masked) so the operator sees what's
         // stored without the write-only form fields revealing it.
@@ -564,7 +565,7 @@ pub(crate) async fn boosty_page(
                 }
             }
             button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                (crate::i18n::t(lang, crate::i18n::K::BtnSave))
+                (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
             }
         }
     };

@@ -13,6 +13,11 @@ use crate::ssh_subprocess::SubprocessSshTransport;
 use vpnctl_core::{Registry, RenderCtx, Server};
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
+#[path = "autodeploy.rs"]
+mod autodeploy;
+pub(crate) use autodeploy::queue_servers_redeploy;
+pub use autodeploy::{AutodeployPhase, AutodeployStatus, autodeploy_status};
+
 /// Re-deploy an EXISTING server, streaming per-step progress over SSE
 /// (item-1, 2026-05-31). Unlike `run_bootstrap` (a NEW server: probe →
 /// fingerprint → push-key → register), the server already exists and
@@ -206,88 +211,17 @@ pub(super) fn deploy_all_terminal(failed: &[String], summary: String) -> Bootstr
     }
 }
 
-/// Drive [`run_redeploy`] over `servers` sequentially and return per-server
-/// error strings (`"<sid>: <phase>: <msg>"`; empty = all deployed). Shared
-/// by every after-mutation auto-deploy dispatcher (user disable/enable,
-/// grant/revoke, the Boosty bridge) so they all get the same semantics:
-///
-/// * **Deploy-lock retry** — a deploy already in flight rendered its config
-///   BEFORE the caller's mutation committed, so a lock refusal would leave
-///   the mutation off the node until a manual deploy. Bounded retry
-///   (3 × 5 s) covers back-to-back operator clicks; a node stuck for
-///   minutes still ends in an error + the pending banner staying up.
-/// * **Missing-key guard** — with no deploy key, running the pipeline would
-///   only stamp `ssh_skip_reason` `server.deploy` rows; return one error
-///   instead and leave the pending banner up.
-/// * Per-server terminal Ok/Error stays observable (run_deploy_all's
-///   stream wraps failures as Step lines and always ends Ok — wrong here).
+/// Shared automatic dispatcher (including Boosty). Requests coalesce per
+/// server, with at most four passes and three five-second followup delays for
+/// contention, stale inputs, or a mutation during execution. Failure strings
+/// are sanitized; only canonical revision-checked audit means applied.
 pub(crate) async fn redeploy_servers_collect_errors(
     servers: Vec<Server>,
     inv: SqliteInventory,
     registry: Arc<Registry>,
     deploy_key_path: PathBuf,
 ) -> Vec<String> {
-    use tokio_stream::StreamExt;
-    let mut errors: Vec<String> = Vec::new();
-    if !deploy_key_path.exists() {
-        errors.push(DEPLOY_KEY_ABSENT_MSG.into());
-        return errors;
-    }
-    let concurrency_limit = std::env::var("VPNCTL_FLEET_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(4)
-        .max(1);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency_limit));
-    let mut tasks = tokio::task::JoinSet::new();
-
-    for server in servers {
-        let inv = inv.clone();
-        let registry = Arc::clone(&registry);
-        let deploy_key_path = deploy_key_path.clone();
-        let sem = Arc::clone(&semaphore);
-
-        tasks.spawn(async move {
-            let sid = server.id.0.clone();
-            let mut failure: Option<String> = None;
-            for attempt in 0u32..4 {
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-                let _permit = sem.acquire().await.ok();
-                failure = None;
-                let mut stream = Box::pin(run_redeploy(
-                    server.clone(),
-                    inv.clone(),
-                    Arc::clone(&registry),
-                    deploy_key_path.clone(),
-                ));
-                while let Some(ev) = stream.next().await {
-                    if let BootstrapEvent::Error { phase, message } = ev {
-                        failure = Some(format!("{phase}: {message}"));
-                    }
-                }
-                match &failure {
-                    Some(msg) if msg.contains(DEPLOY_ALREADY_RUNNING_PREFIX) => {
-                        drop(_permit);
-                        continue;
-                    }
-                    _ => break,
-                }
-            }
-            failure.map(|msg| format!("{sid}: {msg}"))
-        });
-    }
-
-    while let Some(res) = tasks.join_next().await {
-        match res {
-            Ok(Some(err)) => errors.push(err),
-            Ok(None) => {}
-            Err(e) => errors.push(format!("task panicked: {e}")),
-        }
-    }
-    errors.sort();
-    errors
+    queue_servers_redeploy(servers, &inv, &registry, &deploy_key_path).await
 }
 
 async fn redeploy_pipeline(
@@ -491,15 +425,10 @@ async fn redeploy_pipeline(
             .filter(|p| supported.contains(p))
             .filter_map(|p| registry.protocol(p))
             .collect();
-        if protocols.is_empty() {
-            ssh_kernels_pushed.push(format!("{} (installed, no protocols)", kid.0));
-            send_step!(
-                "apply",
-                "{}: installed (no protocols enabled for it).",
-                kid.0
-            );
-            continue;
-        }
+        // Render even an empty protocol set: skipping it would leave old
+        // listeners/credentials active after the last protocol was revoked.
+        // Kernels unable to render an empty set fail closed below, retaining
+        // pending state instead of declaring the old remote config applied.
         send_step!(
             "render",
             "{}: rendering config for {} protocol(s)…",

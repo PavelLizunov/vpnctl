@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
@@ -69,7 +70,8 @@ pub(super) async fn server_detail_render(
     // server leaves the user's granted list, so THIS page is the only
     // surface that can warn that the node still runs the revoked UUID.
     // Best-effort: a detector error renders no banner, not a 500.
-    let pending_deploy = state.inv.server_pending_deploy(&sid).await.unwrap_or(false);
+    let pending_deploy = state.inv.server_pending_deploy(&sid).await.ok();
+    let operation_status = crate::wizard_bootstrap::autodeploy_status(&state.inv, &sid.0);
 
     // Design v2 3e — is the clash-api poller currently holding a LIVE
     // snapshot for this node (checklist row «clash api reachable»).
@@ -80,43 +82,40 @@ pub(super) async fn server_detail_render(
     // Design v2 3d — Grants-tab-only data: grant dates (migration
     // 0039), WHICH granted users still await a deploy, per-user live
     // conns on THIS node (clash snapshot), and per-user 24h traffic.
-    let (grant_dates, pending_users, grants_presence, grants_traffic) = if tab == ServerTab::Grants
-    {
-        let dates: HashMap<vpnctl_core::UserId, Option<chrono::DateTime<chrono::Utc>>> = state
-            .inv
-            .grant_dates_for_server(&sid)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        let pending: HashSet<vpnctl_core::UserId> = state
-            .inv
-            .users_pending_deploy_for_server(&sid)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        let mut presence: HashMap<String, u32> = HashMap::new();
-        // `get_live`: per-user live conns on this node must drop out once
-        // the snapshot goes stale (polling stopped).
-        if let Some(snap) = state.snapshot_cache.get_live(&sid) {
-            for c in &snap.snapshot.connections {
-                if let Some(uid) = c.metadata.user.as_deref() {
-                    *presence.entry(uid.to_string()).or_default() += 1;
+    let (grant_dates, pending_users, pending_users_known, grants_presence, grants_traffic) =
+        if tab == ServerTab::Grants {
+            let dates: HashMap<vpnctl_core::UserId, Option<chrono::DateTime<chrono::Utc>>> = state
+                .inv
+                .grant_dates_for_server(&sid)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let pending_result = state.inv.users_pending_deploy_for_server(&sid).await;
+            let pending_known = pending_result.is_ok() && pending_deploy.is_some();
+            let pending: HashSet<vpnctl_core::UserId> =
+                pending_result.unwrap_or_default().into_iter().collect();
+            let mut presence: HashMap<String, u32> = HashMap::new();
+            // `get_live`: per-user live conns on this node must drop out once
+            // the snapshot goes stale (polling stopped).
+            if let Some(snap) = state.snapshot_cache.get_live(&sid) {
+                for c in &snap.snapshot.connections {
+                    if let Some(uid) = c.metadata.user.as_deref() {
+                        *presence.entry(uid.to_string()).or_default() += 1;
+                    }
                 }
             }
-        }
-        let traffic: HashMap<vpnctl_core::UserId, u64> = state
-            .inv
-            .top_users_by_traffic_for_server(&sid, 24, 1000)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        (dates, pending, presence, traffic)
-    } else {
-        Default::default()
-    };
+            let traffic: HashMap<vpnctl_core::UserId, u64> = state
+                .inv
+                .top_users_by_traffic_for_server(&sid, 24, 1000)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            (dates, pending, pending_known, presence, traffic)
+        } else {
+            Default::default()
+        };
 
     // Phase H+ — rolling uptime windows for the per-server SLO chip
     // section. Three independent SQL aggregates (24h / 7d / 30d) —
@@ -131,19 +130,29 @@ pub(super) async fn server_detail_render(
     let uptime_30d = state.inv.uptime_for_server(&sid, 24 * 30).await.ok();
     let quality_24h = state
         .inv
-        .service_quality_for_server(&sid, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+        .provisioned_service_quality_for_server(&sid, 24, vpnctl_inventory::QUALITY_MIN_SAMPLES)
         .await
         .ok();
     let quality_7d = state
         .inv
-        .service_quality_for_server(&sid, 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
+        .provisioned_service_quality_for_server(&sid, 24 * 7, vpnctl_inventory::QUALITY_MIN_SAMPLES)
         .await
         .ok();
     let quality_history = state
         .inv
-        .service_quality_samples_for_server(&sid, 24)
+        .provisioned_service_quality_samples_for_server(&sid, 24)
         .await
         .unwrap_or_default();
+    let quality_measurement = state
+        .inv
+        .service_quality_measurement_for_server(&sid)
+        .await
+        .ok();
+    // No mutation since last audit is not proof that a first deploy ever happened.
+    let pending_deploy = match (pending_deploy, quality_measurement.as_ref()) {
+        (Some(pending), Some(measurement)) => Some(pending || measurement.provisioned_at.is_none()),
+        _ => None,
+    };
     let assurance_rows = state
         .inv
         .latest_protocol_assurance_for_server(&sid)
@@ -471,7 +480,7 @@ pub(super) async fn server_detail_render(
     let body = html! {
         nav.ed-crumb {
             a href="/admin/servers" style="color: var(--mute); text-decoration: none;" {
-                "← " (crate::i18n::tr(lang, "all servers", "все серверы"))
+                (icon("arrow-left")) (crate::i18n::tr(lang, "all servers", "все серверы"))
             }
         }
         div.ed-headrow {
@@ -479,21 +488,21 @@ pub(super) async fn server_detail_render(
             @if let Some(h) = latest.as_ref() {
                 @if h.sing_box_active == Some(true) {
                     span.ed-stat.ed-stat--active {
-                        span.ed-stat__dot {}
+                        (icon("circle"))
                         (crate::i18n::tr(lang, "up", "работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
                         (humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else if h.sing_box_active == Some(false) {
                     span.ed-stat.ed-stat--failed {
-                        span.ed-stat__dot {}
+                        (icon("circle-x"))
                         (crate::i18n::tr(lang, "down", "не работает"))
                         " · " (crate::i18n::tr(lang, "probe ", "проба "))
                         (humanize_age(chrono::Utc::now() - h.ts, lang))
                     }
                 } @else {
                     span.ed-stat.ed-stat--unknown {
-                        span.ed-stat__dot {}
+                        (icon("circle-dashed"))
                         (crate::i18n::tr(lang, "unknown", "неизвестно"))
                     }
                 }
@@ -510,7 +519,7 @@ pub(super) async fn server_detail_render(
                            "Обновить только бинарники ядер: с живым логом — снять версию каждого ядра, обновить пакет (apt upgrade), перезапустить сервис и снять версию снова. Рабочий конфиг не меняется, поэтому действие безопасно при дрейфе инвентаря.",
                        ))
                        class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                    (crate::i18n::tr(lang, "update kernels", "обновить ядра"))
+                    (icon("rotate-cw")) span data-icon-label { (crate::i18n::tr(lang, "update kernels", "обновить ядра")) }
                 }
                 button id="deploy-button" type="button"
                        data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
@@ -522,14 +531,14 @@ pub(super) async fn server_detail_render(
                            "Полный деплой с живым логом: дораздать недостающие секреты, подключиться к ноде по SSH, выполнить ensure_installed + apply_config для каждого включённого ядра и перезапустить сервисы. Каждый шаг и итог появятся в логе ниже. Повторный клик безопасен.",
                        ))
                        class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                    (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                    (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
                 }
                 noscript {
                     form method="post"
                          action=(format!("/admin/servers/{}/deploy", path_segment_encode(&server.id.0)))
                          style="display: inline;" {
                         button type="submit" class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                            (crate::i18n::t(lang, crate::i18n::K::BtnDeploy))
+                            (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
                         }
                     }
                 }
@@ -565,15 +574,37 @@ pub(super) async fn server_detail_render(
         // deploy, so the node's running config doesn't match inventory.
         // The revoke case is the dangerous one: the revoked user's UUID
         // is STILL ACCEPTED by the node until the deploy below runs.
-        @if pending_deploy {
+        @let deploy_state = match operation_status.as_ref().map(|s| s.phase) {
+            Some(crate::wizard_bootstrap::AutodeployPhase::Queued) => "queued",
+            Some(crate::wizard_bootstrap::AutodeployPhase::Running) => "running",
+            Some(crate::wizard_bootstrap::AutodeployPhase::Failed) if pending_deploy != Some(false) => "failed",
+            _ => match pending_deploy { Some(true) => "pending", Some(false) => "applied", None => "unknown" },
+        };
+        section id="deployment-status" data-deploy-state=(deploy_state) class="ed-alert" role="status" {
+            b { (crate::i18n::tr(lang, "Configuration: ", "Конфигурация: ")) }
+            @match deploy_state {
+                "queued" => { (crate::i18n::tr(lang, "changes saved; queued for application", "изменения сохранены; ожидают применения")) }
+                "running" => { (crate::i18n::tr(lang, "applying; further changes will be included in a follow-up pass", "применяется; новые изменения войдут в следующий проход")) }
+                "failed" => { (crate::i18n::tr(lang, "automatic application failed; changes remain pending. Retry deployment using the Deploy button.", "автоприменение не завершено; изменения ожидают применения. Повтори через кнопку деплоя.")) }
+                "pending" => { (crate::i18n::tr(lang, "saved; awaiting application", "сохранена; ожидает применения")) }
+                "applied" => { (crate::i18n::tr(lang, "applied according to the deployment audit — not a VPN connectivity test", "применена по журналу деплоя — это не проверка VPN-подключения")) }
+                _ => { (crate::i18n::tr(lang, "status unknown; reload to retry reading deployment state", "статус неизвестен; обнови страницу для повторной проверки")) }
+            }
+            @if deploy_state == "failed" {
+                @if let Some(operation) = operation_status.as_ref() {
+                    p { (operation.message) }
+                }
+            }
+        }
+        @if pending_deploy == Some(true) {
             div id="pending-deploy-banner"
                 style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
-                b style="color: var(--warm);" { "⚠ " (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
+                b style="color: var(--warm);" { (icon("triangle-alert")) (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
                 " — "
                 (crate::i18n::tr(
                     lang,
-                    "grants changed since the last deploy. Until you click deploy, the node keeps running the OLD user set — a revoked user can still connect.",
-                    "гранты менялись после последнего деплоя. Пока не нажат deploy, нода работает со СТАРЫМ списком юзеров — отозванный юзер всё ещё может подключиться.",
+                    "saved settings or accesses are newer than the last confirmed application. Until application completes, an older configuration may remain active, including revoked access.",
+                    "настройки или доступы сохранены после последнего подтверждённого применения. Пока применение не завершено, может действовать прежняя конфигурация, включая отозванные доступы.",
                 ))
             }
         }
@@ -582,6 +613,28 @@ pub(super) async fn server_detail_render(
         pre id="update-kernels-log" hidden
             style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
 
+        section id="external-readiness" class="ed-alert" {
+            b { (crate::i18n::tr(lang, "External VPN readiness: ", "Внешняя готовность VPN: ")) }
+            @let external_checks = assurance_rows.iter().filter(|row| {
+                server.enabled_protocols.contains(&row.protocol_id) && matches!(row.stage,
+                    vpnctl_inventory::AssuranceStage::ExternalPath |
+                    vpnctl_inventory::AssuranceStage::Handshake |
+                    vpnctl_inventory::AssuranceStage::Transfer)
+            }).collect::<Vec<_>>();
+            @if external_checks.is_empty() {
+                (crate::i18n::tr(lang, "not checked — no external protocol test results. Configuration application and TCP probes do not prove VPN connectivity.", "не проверено — результатов внешней протокольной проверки нет. Применение конфигурации и TCP-пробы не доказывают работу VPN."))
+            } @else {
+                (crate::i18n::tr(lang, "per-protocol evidence only; check stage and age below, not an overall readiness guarantee.", "только результаты отдельных протоколов; учитывай этап и время проверки, это не гарантия общей готовности."))
+                ul {
+                    @for row in external_checks {
+                        li {
+                            (row.protocol_id.0) " · " (row.stage.as_str()) " · " (row.state.as_str()) " · "
+                            time datetime=(row.ts.to_rfc3339()) { (row.ts.to_rfc3339()) }
+                        }
+                    }
+                }
+            }
+        }
         // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
 
@@ -603,7 +656,7 @@ pub(super) async fn server_detail_render(
             ("protocols", protocols_tab_label.as_str()),
             ("grants", grants_tab_label.as_str()),
             ("setup", crate::i18n::tr(lang, "Setup", "Настройка")),
-        ]))
+        ], lang))
 
         // ── STATUS (default) — "is the node healthy, what changed".
         @if tab == ServerTab::Status {
@@ -626,6 +679,20 @@ pub(super) async fn server_detail_render(
                 }
             }
             (server_detail_kernel_inventory_section(&server, &state.registry, latest.as_ref(), lang))
+            p id="quality-measurement-period" class="ed-grid__mut" {
+                @match quality_measurement.as_ref() {
+                    Some(measurement) if measurement.provisioned_at.is_none() => {
+                        (crate::i18n::tr(lang, "Quality not measured until the first successful deployment.", "Качество ещё не измеряется до первого успешного деплоя."))
+                    }
+                    Some(measurement) => {
+                        @match measurement.measurement_started_at {
+                            Some(started) => { (crate::i18n::tr(lang, "Current target-set measurements since ", "Измерения текущего набора целей с ")) time datetime=(started.to_rfc3339()) { (started.to_rfc3339()) } }
+                            None => { (crate::i18n::tr(lang, "Provisioned; awaiting measurements for the current target set.", "Сервер настроен; ожидаются измерения текущего набора целей.")) }
+                        }
+                    }
+                    None => { (crate::i18n::tr(lang, "Measurement period unknown.", "Период измерений неизвестен.")) }
+                }
+            }
             (server_detail_quality_section(
                 quality_24h.as_ref(),
                 quality_7d.as_ref(),
@@ -650,7 +717,7 @@ pub(super) async fn server_detail_render(
                     " · " (crate::i18n::tr(lang, "by ", "запустил ")) (last_deploy.actor)
                     " · "
                     a href="/admin/audit" style="color: var(--acc);" {
-                        (crate::i18n::tr(lang, "audit with this filter →", "аудит с этим фильтром →"))
+                        (icon("history")) (crate::i18n::tr(lang, "audit with this filter", "аудит с этим фильтром"))
                     }
                 }
             }
@@ -717,9 +784,9 @@ pub(super) async fn server_detail_render(
                     (crate::i18n::tr(lang, "Grants", "Выданные доступы")) " "
                     span.ed-tip title=(crate::i18n::tr(
                         lang,
-                        "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy. «on node» means the deployed config actually contains the user — grant + forget-to-deploy is the #1 silent failure, the banner below tracks it.",
-                        "Грант записывает пару в инвентарь; ключи чеканятся по протоколам на следующем деплое. «на ноде» значит, что задеплоенный конфиг реально содержит юзера — грант без деплоя это тихий сбой №1, баннер ниже его отслеживает.",
-                    )) { "ⓘ" }
+                        "Grant saves access in inventory. Application status is derived from the deployment audit, not a live inspection of the node or a client connection test.",
+                        "Грант сохраняет доступ в инвентаре. Статус применения вычисляется по журналу деплоя, а не по проверке живой ноды или клиентского подключения.",
+                    )) { (status("info", lang, "Information", "Информация")) }
                 }
                 span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len())
@@ -728,14 +795,18 @@ pub(super) async fn server_detail_render(
                     // пользователя / из 42 пользователей — not the
                     // nominative counting forms.
                     (crate::i18n::noun_for(lang, all_users.len() as u64, "user granted", "users granted", "пользователя с доступом", "пользователей с доступом", "пользователей с доступом"))
-                    " · " (crate::i18n::tr(lang, "deployed config covers ", "задеплоенный конфиг покрывает "))
-                    (deployed_count)
+                    " · "
+                    @if pending_users_known {
+                        (crate::i18n::tr(lang, "applied grants per audit: ", "применено грантов по журналу: ")) (deployed_count)
+                    } @else {
+                        (crate::i18n::tr(lang, "application status unknown", "статус применения неизвестен"))
+                    }
                 }
             }
             @if !pending_users.is_empty() {
                 div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 10px 0;" {
                     span style="font-family: var(--mono); font-size: 11px; color: var(--warm);" {
-                        "⚠ " b {
+                        (icon("triangle-alert")) b {
                             (pending_users.len())
                             (crate::i18n::tr(lang, " grant(s) not yet deployed: ", " грант(ов) ещё не задеплоено: "))
                         }
@@ -747,7 +818,7 @@ pub(super) async fn server_detail_render(
                                 data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
                                 data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
                                 class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "deploy now →", "задеплоить сейчас →"))
+                            (icon("rocket")) span data-icon-label { (crate::i18n::tr(lang, "deploy now", "задеплоить сейчас")) }
                         }
                     }
                 }
@@ -775,14 +846,14 @@ pub(super) async fn server_detail_render(
                           placeholder=(crate::i18n::tr(lang, "user id…", "id пользователя…"))
                           style="width: 150px;";
                     button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "grant", "выдать"))
+                        (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                     }
                 }
                 span.ed-tip title=(crate::i18n::tr(
                     lang,
                     "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy (auto-deploy runs after).",
                     "Грант пишет пару в инвентарь; ключи чеканятся на следующем деплое (авто-деплой запускается сам).",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
                 div style="margin-left: auto; display: flex; gap: 8px;" {
                     @if !ungranted.is_empty() {
                         form method="post"
@@ -795,7 +866,7 @@ pub(super) async fn server_detail_render(
                                        "Выдать доступ всем юзерам инвентаря, у кого его сейчас нет. Идемпотентно.",
                                    ))
                                    class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                (crate::i18n::tr(lang, "grant all ", "выдать всем "))
+                                (icon("plus")) (crate::i18n::tr(lang, "grant all ", "выдать всем "))
                                 "(" (ungranted.len()) ")"
                             }
                         }
@@ -823,7 +894,7 @@ pub(super) async fn server_detail_render(
                                        "Отозвать доступ у всех юзеров с текущим грантом. Деструктивно — нужно подтверждение.",
                                    ))
                                    class="ed-abtn ed-abtn--danger ed-abtn--sm" {
-                                (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
+                                (icon("unlink")) (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
                                 "(" (granted_count) ")…"
                             }
                         }
@@ -840,11 +911,13 @@ pub(super) async fn server_detail_render(
             };
             div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: 2px 0 6px;" {
                 (crate::i18n::tr(lang, "sort: ", "сортировка: "))
-                @for (kind, label) in [("id", "id ↑"), ("presence", crate::i18n::tr(lang, "online ↓", "онлайн ↓")), ("traffic", crate::i18n::tr(lang, "traffic ↓", "трафик ↓"))] {
+                @for (kind, label) in [("id", "id"), ("presence", crate::i18n::tr(lang, "online", "онлайн")), ("traffic", crate::i18n::tr(lang, "traffic", "трафик"))] {
+                    @let direction = if kind == "id" { "arrow-up" } else { "arrow-down" };
+                    @let sort_name = if kind == "id" { crate::i18n::tr(lang, "Ascending", "По возрастанию") } else { crate::i18n::tr(lang, "Descending", "По убыванию") };
                     @if grant_sort == kind {
-                        span style="color: var(--ink); text-decoration: underline; margin-right: 8px;" { (label) }
+                        span style="color: var(--ink); text-decoration: underline; margin-right: 8px;" { (label) span role="img" aria-label=(sort_name) { (icon(direction)) } }
                     } @else {
-                        a href=(sort_href(kind)) style="color: var(--mute); margin-right: 8px;" { (label) }
+                        a href=(sort_href(kind)) style="color: var(--mute); margin-right: 8px;" { (label) span role="img" aria-label=(sort_name) { (icon(direction)) } }
                     }
                 }
             }
@@ -891,7 +964,7 @@ pub(super) async fn server_detail_render(
                             td.ed-grid__sm {
                                 @if conns > 0 {
                                     span.ed-stat.ed-stat--active {
-                                        span.ed-stat__dot {}
+                                        (icon("circle"))
                                         (crate::i18n::tr(lang, "online", "онлайн")) " · " (conns)
                                     }
                                 } @else {
@@ -903,10 +976,12 @@ pub(super) async fn server_detail_render(
                                 @else { span.ed-grid__mut { "—" } }
                             }
                             td.ed-grid__sm {
-                                @if is_pending {
-                                    span.ed-grid__flag { "⚠ " (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
+                                @if !pending_users_known {
+                                    span.ed-grid__mut { (crate::i18n::tr(lang, "application unknown", "применение неизвестно")) }
+                                } @else if is_pending {
+                                    span.ed-grid__flag { (icon("triangle-alert")) (crate::i18n::tr(lang, "pending deploy", "ждёт деплоя")) }
                                 } @else {
-                                    span style="color: var(--green);" { "✓ " (crate::i18n::tr(lang, "on node", "на ноде")) }
+                                    span { (icon("check")) (crate::i18n::tr(lang, "applied per audit", "применён по журналу")) }
                                 }
                             }
                             td.ed-grid__mut.ed-grid__sm {
@@ -929,7 +1004,7 @@ pub(super) async fn server_detail_render(
                                                crate::i18n::Locale::Ru => format!("Отозвать доступ {} на {}", u.id.0, server.id.0),
                                            })
                                            class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                                        (crate::i18n::tr(lang, "revoke →", "отозвать →"))
+                                        (icon("unlink")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                     }
                                 }
                             }
@@ -953,7 +1028,7 @@ pub(super) async fn server_detail_render(
                                        crate::i18n::Locale::Ru => format!("Выдать {} доступ на {}", u.id.0, server.id.0),
                                    })
                                    class="ed-grant-chip off" style="cursor: pointer;" {
-                                (u.id.0) " — " (crate::i18n::tr(lang, "grant →", "выдать →"))
+                                (icon("plus")) (u.id.0) " — " (crate::i18n::tr(lang, "grant", "выдать"))
                             }
                         }
                     }
@@ -977,11 +1052,11 @@ pub(super) async fn server_detail_render(
                     lang,
                     "Each row is re-checked on every probe. A ⚠ here means the node drifted from its bootstrapped state.",
                     "Каждая строка перепроверяется каждой пробой. ⚠ значит, что нода уехала от состояния после bootstrap.",
-                )) { "ⓘ" }
+                )) { (status("info", lang, "Information", "Информация")) }
             }
             @let ok = |b: bool| -> Markup {
-                if b { html! { span style="color: var(--green);" { "✓" } } }
-                else { html! { span style="color: var(--warm);" { "⚠" } } }
+                if b { html! { span style="color: var(--green);" { (status("check", lang, "Verified", "Проверено")) } } }
+                else { html! { span style="color: var(--warm);" { (status("triangle-alert", lang, "Not verified", "Не проверено")) } } }
             };
             @let kernels_reported = latest.as_ref()
                 .and_then(|h| h.kernel_versions_json.as_deref())
@@ -1093,7 +1168,7 @@ pub(super) async fn server_detail_render(
                       "Удалить этот сервер из инвентаря (гранты + секреты + протоколы каскадом). Откроется страница с подтверждением по перепечатке id.",
                   ))
                   class="ed-abtn ed-abtn--danger" {
-                    (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
+                    (icon("trash-2")) (crate::i18n::tr(lang, "delete this server…", "удалить этот сервер…"))
                 }
             }
         }

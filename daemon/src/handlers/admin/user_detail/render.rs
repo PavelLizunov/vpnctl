@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::handlers::admin::icons::icon;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
@@ -49,11 +50,15 @@ pub(crate) async fn user_detail_render(
     // the server's most recent deploy. Surfaces as an amber banner
     // at the top of user-detail so the operator notices BEFORE the
     // user reports «connected but no traffic».
-    let pending_deploy_servers: Vec<vpnctl_core::ServerId> = state
+    let pending_deploy_result = state
         .inv
-        .servers_pending_deploy_for_user(&uid, &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
-        .await
-        .unwrap_or_else(|e| {
+        .servers_pending_deploy_for_user(
+            &uid,
+            &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        )
+        .await;
+    let pending_deploy_known = pending_deploy_result.is_ok();
+    let pending_deploy_servers = pending_deploy_result.unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid.0, error = %e, "servers_pending_deploy_for_user failed");
 
             Vec::new()
@@ -522,7 +527,7 @@ pub(crate) async fn user_detail_render(
     let body = html! {
             nav.ed-crumb {
                 a href="/admin/users" style="color: var(--mute); text-decoration: none;" {
-                    (crate::i18n::tr(lang, "← all users", "← все пользователи"))
+                    (icon("arrow-left")) (crate::i18n::tr(lang, "all users", "все пользователи"))
                 }
             }
             div.ed-headrow {
@@ -531,7 +536,7 @@ pub(crate) async fn user_detail_render(
                 div.ed-headrow__actions {
                     a href=(format!("/admin/users/{}/delete-confirm", path_segment_encode(&user.id.0)))
                       class="ed-abtn ed-abtn--danger ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "delete…", "удалить…"))
+                        (icon("trash-2")) (crate::i18n::tr(lang, "delete…", "удалить…"))
                     }
                 }
             }
@@ -550,10 +555,11 @@ pub(crate) async fn user_detail_render(
             @if !pending_deploy_servers.is_empty() {
                 div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 12px 0 16px;" {
                     div style="font-family: var(--serif); font-weight: 500; color: var(--warm); font-size: 13px;" {
+                        (icon("triangle-alert"))
                         (crate::i18n::tr(
                             lang,
-                            "⚠ Config not yet deployed to:",
-                            "⚠ Конфиг ещё не задеплоен на:",
+                            "Config not yet deployed to:",
+                            "Конфиг ещё не задеплоен на:",
                         ))
                         " "
                         @for (i, sid) in pending_deploy_servers.iter().enumerate() {
@@ -568,7 +574,7 @@ pub(crate) async fn user_detail_render(
                         lang,
                         "Until deploy, the user's sing-box entry is absent: REALITY handshake succeeds but VLESS auth silently drops, so the client can show connected with no traffic.",
                         "До деплоя записи пользователя нет в sing-box: REALITY-рукопожатие проходит, но VLESS-auth молча отказывает, поэтому клиент может показывать подключение без трафика.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                     // One-click fix right here in the user view: deploy
                     // ONLY the pending servers the banner names (was the
                     // fleet-wide deploy-all until 2026-07-10 — one
@@ -589,8 +595,11 @@ pub(crate) async fn user_detail_render(
                                    "Задеплоить перечисленные серверы — пушит конфиг юзера на каждую отставшую ноду. Уже актуальные серверы не трогаются. По завершении страница перезагрузится.",
                                ))
                                class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (crate::i18n::tr(lang, "deploy pending ", "задеплоить недостающие "))
-                            "(" (pending_deploy_servers.len()) ") →"
+                            (icon("upload"))
+                            span data-icon-label {
+                                (crate::i18n::tr(lang, "deploy pending ", "задеплоить недостающие "))
+                                "(" (pending_deploy_servers.len()) ")"
+                            }
                         }
                     }
                 }
@@ -600,7 +609,7 @@ pub(crate) async fn user_detail_render(
 
     @let tab_base = format!("/admin/users/{}", path_segment_encode(&user.id.0));
     @let access_tab_label = format!("{} · {}", crate::i18n::tr(lang, "Access", "Доступ"), servers.len());
-    (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", access_tab_label.as_str()), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))]))
+    (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", access_tab_label.as_str()), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))], lang))
     @match tab {
         UserTab::Overview => {
             (tabs::overview::render_overview_tab(
@@ -647,6 +656,7 @@ pub(crate) async fn user_detail_render(
                 &all_servers,
                 &granted_ids,
                 &pending_deploy_servers,
+                pending_deploy_known,
                 &user_grant_dates,
                 &access_protos,
                 &hidden_per_server,

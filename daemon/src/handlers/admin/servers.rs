@@ -1,5 +1,6 @@
 //! Server list handler and table row renderer.
 
+use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -97,7 +98,7 @@ fn server_row(
             td {
                 a.ed-grid__id href=(detail_href) { (s.id.0) }
                 @if has_health_warning {
-                    " " span.ed-grid__flag title=(health_warnings.join(" · ")) { "⚠" }
+                    " " span.ed-grid__flag title=(health_warnings.join(" · ")) { (status("triangle-alert", lang, "Health warning", "Предупреждение здоровья")) }
                 }
             }
             td {
@@ -129,7 +130,7 @@ fn server_row(
             }
             td.ed-grid__mut.ed-grid__sm title=(fp_full) { (fp_short(fp_full)) }
             td.num { (format!("{:.2}", s.usage_coefficient)) }
-            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "open →", "открыть →")) } }
+            td.num { a.ed-grid__open href=(detail_href) { (tr(lang, "open", "открыть")) (icon("arrow-right")) } }
         }
     }
 }
@@ -161,7 +162,7 @@ pub(crate) async fn servers(
                     lang,
                     "Read straight from the SQLite inventory. Add a server through the wizard (paste IP + root password, the daemon does the rest) — it bootstraps secrets and deploys the config automatically.",
                     "Читаются напрямую из SQLite-инвентаря. Добавь сервер через мастер (вставь IP + root-пароль, остальное сделает демон) — он сам создаст секреты и задеплоит конфиг.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             @if !server_list.is_empty() {
                 div.ed-headrow__actions {
                     button type="button"
@@ -175,8 +176,11 @@ pub(crate) async fn servers(
                                "Обновить бинарники ядер на ВСЕХ серверах (apt upgrade + рестарт сервиса) без перерендера конфига. Запусти после релиза ядра, чтобы раскатать новый бинарь по флоту. Рабочий конфиг не трогается, поэтому безопасно даже на ноде с дрейфом инвентаря. Best-effort — упавшая нода отмечается, остальные обновляются.",
                            ))
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "update all kernels", "обновить все ядра"))
-                        " (" (server_list.len()) ")"
+                        (icon("rotate-cw"))
+                        span data-icon-label {
+                            (crate::i18n::tr(lang, "update all kernels", "обновить все ядра"))
+                            " (" (server_list.len()) ")"
+                        }
                     }
                     button id="deploy-button" type="button"
                            data-sse-url="/admin/servers/deploy-all/sse"
@@ -188,8 +192,11 @@ pub(crate) async fn servers(
                                "Передеплоить ВСЕ серверы: пушит конфиг sing-box на каждую ноду, чтобы UUID новых юзеров попали на все. Нажми один раз после добавления юзера или выдачи грантов. Best-effort — упавшая нода отмечается, остальные деплоятся.",
                            ))
                            class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                        (crate::i18n::tr(lang, "deploy all servers →", "развернуть все серверы →"))
-                        " (" (server_list.len()) ")"
+                        (icon("upload"))
+                        span data-icon-label {
+                            (crate::i18n::tr(lang, "deploy all servers", "развернуть все серверы"))
+                            " (" (server_list.len()) ")"
+                        }
                     }
                 }
             }
@@ -248,20 +255,17 @@ pub(crate) async fn servers(
                        "Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after.",
                        "Регистрирует сервер с ядром sing-box и всеми поддерживаемыми им протоколами. Настройки правь на странице сервера сразу после.",
                    )) {
-                (crate::i18n::tr(lang, "register", "зарегистрировать"))
+                (icon("plus")) (crate::i18n::tr(lang, "register", "зарегистрировать"))
             }
             span.ed-tip
                 title=(crate::i18n::tr(
                     lang,
                     "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page.",
                     "→ ядро sing-box по умолчанию, включены все поддерживаемые им протоколы. Тонкая настройка — на странице сервера.",
-                )) { "ⓘ" }
+                )) { (icon("info")) }
             a.ed-grid__open href="/admin/servers/new" style="margin-left: auto;" {
-                (crate::i18n::tr(
-                    lang,
-                    "wizard → bootstrap a fresh node from scratch",
-                    "мастер → развернуть свежую ноду с нуля",
-                ))
+                (icon("rocket")) (crate::i18n::tr(lang, "wizard", "мастер")) " " (icon("arrow-right")) " "
+                (crate::i18n::tr(lang, "bootstrap a fresh node from scratch", "развернуть свежую ноду с нуля"))
             }
         }
 

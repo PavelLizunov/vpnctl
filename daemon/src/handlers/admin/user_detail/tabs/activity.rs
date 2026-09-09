@@ -1,3 +1,4 @@
+use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 use std::collections::HashMap;
 use vpnctl_core::{User, UserId};
@@ -47,7 +48,7 @@ pub(crate) async fn render_activity_tab(
         @if pm.masked_rows > 0 && masked_pct >= 20 {
             div style="border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 9%, var(--paper)); padding: 9px 12px; margin: 12px 0 4px; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
                 b style="color: var(--warm);" {
-                    "⚠ " (pm.masked_rows) (crate::i18n::tr(lang, " of ", " из ")) (pm.window_rows)
+                    (icon("triangle-alert")) " " (pm.masked_rows) (crate::i18n::tr(lang, " of ", " из ")) (pm.window_rows)
                     (crate::i18n::tr(lang, " fetches (", " обращений ("))
                     (masked_pct) (crate::i18n::tr(lang, "%) arrived via the front proxy — client IP not captured.", "%) пришли через фронт-прокси — клиентский IP не пойман."))
                 }
@@ -107,7 +108,7 @@ pub(crate) async fn render_activity_tab(
                         lang,
                         "Heuristic over the 30-day window. Weights SIMULTANEOUS VPN-connection networks (/24s, from live clash data) + impossible travel between fetches, far above sub-fetch IP diversity — so it can differ from the «client IPs» tile, which counts sub-fetch source IPs.",
                         "Эвристика по 30-дневному окну. Одновременные сети VPN-подключений (/24, из живых данных clash) + невозможные перемещения между обращениями весят намного больше, чем разнообразие source-IP обращений — поэтому может отличаться от плитки «клиентских IP», которая считает source-IP обращений.",
-                    )) { "ⓘ" }
+                    )) { (icon("info")) }
                 }
                 div.ed-status-tile__v style=(format!("color: {verdict_color}; font-size: 14px;")) { (verdict_txt) }
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" { (score_note) }
@@ -149,7 +150,7 @@ pub(crate) async fn render_activity_tab(
                 lang,
                 "Every fetch of the config URL, resolved against the GeoIP DBs at request time. A local/VPN-range source usually means the client refreshed over its own tunnel.",
                 "Каждое обращение к config-URL, обогащённое GeoIP на момент запроса. Локальный/VPN-диапазон обычно значит, что клиент обновлялся через собственный туннель.",
-            )) { "ⓘ" }
+            )) { (icon("info")) }
         }
         // TT-3 — the log is newest-first and UNBOUNDED (all rows, all
         // sources), while the tiles above are a 30d, real-client-only
@@ -189,7 +190,7 @@ pub(crate) async fn render_activity_tab(
                                         lang,
                                         "VPN-egress / local-range source — the fetch came through a tunnel",
                                         "VPN-egress / локальный диапазон — обращение пришло через туннель",
-                                    )) { "⚠" }
+                                    )) { (status("triangle-alert", lang, "VPN-egress / local-range source", "VPN-egress / локальный диапазон")) }
                                 }
                             }
                             td.ed-grid__sm {
@@ -233,16 +234,16 @@ pub(crate) async fn render_activity_tab(
                 }
                 @if log_page > 0 {
                     a href=(format!("/admin/users/{uid_enc_log}/activity?log_page={}", log_page - 1)) style="color: var(--acc);" {
-                        (crate::i18n::tr(lang, "← newer", "← новее"))
+                        (icon("arrow-left")) (crate::i18n::tr(lang, "newer", "новее"))
                     }
                 }
                 @if has_older {
                     a href=(format!("/admin/users/{uid_enc_log}/activity?log_page={}", log_page + 1)) style="color: var(--acc);" {
-                        (crate::i18n::tr(lang, "older →", "старше →"))
+                        (crate::i18n::tr(lang, "older", "старше")) (icon("arrow-right"))
                     }
                 }
                 a href=(format!("/admin/users/{uid_enc_log}/access.csv")) style="margin-left: auto; color: var(--acc);" {
-                    (crate::i18n::tr(lang, "export csv →", "экспорт csv →"))
+                    (icon("download")) (crate::i18n::tr(lang, "export csv", "экспорт csv"))
                 }
             }
         }

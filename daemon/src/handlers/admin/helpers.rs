@@ -575,7 +575,7 @@ pub(crate) fn kernel_versions_inline(
                         span.ed-kvers__value title=(version) {
                             (compact_kernel_version(&kid.0, version))
                             @if kid.0 == "sing-box" && fleet_majority_version.is_some_and(|majority| majority != version) {
-                                " ≠"
+                                " " span role="img" aria-label="Version differs / Версия отличается" { (super::icons::icon("equal-not")) }
                             }
                         }
                     } @else {
