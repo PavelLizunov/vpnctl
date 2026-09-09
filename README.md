@@ -19,6 +19,11 @@ action also has a web button.
 > **Canonical home:** [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl).
 > Issues and PRs go on GitHub.
 
+**Operating policy:** [Commercial operations runbook (RU)](docs/specs/commercial-operations.md)
+classifies update risks, staged rollout and rollback gates, and commercial go-live
+prerequisites. It is a policy and acceptance checklist, not a production-readiness
+certificate or a zero-downtime guarantee.
+
 ## Status — v0.9 in flight
 
 Operating in production across multiple nodes, with a bilingual EN/RU
