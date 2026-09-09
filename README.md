@@ -229,6 +229,18 @@ scripting / disaster recovery.
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
 
+### Connect with an already-installed deploy key
+
+On `/admin/servers/<id>/setup`, use **Deploy key already installed**, enter the
+SSH user (for example `debian`), and click **Check key and save**. No password or
+reference key is required. The server must have a trusted host fingerprint pinned
+in setup; non-root accounts must support passwordless `sudo`.
+The daemon checks its existing deploy key and privileges before saving the user;
+a failed check keeps the previous login. This action does not install keys,
+deploy VPN configuration, grant access, or restart services. Key installation
+via password/reference key remains a separate form on the same page. See the
+[setup contract](docs/specs/setup-existing-deploy-key.md).
+
 ### Client detour vs SSH jump_via
 
 - **Client detour** (`client_detour_via`): configures a 2-hop VPN client outbound chain where a target server dials out through an entry server in generated subscriptions. Set via `/admin/servers/<id>` («Client entry / Входной сервер») or `vpnctl server set-client-detour-via <target> <upstream>` (`--clear` to remove).
