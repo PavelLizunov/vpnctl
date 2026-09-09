@@ -393,6 +393,9 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     } else {
         return "/admin/".to_string();
     };
+    if path.starts_with("//") || path.contains('\\') || path.contains("..") || path.contains("//") {
+        return "/admin/".to_string();
+    }
     let path_only = path.split(['?', '#']).next().unwrap_or(path);
     if path_only == "/admin" || path_only.starts_with("/admin/") {
         path.to_string()
@@ -609,5 +612,21 @@ mod tests {
         assert_eq!(cookie(&headers, "vpnctl_accent"), Some("blue"));
         assert_eq!(cookie(&headers, "other"), Some("123"));
         assert_eq!(cookie(&headers, "nonexistent"), None);
+    }
+
+    #[test]
+    fn sanitize_referer_rejects_unsafe_sequences_and_allows_valid_admin_paths() {
+        assert_eq!(sanitize_referer(None), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
+        assert_eq!(
+            sanitize_referer(Some("https://example.com/admin/servers?sort=id#top")),
+            "/admin/servers?sort=id#top"
+        );
+        assert_eq!(sanitize_referer(Some("/admin/../evil")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/\\evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("//evil.com/admin/")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin//evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/test\nheader")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/non-admin")), "/admin/");
     }
 }
