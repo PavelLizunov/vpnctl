@@ -13,18 +13,18 @@
 #      to stop vpnctld; the backup API takes a consistent point-in-
 #      time copy without locking writers).
 #   2. Tar together: snap.db + every CRITICAL path + every OPTIONAL
-#      path that exists on this host. zstd-19 gives ~10× compression.
+#      path that exists on this host. zstd-3 keeps compression within
+#      the scheduled job's bounded runtime.
 #
 #      CRITICAL paths (script aborts if missing):
 #        - inv.db (the snapshot itself)
 #        - /etc/vpnctl/vpnctld.env (basic-auth + telegram + env config)
 #        - /opt/vpnctl/assets (favicon + admin.css)
+#        - /var/lib/vpnctl/.ssh/id_ed25519 (readable, nonempty deploy key)
 #
 #      OPTIONAL paths (warn + skip if missing — newer install or
 #      host without this surface):
-#        - /var/lib/vpnctl/.ssh/id_ed25519{,.pub} (DEPLOY KEY — without
-#          this, restored vpnctld can't reach any VPN node; HARD invariant
-#          per CLAUDE.md "Server invariant — deploy-key authorization").
+#        - /var/lib/vpnctl/.ssh/id_ed25519.pub (public half of deploy key)
 #        - /var/lib/vpnctl/.ssh/known_hosts (TOFU-pinned host keys —
 #          without this, first SSH after restore prompts unknown-host).
 #        - /etc/vpnctl/backup-recipient.txt (without it, the restored
@@ -48,9 +48,9 @@
 #   5. **Off-site push (Phase 5b)**: also scp to root@<OFFSITE_HOST>
 #      :OFFSITE_DIR/. Different jurisdiction + power grid + ISP from
 #      the 236/207 LAN — protects against the «all-LAN-burned» mode.
-#      Best-effort: failure logs WARN but does NOT fail the script,
-#      because the primary 207 archive is still good. The off-site
-#      step needs its own SSH key (we reuse the vpnctld deploy key
+#      Failure preserves the primary archive but returns exit 14 after
+#      remaining stages finish. The off-site step needs an SSH key
+#      (we reuse the vpnctld deploy key
 #      that's already authorised on every VPN node — see CLAUDE.md
 #      «Server invariant — deploy-key authorization»).
 #   6. Rotate on 207 (RETENTION_DAYS) + off-site (OFFSITE_RETENTION_DAYS,
@@ -67,7 +67,9 @@
 #   EXIT trap only ever wipes the scratch staging dir, never the
 #   deliverable archive).
 # * age fails → exit 12 (recipient key rotated or corrupted).
-# * Required path missing → exit 13 (install-time bug or path drift).
+# * Required path/key missing, empty or unsafe → exit 13.
+# * Enabled off-site delivery fails → exit 14; local/primary preserved.
+# * Retention fails → exit 15, unless off-site delivery also failed.
 # Any non-zero exit triggers the systemd unit's failure handling
 # (operator sees `systemctl status vpnctl-backup`).
 #
@@ -76,6 +78,7 @@
 # See `vpnctl-restore.sh` in the same directory.
 
 set -euo pipefail
+umask 077
 
 ## ── tunables ────────────────────────────────────────────────────────────
 DB_PATH=${DB_PATH:-/var/lib/vpnctl/inv.db}
@@ -103,7 +106,7 @@ BACKUP_DIR=${BACKUP_DIR:-/var/lib/vpnctl/backups}
 # Off-site target (Phase 5b). Default = `is` VPN node (Iceland), the
 # geographically + jurisdictionally most-distant from RU/EU. Override
 # OFFSITE_HOST="" to disable off-site push entirely.
-OFFSITE_HOST=${OFFSITE_HOST:-root@93.95.226.167}
+OFFSITE_HOST=${OFFSITE_HOST-root@93.95.226.167}
 OFFSITE_PORT=${OFFSITE_PORT:-22}
 OFFSITE_DIR=${OFFSITE_DIR:-/root/vpnctl-backups}
 OFFSITE_KEY=${OFFSITE_KEY:-$DEPLOY_KEY}
@@ -115,7 +118,6 @@ TMPDIR=${TMPDIR:-/tmp}
 
 ## ── derived ─────────────────────────────────────────────────────────────
 STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-WORK="${TMPDIR}/vpnctl-backup-${STAMP}"
 ARCHIVE_NAME="${STAMP}.tar.zst.age"
 # The deliverable lives in the DURABLE BACKUP_DIR, NOT in WORK. WORK
 # holds only scratch/staging (the plaintext .db snapshot, .tar, .tar.zst)
@@ -126,8 +128,8 @@ LOCAL_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] vpnctl-backup: $*" >&2; }
 fail() { log "FAIL: $*"; exit "${2:-1}"; }
 
-mkdir -p "$WORK"
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$TMPDIR" "$BACKUP_DIR"
+WORK=$(mktemp -d "${TMPDIR}/vpnctl-backup-${STAMP}.XXXXXX")
 # Clean ONLY scratch staging on exit. The deliverable archive in
 # BACKUP_DIR is intentionally NOT covered — it must survive an scp
 # failure (exit 11) for manual recovery.
@@ -146,16 +148,18 @@ sqlite3 "$DB_PATH" ".backup '${WORK}/inv.db'" \
 # shows a clean tree without leading-slash surprises.
 log "collecting files to archive"
 
+[ ! -L "$DEPLOY_KEY" ] && [ -f "$DEPLOY_KEY" ] && [ -r "$DEPLOY_KEY" ] && [ -s "$DEPLOY_KEY" ] \
+    || fail "deploy key missing, empty, unreadable or symlinked: $DEPLOY_KEY" 13
 REQUIRED=(
     "$ENV_FILE"
     "$ASSETS_DIR"
+    "$DEPLOY_KEY"
 )
 for p in "${REQUIRED[@]}"; do
     [ -e "$p" ] || fail "required path missing: $p" 13
 done
 
 OPTIONAL=(
-    "$DEPLOY_KEY"
     "$DEPLOY_KEY_PUB"
     "$DEPLOY_KNOWN_HOSTS"
     "$RECIPIENT_FILE"
@@ -180,7 +184,7 @@ tar -C "$WORK" \
     --absolute-names \
     -cf "${WORK}/snap.tar" \
     "${TAR_PATHS[@]}"
-zstd -q -19 -o "${WORK}/snap.tar.zst" "${WORK}/snap.tar" \
+zstd -q -3 -o "${WORK}/snap.tar.zst" "${WORK}/snap.tar" \
     || fail "zstd compress failed" 10
 rm -f "${WORK}/snap.tar"
 
@@ -201,39 +205,43 @@ log "local archive: $ARCHIVE_NAME (${LOCAL_SIZE} bytes)"
 log "uploading to ${TARGET_HOST}:${TARGET_DIR}/"
 # VM 118 exposes the legacy scp subsystem but not SFTP. OpenSSH 9 defaults
 # scp(1) to SFTP, so force the legacy SCP protocol for this LAN archive hop.
-scp -O -q -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 \
+scp -O -q -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes \
     "$LOCAL_PATH" \
     "${TARGET_HOST}:${TARGET_DIR}/${ARCHIVE_NAME}" \
     || fail "scp to ${TARGET_HOST} failed (network or auth); local archive kept at ${LOCAL_PATH} for manual recovery" 11
 
+# Keep attempting independent stages, but never report partial delivery as ok.
+RESULT=0
 ## ── 5. rotation on 207 ──────────────────────────────────────────────────
 log "rotating ${TARGET_DIR} (keep ${RETENTION_DAYS} days)"
-ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$TARGET_HOST" \
+ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes "$TARGET_HOST" \
     "find '${TARGET_DIR}' -maxdepth 1 -name '*.tar.zst.age' -mtime +${RETENTION_DAYS} -delete" \
-    || log "WARN: rotation step failed (non-fatal — manual cleanup possible)"
+    || { log "WARN: primary rotation failed; archive preserved"; RESULT=15; }
 
 ## ── 6. off-site push (Phase 5b) ─────────────────────────────────────────
-# Best-effort: failures here log WARN and continue. The primary 207
-# archive is already safe at this point; off-site is the «if 207 also
+# Failures log WARN and set the final result; continue local retention.
+# The primary archive is preserved; off-site is the «if 207 also
 # burns» tier. We pin the deploy key explicitly because the script
 # runs as `user` (not root) and `user`'s default ~/.ssh/id_* may have
 # different authorisation surfaces on the VPN nodes.
 if [ -n "${OFFSITE_HOST:-}" ]; then
     if [ ! -r "$OFFSITE_KEY" ]; then
         log "WARN: off-site SSH key not readable: $OFFSITE_KEY (skipping off-site push)"
+        RESULT=14
     else
         log "off-site uploading to ${OFFSITE_HOST}:${OFFSITE_DIR}/ (port ${OFFSITE_PORT})"
         if scp -q -i "$OFFSITE_KEY" -P "$OFFSITE_PORT" \
-            -o BatchMode=yes -o ConnectTimeout=10 \
+            -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes \
             "$LOCAL_PATH" \
             "${OFFSITE_HOST}:${OFFSITE_DIR}/${ARCHIVE_NAME}"; then
             log "off-site rotating ${OFFSITE_DIR} (keep ${OFFSITE_RETENTION_DAYS} days)"
             ssh -i "$OFFSITE_KEY" -p "$OFFSITE_PORT" \
-                -o BatchMode=yes -o ConnectTimeout=10 "$OFFSITE_HOST" \
+                -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes "$OFFSITE_HOST" \
                 "find '${OFFSITE_DIR}' -maxdepth 1 -name '*.tar.zst.age' -mtime +${OFFSITE_RETENTION_DAYS} -delete" \
-                || log "WARN: off-site rotation failed (non-fatal)"
+                || { log "WARN: off-site rotation failed; archive preserved"; RESULT=15; }
         else
-            log "WARN: off-site scp failed (non-fatal — primary archive on ${TARGET_HOST} is safe)"
+            log "WARN: off-site scp failed; local and primary archives preserved"
+            RESULT=14
         fi
     fi
 else
@@ -244,11 +252,12 @@ fi
 # BACKUP_DIR now holds the deliverable across runs, so prune it on the
 # same RETENTION_DAYS as the primary 207 store. The archive written
 # THIS run has mtime ~now and is far inside the window, so it is never
-# pruned here. Non-fatal: a rotation failure must not lose the fresh
-# archive nor mask a successful upload.
+# pruned here. A rotation failure marks this job incomplete without
+# deleting the fresh archive or suppressing an earlier delivery failure.
 log "rotating local ${BACKUP_DIR} (keep ${RETENTION_DAYS} days)"
 find "$BACKUP_DIR" -maxdepth 1 -name '*.tar.zst.age' -mtime +"${RETENTION_DAYS}" -delete \
-    || log "WARN: local rotation failed (non-fatal — manual cleanup possible)"
+    || { log "WARN: local rotation failed"; [ "$RESULT" -ne 0 ] || RESULT=15; }
 
+[ "$RESULT" -eq 0 ] || fail "incomplete backup ${ARCHIVE_NAME}; inspect stage warnings; local archive preserved" "$RESULT"
 log "ok ${ARCHIVE_NAME}"
 exit 0
