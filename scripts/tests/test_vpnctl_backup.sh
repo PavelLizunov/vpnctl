@@ -195,6 +195,8 @@ assert_contains "$SCP_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite scp command used res
 
 # Check ssh invocation used offsite deploy key
 SSH_CALLS=$(cat "$SSH_LOG")
+assert_contains "$SSH_CALLS" "StrictHostKeyChecking=yes" "Retention requires pinned host keys"
+assert_contains "$SCP_CALLS" "StrictHostKeyChecking=yes" "Delivery requires pinned host keys"
 assert_contains "$SSH_CALLS" "ssh -i $DEPLOY_KEY_FILE" "Primary LAN retention ssh uses resolved deploy key"
 assert_contains "$SSH_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite ssh command used resolved deploy key (-i $DEPLOY_KEY_FILE)"
 
@@ -252,6 +254,71 @@ OUTPUT=$(PATH="$MOCK_BIN:$PATH" \
 TAR_LOG_CONTENT=$(cat "$TAR_ENTRIES_LOG")
 assert_contains "$TAR_LOG_CONTENT" "$DEPLOY_KEY_FILE" "Tar archive input contains resolved deploy key"
 assert_contains "$TAR_LOG_CONTENT" "$DEPLOY_KEY_PUB_FILE" "Tar archive input contains derived public deploy key"
+
+# Failure injection stays entirely inside the existing temporary fixture.
+cat <<'EOF' > "$MOCK_BIN/scp"
+#!/usr/bin/env bash
+case "$*" in
+    *remote.primary*) [ "${FAIL_STAGE:-}" != primary ] ;;
+    *remote.offsite*) [[ "${FAIL_STAGE:-}" != offsite* ]] ;;
+    *) exit 90 ;;
+esac
+EOF
+cat <<'EOF' > "$MOCK_BIN/ssh"
+#!/usr/bin/env bash
+[ "${FAIL_STAGE:-}" != retention ]
+EOF
+cat <<'EOF' > "$MOCK_BIN/find"
+#!/usr/bin/env bash
+[[ "${FAIL_STAGE:-}" != *local-retention* ]] || exit 1
+exec /usr/bin/find "$@"
+EOF
+chmod +x "$MOCK_BIN/find"
+cat <<'EOF' > "$MOCK_BIN/zstd"
+#!/usr/bin/env bash
+printf '%s\n' "$2" > "$COMPRESSION_LOG"
+exec /usr/bin/zstd "$@"
+EOF
+chmod +x "$MOCK_BIN/zstd"
+
+check_result() {
+    local stage="$1" expected="$2" key="$3" offsite="$4"
+    local dest="$TMP_TEST_DIR/case-$stage" status=0
+    OUTPUT=$(env PATH="$MOCK_BIN:$PATH" FAIL_STAGE="$stage" COMPRESSION_LOG="$TMP_TEST_DIR/compression.log" \
+        DB_PATH="$DB_FILE" ENV_FILE="$ENV_FILE" ASSETS_DIR="$ASSETS_DIR" \
+        RECIPIENT_FILE="$RECIPIENT_FILE" BACKUP_DIR="$dest" \
+        DEPLOY_KEY="$key" TARGET_HOST="user@remote.primary" \
+        OFFSITE_HOST="$offsite" TMPDIR="$TMP_TEST_DIR/tmp" \
+        bash "$SCRIPT_PATH" 2>&1) || status=$?
+    assert_eq "$expected" "$status" "$stage has distinct exit status"
+    if [ "$expected" = 13 ]; then
+        assert_eq 0 "$(find "$dest" -name '*.tar.zst.age' | wc -l)" "$stage produces no unusable archive"
+    else
+        assert_eq 1 "$(find "$dest" -name '*.tar.zst.age' | wc -l)" "$stage preserves local archive"
+        assert_eq 600 "$(stat -c %a "$dest"/*.tar.zst.age)" "$stage archive is private"
+    fi
+    if [ "$expected" != 0 ]; then
+        if [[ "$OUTPUT" == *'vpnctl-backup: ok '* ]]; then
+            echo "  [FAIL] $stage falsely reports ok"
+            FAILED=$((FAILED + 1))
+        else
+            PASSED=$((PASSED + 1))
+        fi
+    fi
+}
+check_result primary 11 "$DEPLOY_KEY_FILE" root@remote.offsite
+assert_eq -3 "$(<"$TMP_TEST_DIR/compression.log")" 'Scheduled backup uses measured fast compression'
+check_result offsite 14 "$DEPLOY_KEY_FILE" root@remote.offsite
+check_result retention 15 "$DEPLOY_KEY_FILE" root@remote.offsite
+check_result local-retention 15 "$DEPLOY_KEY_FILE" ""
+check_result offsite-local-retention 14 "$DEPLOY_KEY_FILE" root@remote.offsite
+check_result disabled 0 "$DEPLOY_KEY_FILE" ""
+assert_contains "$OUTPUT" 'off-site push disabled' 'Empty offsite explicitly disables delivery'
+check_result missing-key 13 "$KEY_DIR/missing" root@remote.offsite
+: > "$KEY_DIR/empty"
+check_result empty-key 13 "$KEY_DIR/empty" root@remote.offsite
+ln -s "$DEPLOY_KEY_FILE" "$KEY_DIR/symlink"
+check_result symlink-key 13 "$KEY_DIR/symlink" root@remote.offsite
 
 echo ""
 echo "=== Test Summary: $PASSED passed, $FAILED failed ==="

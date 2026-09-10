@@ -53,6 +53,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: backup script regression tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          bash -n scripts/vpnctl-backup.sh scripts/tests/test_vpnctl_backup.sh
+          bash scripts/tests/test_vpnctl_backup.sh
       - run: cargo test --workspace --all-targets
 
   deny:

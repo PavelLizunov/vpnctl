@@ -10,8 +10,9 @@
     cannot reach ANY VPN node (silent failure).
   - A snapshot has no value without a drill: restore is self-tested in prod
     and byte-equality is CI-protected.
-  - Off-site copy is best-effort but must exist (the LAN box can die with the
-    prod host).
+  - Off-site delivery failure preserves local and primary copies but makes
+    the scheduled job fail (exit 14), rather than claiming full success.
+    Explicit `OFFSITE_HOST=""` disables that stage; disabled is not verified.
 
 ## 2. Interface / Data Contract
 

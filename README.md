@@ -89,6 +89,17 @@ Migration 0056 is additive; binary rollback must use the documented
 [pre-upgrade snapshot restore procedure](docs/specs/backup-restore.md), not assume
 an older binary accepts a database containing a newer migration.
 
+### Scheduled recovery bundles
+
+The scheduled `scripts/vpnctl-backup.sh` creates an encrypted recovery bundle
+separately from the daemon's hourly SQLite snapshots. It requires a nonempty,
+readable deploy key and uses zstd level 3. Failed uploads preserve the local
+archive; an enabled off-site delivery failure exits 14, and retention failure
+exits 15 unless a delivery failure takes precedence. These failures are visible
+in the systemd job result and stage logs, not a new Web status panel.
+`OFFSITE_HOST=""` explicitly disables off-site delivery; it is not proof of an
+off-site copy. See the [backup/restore contract](docs/specs/backup-restore.md).
+
 ### AmneziaWG 2.0 / 3.1 integration
 
 The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,
