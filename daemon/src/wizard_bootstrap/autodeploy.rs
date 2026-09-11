@@ -332,7 +332,7 @@ mod pipeline_tests;
 
 /// Register all requests NOW, before returning the completion future. Dropping
 /// the future does not cancel deployment; concurrent batches share workers.
-pub(crate) fn queue_servers_redeploy(
+pub fn queue_servers_redeploy(
     servers: Vec<Server>,
     inv: &SqliteInventory,
     registry: &Arc<Registry>,

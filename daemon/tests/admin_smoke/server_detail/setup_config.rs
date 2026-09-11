@@ -456,6 +456,47 @@ async fn admin_server_detail_shows_deploy_button() {
 }
 
 #[tokio::test]
+async fn server_detail_renders_live_monitoring_when_deploy_is_in_flight() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let srv_id = ServerId("sb-live".into());
+    s.inv
+        .add_server(&Server {
+            id: srv_id.clone(),
+            address: "203.0.113.8".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+
+    let _guard = vpnctld::wizard_bootstrap::DeployGuard::try_acquire("sb-live")
+        .expect("must acquire deploy permit to simulate in-flight deploy");
+
+    let app = router(s);
+    let html = fetch_html(app, "/admin/servers/sb-live").await;
+
+    assert!(
+        html.contains(r#"data-sse-autostart="/admin/servers/sb-live/deploy/sse""#),
+        "deploy log pane must autostart SSE when deploy is in flight: {html}"
+    );
+    assert!(
+        html.contains("disabled") && html.contains("is-loading"),
+        "deploy button must be disabled and loading when in flight: {html}"
+    );
+    assert!(
+        !html.contains("id=\"pending-deploy-banner\""),
+        "pending-deploy-banner should not be shown while active deploy is running"
+    );
+}
+
+#[tokio::test]
 async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

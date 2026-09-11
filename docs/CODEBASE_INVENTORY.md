@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 404 (271 prod / 133 test)
-- **Total Rust LOC:** 145,885 (87,254 prod / 58,631 test)
+- **Total Rust LOC:** 145,954 (87,282 prod / 58,672 test)
 - **Database Migrations:** 56
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 121
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,773 (20) | 4,847 (12) | **9,620** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 49,117 (144) | 31,587 (59) | **80,704** |
-| **Total** | | | | **87,254 (271)** | **58,631 (133)** | **145,885** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 49,145 (144) | 31,628 (59) | **80,773** |
+| **Total** | | | | **87,282 (271)** | **58,672 (133)** | **145,954** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -36,11 +36,11 @@
 | `crates/kernels/src/caddy/tests.rs` | 1,519 | `crates/kernels` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,481 | `crates/kernels` | Prod |
 | `crates/inventory/src/sqlite/tests.rs` | 1,378 | `crates/inventory` | Prod |
+| `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,369 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,368 | `daemon` | Test |
-| `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,328 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,315 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,239 | `daemon` | Test |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,177 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,205 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,152 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
