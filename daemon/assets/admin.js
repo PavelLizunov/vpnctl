@@ -97,6 +97,12 @@
           try {
             msg = JSON.parse(ev.data).message || msg;
           } catch (_) {}
+          if (msg.indexOf("deploy already running") !== -1) {
+            line("ℹ " + (document.documentElement.lang === "ru" ? "деплой уже выполняется — ожидаем завершения…" : "deploy is already in progress — waiting for completion…"), "var(--ink)");
+            es.close();
+            setTimeout(function () { window.location.reload(); }, 2000);
+            return;
+          }
           line("✗ " + msg, "var(--acc-bad, #97233f)");
         } else {
           line("✗ connection lost — please retry", "var(--acc-bad, #97233f)");
@@ -209,12 +215,19 @@
       line("✓ complete.", "var(--green)");
       es.close();
       if (redirect) setTimeout(function () { window.location = redirect; }, 1400);
+      else setTimeout(function () { window.location.reload(); }, 1400);
     });
     es.addEventListener("error", function (ev) {
       if (done) return;
       var msg = "bootstrap failed — see the log above";
       if (ev && ev.data) {
         try { msg = JSON.parse(ev.data).message || msg; } catch (_) {}
+      }
+      if (msg.indexOf("deploy already running") !== -1) {
+        line("ℹ " + (document.documentElement.lang === "ru" ? "деплой уже выполняется — ожидаем завершения…" : "deploy is already in progress — waiting for completion…"), "var(--ink)");
+        es.close();
+        setTimeout(function () { window.location.reload(); }, 2000);
+        return;
       }
       line("✗ " + msg, "var(--red)");
       es.close();

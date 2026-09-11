@@ -521,7 +521,10 @@ pub(super) async fn server_detail_render(
                        class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                     (icon("rotate-cw")) span data-icon-label { (crate::i18n::tr(lang, "update kernels", "обновить ядра")) }
                 }
+                @let is_guard_active = crate::wizard_bootstrap::DeployGuard::is_active(&server.id.0);
+                @let is_deploying = is_guard_active || matches!(operation_status.as_ref().map(|s| s.phase), Some(crate::wizard_bootstrap::AutodeployPhase::Queued) | Some(crate::wizard_bootstrap::AutodeployPhase::Running));
                 button id="deploy-button" type="button"
+                       disabled[is_deploying]
                        data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
                        data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
                        data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
@@ -530,8 +533,12 @@ pub(super) async fn server_detail_render(
                            "Full deploy: streamed live — mint missing per-protocol secrets, SSH into the node, run ensure_installed + apply_config for every enabled kernel, and restart services. Each step and the final status appear in the log below. Re-clicking is safe.",
                            "Полный деплой с живым логом: дораздать недостающие секреты, подключиться к ноде по SSH, выполнить ensure_installed + apply_config для каждого включённого ядра и перезапустить сервисы. Каждый шаг и итог появятся в логе ниже. Повторный клик безопасен.",
                        ))
-                       class="ed-abtn ed-abtn--recovery ed-abtn--sm" {
-                    (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
+                       class={"ed-abtn ed-abtn--recovery ed-abtn--sm" (if is_deploying { " is-loading" } else { "" })} {
+                    @if is_deploying {
+                        (icon("rotate-cw")) span data-icon-label { (crate::i18n::tr(lang, "deploying… (watch the log)", "деплоится… (смотри лог)")) }
+                    } @else {
+                        (icon("rocket")) span data-icon-label { (crate::i18n::t(lang, crate::i18n::K::BtnDeploy)) }
+                    }
                 }
                 noscript {
                     form method="post"
@@ -574,11 +581,15 @@ pub(super) async fn server_detail_render(
         // deploy, so the node's running config doesn't match inventory.
         // The revoke case is the dangerous one: the revoked user's UUID
         // is STILL ACCEPTED by the node until the deploy below runs.
-        @let deploy_state = match operation_status.as_ref().map(|s| s.phase) {
-            Some(crate::wizard_bootstrap::AutodeployPhase::Queued) => "queued",
-            Some(crate::wizard_bootstrap::AutodeployPhase::Running) => "running",
-            Some(crate::wizard_bootstrap::AutodeployPhase::Failed) if pending_deploy != Some(false) => "failed",
-            _ => match pending_deploy { Some(true) => "pending", Some(false) => "applied", None => "unknown" },
+        @let deploy_state = if is_guard_active {
+            "running"
+        } else {
+            match operation_status.as_ref().map(|s| s.phase) {
+                Some(crate::wizard_bootstrap::AutodeployPhase::Queued) => "queued",
+                Some(crate::wizard_bootstrap::AutodeployPhase::Running) => "running",
+                Some(crate::wizard_bootstrap::AutodeployPhase::Failed) if pending_deploy != Some(false) => "failed",
+                _ => match pending_deploy { Some(true) => "pending", Some(false) => "applied", None => "unknown" },
+            }
         };
         section id="deployment-status" data-deploy-state=(deploy_state) class="ed-alert" role="status" {
             b { (crate::i18n::tr(lang, "Configuration: ", "Конфигурация: ")) }
@@ -596,7 +607,7 @@ pub(super) async fn server_detail_render(
                 }
             }
         }
-        @if pending_deploy == Some(true) {
+        @if pending_deploy == Some(true) && !is_deploying {
             div id="pending-deploy-banner"
                 style="margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--warm); border-left-width: 3px; background: var(--paper-tint); font-family: var(--mono); font-size: 11px; color: var(--ink);" {
                 b style="color: var(--warm);" { (icon("triangle-alert")) (crate::i18n::tr(lang, "config not yet deployed", "конфиг ещё не задеплоен")) }
@@ -608,8 +619,16 @@ pub(super) async fn server_detail_render(
                 ))
             }
         }
-        pre id="deploy-log" hidden
-            style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
+        @if is_deploying {
+            pre id="deploy-log"
+                data-sse-autostart=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
+                style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {
+                (crate::i18n::tr(lang, "connecting to live deployment stream…", "подключаюсь к живому потоку деплоя…"))
+            }
+        } @else {
+            pre id="deploy-log" hidden
+                style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
+        }
         pre id="update-kernels-log" hidden
             style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {}
 
@@ -808,17 +827,26 @@ pub(super) async fn server_detail_render(
                     span style="font-family: var(--mono); font-size: 11px; color: var(--warm);" {
                         (icon("triangle-alert")) b {
                             (pending_users.len())
-                            (crate::i18n::tr(lang, " grant(s) not yet deployed: ", " грант(ов) ещё не задеплоено: "))
+                            @if is_deploying {
+                                (crate::i18n::tr(lang, " grant(s) deploying right now: ", " грант(ов) деплоится прямо сейчас: "))
+                            } @else {
+                                (crate::i18n::tr(lang, " grant(s) not yet deployed: ", " грант(ов) ещё не задеплоено: "))
+                            }
                         }
                         (pending_users.iter().map(|u| u.0.as_str()).collect::<Vec<_>>().join(", "))
                     }
                     div style="margin-left: auto;" {
                         button type="button"
+                                disabled[is_deploying]
                                 data-sse-url=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
                                 data-busy-label=(crate::i18n::tr(lang, "deploying… (watch the log)", "деплою… (смотри лог)"))
                                 data-retry-label=(crate::i18n::tr(lang, "retry deploy", "повторить деплой"))
-                                class="ed-abtn ed-abtn--warning ed-abtn--sm" {
-                            (icon("rocket")) span data-icon-label { (crate::i18n::tr(lang, "deploy now", "задеплоить сейчас")) }
+                                class={"ed-abtn ed-abtn--warning ed-abtn--sm" (if is_deploying { " is-loading" } else { "" })} {
+                            @if is_deploying {
+                                (icon("rotate-cw")) span data-icon-label { (crate::i18n::tr(lang, "deploying…", "деплоится…")) }
+                            } @else {
+                                (icon("rocket")) span data-icon-label { (crate::i18n::tr(lang, "deploy now", "задеплоить сейчас")) }
+                            }
                         }
                     }
                 }

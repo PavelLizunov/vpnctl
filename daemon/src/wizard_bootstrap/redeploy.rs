@@ -15,7 +15,7 @@ use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
 #[path = "autodeploy.rs"]
 mod autodeploy;
-pub(crate) use autodeploy::queue_servers_redeploy;
+pub use autodeploy::queue_servers_redeploy;
 pub use autodeploy::{AutodeployPhase, AutodeployStatus, autodeploy_status};
 
 /// Re-deploy an EXISTING server, streaming per-step progress over SSE
