@@ -3,6 +3,7 @@
 //!
 //! Extracted from `legacy.rs` as part of the admin submodules refactor.
 
+use crate::handlers::admin::audit::sanitize_header_filename;
 use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -118,7 +119,8 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+    let safe_name = sanitize_header_filename(&name);
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     resp
