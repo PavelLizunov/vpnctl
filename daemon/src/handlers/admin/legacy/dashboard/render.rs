@@ -77,8 +77,8 @@ fn dashboard_summary_bar(
     html! {
         div.ed-sumbar {
             h1.ed-sumbar__h {
-                (tr(lang, "fleet ", "флот "))
-                em { (tr(lang, "overview", "инфраструктура")) }
+                (tr(lang, "homelab ", "homelab "))
+                em { (tr(lang, "at a glance", "одним взглядом")) }
             }
             span.ed-tip title=(tip) { (status("info", lang, "Information", "Информация")) }
             span.ed-sumbar__stat {
