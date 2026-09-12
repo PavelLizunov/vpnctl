@@ -151,6 +151,16 @@ pub(crate) async fn servers(
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
+
+        div.ed-tabs style="margin-bottom: 18px;" {
+            a.ed-tab.ed-tab--on href="/admin/servers" {
+                (crate::i18n::tr(lang, "All servers", "Все серверы"))
+            }
+            a.ed-tab href="/admin/servers/billing" {
+                (crate::i18n::tr(lang, "Billing & Rental", "Оплата и аренда"))
+            }
+        }
+
         div.ed-headrow {
             h1.ed-sumbar__h {
                 (server_list.len()) " "
@@ -287,30 +297,32 @@ pub(crate) async fn servers(
                 ))
             }
         } @else {
-            table.ed-grid {
-                thead {
-                    tr {
-                        th style="width: 34px;" { "№" }
-                        th { (crate::i18n::tr(lang, "server", "сервер")) }
-                        th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
-                        th { (crate::i18n::tr(lang, "hoster", "хостер")) }
-                        th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
-                        th { (crate::i18n::tr(lang, "protocols", "протоколы")) }
-                        th { (crate::i18n::tr(lang, "fingerprint", "отпечаток")) }
-                        th.num { (crate::i18n::tr(lang, "usage ×", "коэф. ×")) }
-                        th {}
+            div.ed-grid-wrap {
+                table.ed-grid {
+                    thead {
+                        tr {
+                            th style="width: 34px;" { "№" }
+                            th { (crate::i18n::tr(lang, "server", "сервер")) }
+                            th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
+                            th { (crate::i18n::tr(lang, "hoster", "хостер")) }
+                            th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
+                            th { (crate::i18n::tr(lang, "protocols", "протоколы")) }
+                            th { (crate::i18n::tr(lang, "fingerprint", "отпечаток")) }
+                            th.num { (crate::i18n::tr(lang, "usage ×", "коэф. ×")) }
+                            th {}
+                        }
                     }
-                }
-                tbody {
-                    @for (idx, s) in server_list.iter().enumerate() {
-                        (server_row(
-                            idx,
-                            s,
-                            user_counts.get(&s.id).copied().unwrap_or(0),
-                            &hidden_matrix,
-                            latest_health.get(&s.id),
-                            lang,
-                        ))
+                    tbody {
+                        @for (idx, s) in server_list.iter().enumerate() {
+                            (server_row(
+                                idx,
+                                s,
+                                user_counts.get(&s.id).copied().unwrap_or(0),
+                                &hidden_matrix,
+                                latest_health.get(&s.id),
+                                lang,
+                            ))
+                        }
                     }
                 }
             }

@@ -356,6 +356,12 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    let server_billing = state
+        .inv
+        .get_server_billing(&sid)
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     // ── PR-Server informativeness cards ─────────────────────────────
     // All three SQL-backed loads are best-effort: a query error logs +
     // empty-states the relevant card rather than 500-ing the whole
@@ -1176,6 +1182,8 @@ pub(super) async fn server_detail_render(
             (server_detail_client_detour_section(&server, client_detour_via.as_ref(), &client_detour_candidates, lang))
             // Display name — operator subscription label (migration 0029).
             (server_detail_display_name_section(&server, display_name.as_deref(), lang))
+            // Server billing — rental and payment tracker (migration 0057).
+            (server_detail_billing_section(&server, server_billing.as_ref(), lang))
             // Auto-suppress from subscription when unreachable (migration 0030).
             (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
             // Push deploy key — recovery for quick-add/migrate nodes whose

@@ -272,95 +272,97 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     // A node on any OTHER version gets a warm «≠» drift marker.
     let majority_version = fleet_majority_version(kernel_versions);
     html! {
-        section id="fleet-at-a-glance" style="margin-top: 18px;" {
-            div.ed-art-eyebrow {
-                (tr(lang, "Fleet", "Флот")) " "
-                span.ed-tip title=(tr(
-                    lang,
-                    "One row per server — sing-box state, disk/memory pressure (warm cell above 70%), live connections, 24h traffic with each node's share of the busiest, the on-node sing-box version (≠ marks drift from the fleet majority) and probe freshness. Open a server for the full drill-in.",
-                    "Одна строка на сервер — состояние sing-box, нагрузка диска/памяти (тёплая ячейка выше 70%), живые подключения, трафик за 24ч с долей от самой нагруженной ноды, версия sing-box на ноде (≠ помечает дрейф от большинства флота) и свежесть пробы. Открой сервер для деталей.",
-                )) { (status("info", lang, "Information", "Информация")) }
-            }
-            table.ed-grid style="margin-top: 8px;" {
-                thead {
-                    tr {
-                        th { (tr(lang, "server", "сервер")) }
-                        th { (tr(lang, "state", "состояние")) }
-                        th.num { (tr(lang, "disk", "диск")) }
-                        th.num { (tr(lang, "mem", "память")) }
-                        th.num { (tr(lang, "conns", "подкл.")) }
-                        th.num { (tr(lang, "traffic 24h", "трафик 24ч")) }
-                        th { (tr(lang, "share of traffic", "доля трафика")) }
-                        th { (tr(lang, "kernel versions", "версии ядер")) }
-                        th.num { (tr(lang, "probe", "проба")) }
-                    }
+            section id="fleet-at-a-glance" style="margin-top: 18px;" {
+                div.ed-art-eyebrow {
+                    (tr(lang, "Fleet", "Флот")) " "
+                    span.ed-tip title=(tr(
+                        lang,
+                        "One row per server — sing-box state, disk/memory pressure (warm cell above 70%), live connections, 24h traffic with each node's share of the busiest, the on-node sing-box version (≠ marks drift from the fleet majority) and probe freshness. Open a server for the full drill-in.",
+                        "Одна строка на сервер — состояние sing-box, нагрузка диска/памяти (тёплая ячейка выше 70%), живые подключения, трафик за 24ч с долей от самой нагруженной ноды, версия sing-box на ноде (≠ помечает дрейф от большинства флота) и свежесть пробы. Открой сервер для деталей.",
+                    )) { (status("info", lang, "Information", "Информация")) }
                 }
-                tbody {
-                    @for s in servers {
-                        @let health = latest_health
-                            .iter()
-                            .find(|(id, _)| *id == s.id)
-                            .and_then(|(_, h)| h.as_ref());
-                        @let conns = active_conns
-                            .iter()
-                            .find(|(id, _)| *id == s.id)
-                            .and_then(|(_, c)| *c);
-                        @let kv_json = kernel_versions
-                            .iter()
-                            .find(|(id, _)| *id == s.id)
-                            .and_then(|(_, j)| j.as_deref());
-                        @let traffic = traffic_24h.get(&s.id).copied();
-                        @let busiest = max_traffic > 0 && traffic == Some(max_traffic);
-                        @let disk_pct = health.and_then(pct_disk);
-                        @let mem_pct = health.and_then(pct_mem);
+                div.ed-grid-wrap {
+                    table.ed-grid style="margin-top: 8px;" {
+                    thead {
                         tr {
-                            td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) { (s.id.0) } }
-                            td.ed-grid__sm {
-                                @match health.and_then(|h| h.sing_box_active) {
-                                    Some(true) => span.ed-stat.ed-stat--active { (icon("circle")) (tr(lang, "up", "работает")) },
-                                    Some(false) => span.ed-stat.ed-stat--failed { (icon("circle-x")) (tr(lang, "down", "не работает")) },
-                                    None => span.ed-grid__mut { (dash) },
+                            th { (tr(lang, "server", "сервер")) }
+                            th { (tr(lang, "state", "состояние")) }
+                            th.num { (tr(lang, "disk", "диск")) }
+                            th.num { (tr(lang, "mem", "память")) }
+                            th.num { (tr(lang, "conns", "подкл.")) }
+                            th.num { (tr(lang, "traffic 24h", "трафик 24ч")) }
+                            th { (tr(lang, "share of traffic", "доля трафика")) }
+                            th { (tr(lang, "kernel versions", "версии ядер")) }
+                            th.num { (tr(lang, "probe", "проба")) }
+                        }
+                    }
+                    tbody {
+                        @for s in servers {
+                            @let health = latest_health
+                                .iter()
+                                .find(|(id, _)| *id == s.id)
+                                .and_then(|(_, h)| h.as_ref());
+                            @let conns = active_conns
+                                .iter()
+                                .find(|(id, _)| *id == s.id)
+                                .and_then(|(_, c)| *c);
+                            @let kv_json = kernel_versions
+                                .iter()
+                                .find(|(id, _)| *id == s.id)
+                                .and_then(|(_, j)| j.as_deref());
+                            @let traffic = traffic_24h.get(&s.id).copied();
+                            @let busiest = max_traffic > 0 && traffic == Some(max_traffic);
+                            @let disk_pct = health.and_then(pct_disk);
+                            @let mem_pct = health.and_then(pct_mem);
+                            tr {
+                                td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) { (s.id.0) } }
+                                td.ed-grid__sm {
+                                    @match health.and_then(|h| h.sing_box_active) {
+                                        Some(true) => span.ed-stat.ed-stat--active { (icon("circle")) (tr(lang, "up", "работает")) },
+                                        Some(false) => span.ed-stat.ed-stat--failed { (icon("circle-x")) (tr(lang, "down", "не работает")) },
+                                        None => span.ed-grid__mut { (dash) },
+                                    }
                                 }
-                            }
-                            td class=(if disk_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
-                                @match disk_pct {
-                                    Some(p) => { (p) "%" @if p > 70 { (status("triangle-alert", lang, "High usage", "Высокая нагрузка")) } },
-                                    None => span.ed-grid__mut { (dash) },
+                                td class=(if disk_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
+                                    @match disk_pct {
+                                        Some(p) => { (p) "%" @if p > 70 { (status("triangle-alert", lang, "High usage", "Высокая нагрузка")) } },
+                                        None => span.ed-grid__mut { (dash) },
+                                    }
                                 }
-                            }
-                            td class=(if mem_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
-                                @match mem_pct {
-                                    Some(p) => { (p) "%" @if p > 70 { (status("triangle-alert", lang, "High usage", "Высокая нагрузка")) } },
-                                    None => span.ed-grid__mut { (dash) },
+                                td class=(if mem_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
+                                    @match mem_pct {
+                                        Some(p) => { (p) "%" @if p > 70 { (status("triangle-alert", lang, "High usage", "Высокая нагрузка")) } },
+                                        None => span.ed-grid__mut { (dash) },
+                                    }
                                 }
-                            }
-                            td.num {
-                                @match conns {
-                                    Some(c) => @if busiest { b { (c) } } @else { (c) },
-                                    None => span.ed-grid__mut { (dash) },
+                                td.num {
+                                    @match conns {
+                                        Some(c) => @if busiest { b { (c) } } @else { (c) },
+                                        None => span.ed-grid__mut { (dash) },
+                                    }
                                 }
-                            }
-                            td.num {
-                                @match traffic {
-                                    Some(b) => @if busiest { b { (humanize_bytes(b)) } } @else { (humanize_bytes(b)) },
-                                    None => span.ed-grid__mut { (dash) },
+                                td.num {
+                                    @match traffic {
+                                        Some(b) => @if busiest { b { (humanize_bytes(b)) } } @else { (humanize_bytes(b)) },
+                                        None => span.ed-grid__mut { (dash) },
+                                    }
                                 }
-                            }
-                            td {
-                                @if let Some(b) = traffic {
-                                    @let share = b.saturating_mul(100).checked_div(max_traffic).unwrap_or(0);
-                                    div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} };
-                                } @else {
-                                    span.ed-grid__mut { (dash) }
+                                td {
+                                    @if let Some(b) = traffic {
+                                        @let share = b.saturating_mul(100).checked_div(max_traffic).unwrap_or(0);
+                                        div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} };
+                                    } @else {
+                                        span.ed-grid__mut { (dash) }
+                                    }
                                 }
-                            }
-                            td.ed-grid__sm {
-                                (kernel_versions_inline(s, kv_json, majority_version.as_deref()))
-                            }
-                            td.num.ed-grid__mut.ed-grid__sm {
-                                @match health.map(|h| h.ts) {
-                                    Some(ts) => (humanize_age(now - ts, lang)),
-                                    None => (dash),
+                                td.ed-grid__sm {
+                                    (kernel_versions_inline(s, kv_json, majority_version.as_deref()))
+                                }
+                                td.num.ed-grid__mut.ed-grid__sm {
+                                    @match health.map(|h| h.ts) {
+                                        Some(ts) => (humanize_age(now - ts, lang)),
+                                        None => (dash),
+                                    }
                                 }
                             }
                         }

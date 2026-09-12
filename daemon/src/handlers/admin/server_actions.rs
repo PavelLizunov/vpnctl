@@ -5,6 +5,7 @@
 //! `servers.rs`. Extracted from `legacy.rs` as part of the admin
 //! submodules refactor.
 
+mod billing;
 mod config;
 mod deploy;
 mod grants;
@@ -12,6 +13,7 @@ mod kernels;
 mod lifecycle;
 mod protocols;
 
+pub(crate) use self::billing::*;
 pub(crate) use self::config::*;
 pub(crate) use self::deploy::*;
 pub(crate) use self::grants::*;
