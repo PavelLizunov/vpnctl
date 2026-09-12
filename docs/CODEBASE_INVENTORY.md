@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 408 (274 prod / 134 test)
-- **Total Rust LOC:** 147,764 (88,607 prod / 59,157 test)
-- **Database Migrations:** 57
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 125
+- **Tracked Rust Files:** 410 (276 prod / 134 test)
+- **Total Rust LOC:** 149,410 (90,173 prod / 59,237 test)
+- **Database Migrations:** 58
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
 ## Workspace Crates & Targets
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 15,549 (51) | 17,998 (47) | **33,547** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 16,629 (52) | 18,043 (47) | **34,672** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,893 (20) | 4,847 (12) | **9,740** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 49,970 (146) | 31,842 (59) | **81,812** |
-| **Total** | | | | **88,607 (274)** | **59,157 (134)** | **147,764** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,456 (147) | 31,877 (59) | **82,333** |
+| **Total** | | | | **90,173 (276)** | **59,237 (134)** | **149,410** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -43,20 +43,20 @@
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,213 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,152 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
+| `crates/inventory/src/sqlite/models.rs` | 1,035 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
 | `daemon/src/quality_poller.rs` | 1,010 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/servers.rs` | 992 | `daemon` | Test |
 | `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 958 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 957 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
 | `crates/protocols/tests/spec_amneziawg_versions.rs` | 919 | `crates/protocols` | Test |
-| `crates/ssh/src/subprocess.rs` | 901 | `crates/ssh` | Prod |
 
-## Database Migrations (57)
+## Database Migrations (58)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -117,8 +117,9 @@
 | `0055` | vpn counter baselines | `crates/inventory/migrations/0055_vpn_counter_baselines.sql` | 21 |
 | `0056` | quality measurement population | `crates/inventory/migrations/0056_quality_measurement_population.sql` | 24 |
 | `0057` | server billing | `crates/inventory/migrations/0057_server_billing.sql` | 16 |
+| `0058` | currency exchange | `crates/inventory/migrations/0058_currency_exchange.sql` | 78 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (125)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (127)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -152,6 +153,8 @@
 | `GET` | `/admin/servers/` | `admin::servers` |
 | `GET` | `/admin/servers/billing` | `admin::servers_billing` |
 | `GET` | `/admin/servers/billing/` | `admin::servers_billing` |
+| `POST` | `/admin/servers/billing/refresh-rates` | `admin::billing_refresh_rates` |
+| `POST` | `/admin/servers/billing/settings` | `admin::billing_update_settings` |
 | `GET` | `/admin/servers/deploy-all/sse` | `admin::servers_deploy_all_sse` |
 | `GET` | `/admin/servers/new` | `admin::wizard_new` |
 | `POST` | `/admin/servers/new` | `admin::wizard_new_submit` |

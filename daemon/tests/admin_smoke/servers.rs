@@ -954,4 +954,39 @@ async fn admin_servers_billing_page_and_actions() {
         html_adv.contains("15.11.2026"),
         "due date should advance to November: {html_adv}"
     );
+
+    // 5. POST /admin/servers/billing/settings sets display currency and markup coefficient
+    let resp_settings = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/billing/settings")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("display_currency=RUB&markup_coeff=1.07"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_settings.status(), StatusCode::SEE_OTHER);
+
+    // Insert a known EUR/RUB rate (98.00)
+    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+        base_currency: "EUR".into(),
+        target_currency: "RUB".into(),
+        rate_micros: 98_000_000,
+        source: "test".into(),
+        fetched_at: "2026-09-12T00:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+
+    let html_rub = fetch_html(app.clone(), "/admin/servers/billing").await;
+    // 5.50 EUR * 98.0 * 1.07 = 576.73 RUB
+    assert!(
+        html_rub.contains("576.73 ₽"),
+        "converted RUB amount missing: {html_rub}"
+    );
 }

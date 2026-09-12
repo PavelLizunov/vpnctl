@@ -50,6 +50,25 @@ impl SqliteInventory {
     ) -> Result<ServerBilling> {
         validate_due_date(&input.due_date)?;
 
+        // Pre-compute conversion outside the transaction to prevent pool deadlock
+        let conv_snapshot = if let Some(count) = input.initial_payments_count {
+            if count > 0 {
+                let settings = self.get_currency_settings().await.unwrap_or_default();
+                self.convert_amount(
+                    input.amount_cents,
+                    &input.currency,
+                    &settings.display_currency,
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut tx = self.pool.begin().await?;
 
         // Server must exist
@@ -110,6 +129,48 @@ impl SqliteInventory {
             updated_at: row.try_get("updated_at")?,
         };
 
+        if let Some(count) = input.initial_payments_count {
+            if count > 0 {
+                let existing_count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM server_payments WHERE server_id = ?1")
+                        .bind(&sid.0)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap_or(0);
+
+                if existing_count == 0 {
+                    let (conv_minor, disp_cur, rate_used, markup_used) = match &conv_snapshot {
+                        Some(c) => (
+                            Some(c.amount_minor),
+                            Some(c.target_currency.as_str()),
+                            Some(c.rate_micros),
+                            Some(c.markup_bps),
+                        ),
+                        None => (None, None, None, None),
+                    };
+
+                    for _ in 0..count.min(120) {
+                        sqlx::query(
+                            "INSERT INTO server_payments
+                                (server_id, amount_minor, currency, cycle,
+                                 converted_minor, display_currency, rate_micros_used, markup_bps_used)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        )
+                        .bind(&sid.0)
+                        .bind(input.amount_cents)
+                        .bind(&input.currency)
+                        .bind(input.billing_cycle.as_str())
+                        .bind(conv_minor)
+                        .bind(disp_cur)
+                        .bind(rate_used)
+                        .bind(markup_used)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                }
+            }
+        }
+
         // Write audit log
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload)
@@ -126,28 +187,40 @@ impl SqliteInventory {
 
     /// Advance the server's billing due date by its recurring cycle (+1 month, +3 months, etc.).
     pub async fn advance_server_billing_cycle(&self, sid: &ServerId) -> Result<ServerBilling> {
-        let mut tx = self.pool.begin().await?;
-
-        let row = sqlx::query(
-            "SELECT server_id, due_date, billing_cycle, amount_cents, currency, auto_renew, billing_url, notes, updated_at
-             FROM server_billing
-             WHERE server_id = ?1",
-        )
-        .bind(&sid.0)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let Some(r) = row else {
+        // Look up current billing outside transaction
+        let current_billing = self.get_server_billing(sid).await?;
+        let Some(curr) = current_billing else {
             return Err(SqliteInventoryError::Invalid(format!(
                 "billing record for server '{}' does not exist; configure billing before advancing",
                 sid.0
             )));
         };
 
-        let current_due: String = r.try_get("due_date")?;
-        let cycle_str: String = r.try_get("billing_cycle")?;
-        let cycle: BillingCycle = cycle_str.parse()?;
-        let next_due = advance_date_by_cycle(&current_due, cycle)?;
+        let next_due = advance_date_by_cycle(&curr.due_date, curr.billing_cycle)?;
+
+        // Pre-compute conversion outside the transaction to prevent pool deadlock
+        let settings = self.get_currency_settings().await.unwrap_or_default();
+        let conv = self
+            .convert_amount(
+                curr.amount_cents,
+                &curr.currency,
+                &settings.display_currency,
+            )
+            .await
+            .ok()
+            .flatten();
+
+        let (conv_minor, disp_cur, rate_used, markup_used) = match &conv {
+            Some(c) => (
+                Some(c.amount_minor),
+                Some(c.target_currency.as_str()),
+                Some(c.rate_micros),
+                Some(c.markup_bps),
+            ),
+            None => (None, None, None, None),
+        };
+
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "UPDATE server_billing
@@ -159,26 +232,34 @@ impl SqliteInventory {
         .execute(&mut *tx)
         .await?;
 
-        let updated_row = sqlx::query(
-            "SELECT server_id, due_date, billing_cycle, amount_cents, currency, auto_renew, billing_url, notes, updated_at
-             FROM server_billing
-             WHERE server_id = ?1",
+        // Snapshot payment in server_payments for immutable historical Total Spend
+        sqlx::query(
+            "INSERT INTO server_payments
+                (server_id, amount_minor, currency, cycle,
+                 converted_minor, display_currency, rate_micros_used, markup_bps_used)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&sid.0)
-        .fetch_one(&mut *tx)
+        .bind(curr.amount_cents)
+        .bind(&curr.currency)
+        .bind(curr.billing_cycle.as_str())
+        .bind(conv_minor)
+        .bind(disp_cur)
+        .bind(rate_used)
+        .bind(markup_used)
+        .execute(&mut *tx)
         .await?;
 
-        let auto_renew: i64 = updated_row.try_get("auto_renew")?;
         let updated = ServerBilling {
-            server_id: ServerId(updated_row.try_get("server_id")?),
-            due_date: updated_row.try_get("due_date")?,
-            billing_cycle: cycle,
-            amount_cents: updated_row.try_get("amount_cents")?,
-            currency: updated_row.try_get("currency")?,
-            auto_renew: auto_renew == 1,
-            billing_url: updated_row.try_get("billing_url")?,
-            notes: updated_row.try_get("notes")?,
-            updated_at: updated_row.try_get("updated_at")?,
+            server_id: sid.clone(),
+            due_date: next_due.clone(),
+            billing_cycle: curr.billing_cycle,
+            amount_cents: curr.amount_cents,
+            currency: curr.currency,
+            auto_renew: curr.auto_renew,
+            billing_url: curr.billing_url,
+            notes: curr.notes,
+            updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
         sqlx::query(
@@ -188,9 +269,9 @@ impl SqliteInventory {
         .bind(&sid.0)
         .bind(
             serde_json::to_string(&serde_json::json!({
-                "previous_due_date": current_due,
+                "previous_due_date": curr.due_date,
                 "new_due_date": next_due,
-                "cycle": cycle.as_str(),
+                "cycle": curr.billing_cycle.as_str(),
             }))
             .unwrap_or_default(),
         )

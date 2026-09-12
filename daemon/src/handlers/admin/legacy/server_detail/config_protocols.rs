@@ -372,15 +372,11 @@ pub(crate) fn server_detail_billing_section(
 
             div {
                 label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Currency", "Валюта"))
+                    (tr(lang, "Currency (ISO 4217)", "Валюта (ISO 4217)"))
                 }
-                select name="currency" style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
-                    @let cur_curr = current.map(|b| b.currency.as_str()).unwrap_or("EUR");
-                    option value="EUR" selected[cur_curr == "EUR"] { "EUR (€)" }
-                    option value="USD" selected[cur_curr == "USD"] { "USD ($)" }
-                    option value="RUB" selected[cur_curr == "RUB"] { "RUB (₽)" }
-                    option value="CHF" selected[cur_curr == "CHF"] { "CHF" }
-                }
+                input list="currency_list" name="currency" maxlength="8"
+                       value=(current.map(|b| b.currency.as_str()).unwrap_or("EUR"))
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase;" {}
             }
 
             div {
@@ -393,6 +389,14 @@ pub(crate) fn server_detail_billing_section(
             }
 
             div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Past cycles paid", "Оплачено ранее циклов"))
+                }
+                input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+            }
+
+            div style="grid-column: 1 / -1;" {
                 label style="display: block; color: var(--mute); margin-bottom: 2px;" {
                     (tr(lang, "Notes / contract", "Заметки / договор"))
                 }

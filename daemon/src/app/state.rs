@@ -216,6 +216,11 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         deploy_key_path.clone(),
     ));
 
+    // Periodic currency exchange rate poller.
+    drop(crate::exchange_rate_poller::spawn_exchange_rate_poller(
+        inv.clone(),
+    ));
+
     // Phase Track-1 back-pressure (audit-fix B + retroactive review #3
     // / security #2): a dedicated writer task drains a bounded mpsc
     // channel into `sub_access_log`. Without this, an attacker
