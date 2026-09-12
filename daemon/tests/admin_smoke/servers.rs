@@ -874,3 +874,84 @@ async fn kernel_quality_release_renders_all_kernel_versions() {
     assert!(list_ru.contains("Версии ядер"));
     assert!(list_ru.contains(r#"class="ed-kvers""#));
 }
+
+#[tokio::test]
+async fn admin_servers_billing_page_and_actions() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    inv.add_server(&Server {
+        id: ServerId("srv-bill-1".into()),
+        address: "203.0.113.101".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    let app = router(s);
+
+    // 1. GET /admin/servers/billing initially renders unconfigured state
+    let html = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(html.contains("Server rental &amp; payment schedule"));
+    assert!(html.contains("srv-bill-1"));
+    assert!(html.contains("unconfigured"));
+
+    // 2. POST /admin/servers/{id}/billing sets parameters
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/srv-bill-1/billing")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("due_date=2026-10-15&billing_cycle=monthly&amount=5.50&currency=EUR&auto_renew=1&billing_url=https%3A%2F%2Fexample.com%2Fbilling&notes=Order123"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // 3. GET /admin/servers/billing shows updated info
+    let html_after = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(html_after.contains("5.50 €"), "amount missing in html");
+    assert!(html_after.contains("Order123"), "notes missing in html");
+    assert!(
+        html_after.contains("15.10.2026"),
+        "due date missing in html"
+    );
+    assert!(html_after.contains("Order123"));
+    assert!(html_after.contains("15.10.2026"));
+
+    // 4. POST /admin/servers/{id}/billing/advance advances due date by 1 month
+    let resp_adv = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/srv-bill-1/billing/advance")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_adv.status(), StatusCode::SEE_OTHER);
+
+    let html_adv = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(
+        html_adv.contains("15.11.2026"),
+        "due date should advance to November: {html_adv}"
+    );
+}

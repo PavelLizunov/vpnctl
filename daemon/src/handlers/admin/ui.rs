@@ -8,7 +8,7 @@ pub(crate) fn glyph(size: u32) -> Markup {
     let stroke = 1.8;
     let r = 2.4;
     html! {
-        svg width=(size) height=(size) viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:block" {
+        svg width=(size) height=(size) viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:inline-block; vertical-align:middle;" {
             path d="M8 4 H5 V20 H8" stroke="currentColor" stroke-width=(stroke) stroke-linecap="round" fill="none" {}
             path d="M16 4 H19 V20 H16" stroke="currentColor" stroke-width=(stroke) stroke-linecap="round" fill="none" {}
             circle cx="12" cy="12" r=(r) fill="currentColor" style="fill: color-mix(in oklab, var(--acc) 55%, var(--paper))" {}

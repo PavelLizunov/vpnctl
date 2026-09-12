@@ -6,6 +6,7 @@
 pub(crate) mod alerts;
 pub(crate) mod audit;
 pub(crate) mod backup;
+pub(crate) mod billing;
 pub(crate) mod boosty;
 pub(crate) mod helpers;
 pub(crate) mod icons;
@@ -23,6 +24,7 @@ pub(crate) mod users;
 pub(crate) use alerts::*;
 pub(crate) use audit::*;
 pub(crate) use backup::*;
+pub(crate) use billing::*;
 pub(crate) use boosty::*;
 pub(crate) use helpers::*;
 pub(crate) use legacy::*;

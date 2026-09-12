@@ -165,5 +165,12 @@ done
 SUCCESS=1
 trap - EXIT HUP INT TERM
 rm -f "${BACKUPS[@]}"
+
+# Ensure web assets are world-readable so unprivileged daemon can serve them.
+ASSETS_DIR=${VPNCTL_ASSETS_DST:-/opt/vpnctl/assets}
+if [ -d "$ASSETS_DIR" ]; then
+    chmod -R a+rX "$ASSETS_DIR"
+fi
+
 log "ok: control-plane and node artifacts installed from the same revision"
 log "next: sudo systemctl restart vpnctld"

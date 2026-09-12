@@ -795,3 +795,92 @@ impl std::str::FromStr for ServerRole {
         }
     }
 }
+
+/// Server billing recurring cycle options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BillingCycle {
+    #[default]
+    Monthly,
+    Quarterly,
+    SemiAnnual,
+    Annual,
+}
+
+impl BillingCycle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Monthly => "monthly",
+            Self::Quarterly => "quarterly",
+            Self::SemiAnnual => "semi-annual",
+            Self::Annual => "annual",
+        }
+    }
+
+    pub fn months(&self) -> u32 {
+        match self {
+            Self::Monthly => 1,
+            Self::Quarterly => 3,
+            Self::SemiAnnual => 6,
+            Self::Annual => 12,
+        }
+    }
+}
+
+impl std::fmt::Display for BillingCycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for BillingCycle {
+    type Err = SqliteInventoryError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "monthly" => Ok(Self::Monthly),
+            "quarterly" => Ok(Self::Quarterly),
+            "semi-annual" => Ok(Self::SemiAnnual),
+            "annual" => Ok(Self::Annual),
+            other => Err(SqliteInventoryError::Invalid(format!(
+                "invalid billing cycle '{other}'"
+            ))),
+        }
+    }
+}
+
+/// Stored server billing metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerBilling {
+    pub server_id: ServerId,
+    pub due_date: String,
+    pub billing_cycle: BillingCycle,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub auto_renew: bool,
+    pub billing_url: Option<String>,
+    pub notes: Option<String>,
+    pub updated_at: String,
+}
+
+/// Input payload to update or insert a server's billing record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerBillingInput {
+    pub due_date: String,
+    pub billing_cycle: BillingCycle,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub auto_renew: bool,
+    pub billing_url: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Unified fleet billing item for dashboard / billing tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerBillingItem {
+    pub server_id: ServerId,
+    pub display_name: Option<String>,
+    pub hoster: String,
+    pub address: String,
+    pub billing: Option<ServerBilling>,
+}

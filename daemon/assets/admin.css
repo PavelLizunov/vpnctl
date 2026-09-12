@@ -757,6 +757,7 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
    Heat cells (`td.warn`) + row tints (`tr.on-warn`/`tr.on-green`) surface a
    threshold crossing without a new colour — a paper-toned mix of the status
    token. Design handoff `design_handoff_vpnctl_densify` (variant 1b). */
+.ed-grid-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 6px 0; }
 .ed-grid { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
 .ed-grid caption { text-align: left; }
 .ed-grid th {
@@ -1322,6 +1323,16 @@ form[data-submitting] .ed-abtn,
 
 /* ── Responsive Safeguards for Screens < 768px ───────────────────────────── */
 @media (max-width: 768px) {
+  .ed-main {
+    padding: 16px 14px 24px;
+  }
+  .ed-foot {
+    padding: 12px 14px 16px;
+  }
+  .ed-sumbar {
+    gap: 8px 14px;
+    padding: 10px 0 12px;
+  }
   .ed-tb {
     padding: 0 12px;
   }

@@ -261,6 +261,162 @@ pub(crate) fn server_detail_display_name_section(
     }
 }
 
+/// Server billing section on the server-detail page (migration 0057).
+pub(crate) fn server_detail_billing_section(
+    server: &vpnctl_core::Server,
+    current: Option<&vpnctl_inventory::ServerBilling>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use vpnctl_inventory::BillingCycle;
+    let sid_enc = path_segment_encode(&server.id.0);
+    let return_to = format!("/admin/servers/{sid_enc}/setup");
+
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(
+                lang,
+                "Server rental billing parameters — due date, recurring cycle, cost, hoster portal link, and renewal terms.",
+                "Параметры аренды сервера — срок следующей оплаты, период, стоимость, ссылка на биллинг хостера и статус автопродления.",
+            )) {
+            (tr(lang, "RENTAL & BILLING", "АРЕНДА И ОПЛАТА"))
+        }
+
+        @if let Some(b) = current {
+            div style="margin: 8px 0 12px; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 12px;" {
+                div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;" {
+                    div {
+                        b { (format!("{:.2} {}", b.amount_cents as f64 / 100.0, b.currency)) }
+                        " / "
+                        (match (b.billing_cycle, lang) {
+                            (BillingCycle::Monthly, crate::i18n::Locale::Ru) => "месяц",
+                            (BillingCycle::Monthly, crate::i18n::Locale::En) => "month",
+                            (BillingCycle::Quarterly, crate::i18n::Locale::Ru) => "квартал (3 мес)",
+                            (BillingCycle::Quarterly, crate::i18n::Locale::En) => "quarter",
+                            (BillingCycle::SemiAnnual, crate::i18n::Locale::Ru) => "полгода (6 мес)",
+                            (BillingCycle::SemiAnnual, crate::i18n::Locale::En) => "6 months",
+                            (BillingCycle::Annual, crate::i18n::Locale::Ru) => "год",
+                            (BillingCycle::Annual, crate::i18n::Locale::En) => "year",
+                        })
+                        " · "
+                        (tr(lang, "Next due: ", "Срок оплаты: "))
+                        b { (b.due_date) }
+                        @if b.auto_renew {
+                            " · " span style="color: var(--green);" { (icon("check")) (tr(lang, " Auto-renew", " Автопродление")) }
+                        }
+                    }
+                    div style="display: flex; gap: 8px; align-items: center;" {
+                        @if let Some(ref url) = b.billing_url {
+                            a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href=(url) target="_blank" rel="noopener noreferrer" {
+                                (tr(lang, "Hoster Portal ↗", "В кабинет ↗"))
+                            }
+                        }
+                        form method="post" action=(format!("/admin/servers/{sid_enc}/billing/advance")) style="margin: 0;" {
+                            input type="hidden" name="return_to" value=(return_to) {}
+                            button type="submit" class="ed-abtn ed-abtn--sm" title=(tr(lang, "Mark paid and advance date by 1 cycle", "Отметить оплату и сдвинуть дату на 1 цикл")) {
+                                (icon("check")) " " (tr(lang, "+1 cycle", "+1 цикл"))
+                            }
+                        }
+                    }
+                }
+                @if let Some(ref notes) = b.notes {
+                    @if !notes.is_empty() {
+                        div style="margin-top: 6px; font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "Notes: ", "Заметки: ")) (notes)
+                        }
+                    }
+                }
+            }
+        } @else {
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+                (tr(lang, "No billing terms configured for this server yet. Set due date and pricing below.", "Параметры оплаты для этого сервера ещё не заданы. Укажи дату и стоимость ниже."))
+            }
+        }
+
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/billing"))
+             style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; font-family: var(--mono); font-size: 11px; margin-top: 8px;" {
+            input type="hidden" name="return_to" value=(return_to) {}
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Due date", "Дата оплаты"))
+                }
+                input type="date" name="due_date" required
+                       value=(current.map(|b| b.due_date.as_str()).unwrap_or(""))
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+            }
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Cycle", "Период"))
+                }
+                select name="billing_cycle" style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                    @let cur_c = current.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
+                    option value="monthly" selected[cur_c == BillingCycle::Monthly] { (tr(lang, "Monthly", "1 месяц")) }
+                    option value="quarterly" selected[cur_c == BillingCycle::Quarterly] { (tr(lang, "Quarterly (3 mo)", "3 месяца")) }
+                    option value="semi-annual" selected[cur_c == BillingCycle::SemiAnnual] { (tr(lang, "Semi-annual (6 mo)", "6 месяцев")) }
+                    option value="annual" selected[cur_c == BillingCycle::Annual] { (tr(lang, "Annual (12 mo)", "1 год")) }
+                }
+            }
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Amount", "Сумма"))
+                }
+                input type="text" name="amount" placeholder="0.00"
+                       value=(current.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+            }
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Currency", "Валюта"))
+                }
+                select name="currency" style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                    @let cur_curr = current.map(|b| b.currency.as_str()).unwrap_or("EUR");
+                    option value="EUR" selected[cur_curr == "EUR"] { "EUR (€)" }
+                    option value="USD" selected[cur_curr == "USD"] { "USD ($)" }
+                    option value="RUB" selected[cur_curr == "RUB"] { "RUB (₽)" }
+                    option value="CHF" selected[cur_curr == "CHF"] { "CHF" }
+                }
+            }
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Billing portal URL", "Ссылка на биллинг"))
+                }
+                input type="url" name="billing_url" placeholder="https://..."
+                       value=(current.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+            }
+
+            div {
+                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
+                    (tr(lang, "Notes / contract", "Заметки / договор"))
+                }
+                input type="text" name="notes" placeholder=(tr(lang, "Card, account, contract...", "Карта, аккаунт, договор..."))
+                       value=(current.and_then(|b| b.notes.as_deref()).unwrap_or(""))
+                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+            }
+
+            div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin-top: 4px;" {
+                label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;" {
+                    @let auto = current.map(|b| b.auto_renew).unwrap_or(false);
+                    input type="checkbox" name="auto_renew" value="1" checked[auto] {}
+                    (tr(lang, "Auto-renew enabled", "Включено автопродление"))
+                }
+
+                button type="submit"
+                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    (icon("save")) (tr(lang, "save billing", "сохранить биллинг"))
+                }
+            }
+        }
+    }
+}
+
 /// Auto-suppress section on the server-detail page (migration 0030).
 /// Per-server opt-in to drop this server from the subscription render
 /// while it's unreachable: the health monitor sets `suppressed_at` once
