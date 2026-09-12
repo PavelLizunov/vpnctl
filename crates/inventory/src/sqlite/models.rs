@@ -873,6 +873,8 @@ pub struct ServerBillingInput {
     pub auto_renew: bool,
     pub billing_url: Option<String>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub initial_payments_count: Option<i64>,
 }
 
 /// Unified fleet billing item for dashboard / billing tables.
@@ -883,4 +885,151 @@ pub struct ServerBillingItem {
     pub hoster: String,
     pub address: String,
     pub billing: Option<ServerBilling>,
+}
+
+// ── Multi-currency exchange & financial math (migration 0058) ───────────
+
+/// One row in `currency_rates`: an exchange rate between two ISO 4217
+/// currencies.  The rate is stored as integer micros (6 implicit decimal
+/// places) to avoid floating-point precision loss in SQLite.
+///
+/// Example: 1 USD = 89.123456 RUB → `rate_micros = 89_123_456`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CurrencyRate {
+    pub base_currency: String,
+    pub target_currency: String,
+    /// Exchange rate × 1 000 000.  Always positive.
+    pub rate_micros: i64,
+    /// Where the rate came from: `"manual"`, `"ecb"`, `"cbr"`, etc.
+    pub source: String,
+    pub fetched_at: String,
+}
+
+/// Operator-wide currency display preferences (singleton row).
+/// Stored in `currency_settings` (id = 1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrencySettings {
+    /// Target display currency for fleet summaries (ISO 4217, e.g. `"RUB"`).
+    pub display_currency: String,
+    /// Default markup coefficient in basis-point format (4 implicit
+    /// decimals).  `10700` = 1.07 = 7% fee.  Applied when converting TO
+    /// the display currency; same-currency conversions always use 10000.
+    pub default_markup_bps: i64,
+    /// Per-currency markup overrides.  Keys are ISO 4217 target
+    /// currencies; values are markup in basis-point format.
+    /// Empty map means "use `default_markup_bps` for everything".
+    pub markup_overrides: std::collections::HashMap<String, i64>,
+    /// Manual rate overrides.  Keys are `"BASE/TARGET"` (e.g.
+    /// `"USD/RUB"`); values are `rate_micros`.  Takes precedence over
+    /// `currency_rates` table rows.
+    pub rate_overrides: std::collections::HashMap<String, i64>,
+    /// Whether automatic rate refresh is enabled.
+    pub auto_refresh: bool,
+}
+
+impl Default for CurrencySettings {
+    fn default() -> Self {
+        Self {
+            display_currency: "EUR".into(),
+            default_markup_bps: 10_700,
+            markup_overrides: std::collections::HashMap::new(),
+            rate_overrides: std::collections::HashMap::new(),
+            auto_refresh: false,
+        }
+    }
+}
+
+/// Input payload for updating `currency_settings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrencySettingsInput {
+    pub display_currency: Option<String>,
+    pub default_markup_bps: Option<i64>,
+    pub markup_overrides: Option<std::collections::HashMap<String, i64>>,
+    pub rate_overrides: Option<std::collections::HashMap<String, i64>>,
+    pub auto_refresh: Option<bool>,
+}
+
+/// One row in `server_payments`: an immutable record of an actual payment
+/// made for a server.  Converted values are snapshots at payment time so
+/// historical "Total Spend" never drifts when exchange rates change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerPayment {
+    pub id: i64,
+    pub server_id: ServerId,
+    pub paid_at: String,
+    /// Original payment in minor units of `currency`.
+    pub amount_minor: i64,
+    /// Source ISO 4217 code.
+    pub currency: String,
+    pub cycle: BillingCycle,
+    /// Converted value in minor units of `display_currency` at the time
+    /// of payment.  `None` when no rate was available.
+    pub converted_minor: Option<i64>,
+    /// Target ISO 4217 code used for conversion.
+    pub display_currency: Option<String>,
+    /// Snapshot of the exchange rate (micros) used, for audit trail.
+    pub rate_micros_used: Option<i64>,
+    /// Snapshot of the markup (bps) applied, for audit trail.
+    pub markup_bps_used: Option<i64>,
+    pub notes: Option<String>,
+}
+
+/// Input for recording a new payment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerPaymentInput {
+    pub amount_minor: i64,
+    pub currency: String,
+    pub cycle: BillingCycle,
+    pub notes: Option<String>,
+}
+
+/// Result of a currency conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversionResult {
+    /// Converted amount in minor units of `target_currency`.
+    pub amount_minor: i64,
+    pub target_currency: String,
+    /// The rate_micros that was used.
+    pub rate_micros: i64,
+    /// The markup_bps that was applied.
+    pub markup_bps: i64,
+    /// Whether this was an identity conversion (source == target).
+    pub identity: bool,
+}
+
+/// Fleet-wide billing summary with all amounts converted to the operator's
+/// chosen display currency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetBillingSummary {
+    pub display_currency: String,
+    pub markup_bps: i64,
+    /// Sum of all historical `server_payments.converted_minor` — actual
+    /// money spent, never re-converted.
+    pub total_spend_minor: i64,
+    /// Forward-looking monthly cost: each server's `amount_cents`
+    /// normalised to monthly and converted at current rates.
+    pub monthly_burn_minor: i64,
+    /// Same projected over 12 months.
+    pub annual_burn_minor: i64,
+    /// Per-server breakdown.
+    pub servers: Vec<ServerBillingSummaryItem>,
+    /// Servers whose billing currency has no available exchange rate.
+    pub unconvertible: Vec<String>,
+}
+
+/// Per-server line in the fleet billing summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerBillingSummaryItem {
+    pub server_id: ServerId,
+    pub display_name: Option<String>,
+    /// Original amount and currency from `server_billing`.
+    pub source_amount_minor: i64,
+    pub source_currency: String,
+    pub billing_cycle: BillingCycle,
+    /// Converted to display currency at current rates.
+    pub converted_monthly_minor: Option<i64>,
+    /// Historical total spend for this server.
+    pub total_spend_minor: i64,
+    /// Number of recorded payments.
+    pub payment_count: i64,
 }

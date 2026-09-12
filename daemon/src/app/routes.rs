@@ -155,6 +155,14 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/servers/", get(admin::servers))
         .route("/admin/servers/billing", get(admin::servers_billing))
         .route("/admin/servers/billing/", get(admin::servers_billing))
+        .route(
+            "/admin/servers/billing/settings",
+            post(admin::billing_update_settings),
+        )
+        .route(
+            "/admin/servers/billing/refresh-rates",
+            post(admin::billing_refresh_rates),
+        )
         .route("/admin/servers/{id}/billing", post(admin::server_set_billing))
         .route("/admin/servers/{id}/billing/advance", post(admin::server_advance_billing))
         // Phase H chunk 3: server detail page with live telemetry +

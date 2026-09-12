@@ -63,6 +63,7 @@ async fn set_and_get_server_billing() {
         auto_renew: true,
         billing_url: Some("https://manager.infomaniak.com/".into()),
         notes: Some("Contract #12345".into()),
+        initial_payments_count: None,
     };
 
     let record = inv.set_server_billing(&s.id, &input).await.unwrap();
@@ -106,6 +107,7 @@ async fn server_billing_cascade_on_delete() {
         auto_renew: false,
         billing_url: None,
         notes: None,
+        initial_payments_count: None,
     };
     inv.set_server_billing(&s.id, &input).await.unwrap();
     assert!(inv.get_server_billing(&s.id).await.unwrap().is_some());
@@ -134,6 +136,7 @@ async fn advance_billing_cycle_advances_date_and_audits() {
         auto_renew: true,
         billing_url: None,
         notes: None,
+        initial_payments_count: None,
     };
     inv.set_server_billing(&s.id, &input).await.unwrap();
 
@@ -174,6 +177,7 @@ async fn list_fleet_billing_orders_earliest_due_first() {
             auto_renew: true,
             billing_url: None,
             notes: None,
+            initial_payments_count: None,
         },
     )
     .await
@@ -189,6 +193,7 @@ async fn list_fleet_billing_orders_earliest_due_first() {
             auto_renew: false,
             billing_url: None,
             notes: None,
+            initial_payments_count: None,
         },
     )
     .await
@@ -241,6 +246,7 @@ async fn server_billing_error_paths() {
         auto_renew: false,
         billing_url: None,
         notes: None,
+        initial_payments_count: None,
     };
     let err_missing = inv.set_server_billing(&missing_sid, &valid_input).await;
     assert!(err_missing.is_err(), "cannot set billing on missing server");
@@ -268,4 +274,43 @@ async fn server_billing_error_paths() {
         err_adv_missing.is_err(),
         "cannot advance billing on missing server"
     );
+}
+
+#[tokio::test]
+async fn server_billing_initial_payments_and_advance_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("s1", "transip");
+    inv.add_server(&s).await.unwrap();
+
+    let input = ServerBillingInput {
+        due_date: "2026-10-10".into(),
+        billing_cycle: BillingCycle::Monthly,
+        amount_cents: 700,
+        currency: "EUR".into(),
+        auto_renew: true,
+        billing_url: None,
+        notes: None,
+        initial_payments_count: Some(3),
+    };
+
+    inv.set_server_billing(&s.id, &input).await.unwrap();
+
+    // Verify 3 payments were recorded
+    let payments = inv.list_server_payments(&s.id).await.unwrap();
+    assert_eq!(payments.len(), 3);
+    assert_eq!(payments[0].amount_minor, 700);
+    assert_eq!(payments[0].currency, "EUR");
+
+    let (spend, count) = inv.server_spend_and_count(&s.id, "EUR").await.unwrap();
+    assert_eq!(count, 3);
+    assert_eq!(spend, 2100);
+
+    // Advance 1 cycle -> advances due_date AND records 4th payment
+    let advanced = inv.advance_server_billing_cycle(&s.id).await.unwrap();
+    assert_eq!(advanced.due_date, "2026-11-10");
+
+    let (spend4, count4) = inv.server_spend_and_count(&s.id, "EUR").await.unwrap();
+    assert_eq!(count4, 4);
+    assert_eq!(spend4, 2800);
 }

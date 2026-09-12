@@ -5381,6 +5381,7 @@ dependencies = [
  "maxminddb",
  "percent-encoding",
  "qrcode",
+ "reqwest 0.12.28",
  "serde",
  "serde-saphyr",
  "serde_json",

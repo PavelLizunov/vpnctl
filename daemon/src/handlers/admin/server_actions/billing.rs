@@ -65,6 +65,10 @@ pub(crate) async fn server_set_billing(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let initial_payments_count = form_field(&body, "initial_payments_count")
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0);
+
     let input = ServerBillingInput {
         due_date,
         billing_cycle: cycle,
@@ -73,6 +77,7 @@ pub(crate) async fn server_set_billing(
         auto_renew,
         billing_url,
         notes,
+        initial_payments_count,
     };
 
     if let Err(e) = state.inv.set_server_billing(&sid, &input).await {
@@ -99,6 +104,52 @@ pub(crate) async fn server_advance_billing(
 
     if let Err(e) = state.inv.advance_server_billing_cycle(&sid).await {
         return internal_error(anyhow::Error::new(e));
+    }
+
+    let return_to = safe_return_to(form_field(&body, "return_to"));
+    Redirect::to(&return_to).into_response()
+}
+
+/// `POST /admin/servers/billing/settings` — update display currency, markup coefficient, or auto-refresh.
+pub(crate) async fn billing_update_settings(
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let display_currency = form_field(&body, "display_currency")
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty() && s.len() <= 8);
+
+    let default_markup_bps = form_field(&body, "markup_coeff").and_then(|s| {
+        let clean = s.trim().replace(',', ".");
+        clean
+            .parse::<f64>()
+            .ok()
+            .map(|f| (f * 10_000.0).round() as i64)
+    });
+
+    let auto_refresh =
+        form_field(&body, "auto_refresh").map(|v| matches!(v.as_str(), "1" | "true" | "on"));
+
+    let input = vpnctl_inventory::CurrencySettingsInput {
+        display_currency,
+        default_markup_bps,
+        markup_overrides: None,
+        rate_overrides: None,
+        auto_refresh,
+    };
+
+    if let Err(e) = state.inv.set_currency_settings(&input).await {
+        return internal_error(anyhow::Error::new(e));
+    }
+
+    let return_to = safe_return_to(form_field(&body, "return_to"));
+    Redirect::to(&return_to).into_response()
+}
+
+/// `POST /admin/servers/billing/refresh-rates` — manual on-demand trigger to fetch exchange rates.
+pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: String) -> Response {
+    if let Err(e) = crate::exchange_rate_poller::refresh_exchange_rates(&state.inv).await {
+        tracing::warn!(target = "vpnctld::currency", error = %e, "manual refresh_exchange_rates failed");
     }
 
     let return_to = safe_return_to(form_field(&body, "return_to"));

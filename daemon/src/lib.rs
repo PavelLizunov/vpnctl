@@ -32,6 +32,7 @@ pub mod boosty_sync_poller;
 pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
+pub mod exchange_rate_poller;
 pub mod handlers;
 pub mod health_monitor;
 pub mod real_ip;

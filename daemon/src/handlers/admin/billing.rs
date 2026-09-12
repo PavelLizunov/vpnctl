@@ -20,22 +20,56 @@ pub(crate) async fn servers_billing(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    let items = state
-        .inv
-        .list_fleet_billing()
-        .await
-        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let (items, settings, rates) = tokio::try_join!(
+        state.inv.list_fleet_billing(),
+        state.inv.get_currency_settings(),
+        state.inv.list_currency_rates(),
+    )
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let today = Utc::now().date_naive();
+    let display_cur = &settings.display_currency;
 
-    // Summary calculations
-    let mut monthly_totals: BTreeMap<String, i64> = BTreeMap::new();
+    // Active markup multiplier
+    let markup_bps = settings
+        .markup_overrides
+        .get(display_cur)
+        .copied()
+        .unwrap_or(settings.default_markup_bps);
+    let markup_coeff_f64 = markup_bps as f64 / 10_000.0;
+
+    // Collect per-server data
+    let mut monthly_totals_raw: BTreeMap<String, i64> = BTreeMap::new();
     let mut due_soon_count = 0usize;
     let mut overdue_count = 0usize;
     let mut configured_count = 0usize;
     let mut next_due: Option<(&ServerBillingItem, i64, NaiveDate)> = None;
 
+    let mut fleet_monthly_converted_minor: i64 = 0;
+    let mut fleet_total_spend_converted_minor: i64 = 0;
+    let mut total_payments_count: i64 = 0;
+
+    struct ComputedServerItem<'a> {
+        item: &'a ServerBillingItem,
+        converted_monthly: Option<i64>,
+        total_spend: i64,
+        payment_count: i64,
+    }
+
+    let mut computed_items = Vec::with_capacity(items.len());
+
     for item in &items {
+        let (spend, pcount) = state
+            .inv
+            .server_spend_and_count(&item.server_id, display_cur)
+            .await
+            .unwrap_or((0, 0));
+
+        fleet_total_spend_converted_minor = fleet_total_spend_converted_minor.saturating_add(spend);
+        total_payments_count = total_payments_count.saturating_add(pcount);
+
+        let mut conv_monthly = None;
+
         if let Some(ref b) = item.billing {
             configured_count += 1;
             let monthly_cents = match b.billing_cycle {
@@ -44,7 +78,17 @@ pub(crate) async fn servers_billing(
                 BillingCycle::SemiAnnual => b.amount_cents / 6,
                 BillingCycle::Annual => b.amount_cents / 12,
             };
-            *monthly_totals.entry(b.currency.clone()).or_default() += monthly_cents;
+            *monthly_totals_raw.entry(b.currency.clone()).or_default() += monthly_cents;
+
+            if let Ok(Some(conv)) = state
+                .inv
+                .convert_amount(monthly_cents, &b.currency, display_cur)
+                .await
+            {
+                fleet_monthly_converted_minor =
+                    fleet_monthly_converted_minor.saturating_add(conv.amount_minor);
+                conv_monthly = Some(conv.amount_minor);
+            }
 
             if let Ok(due) = vpnctl_inventory::validate_due_date(&b.due_date) {
                 let days = (due - today).num_days();
@@ -61,7 +105,16 @@ pub(crate) async fn servers_billing(
                 }
             }
         }
+
+        computed_items.push(ComputedServerItem {
+            item,
+            converted_monthly: conv_monthly,
+            total_spend: spend,
+            payment_count: pcount,
+        });
     }
+
+    let fleet_annual_converted_minor = fleet_monthly_converted_minor.saturating_mul(12);
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
@@ -81,9 +134,68 @@ pub(crate) async fn servers_billing(
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "Due dates, recurring cycles and costs across all leased servers. Backed by the server_billing inventory table.",
-                "Сроки следующей оплаты, периоды продления и стоимость по всем арендованным серверам. Читается напрямую из таблицы server_billing.",
+                "Due dates, recurring cycles, pricing and multi-currency exchange rates across all leased servers.",
+                "Сроки следующей оплаты, периоды продления, стоимость и мультивалютный пересчёт по всем арендованным серверам.",
             )) { (icon("info")) }
+        }
+
+        // Currency Settings Toolbar
+        div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0 16px; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px;" {
+            form method="post" action="/admin/servers/billing/settings" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0;" {
+                input type="hidden" name="return_to" value="/admin/servers/billing" {}
+
+                span style="color: var(--mute); text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; font-weight: 600;" {
+                    (crate::i18n::tr(lang, "Display currency:", "Валюта сводки:"))
+                }
+                select name="display_currency" style="padding: 3px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px;" {
+                    @for code in ["RUB", "EUR", "USD", "CHF", "SEK", "GBP", "TRY", "KGS", "KZT"] {
+                        option value=(code) selected[code == display_cur] {
+                            (code) " (" (currency_symbol(code)) ")"
+                        }
+                    }
+                }
+
+                span style="color: var(--mute);" { "·" }
+
+                span style="color: var(--mute); text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; font-weight: 600;" {
+                    (crate::i18n::tr(lang, "Fee coefficient:", "Коэффициент наценки:"))
+                }
+                input type="number" step="0.01" min="1.00" max="2.00" name="markup_coeff" value=(format!("{:.2}", markup_coeff_f64))
+                       style="width: 58px; padding: 3px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; text-align: right;" {}
+
+                @if markup_bps > 10000 {
+                    span style="color: var(--warm); font-size: 10px;" title=(crate::i18n::tr(lang, "Accounts for intermediary bank/card fee", "Учитывает комиссию банка/посредника")) {
+                        "(+" (format!("{:.1}", (markup_coeff_f64 - 1.0) * 100.0)) "%)"
+                    }
+                }
+
+                button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                    (crate::i18n::tr(lang, "Apply", "Применить"))
+                }
+            }
+
+            div style="display: flex; align-items: center; gap: 8px;" {
+                form method="post" action="/admin/servers/billing/refresh-rates" style="margin: 0;" {
+                    input type="hidden" name="return_to" value="/admin/servers/billing" {}
+                    button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" title=(crate::i18n::tr(lang, "Fetch live rates from public central bank APIs", "Загрузить свежие курсы из публичных API центробанков")) {
+                        (icon("rotate-cw")) " " (crate::i18n::tr(lang, "Refresh rates", "Обновить курсы"))
+                    }
+                }
+            }
+        }
+
+        // Rates banner indicator
+        @if !rates.is_empty() {
+            div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: -10px 0 16px 4px;" {
+                (crate::i18n::tr(lang, "Active rates (EUR base): ", "Действующие курсы (база EUR): "))
+                @let rates_text = rates
+                    .iter()
+                    .filter(|r| ["USD", "RUB", "CHF", "SEK"].contains(&r.target_currency.as_str()))
+                    .map(|r| format!("1 EUR = {:.2} {}", r.rate_micros as f64 / 1_000_000.0, r.target_currency))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                (rates_text)
+            }
         }
 
         // Summary KPI Fact Grid
@@ -115,31 +227,78 @@ pub(crate) async fn servers_billing(
                 }
             }
 
-            // Card 2: Estimated monthly burn rate
+            // Card 2: Estimated monthly / annual budget in display currency
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
-                    (crate::i18n::tr(lang, "Monthly burn rate", "Расходы в месяц"))
+                    (crate::i18n::tr(lang, "Budget (Month / Year)", "Бюджет (месяц / год)"))
+                    @if markup_bps > 10000 {
+                        " · " (format!("×{:.2}", markup_coeff_f64))
+                    }
                 }
                 div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
-                    @if monthly_totals.is_empty() {
-                        span style="color: var(--mute); font-style: italic; font-weight: 400;" {
-                            "0.00 €"
+                    @if fleet_monthly_converted_minor > 0 {
+                        (format_amount(fleet_monthly_converted_minor, display_cur))
+                        " "
+                        span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                            (crate::i18n::tr(lang, "/mo · ", "/мес · "))
                         }
-                    } @else {
-                        @let totals_str = monthly_totals
+                        (format_amount(fleet_annual_converted_minor, display_cur))
+                        " "
+                        span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                            (crate::i18n::tr(lang, "/yr", "/год"))
+                        }
+                    } @else if !monthly_totals_raw.is_empty() {
+                        @let totals_str = monthly_totals_raw
                             .iter()
                             .map(|(curr, cents)| format_amount(*cents, curr))
                             .collect::<Vec<_>>()
                             .join(" · ");
                         (totals_str)
+                    } @else {
+                        span style="color: var(--mute); font-style: italic; font-weight: 400;" {
+                            "0.00 " (currency_symbol(display_cur))
+                        }
                     }
                 }
                 div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (configured_count) " / " (items.len()) " " (crate::i18n::tr(lang, "servers configured", "серверов настроено"))
+                    @if !monthly_totals_raw.is_empty() {
+                        (crate::i18n::tr(lang, "raw: ", "исходно: "))
+                        @let raw_list = monthly_totals_raw
+                            .iter()
+                            .map(|(c, a)| format_amount(*a, c))
+                            .collect::<Vec<_>>()
+                            .join(" + ");
+                        (raw_list)
+                    } @else {
+                        (configured_count) " / " (items.len()) " " (crate::i18n::tr(lang, "servers configured", "серверов настроено"))
+                    }
                 }
             }
 
-            // Card 3: Actionable attention
+            // Card 3: Total spend to date (cumulative historical payments)
+            div.ed-fact {
+                div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
+                    (crate::i18n::tr(lang, "Total Spend (To Date)", "Всего выплачено (Total Spend)"))
+                }
+                div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
+                    @if fleet_total_spend_converted_minor > 0 {
+                        (format_amount(fleet_total_spend_converted_minor, display_cur))
+                    } @else {
+                        span style="color: var(--mute); font-style: italic; font-weight: 400;" {
+                            "0.00 " (currency_symbol(display_cur))
+                        }
+                    }
+                }
+                div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                    @if total_payments_count > 0 {
+                        (total_payments_count) " " (crate::i18n::tr(lang, "recorded payments", "зафиксированных платежей"))
+                    } @else {
+                        (crate::i18n::tr(lang, "via +1 cycle or edit form", "через +1 цикл или форму"))
+                    }
+                }
+            }
+
+            // Card 4: Actionable attention
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "Attention status", "Требуют внимания"))
@@ -178,6 +337,8 @@ pub(crate) async fn servers_billing(
                         th { (crate::i18n::tr(lang, "next due", "срок оплаты")) }
                         th { (crate::i18n::tr(lang, "days left", "до оплаты")) }
                         th { (crate::i18n::tr(lang, "cycle & amount", "тариф и сумма")) }
+                        th { (crate::i18n::tr(lang, "in display currency", "в валюте сводки")) }
+                        th { (crate::i18n::tr(lang, "total spend", "всего оплачено")) }
                         th { (crate::i18n::tr(lang, "auto-renew", "автопродление")) }
                         th { (crate::i18n::tr(lang, "hoster console", "личный кабинет")) }
                         th { (crate::i18n::tr(lang, "notes", "заметки")) }
@@ -185,7 +346,8 @@ pub(crate) async fn servers_billing(
                     }
                 }
                 tbody {
-                    @for (idx, item) in items.iter().enumerate() {
+                    @for (idx, comp) in computed_items.iter().enumerate() {
+                        @let item = comp.item;
                         @let sid = &item.server_id.0;
                         @let sid_enc = path_segment_encode(sid);
                         @let label = item.display_name.as_deref().unwrap_or(sid);
@@ -220,6 +382,26 @@ pub(crate) async fn servers_billing(
                                         b { (format_amount(b.amount_cents, &b.currency)) }
                                         " / "
                                         (cycle_label(b.billing_cycle, lang))
+                                    }
+                                    td.ed-grid__sm {
+                                        @match comp.converted_monthly {
+                                            Some(conv_m) => {
+                                                b { (format_amount(conv_m, display_cur)) }
+                                                " " (crate::i18n::tr(lang, "/mo", "/мес"))
+                                            }
+                                            None => { span.ed-grid__mut { "—" } }
+                                        }
+                                    }
+                                    td.ed-grid__sm {
+                                        @if comp.total_spend > 0 {
+                                            b { (format_amount(comp.total_spend, display_cur)) }
+                                            " "
+                                            span.ed-grid__mut.ed-grid__sm {
+                                                "(" (comp.payment_count) ")"
+                                            }
+                                        } @else {
+                                            span.ed-grid__mut { "0 " (currency_symbol(display_cur)) }
+                                        }
                                     }
                                     td.ed-grid__sm {
                                         @if b.auto_renew {
@@ -264,6 +446,8 @@ pub(crate) async fn servers_billing(
                                     td.ed-grid__mut { "—" }
                                     td.ed-grid__mut { "—" }
                                     td.ed-grid__mut { "—" }
+                                    td.ed-grid__mut { "—" }
+                                    td.ed-grid__mut { "—" }
                                     td style="text-align: right;" {
                                         span.ed-grid__mut { (crate::i18n::tr(lang, "see edit form below", "см. форму ниже")) }
                                     }
@@ -289,7 +473,20 @@ pub(crate) async fn servers_billing(
                 ))
             }
 
-            @for item in &items {
+            datalist id="currency_list" {
+                option value="EUR" { "EUR (€)" }
+                option value="USD" { "USD ($)" }
+                option value="RUB" { "RUB (₽)" }
+                option value="CHF" { "CHF" }
+                option value="SEK" { "SEK (kr)" }
+                option value="GBP" { "GBP (£)" }
+                option value="TRY" { "TRY (₺)" }
+                option value="KGS" { "KGS (сом)" }
+                option value="KZT" { "KZT (₸)" }
+            }
+
+            @for comp in &computed_items {
+                @let item = comp.item;
                 @let sid = &item.server_id.0;
                 @let sid_enc = path_segment_encode(sid);
                 @let b_opt = item.billing.as_ref();
@@ -305,6 +502,12 @@ pub(crate) async fn servers_billing(
                             span style="color: var(--green); font-weight: 400;" {
                                 (crate::i18n::tr(lang, "Configured", "Настроено"))
                                 " (" (format_amount(b.amount_cents, &b.currency)) ")"
+                            }
+                            @if comp.total_spend > 0 {
+                                span style="color: var(--mute); font-weight: 400; margin-left: 8px;" {
+                                    "· " (crate::i18n::tr(lang, "Total spend: ", "Всего оплачено: "))
+                                    (format_amount(comp.total_spend, display_cur))
+                                }
                             }
                         } @else {
                             span style="color: var(--warm); font-weight: 400;" {
@@ -349,15 +552,11 @@ pub(crate) async fn servers_billing(
 
                         div {
                             label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Currency", "Валюта"))
+                                (crate::i18n::tr(lang, "Currency (ISO 4217)", "Валюта (ISO 4217)"))
                             }
-                            select name="currency" style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
-                                @let cur_c = b_opt.map(|b| b.currency.as_str()).unwrap_or("EUR");
-                                option value="EUR" selected[cur_c == "EUR"] { "EUR (€)" }
-                                option value="USD" selected[cur_c == "USD"] { "USD ($)" }
-                                option value="RUB" selected[cur_c == "RUB"] { "RUB (₽)" }
-                                option value="CHF" selected[cur_c == "CHF"] { "CHF" }
-                            }
+                            input list="currency_list" name="currency" maxlength="8"
+                                   value=(b_opt.map(|b| b.currency.as_str()).unwrap_or("EUR"))
+                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase;" {}
                         }
 
                         div {
@@ -370,6 +569,14 @@ pub(crate) async fn servers_billing(
                         }
 
                         div {
+                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
+                                (crate::i18n::tr(lang, "Past cycles paid (history)", "Оплачено ранее циклов (в историю)"))
+                            }
+                            input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
+                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                        }
+
+                        div style="grid-column: 1 / -1;" {
                             label style="display: block; color: var(--mute); margin-bottom: 4px;" {
                                 (crate::i18n::tr(lang, "Notes / contract", "Заметки / договор"))
                             }
@@ -398,14 +605,27 @@ pub(crate) async fn servers_billing(
     Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
 }
 
-fn format_amount(cents: i64, currency: &str) -> String {
-    let sym = match currency {
+fn currency_symbol(code: &str) -> &'static str {
+    match code {
         "EUR" => "€",
         "USD" => "$",
         "RUB" => "₽",
-        _ => currency,
-    };
-    format!("{:.2} {}", cents as f64 / 100.0, sym)
+        "GBP" => "£",
+        "CHF" => "CHF",
+        "SEK" => "kr",
+        "TRY" => "₺",
+        "KZT" => "₸",
+        _ => "",
+    }
+}
+
+fn format_amount(cents: i64, currency: &str) -> String {
+    let sym = currency_symbol(currency);
+    if sym.is_empty() {
+        format!("{:.2} {}", cents as f64 / 100.0, currency)
+    } else {
+        format!("{:.2} {}", cents as f64 / 100.0, sym)
+    }
 }
 
 fn format_days_badge(days: i64, lang: crate::i18n::Locale) -> Markup {
