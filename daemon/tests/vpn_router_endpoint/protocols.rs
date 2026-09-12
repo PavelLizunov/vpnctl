@@ -13,8 +13,9 @@ use vpnctld::router;
 
 use super::common::{
     AWG_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID, seed_hy2_opts,
-    seed_state_with_awg, seed_state_with_hy2, seed_state_with_naive, seed_state_with_paired_node,
-    seed_state_with_xhttp, subscription_lines, subscription_lines_for_ua,
+    seed_state_with_awg, seed_state_with_awg2, seed_state_with_hy2, seed_state_with_naive,
+    seed_state_with_paired_node, seed_state_with_xhttp, subscription_lines,
+    subscription_lines_for_ua,
 };
 
 /// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
@@ -782,5 +783,45 @@ async fn vpn_router_xhttp_ua_gated_out_for_generic_client() {
     assert!(
         lines.iter().any(|l| l.starts_with("vless://")),
         "vless+reality must remain for the generic client: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn vpn_router_awg2_uri_delivered_to_vpnrouter() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg2(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "VPNRouter").await;
+
+    assert_eq!(lines.len(), 2, "expected 1 vless + 1 awg: {lines:?}");
+    assert!(lines[0].starts_with("vless://"), "vless first: {lines:?}");
+    let awg = lines.last().unwrap();
+    assert!(awg.starts_with("awg://"), "awg must be last: {lines:?}");
+    assert!(awg.contains("@203.0.113.60:51821"), "awg2 host:port: {awg}");
+    assert!(
+        awg.contains("private_key=") && awg.contains("address=10.72."),
+        "awg2 must carry private_key + 10.72 address: {awg}"
+    );
+    assert!(
+        awg.contains("jc=") && awg.contains("s1=") && awg.contains("h1="),
+        "awg2 obfs must mirror parameters: {awg}"
+    );
+    assert!(
+        awg.ends_with("#Iceland2%20AWG%20~tester-1"),
+        "awg2 fragment must carry the server display label: {awg}"
+    );
+}
+
+#[tokio::test]
+async fn vpn_router_awg2_ua_gated_out_for_generic_client() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state_with_awg2(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), AWG_DEVICE_ID, "v2rayN/6.62").await;
+    assert!(
+        !lines.iter().any(|l| l.starts_with("awg://")),
+        "generic client must NOT receive awg://: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("vless://")),
+        "vless must remain for generic client: {lines:?}"
     );
 }

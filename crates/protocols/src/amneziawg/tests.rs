@@ -183,6 +183,13 @@ fn invalid_and_ambiguous_peers_fail_closed() {
             .to_string()
             .contains(".conf")
     );
+    assert!(
+        AmneziaWg3::new()
+            .share_link(&ctx, &alice)
+            .unwrap_err()
+            .to_string()
+            .contains(".conf")
+    );
 }
 
 #[test]
@@ -299,4 +306,71 @@ fn many_seeds_preserve_padding_and_junk_constraints() {
             }
         }
     }
+}
+
+#[test]
+fn awg2_share_link_renders_expected_uri() {
+    let server = server();
+    let secrets = secrets();
+    let alice = user("alice", 256);
+    let users = [alice.clone()];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users);
+
+    let link = awg2_share_link(&ctx, &alice).unwrap();
+    assert!(link.starts_with("awg://"), "must use awg:// scheme: {link}");
+    assert!(
+        link.contains("@[2001:db8::1]:51821?"),
+        "host and port: {link}"
+    );
+    assert!(
+        link.contains("private_key="),
+        "must contain private_key: {link}"
+    );
+    assert!(
+        link.contains("address=10.72.1.2/32"),
+        "address cidr: {link}"
+    );
+    assert!(link.contains("keepalive=25"), "keepalive: {link}");
+    assert!(link.contains("jc=8"), "jc param: {link}");
+    assert!(link.contains("jmin=37"), "jmin param: {link}");
+    assert!(link.contains("jmax=101"), "jmax param: {link}");
+    assert!(link.contains("s1=21"), "s1 param: {link}");
+    assert!(link.contains("s2=21"), "s2 param: {link}");
+    assert!(link.contains("s3=21"), "s3 param: {link}");
+    assert!(link.contains("s4=21"), "s4 param: {link}");
+    assert!(link.contains("h1=84215046-84215301"), "h1 param: {link}");
+    assert!(
+        link.contains("h2=1157956870-1157957125"),
+        "h2 param: {link}"
+    );
+    assert!(
+        link.contains("h3=2231698694-2231698949"),
+        "h3 param: {link}"
+    );
+    assert!(
+        link.contains("h4=3305440518-3305440773"),
+        "h4 param: {link}"
+    );
+    assert!(link.ends_with("#alice"), "tag: {link}");
+
+    // Generic Protocol::share_link returns unsupported error
+    let proto = AmneziaWg2::new();
+    assert!(proto.share_link(&ctx, &alice).is_err());
+
+    // AmneziaWg3 share_link also returns unsupported error
+    let proto3 = AmneziaWg3::new();
+    assert!(proto3.share_link(&ctx, &alice).is_err());
+}
+
+#[test]
+fn awg2_share_link_errors_when_user_not_granted() {
+    let server = server();
+    let secrets = secrets();
+    let alice = user("alice", 256);
+    let bob = user("bob", 512);
+    let users = [alice.clone()];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users);
+
+    // bob is not in ctx.peers
+    assert!(awg2_share_link(&ctx, &bob).is_err());
 }
