@@ -490,12 +490,14 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
         }
     };
     let wg_pid = vpnctl_core::ProtocolId("wireguard".to_string());
+    let awg2_pid = vpnctl_core::ProtocolId("amneziawg2".to_string());
     let mut uris: Vec<String> = Vec::new();
     for server in &servers {
-        // `awg://` only makes sense on an AmneziaWG node (obfs is a
-        // property of that kernel); skip cleanly so a vanilla sing-box
-        // WG server never hits awg_share_link's missing-obfs error path.
-        if !server.kernels.iter().any(|k| k.0 == "amneziawg") {
+        // Support both modern amneziawg2 on sing-box and legacy wireguard on amneziawg kernel.
+        let has_awg2 = server.enabled_protocols.contains(&awg2_pid);
+        let has_legacy_awg = server.kernels.iter().any(|k| k.0 == "amneziawg")
+            && server.enabled_protocols.contains(&wg_pid);
+        if !has_awg2 && !has_legacy_awg {
             continue;
         }
         // Same auto-suppress (migration 0030) skip as the vless path.
@@ -517,18 +519,27 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
         }
         // NM-10 visibility: server-hidden OR per-user-denied → no awg://
         // for this (user, server). This is the operator's kill-switch.
-        match state
+        let visible = match state
             .inv
             .visible_protocols_for_subscription(&user.id, &server.id)
             .await
         {
-            Ok(vis) if vis.contains(&wg_pid) => {}
-            Ok(_) => continue,
+            Ok(vis) => vis,
             Err(e) => {
                 tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg: visibility lookup failed; skipping");
                 continue;
             }
-        }
+        };
+        let target_pid = if has_awg2 && visible.contains(&awg2_pid) {
+            Some(&awg2_pid)
+        } else if has_legacy_awg && visible.contains(&wg_pid) {
+            Some(&wg_pid)
+        } else {
+            None
+        };
+        let Some(chosen_pid) = target_pid else {
+            continue;
+        };
         let secrets = match state.inv.list_server_secrets(&server.id).await {
             Ok(s) => s,
             Err(e) => {
@@ -536,7 +547,7 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
                 continue;
             }
         };
-        // `with_peers` so the per-user octet matches the kernel's awg0.conf.
+        // `with_peers` so the per-user octet matches the kernel's peer list.
         let peers = match state.inv.users_for_server(&server.id).await {
             Ok(p) => p,
             Err(e) => {
@@ -545,14 +556,12 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
             }
         };
         let ctx = RenderCtx::with_peers(server, &secrets, &peers);
-        // Pass the global `user` (not a per-server-UUID-resolved copy like
-        // the vless / admin-card paths): `awg_share_link` keys off
-        // `wireguard_private`/`wireguard_pubkey` + the peer octet, never
-        // `user.uuid`, so the per-server-uuid step is intentionally omitted.
-        // The octet (2 + position in this full peers list) matches the
-        // kernel's awg0.conf [Peer] octet, which enumerates the SAME list
-        // and counts pubkey-less granted users in the index too.
-        match vpnctl_protocols::awg_share_link(&ctx, user) {
+        let link_res = if chosen_pid == &awg2_pid {
+            vpnctl_protocols::awg2_share_link(&ctx, user)
+        } else {
+            vpnctl_protocols::awg_share_link(&ctx, user)
+        };
+        match link_res {
             Ok(link) => {
                 // Re-label the fragment to the ninitux house style
                 // "{label} AWG ~{client}", matching the vless / extra lines.

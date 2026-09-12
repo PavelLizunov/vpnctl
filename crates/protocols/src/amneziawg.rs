@@ -403,3 +403,49 @@ pub fn render_amnezia_conf(version: u8, ctx: &RenderCtx<'_>, user: &User) -> Res
     ));
     Ok(conf)
 }
+
+/// Generate an `awg://` share-link URI for AmneziaWG 2.0.
+///
+/// Formats the operator's standard schema with AmneziaWG 2.0 parameters.
+/// Requires server-generated WireGuard keypair for the user, valid grant,
+/// and complete AmneziaWG 2.0 server secrets.
+pub fn awg2_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+    let (private, server_public, addresses) = client_material(V2, ctx, user)?;
+    let address = addresses
+        .first()
+        .ok_or_else(|| render_error("missing client address"))?;
+    let host = host_for_url(&ctx.server.address);
+    let port = V2.port;
+    let params = parameters(V2, ctx)?;
+    let require_param = |k: &str| -> Result<String> {
+        params
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case(k))
+            .map(|(_, _, v)| match v {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s.clone(),
+                Value::Bool(b) => b.to_string(),
+                other => other.to_string(),
+            })
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| render_error(&format!("missing required obfuscation parameter '{k}'")))
+    };
+    let tag = percent_encoding::utf8_percent_encode(&user.id.0, crate::encoding::FRAGMENT);
+    Ok(format!(
+        "awg://{server_public}@{host}:{port}?private_key={private}\
+         &address={address}&keepalive=25\
+         &jc={jc}&jmin={jmin}&jmax={jmax}&s1={s1}&s2={s2}&s3={s3}&s4={s4}\
+         &h1={h1}&h2={h2}&h3={h3}&h4={h4}#{tag}",
+        jc = require_param("jc")?,
+        jmin = require_param("jmin")?,
+        jmax = require_param("jmax")?,
+        s1 = require_param("s1")?,
+        s2 = require_param("s2")?,
+        s3 = require_param("s3")?,
+        s4 = require_param("s4")?,
+        h1 = require_param("h1")?,
+        h2 = require_param("h2")?,
+        h3 = require_param("h3")?,
+        h4 = require_param("h4")?,
+    ))
+}
