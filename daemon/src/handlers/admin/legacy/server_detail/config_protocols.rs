@@ -336,85 +336,92 @@ pub(crate) fn server_detail_billing_section(
 
         form method="post"
              action=(format!("/admin/servers/{sid_enc}/billing"))
-             style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; font-family: var(--mono); font-size: 11px; margin-top: 8px;" {
+             style="margin: 14px 0 4px; max-width: 1080px; display: flex; flex-direction: column; gap: 12px; font-family: var(--mono); font-size: 11px;" {
             input type="hidden" name="return_to" value=(return_to) {}
 
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Due date", "Дата оплаты"))
+            div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
+                div style="flex: 0 0 140px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Due date", "Дата оплаты"))
+                    }
+                    input type="date" name="due_date" required
+                           value=(current.map(|b| b.due_date.as_str()).unwrap_or(""))
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
                 }
-                input type="date" name="due_date" required
-                       value=(current.map(|b| b.due_date.as_str()).unwrap_or(""))
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+
+                div style="flex: 0 0 130px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Billing cycle", "Период"))
+                    }
+                    select name="billing_cycle" style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                        @let cur_c = current.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
+                        option value="monthly" selected[cur_c == BillingCycle::Monthly] { (tr(lang, "Monthly", "1 месяц")) }
+                        option value="quarterly" selected[cur_c == BillingCycle::Quarterly] { (tr(lang, "Quarterly (3 mo)", "3 месяца")) }
+                        option value="semi-annual" selected[cur_c == BillingCycle::SemiAnnual] { (tr(lang, "Semi-annual (6 mo)", "6 месяцев")) }
+                        option value="annual" selected[cur_c == BillingCycle::Annual] { (tr(lang, "Annual (12 mo)", "1 год")) }
+                    }
+                }
+
+                div style="flex: 0 0 95px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Amount", "Стоимость"))
+                    }
+                    input type="text" name="amount" placeholder="0.00"
+                           value=(current.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                }
+
+                div style="flex: 0 0 80px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Currency", "Валюта"))
+                    }
+                    input list="currency_list" name="currency" maxlength="8"
+                           value=(current.map(|b| b.currency.as_str()).unwrap_or("EUR"))
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase; text-align: center;" {}
+                }
+
+                div style="flex: 0 0 110px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;"
+                          title=(tr(lang, "Past cycles already paid (history record)", "Сколько циклов было оплачено ранее (запись в историю)")) {
+                        (tr(lang, "Past paid", "Оплачено ранее"))
+                    }
+                    input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                }
+
+                div style="margin-left: auto; padding-bottom: 6px;" {
+                    label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--ink); font-size: 11px;" {
+                        @let auto = current.map(|b| b.auto_renew).unwrap_or(false);
+                        input type="checkbox" name="auto_renew" value="1" checked[auto] {}
+                        (tr(lang, "Auto-renewal (card charge)", "Автосписание с карты"))
+                    }
+                }
             }
 
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Cycle", "Период"))
-                }
-                select name="billing_cycle" style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
-                    @let cur_c = current.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
-                    option value="monthly" selected[cur_c == BillingCycle::Monthly] { (tr(lang, "Monthly", "1 месяц")) }
-                    option value="quarterly" selected[cur_c == BillingCycle::Quarterly] { (tr(lang, "Quarterly (3 mo)", "3 месяца")) }
-                    option value="semi-annual" selected[cur_c == BillingCycle::SemiAnnual] { (tr(lang, "Semi-annual (6 mo)", "6 месяцев")) }
-                    option value="annual" selected[cur_c == BillingCycle::Annual] { (tr(lang, "Annual (12 mo)", "1 год")) }
-                }
-            }
-
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Amount", "Сумма"))
-                }
-                input type="text" name="amount" placeholder="0.00"
-                       value=(current.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-            }
-
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Currency (ISO 4217)", "Валюта (ISO 4217)"))
-                }
-                input list="currency_list" name="currency" maxlength="8"
-                       value=(current.map(|b| b.currency.as_str()).unwrap_or("EUR"))
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase;" {}
-            }
-
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Billing portal URL", "Ссылка на биллинг"))
-                }
-                input type="url" name="billing_url" placeholder="https://..."
-                       value=(current.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-            }
-
-            div {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Past cycles paid", "Оплачено ранее циклов"))
-                }
-                input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-            }
-
-            div style="grid-column: 1 / -1;" {
-                label style="display: block; color: var(--mute); margin-bottom: 2px;" {
-                    (tr(lang, "Notes / contract", "Заметки / договор"))
-                }
-                input type="text" name="notes" placeholder=(tr(lang, "Card, account, contract...", "Карта, аккаунт, договор..."))
-                       value=(current.and_then(|b| b.notes.as_deref()).unwrap_or(""))
-                       style="width: 100%; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-            }
-
-            div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin-top: 4px;" {
-                label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;" {
-                    @let auto = current.map(|b| b.auto_renew).unwrap_or(false);
-                    input type="checkbox" name="auto_renew" value="1" checked[auto] {}
-                    (tr(lang, "Auto-renew enabled", "Включено автопродление"))
+            div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
+                div style="flex: 1.2 1 240px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Hoster portal URL", "Ссылка на кабинет хостера"))
+                    }
+                    input type="url" name="billing_url" placeholder="https://..."
+                           value=(current.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
                 }
 
-                button type="submit"
-                       style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (icon("save")) (tr(lang, "save billing", "сохранить биллинг"))
+                div style="flex: 1 1 200px;" {
+                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                        (tr(lang, "Notes / contract", "Заметки / договор"))
+                    }
+                    input type="text" name="notes" placeholder=(tr(lang, "Account, card, contract...", "Аккаунт, карта, заметка..."))
+                           value=(current.and_then(|b| b.notes.as_deref()).unwrap_or(""))
+                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                }
+
+                div style="flex: 0 0 auto;" {
+                    button type="submit" class="ed-abtn ed-abtn--primary"
+                           style="height: 32px; padding: 0 16px; display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box;" {
+                        (icon("check")) " " (tr(lang, "Save parameters", "Сохранить"))
+                    }
                 }
             }
         }

@@ -516,84 +516,93 @@ pub(crate) async fn servers_billing(
                         }
                     }
 
-                    form method="post" action=(format!("/admin/servers/{sid_enc}/billing")) style="margin: 14px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; font-family: var(--mono); font-size: 11px;" {
+                    form method="post" action=(format!("/admin/servers/{sid_enc}/billing"))
+                         style="margin: 14px 0 4px; max-width: 1080px; display: flex; flex-direction: column; gap: 12px; font-family: var(--mono); font-size: 11px;" {
                         input type="hidden" name="return_to" value="/admin/servers/billing" {}
 
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Due date (YYYY-MM-DD)", "Дата оплаты (ГГГГ-ММ-ДД)"))
+                        div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
+                            div style="flex: 0 0 140px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Due date", "Дата оплаты"))
+                                }
+                                input type="date" name="due_date" required
+                                       value=(b_opt.map(|b| b.due_date.as_str()).unwrap_or(""))
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
                             }
-                            input type="date" name="due_date" required
-                                   value=(b_opt.map(|b| b.due_date.as_str()).unwrap_or(""))
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+
+                            div style="flex: 0 0 130px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Billing cycle", "Период"))
+                                }
+                                select name="billing_cycle" style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                                    @let cur_cycle = b_opt.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
+                                    option value="monthly" selected[cur_cycle == BillingCycle::Monthly] { (crate::i18n::tr(lang, "Monthly", "1 месяц")) }
+                                    option value="quarterly" selected[cur_cycle == BillingCycle::Quarterly] { (crate::i18n::tr(lang, "Quarterly (3 mo)", "3 месяца")) }
+                                    option value="semi-annual" selected[cur_cycle == BillingCycle::SemiAnnual] { (crate::i18n::tr(lang, "Semi-annual (6 mo)", "6 месяцев")) }
+                                    option value="annual" selected[cur_cycle == BillingCycle::Annual] { (crate::i18n::tr(lang, "Annual (12 mo)", "1 год")) }
+                                }
+                            }
+
+                            div style="flex: 0 0 95px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Amount", "Стоимость"))
+                                }
+                                input type="text" name="amount" placeholder="0.00"
+                                       value=(b_opt.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                            }
+
+                            div style="flex: 0 0 80px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Currency", "Валюта"))
+                                }
+                                input list="currency_list" name="currency" maxlength="8"
+                                       value=(b_opt.map(|b| b.currency.as_str()).unwrap_or("EUR"))
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase; text-align: center;" {}
+                            }
+
+                            div style="flex: 0 0 110px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;"
+                                      title=(crate::i18n::tr(lang, "Past cycles already paid (history record)", "Сколько циклов было оплачено ранее (запись в историю)")) {
+                                    (crate::i18n::tr(lang, "Past paid", "Оплачено ранее"))
+                                }
+                                input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                            }
+
+                            div style="margin-left: auto; padding-bottom: 6px;" {
+                                label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--ink); font-size: 11px;" {
+                                    @let auto = b_opt.map(|b| b.auto_renew).unwrap_or(false);
+                                    input type="checkbox" name="auto_renew" value="1" checked[auto] {}
+                                    (crate::i18n::tr(lang, "Auto-renewal (card charge)", "Автосписание с карты"))
+                                }
+                            }
                         }
 
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Billing cycle", "Период оплаты"))
-                            }
-                            select name="billing_cycle" style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
-                                @let cur_cycle = b_opt.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
-                                option value="monthly" selected[cur_cycle == BillingCycle::Monthly] { (crate::i18n::tr(lang, "Monthly", "1 месяц")) }
-                                option value="quarterly" selected[cur_cycle == BillingCycle::Quarterly] { (crate::i18n::tr(lang, "Quarterly (3 mo)", "3 месяца")) }
-                                option value="semi-annual" selected[cur_cycle == BillingCycle::SemiAnnual] { (crate::i18n::tr(lang, "Semi-annual (6 mo)", "6 месяцев")) }
-                                option value="annual" selected[cur_cycle == BillingCycle::Annual] { (crate::i18n::tr(lang, "Annual (12 mo)", "1 год")) }
-                            }
-                        }
-
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Amount (e.g. 5.00)", "Стоимость (напр. 5.00)"))
-                            }
-                            input type="text" name="amount" placeholder="0.00"
-                                   value=(b_opt.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-                        }
-
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Currency (ISO 4217)", "Валюта (ISO 4217)"))
-                            }
-                            input list="currency_list" name="currency" maxlength="8"
-                                   value=(b_opt.map(|b| b.currency.as_str()).unwrap_or("EUR"))
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase;" {}
-                        }
-
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Provider console URL", "Ссылка на биллинг хостера"))
-                            }
-                            input type="url" name="billing_url" placeholder="https://..."
-                                   value=(b_opt.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-                        }
-
-                        div {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Past cycles paid (history)", "Оплачено ранее циклов (в историю)"))
-                            }
-                            input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-                        }
-
-                        div style="grid-column: 1 / -1;" {
-                            label style="display: block; color: var(--mute); margin-bottom: 4px;" {
-                                (crate::i18n::tr(lang, "Notes / contract", "Заметки / договор"))
-                            }
-                            input type="text" name="notes" placeholder=(crate::i18n::tr(lang, "Account, card, notes...", "Аккаунт, карта, заметка..."))
-                                   value=(b_opt.and_then(|b| b.notes.as_deref()).unwrap_or(""))
-                                   style="width: 100%; padding: 6px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
-                        }
-
-                        div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin-top: 6px;" {
-                            label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer;" {
-                                @let auto = b_opt.map(|b| b.auto_renew).unwrap_or(false);
-                                input type="checkbox" name="auto_renew" value="1" checked[auto] {}
-                                (crate::i18n::tr(lang, "Auto-renewal enabled (card charge)", "Включено автопродление (списание с карты)"))
+                        div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
+                            div style="flex: 1.2 1 240px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Hoster portal URL", "Ссылка на кабинет хостера"))
+                                }
+                                input type="url" name="billing_url" placeholder="https://..."
+                                       value=(b_opt.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
                             }
 
-                            button type="submit" class="ed-abtn ed-abtn--primary" {
-                                (icon("check")) " " (crate::i18n::tr(lang, "Save parameters", "Сохранить параметры"))
+                            div style="flex: 1 1 200px;" {
+                                label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                                    (crate::i18n::tr(lang, "Notes / contract", "Заметки / договор"))
+                                }
+                                input type="text" name="notes" placeholder=(crate::i18n::tr(lang, "Account, card, contract...", "Аккаунт, карта, заметка..."))
+                                       value=(b_opt.and_then(|b| b.notes.as_deref()).unwrap_or(""))
+                                       style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                            }
+
+                            div style="flex: 0 0 auto;" {
+                                button type="submit" class="ed-abtn ed-abtn--primary"
+                                       style="height: 32px; padding: 0 16px; display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box;" {
+                                    (icon("check")) " " (crate::i18n::tr(lang, "Save parameters", "Сохранить"))
+                                }
                             }
                         }
                     }
