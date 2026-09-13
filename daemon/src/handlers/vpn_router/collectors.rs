@@ -459,23 +459,24 @@ pub(crate) async fn collect_extra_protocol_uris(
     Ok(uris)
 }
 
-/// Collect `awg://` AmneziaWG links for the ninitux subscription blob —
-/// one per granted server that (a) runs the `amneziawg` kernel, (b) has
-/// `wireguard` VISIBLE for this (user, server) (NM-10 hidden/deny gate —
-/// `hidden=1` is the operator's advertise kill-switch), and (c) is
-/// provisioned with the per-server obfs + server keypair.
+/// Collect `awg://` and `awg3://` AmneziaWG links for the ninitux subscription blob —
+/// one per granted server that (a) runs modern sing-box `amneziawg2` or `amneziawg3`
+/// or legacy `amneziawg` kernel, (b) has the corresponding protocol VISIBLE for this
+/// (user, server) (NM-10 hidden/deny gate — `hidden=1` is the operator's advertise kill-switch),
+/// and (c) is provisioned with the per-server obfs + server keypair.
 ///
-/// Special-cased (NOT in `EXTRA_PROTOCOLS`) because `awg://` is rendered
-/// by [`vpnctl_protocols::awg_share_link`], not the generic
+/// Special-cased (NOT in `EXTRA_PROTOCOLS`) because `awg://` / `awg3://` are rendered
+/// by [`vpnctl_protocols::awg_share_link`], [`vpnctl_protocols::awg2_share_link`],
+/// and [`vpnctl_protocols::awg3_share_link`], not the generic
 /// `Protocol::share_link`, and needs a per-peer [`RenderCtx::with_peers`]:
-/// the client's `/32` octet must match the server's live `awg0.conf`
+/// the client's `/32` octet must match the server's live `awg0.conf` / sing-box
 /// `[Peer]` block 1:1. Both sides derive the octet from the SAME
 /// `users_for_server` (ORDER BY id) list, so the subscription octet
 /// matches the deployed config on every pull — a polling client
 /// self-heals after any user-churn redeploy (the only stale-octet case
 /// is a never-re-pulled one-shot artefact, which this endpoint isn't).
 ///
-/// The `awg://` line lands strictly AFTER every vless (and the other
+/// The `awg://` / `awg3://` lines land strictly AFTER every vless (and the other
 /// extras), so a client build without AmneziaWG support ignores the
 /// trailing line and keeps every vless (forward-compatible rollout).
 /// Failure-isolated: a server's render error is
@@ -491,13 +492,15 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
     };
     let wg_pid = vpnctl_core::ProtocolId("wireguard".to_string());
     let awg2_pid = vpnctl_core::ProtocolId("amneziawg2".to_string());
+    let awg3_pid = vpnctl_core::ProtocolId("amneziawg3".to_string());
     let mut uris: Vec<String> = Vec::new();
     for server in &servers {
-        // Support both modern amneziawg2 on sing-box and legacy wireguard on amneziawg kernel.
+        // Support both modern amneziawg2 / amneziawg3 on sing-box and legacy wireguard on amneziawg kernel.
         let has_awg2 = server.enabled_protocols.contains(&awg2_pid);
+        let has_awg3 = server.enabled_protocols.contains(&awg3_pid);
         let has_legacy_awg = server.kernels.iter().any(|k| k.0 == "amneziawg")
             && server.enabled_protocols.contains(&wg_pid);
-        if !has_awg2 && !has_legacy_awg {
+        if !has_awg2 && !has_awg3 && !has_legacy_awg {
             continue;
         }
         // Same auto-suppress (migration 0030) skip as the vless path.
@@ -517,7 +520,7 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
                 continue;
             }
         }
-        // NM-10 visibility: server-hidden OR per-user-denied → no awg://
+        // NM-10 visibility: server-hidden OR per-user-denied → no awg:// / awg3://
         // for this (user, server). This is the operator's kill-switch.
         let visible = match state
             .inv
@@ -530,16 +533,21 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
                 continue;
             }
         };
-        let target_pid = if has_awg2 && visible.contains(&awg2_pid) {
-            Some(&awg2_pid)
+
+        let mut target_pids: Vec<(&vpnctl_core::ProtocolId, &'static str)> = Vec::new();
+        if has_awg2 && visible.contains(&awg2_pid) {
+            target_pids.push((&awg2_pid, "AWG"));
         } else if has_legacy_awg && visible.contains(&wg_pid) {
-            Some(&wg_pid)
-        } else {
-            None
-        };
-        let Some(chosen_pid) = target_pid else {
+            target_pids.push((&wg_pid, "AWG"));
+        }
+        if has_awg3 && visible.contains(&awg3_pid) {
+            target_pids.push((&awg3_pid, "AWG3"));
+        }
+
+        if target_pids.is_empty() {
             continue;
-        };
+        }
+
         let secrets = match state.inv.list_server_secrets(&server.id).await {
             Ok(s) => s,
             Err(e) => {
@@ -556,28 +564,32 @@ pub(crate) async fn collect_awg_subscription_uris(state: &AppState, user: &User)
             }
         };
         let ctx = RenderCtx::with_peers(server, &secrets, &peers);
-        let link_res = if chosen_pid == &awg2_pid {
-            vpnctl_protocols::awg2_share_link(&ctx, user)
-        } else {
-            vpnctl_protocols::awg_share_link(&ctx, user)
-        };
-        match link_res {
-            Ok(link) => {
-                // Re-label the fragment to the ninitux house style
-                // "{label} AWG ~{client}", matching the vless / extra lines.
-                let custom = state
-                    .inv
-                    .server_display_name(&server.id)
-                    .await
-                    .ok()
-                    .flatten();
-                let label = server_display_label(&server.id.0, custom.as_deref());
-                let fragment = format!("{label} AWG ~{}", user.id.0);
-                let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
-                uris.push(relabel_uri_fragment(&link, &encoded));
-            }
-            Err(e) => {
-                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, error = %e, "awg share_link failed; skipping this server");
+        for (chosen_pid, tag) in target_pids {
+            let link_res = if chosen_pid == &awg3_pid {
+                vpnctl_protocols::awg3_share_link(&ctx, user)
+            } else if chosen_pid == &awg2_pid {
+                vpnctl_protocols::awg2_share_link(&ctx, user)
+            } else {
+                vpnctl_protocols::awg_share_link(&ctx, user)
+            };
+            match link_res {
+                Ok(link) => {
+                    // Re-label the fragment to the ninitux house style
+                    // "{label} {tag} ~{client}", matching the vless / extra lines.
+                    let custom = state
+                        .inv
+                        .server_display_name(&server.id)
+                        .await
+                        .ok()
+                        .flatten();
+                    let label = server_display_label(&server.id.0, custom.as_deref());
+                    let fragment = format!("{label} {tag} ~{}", user.id.0);
+                    let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
+                    uris.push(relabel_uri_fragment(&link, &encoded));
+                }
+                Err(e) => {
+                    tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, server = %server.id, protocol = %chosen_pid.0, error = %e, "awg share_link failed; skipping this server protocol");
+                }
             }
         }
     }

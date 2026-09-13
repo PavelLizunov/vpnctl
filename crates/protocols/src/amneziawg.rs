@@ -449,3 +449,59 @@ pub fn awg2_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         h4 = require_param("h4")?,
     ))
 }
+
+/// Generate an `awg3://` share-link URI for AmneziaWG 3.0/3.1.
+///
+/// Formats the operator's standard schema with AmneziaWG 3.1 parameters,
+/// including HeaderProtectionKey, ContentPaddingAddition, RandomTrailers,
+/// and DisableCookies.
+/// Requires server-generated WireGuard keypair for the user, valid grant,
+/// and complete AmneziaWG 3.0 server secrets.
+pub fn awg3_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
+    let (private, server_public, addresses) = client_material(V3, ctx, user)?;
+    let address = addresses
+        .first()
+        .ok_or_else(|| render_error("missing client address"))?;
+    let host = host_for_url(&ctx.server.address);
+    let port = V3.port;
+    let params = parameters(V3, ctx)?;
+    let require_param = |k: &str| -> Result<String> {
+        params
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case(k))
+            .map(|(_, _, v)| match v {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s.clone(),
+                Value::Bool(b) => b.to_string(),
+                other => other.to_string(),
+            })
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| render_error(&format!("missing required obfuscation parameter '{k}'")))
+    };
+    let tag = percent_encoding::utf8_percent_encode(&user.id.0, crate::encoding::FRAGMENT);
+    Ok(format!(
+        "awg3://{server_public}@{host}:{port}?private_key={private}\
+         &address={address}&keepalive=25\
+         &jc={jc}&jmin={jmin}&jmax={jmax}&s1={s1}&s2={s2}&s3={s3}&s4={s4}\
+         &h1={h1}&h2={h2}&h3={h3}&h4={h4}\
+         &header_protection_key={hpk}\
+         &content_padding_addition={cpa}\
+         &random_trailers={rt}\
+         &disable_cookies={dc}#{tag}",
+        jc = require_param("jc")?,
+        jmin = require_param("jmin")?,
+        jmax = require_param("jmax")?,
+        s1 = require_param("s1")?,
+        s2 = require_param("s2")?,
+        s3 = require_param("s3")?,
+        s4 = require_param("s4")?,
+        h1 = require_param("h1")?,
+        h2 = require_param("h2")?,
+        h3 = require_param("h3")?,
+        h4 = require_param("h4")?,
+        hpk = require_param("header_protection_key")?,
+        cpa = require_param("content_padding_addition")?,
+        rt = require_param("random_trailers")?,
+        dc = require_param("disable_cookies")?,
+    ))
+}

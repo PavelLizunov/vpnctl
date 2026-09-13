@@ -15,7 +15,9 @@ mod vless_xhttp;
 mod wg_addressing;
 mod wireguard;
 
-pub use amneziawg::{AmneziaWg2, AmneziaWg3, awg2_share_link, render_amnezia_conf};
+pub use amneziawg::{
+    AmneziaWg2, AmneziaWg3, awg2_share_link, awg3_share_link, render_amnezia_conf,
+};
 pub use anytls::{ANYTLS_PORT, AnyTls};
 pub use hysteria2::Hysteria2;
 pub use naive::{NAIVE_PORT, Naive};

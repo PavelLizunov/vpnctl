@@ -374,3 +374,78 @@ fn awg2_share_link_errors_when_user_not_granted() {
     // bob is not in ctx.peers
     assert!(awg2_share_link(&ctx, &bob).is_err());
 }
+
+#[test]
+fn awg3_share_link_renders_expected_uri() {
+    let server = server();
+    let secrets = secrets();
+    let alice = user("alice", 256);
+    let users = [alice.clone()];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users);
+
+    let link = awg3_share_link(&ctx, &alice).unwrap();
+    assert!(
+        link.starts_with("awg3://"),
+        "must use awg3:// scheme: {link}"
+    );
+    assert!(
+        link.contains("@[2001:db8::1]:51822?"),
+        "host and port for v3: {link}"
+    );
+    assert!(
+        link.contains("private_key="),
+        "must contain private_key: {link}"
+    );
+    assert!(
+        link.contains("address=10.73.1.2/32"),
+        "address cidr for v3 network 73: {link}"
+    );
+    assert!(link.contains("keepalive=25"), "keepalive: {link}");
+    assert!(link.contains("jc=8"), "jc param: {link}");
+    assert!(link.contains("jmin=37"), "jmin param: {link}");
+    assert!(link.contains("jmax=101"), "jmax param: {link}");
+    assert!(link.contains("s1=21"), "s1 param: {link}");
+    assert!(link.contains("s2=21"), "s2 param: {link}");
+    assert!(link.contains("s3=21"), "s3 param: {link}");
+    assert!(link.contains("s4=21"), "s4 param: {link}");
+    assert!(link.contains("h1="), "h1 param: {link}");
+    assert!(link.contains("h2="), "h2 param: {link}");
+    assert!(link.contains("h3="), "h3 param: {link}");
+    assert!(link.contains("h4="), "h4 param: {link}");
+    assert!(
+        link.contains(&format!("header_protection_key={}", "06".repeat(32))),
+        "must contain 64-character lowercase hex header_protection_key: {link}"
+    );
+    assert!(
+        link.contains("content_padding_addition=0-32"),
+        "must contain content_padding_addition: {link}"
+    );
+    assert!(
+        link.contains("random_trailers=true"),
+        "must contain random_trailers: {link}"
+    );
+    assert!(
+        link.contains("disable_cookies=true"),
+        "must contain disable_cookies: {link}"
+    );
+    assert!(link.ends_with("#alice"), "tag: {link}");
+}
+
+#[test]
+fn awg3_share_link_errors_when_user_not_granted_or_secrets_missing() {
+    let server = server();
+    let secrets = secrets();
+    let alice = user("alice", 256);
+    let bob = user("bob", 512);
+    let users = [alice.clone()];
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users);
+
+    // bob is not in ctx.peers
+    assert!(awg3_share_link(&ctx, &bob).is_err());
+
+    // Missing header protection key fails closed
+    let mut missing_secrets = secrets.clone();
+    missing_secrets.remove(HEADER_KEY);
+    let ctx_missing = RenderCtx::with_peers(&server, &missing_secrets, &users);
+    assert!(awg3_share_link(&ctx_missing, &alice).is_err());
+}

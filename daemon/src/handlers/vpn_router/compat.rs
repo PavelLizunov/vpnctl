@@ -56,7 +56,7 @@ pub(crate) fn is_vpn_client_ua_v2ray_family(ua: &str) -> bool {
 }
 
 /// UAs of the operator's custom VPNRouter client — the only one that speaks
-/// the custom subscription schemes (`awg://` AmneziaWG + `vless://…type=xhttp`).
+/// the custom subscription schemes (`awg://` / `awg3://` AmneziaWG + `vless://…type=xhttp`).
 /// A generic v2ray/clash/sing-box client on this endpoint would at best ignore
 /// such a line and at worst (strict parser) drop the whole config, so those
 /// schemes are UA-gated to VPNRouter only — a generic client never sees them,
