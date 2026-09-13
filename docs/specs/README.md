@@ -25,6 +25,11 @@ Two kinds of documents live here:
    fix is not proven until the relevant test fails under a planted regression
    (or equivalent mutation) and then passes with the implementation.
 
+   Recent feature micro-specs:
+   - [`boosty-income-and-connect.md`](boosty-income-and-connect.md) — Boosty income tracking, P&L cost coverage & 1-click bookmarklet
+   - [`currency-exchange.md`](currency-exchange.md) — Multi-currency conversion engine & total spend tracking
+   - [`server-billing.md`](server-billing.md) — Server rental and payment scheduling
+
 2. **Standing contracts** — distilled operational knowledge, enforced by tests
    wherever possible:
 
@@ -37,4 +42,4 @@ Two kinds of documents live here:
    | `abuse-detection.md` | three-layer visibility model |
    | `migration-compatibility.md` | byte-for-byte client compatibility |
    | `backup-restore.md` | backup bundle, restore drill, invariants |
-    | [commercial-operations.md](commercial-operations.md) | RU operator policy: update risks, rollout/rollback, incident response, commercial go-live gates |
+   | [commercial-operations.md](commercial-operations.md) | RU operator policy: update risks, rollout/rollback, incident response, commercial go-live gates |
