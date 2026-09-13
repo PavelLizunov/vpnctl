@@ -160,7 +160,8 @@ fn safe_return_to(raw: Option<String>) -> String {
     match raw {
         Some(r)
             if r.starts_with("/admin/servers")
-                && !r.starts_with("//")
+                && !r.contains("//")
+                && !r.contains("..")
                 && !r.contains(['\r', '\n', '\\']) =>
         {
             r
