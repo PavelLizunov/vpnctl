@@ -637,12 +637,7 @@ mod tests {
         let headers = HeaderMap::new();
 
         // Newline injection in value should be stripped
-        let resp = set_tweak_cookie(
-            &headers,
-            "vpnctl_theme",
-            &["dark"],
-            "value=dar\r\nk",
-        );
+        let resp = set_tweak_cookie(&headers, "vpnctl_theme", &["dark"], "value=dar\r\nk");
         let set_cookie = resp
             .headers()
             .get(header::SET_COOKIE)
@@ -653,12 +648,7 @@ mod tests {
         );
 
         // Header/cookie injection in name should be stripped
-        let resp = set_tweak_cookie(
-            &headers,
-            "vpnctl_\r\n_theme",
-            &["dark"],
-            "value=dark",
-        );
+        let resp = set_tweak_cookie(&headers, "vpnctl_\r\n_theme", &["dark"], "value=dark");
         let set_cookie = resp
             .headers()
             .get(header::SET_COOKIE)
