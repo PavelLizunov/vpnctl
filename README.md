@@ -262,9 +262,14 @@ scripting / disaster recovery.
 | Set client 2-hop detour | `/admin/servers/<id>` («Client entry / Входной сервер») | `vpnctl server set-client-detour-via <target> <upstream>` (or `--clear`) |
 | Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
 | Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
-| Inspect Boosty bridge state | `/admin/boosty` | `vpnctl boosty status` (global `--output json` for automation) |
+| Inspect Boosty bridge & income | `/admin/boosty` (1-click bookmarklet, MRR & roster) | `vpnctl boosty status` (global `--output json` for automation) |
+| Manage server billing & P&L | `/admin/servers/billing` (multi-currency, P&L coverage) | (none; web-only) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+
+### Client setup guides
+
+User-facing setup instructions for all platforms (**iOS**, **Android**, **Windows**, **macOS**, **Linux**, **Android TV**) are documented in [`docs/CLIENT_GUIDES.md`](docs/CLIENT_GUIDES.md).
 
 ### Connect with an already-installed deploy key
 

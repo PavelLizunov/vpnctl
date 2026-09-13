@@ -10,3 +10,7 @@
 /core
 /core.*
 scripts/__pycache__/
+.env
+IMG_*.png
+/admin/
+opendesign/
