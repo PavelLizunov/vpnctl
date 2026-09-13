@@ -153,8 +153,13 @@ pub(crate) async fn servers_billing(
 
     let net_monthly_margin_minor: Option<i64> =
         boosty_mrr_converted_minor.map(|mrr| mrr.saturating_sub(fleet_monthly_converted_minor));
-    let net_lifetime_margin_minor: Option<i64> = boosty_total_revenue_converted_minor
-        .map(|rev| rev.saturating_sub(fleet_total_spend_converted_minor));
+    let coverage_ratio_f64: Option<f64> = boosty_mrr_converted_minor.and_then(|mrr| {
+        if fleet_monthly_converted_minor > 0 {
+            Some((mrr as f64) / (fleet_monthly_converted_minor as f64))
+        } else {
+            None
+        }
+    });
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
@@ -278,9 +283,9 @@ pub(crate) async fn servers_billing(
                         (inc.active_payers) " " (crate::i18n::tr(lang, "payers", "плательщиков"))
                         " · "
                         @if let Some(rev) = boosty_total_revenue_converted_minor {
-                            (crate::i18n::tr(lang, "total: ", "всего: ")) (format_amount(rev, display_cur))
+                            (crate::i18n::tr(lang, "all-time: ", "история блога: ")) (format_amount(rev, display_cur))
                         } @else {
-                            (crate::i18n::tr(lang, "total: ", "всего: ")) (format!("{:.0} ₽", inc.total_revenue_rub_cents as f64 / 100.0))
+                            (crate::i18n::tr(lang, "all-time: ", "история блога: ")) (format!("{:.0} ₽", inc.total_revenue_rub_cents as f64 / 100.0))
                         }
                     }
                 }
@@ -353,18 +358,32 @@ pub(crate) async fn servers_billing(
                         }
                     }
                     div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                        @match net_lifetime_margin_minor {
-                            Some(lnet) if lnet >= 0 => {
-                                (crate::i18n::tr(lang, "lifetime net: +", "сальдо за всё время: +"))
-                                (format_amount(lnet, display_cur))
+                        @match coverage_ratio_f64 {
+                            Some(ratio) if ratio >= 1.0 => {
+                                (format!("{}: {:.0}% ({:.1}×)",
+                                    crate::i18n::tr(lang, "cost coverage", "покрытие расходов"),
+                                    ratio * 100.0,
+                                    ratio
+                                ))
                             }
-                            Some(lnet) => {
-                                (crate::i18n::tr(lang, "lifetime net: -", "сальдо за всё время: -"))
-                                (format_amount(lnet.saturating_abs(), display_cur))
+                            Some(ratio) if ratio > 0.0 => {
+                                @let cov = (ratio * 100.0).floor();
+                                @let def = (100.0 - cov).max(1.0);
+                                (format!("{}: {:.0}% ({}: {:.0}%)",
+                                    crate::i18n::tr(lang, "cost coverage", "покрытие расходов"),
+                                    cov,
+                                    crate::i18n::tr(lang, "deficit", "дефицит"),
+                                    def
+                                ))
+                            }
+                            Some(_) => {
+                                (crate::i18n::tr(lang, "cost coverage: 0%", "покрытие расходов: 0%"))
                             }
                             None => {
-                                a href="/admin/boosty" style="color: var(--ink); text-decoration: underline;" {
-                                    (crate::i18n::tr(lang, "/admin/boosty", "/admin/boosty"))
+                                @if fleet_monthly_converted_minor == 0 {
+                                    (crate::i18n::tr(lang, "zero server expenses", "серверы не тарифицированы"))
+                                } @else {
+                                    (crate::i18n::tr(lang, "awaiting exchange rate", "ожидает курса валюты"))
                                 }
                             }
                         }
