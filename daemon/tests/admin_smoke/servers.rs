@@ -1082,4 +1082,15 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     assert!(html_pl.contains("10.70 €"), "MRR in EUR: {html_pl}");
     assert!(html_pl.contains("5.00 €"), "Spend in EUR: {html_pl}");
     assert!(html_pl.contains("+5.70 €"), "Net margin in EUR: {html_pl}");
+    assert!(
+        html_pl.contains("cost coverage: 214% (2.1×)")
+            || html_pl.contains("cost coverage: 214% (2.1x)")
+            || html_pl.contains("покрытие расходов: 214% (2.1×)")
+            || html_pl.contains("покрытие расходов: 214% (2.1x)"),
+        "coverage ratio missing in html: {html_pl}"
+    );
+    assert!(
+        html_pl.contains("all-time:") || html_pl.contains("история блога:"),
+        "all-time label missing in html: {html_pl}"
+    );
 }
