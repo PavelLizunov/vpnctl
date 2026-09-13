@@ -121,6 +121,22 @@ pub(crate) async fn boosty_page(
                 .as_deref()
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
+
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("vpnctld");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|p| p.to_str().ok())
+        .unwrap_or("http");
+    let admin_origin = format!("{proto}://{host}");
+
+    let bookmarklet_js = format!(
+        r#"(function(){{if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{alert('Откройте страницу вашего блога на boosty.to и нажмите эту закладку снова!');return;}}function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var a=c('auth'),d=c('_clientId');if(!a||!d){{alert('Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{blog:b,refresh_token:j.refreshToken||'',access_token:j.accessToken||'',device_id:d}};location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}}catch(e){{alert('Ошибка чтения токенов Boosty: '+e);}}}})();"#
+    );
+    let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
+
     let body = html! {
         div.ed-art-eyebrow { "Boosty" }
         div.ed-headrow {
@@ -547,7 +563,39 @@ pub(crate) async fn boosty_page(
                 "Основной способ: refresh token + device id (обновляются автоматически). Access token — короткоживущий резерв, он используется только если пара заполнена не полностью.",
             ))
         }
-        form method="post" action="/admin/boosty/settings" {
+
+        // ── 1-Click Quick Connect Bookmarklet Card ───────────────
+        div.ed-card style="margin: 10px 0 20px; border: 1px solid color-mix(in oklab, var(--accent) 50%, var(--rule)); background: color-mix(in oklab, var(--accent) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
+            div.ed-card__hd {
+                (tr(lang, "1-Click Quick Connect (No DevTools / F12)", "Быстрое подключение в 1 клик (без F12 и консоли)"))
+            }
+            p style="font-family: var(--serif); font-size: 13px; color: var(--ink); margin: 0 0 14px; line-height: 1.5;" {
+                (tr(
+                    lang,
+                    "No console commands or manual cookie copying: drag the button below to your browser bookmarks bar, open your creator page on boosty.to, and click the bookmark. It will automatically read tokens and connect this server.",
+                    "Без консоли и ручного копирования кук: перетащите кнопку ниже на панель закладок браузера, откройте страницу блога на boosty.to и нажмите закладку. Она сама считает токены и мгновенно свяжет ваш сервер.",
+                ))
+            }
+            div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;" {
+                a.ed-abtn.ed-abtn--primary href=(bookmarklet_href) draggable="true" title=(tr(lang, "Drag this button to your bookmarks bar", "Перетащите эту кнопку на панель закладок")) {
+                    (icon("link")) " " (tr(lang, "🔑 Connect Boosty", "🔑 Подключить Boosty"))
+                }
+                button.ed-abtn.ed-abtn--secondary type="button" onclick="var s=this.dataset.script;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(function(){alert('Скрипт скопирован в буфер обмена!');});}else{var t=document.createElement('textarea');t.value=s;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Скрипт скопирован в буфер обмена!');}" data-script=(bookmarklet_js) {
+                    (icon("code")) " " (tr(lang, "Copy script", "Скопировать скрипт"))
+                }
+            }
+        }
+
+        // Import success banner (shown when loaded with #quick_connect=...)
+        div id="quick-connect-banner" style="display: none; border: 1px solid var(--green); border-left-width: 4px; background: color-mix(in oklab, var(--green) 10%, var(--paper)); padding: 12px 16px; margin: 12px 0 16px; font-family: var(--serif); font-size: 13px; line-height: 1.5;" {
+            b style="color: var(--green);" { (icon("check")) " " (tr(lang, "Boosty credentials imported!", "Учётные данные Boosty импортированы!")) }
+            span style="color: var(--ink);" {
+                " "
+                (tr(lang, "Review the pre-filled fields below and click Save settings to apply.", "Проверьте заполненные поля ниже и нажмите кнопку «Сохранить» для применения."))
+            }
+        }
+
+        form id="boosty-settings-form" method="post" action="/admin/boosty/settings" {
             div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
                 label for="boosty_blog_url" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (tr(lang, "blog url / slug", "блог url / slug"))
@@ -590,7 +638,7 @@ pub(crate) async fn boosty_page(
             }
             div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0;" {
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
-                    input type="checkbox" name="enabled" checked[settings.enabled];
+                    input id="boosty_enabled" type="checkbox" name="enabled" checked[settings.enabled];
                     (tr(lang, "enabled (poller runs)", "включено (поллер работает)"))
                 }
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
@@ -605,6 +653,46 @@ pub(crate) async fn boosty_page(
             button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                 (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
             }
+        }
+
+        // Client-side receiver for 1-click quick-connect bookmarklet payload
+        script {
+            (maud::PreEscaped(r#"
+(function() {
+  if (window.location.hash.indexOf('#quick_connect=') === 0) {
+    try {
+      var raw = decodeURIComponent(window.location.hash.substring(15));
+      var data = JSON.parse(raw);
+      history.replaceState(null, '', window.location.pathname);
+      if (data.blog) {
+        var el = document.getElementById('boosty_blog_url');
+        if (el) el.value = data.blog;
+      }
+      if (data.access_token) {
+        var el = document.getElementById('boosty_access');
+        if (el) el.value = data.access_token;
+      }
+      if (data.refresh_token) {
+        var el = document.getElementById('boosty_refresh');
+        if (el) el.value = data.refresh_token;
+      }
+      if (data.device_id) {
+        var el = document.getElementById('boosty_device');
+        if (el) el.value = data.device_id;
+      }
+      var cb = document.getElementById('boosty_enabled');
+      if (cb) cb.checked = true;
+      var banner = document.getElementById('quick-connect-banner');
+      if (banner) {
+        banner.style.display = 'block';
+        banner.scrollIntoView({ behavior: 'smooth' });
+      }
+    } catch (e) {
+      console.error('Boosty quick connect error', e);
+    }
+  }
+})();
+"#))
         }
     };
 

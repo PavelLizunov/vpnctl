@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 149,865 (90,527 prod / 59,338 test)
+- **Total Rust LOC:** 149,966 (90,615 prod / 59,351 test)
 - **Database Migrations:** 58
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
@@ -23,14 +23,14 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,893 (20) | 4,847 (12) | **9,740** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,693 (147) | 31,978 (59) | **82,671** |
-| **Total** | | | | **90,527 (276)** | **59,338 (134)** | **149,865** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,781 (147) | 31,991 (59) | **82,772** |
+| **Total** | | | | **90,615 (276)** | **59,351 (134)** | **149,966** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,054 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,067 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,717 | `daemon` | Test |
 | `daemon/src/health_monitor/tests.rs` | 1,629 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,519 | `crates/kernels` | Prod |
@@ -51,10 +51,10 @@
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 958 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
+| `daemon/src/handlers/admin/boosty.rs` | 947 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
-| `crates/protocols/tests/spec_amneziawg_versions.rs` | 919 | `crates/protocols` | Test |
 
 ## Database Migrations (58)
 
