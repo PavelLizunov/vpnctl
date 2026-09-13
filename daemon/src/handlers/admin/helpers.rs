@@ -139,18 +139,20 @@ pub(crate) fn set_tweak_cookie(
     valid: &[&str],
     body: &str,
 ) -> Response {
-    let value = body
+    let raw_value = body
         .split('&')
         .find_map(|kv| kv.strip_prefix("value="))
         .unwrap_or("");
-    if !valid.contains(&value) {
+    let value = raw_value.replace(['\r', '\n', ';'], "");
+    let safe_name = cookie_name.replace(['\r', '\n', ';', '='], "");
+    if !valid.contains(&value.as_str()) {
         return bad_request(&format!(
-            "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+            "invalid value '{value}' for tweak '{safe_name}' (allowed: {})",
             valid.join(", ")
         ));
     }
     let cookie_val =
-        format!("{cookie_name}={value}; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax");
+        format!("{safe_name}={value}; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax");
     let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok());
     let target = sanitize_referer(referer);
     let mut resp = Redirect::to(&target).into_response();
@@ -628,5 +630,42 @@ mod tests {
         );
         assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
         assert_eq!(sanitize_referer(None), "/admin/");
+    }
+
+    #[test]
+    fn set_tweak_cookie_sanitizes_injection_attempts() {
+        let headers = HeaderMap::new();
+
+        // Newline injection in value should be stripped
+        let resp = set_tweak_cookie(
+            &headers,
+            "vpnctl_theme",
+            &["dark"],
+            "value=dar\r\nk",
+        );
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap());
+        assert_eq!(
+            set_cookie,
+            Some("vpnctl_theme=dark; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax")
+        );
+
+        // Header/cookie injection in name should be stripped
+        let resp = set_tweak_cookie(
+            &headers,
+            "vpnctl_\r\n_theme",
+            &["dark"],
+            "value=dark",
+        );
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap());
+        assert_eq!(
+            set_cookie,
+            Some("vpnctl__theme=dark; Path=/admin; Max-Age=31536000; HttpOnly; SameSite=Lax")
+        );
     }
 }
