@@ -667,3 +667,229 @@ pub(crate) async fn seed_state_with_awg2(dir: &TempDir) -> AppState {
     let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
     state
 }
+
+pub(crate) async fn seed_state_with_awg3(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))
+        .unwrap();
+
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    let aw3 = Server {
+        id: ServerId("is-new".into()),
+        address: "203.0.113.60".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("amneziawg3".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&aw3).await.unwrap();
+    inv.set_server_secret(
+        &aw3.id,
+        "amneziawg3.server_public_key",
+        "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &aw3.id,
+        "amneziawg3.server_private_key",
+        "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &aw3.id,
+        "amneziawg3.profile_seed",
+        "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &aw3.id,
+        "amneziawg3.header_protection_key",
+        "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_display_name(&aw3.id, Some("Iceland3"))
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=".into()),
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, AWG_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("is-new".into()))
+        .await
+        .unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
+
+pub(crate) async fn seed_state_with_awg2_and_awg3(dir: &TempDir) -> AppState {
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register_kernel(Box::new(SingBox::new())).unwrap();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg2::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))
+        .unwrap();
+
+    let de = Server {
+        id: ServerId("de".into()),
+        address: "de.example.com".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&de).await.unwrap();
+    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
+        .await
+        .unwrap();
+    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
+
+    let node = Server {
+        id: ServerId("is-new".into()),
+        address: "203.0.113.60".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("amneziawg2".into()),
+            ProtocolId("amneziawg3".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&node).await.unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg2.server_public_key",
+        "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg2.server_private_key",
+        "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg2.profile_seed",
+        "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    )
+    .await
+    .unwrap();
+
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg3.server_public_key",
+        "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg3.server_private_key",
+        "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg3.profile_seed",
+        "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &node.id,
+        "amneziawg3.header_protection_key",
+        "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+    )
+    .await
+    .unwrap();
+
+    inv.set_server_display_name(&node.id, Some("Iceland Dual"))
+        .await
+        .unwrap();
+
+    let user = User {
+        id: UserId("tester-1".into()),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=".into()),
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.set_vpn_router_device_id(&user.id, AWG_DEVICE_ID)
+        .await
+        .unwrap();
+    inv.grant(&user.id, &ServerId("de".into())).await.unwrap();
+    inv.grant(&user.id, &ServerId("is-new".into()))
+        .await
+        .unwrap();
+
+    let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
+    state
+}
