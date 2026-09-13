@@ -223,6 +223,44 @@ pub(crate) async fn boosty_page(
             }
         }
 
+        // ── Revenue summary — MRR, cumulative payments, active payers ──
+        @if let Some(r) = report {
+            @let income = r.income_summary();
+            div.ed-status-strip style="grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px;" {
+                div.ed-status-tile {
+                    div.ed-status-tile__k { (tr(lang, "monthly income (mrr)", "доход в месяц (mrr)")) }
+                    div.ed-status-tile__v style="color: var(--green); font-family: var(--mono); font-weight: 600;" {
+                        (format!("{:.2} ₽", income.mrr_rub_cents as f64 / 100.0))
+                    }
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                        (income.active_payers) " " (tr(lang, "paying subscriber(s)", "платящих подписчиков"))
+                    }
+                }
+                div.ed-status-tile {
+                    div.ed-status-tile__k { (tr(lang, "total revenue (to date)", "всего собрано (to date)")) }
+                    div.ed-status-tile__v style="font-family: var(--mono); font-weight: 600;" {
+                        (format!("{:.2} ₽", income.total_revenue_rub_cents as f64 / 100.0))
+                    }
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                        (tr(lang, "cumulative subscriber payments", "суммарные выплаты по ростеру"))
+                    }
+                }
+                div.ed-status-tile {
+                    div.ed-status-tile__k { (tr(lang, "active payers / total", "плательщиков / всего")) }
+                    div.ed-status-tile__v style="font-family: var(--mono);" {
+                        (r.active_subscribers) " / " (r.total_subscribers)
+                    }
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 2px;" {
+                        @if r.excluded_unpaid > 0 {
+                            (r.excluded_unpaid) " " (tr(lang, "free followers", "бесплатных фолловеров"))
+                        } @else {
+                            (tr(lang, "all on paid tiers", "все на платных уровнях"))
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Paid-only note: free followers the gate excluded ────
         @if let Some(r) = report {
             @if r.excluded_unpaid > 0 {

@@ -120,6 +120,17 @@ pub struct SyncReport {
     pub subscribers: Vec<SubscriberSnapshot>,
 }
 
+/// Financial revenue summary computed from a [`SyncReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct BoostyIncomeSummary {
+    /// Number of active paying subscribers (present, active status, price > 0).
+    pub active_payers: usize,
+    /// Monthly Recurring Revenue (MRR) in RUB minor units (kopecks, 1 RUB = 100 kopecks).
+    pub mrr_rub_cents: i64,
+    /// Cumulative historical revenue paid by all observed subscribers in RUB minor units (kopecks).
+    pub total_revenue_rub_cents: i64,
+}
+
 impl SyncReport {
     /// Record an applied (or dry-run) flip into the right bucket.
     pub(crate) fn record(&mut self, disabled: bool, user_id: &str) {
@@ -127,6 +138,40 @@ impl SyncReport {
             self.disabled.push(user_id.to_string());
         } else {
             self.enabled.push(user_id.to_string());
+        }
+    }
+
+    /// Calculate income and revenue summary from the roster.
+    pub fn income_summary(&self) -> BoostyIncomeSummary {
+        let mut active_payers = 0usize;
+        let mut mrr_rub_cents: i64 = 0;
+        let mut total_revenue_rub_cents: i64 = 0;
+
+        for sub in &self.subscribers {
+            // Parse payments (cumulative historical spend) for all observed subscribers
+            if let Ok(payments_f) = sub.payments.trim().parse::<f64>() {
+                if payments_f > 0.0 && payments_f.is_finite() {
+                    let kopecks = (payments_f * 100.0).round() as i64;
+                    total_revenue_rub_cents = total_revenue_rub_cents.saturating_add(kopecks);
+                }
+            }
+
+            // MRR: only present, active subscribers with non-zero price
+            if sub.present && sub.status.eq_ignore_ascii_case("active") {
+                if let Ok(price_f) = sub.price.trim().parse::<f64>() {
+                    if price_f > 0.0 && price_f.is_finite() {
+                        let kopecks = (price_f * 100.0).round() as i64;
+                        mrr_rub_cents = mrr_rub_cents.saturating_add(kopecks);
+                        active_payers += 1;
+                    }
+                }
+            }
+        }
+
+        BoostyIncomeSummary {
+            active_payers,
+            mrr_rub_cents,
+            total_revenue_rub_cents,
         }
     }
 }
@@ -233,5 +278,76 @@ mod tests {
         let s = sync_failure_summary(&err);
         assert!(s.contains("transient"), "{s}");
         assert!(s.contains("blog_url not set"), "{s}");
+    }
+
+    #[test]
+    fn income_summary_computes_mrr_and_total_revenue() {
+        let report = SyncReport {
+            subscribers: vec![
+                // Active subscriber with 300 RUB price and 900 RUB payments
+                SubscriberSnapshot {
+                    subscriber_id: 1,
+                    status: "active".into(),
+                    present: true,
+                    price: "300".into(),
+                    payments: "900".into(),
+                    ..Default::default()
+                },
+                // Active subscriber with decimal price and payments
+                SubscriberSnapshot {
+                    subscriber_id: 2,
+                    status: "ACTIVE".into(),
+                    present: true,
+                    price: "150.50".into(),
+                    payments: "451.50".into(),
+                    ..Default::default()
+                },
+                // Free subscriber (0 price) — active, but not a payer
+                SubscriberSnapshot {
+                    subscriber_id: 3,
+                    status: "active".into(),
+                    present: true,
+                    price: "0".into(),
+                    payments: "0".into(),
+                    ..Default::default()
+                },
+                // Inactive / lapsed subscriber — excluded from MRR, but past payments counted
+                SubscriberSnapshot {
+                    subscriber_id: 4,
+                    status: "inactive".into(),
+                    present: true,
+                    price: "500".into(),
+                    payments: "1500".into(),
+                    ..Default::default()
+                },
+                // Missing tombstone subscriber — excluded from MRR, past payments counted
+                SubscriberSnapshot {
+                    subscriber_id: 5,
+                    status: "active".into(),
+                    present: false,
+                    price: "200".into(),
+                    payments: "600".into(),
+                    ..Default::default()
+                },
+                // Malformed price / payment entry — doesn't panic, skipped safely
+                SubscriberSnapshot {
+                    subscriber_id: 6,
+                    status: "active".into(),
+                    present: true,
+                    price: "not-a-number".into(),
+                    payments: "invalid".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let summary = report.income_summary();
+        // Active payers: sub 1 (300) and sub 2 (150.50) = 2 payers
+        assert_eq!(summary.active_payers, 2);
+        // MRR: 300.00 + 150.50 = 450.50 RUB = 45050 kopecks
+        assert_eq!(summary.mrr_rub_cents, 45_050);
+        // Total payments: 900 + 451.50 + 1500 + 600 = 3451.50 RUB = 345150 kopecks
+        assert_eq!(summary.total_revenue_rub_cents, 345_150);
     }
 }

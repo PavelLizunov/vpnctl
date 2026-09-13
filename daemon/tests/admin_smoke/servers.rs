@@ -990,3 +990,96 @@ async fn admin_servers_billing_page_and_actions() {
         "converted RUB amount missing: {html_rub}"
     );
 }
+
+#[tokio::test]
+async fn admin_server_billing_boosty_income_and_pl_overview() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+
+    // 1. Initially without Boosty report: renders tip and graceful fallback
+    let app = router(s);
+    let html_no_boosty = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(html_no_boosty.contains("Connect Boosty on"));
+    assert!(html_no_boosty.contains("/admin/boosty"));
+
+    // 2. Set Boosty report: 1 active subscriber with 1000 RUB price and 3000 RUB payments
+    inv.set_boosty_report_and_events(
+        &serde_json::json!({
+            "observed_at": 1_754_000_000_i64,
+            "total_subscribers": 1,
+            "active_subscribers": 1,
+            "subscribers": [{
+                "subscriber_id": 101,
+                "name": "Alice",
+                "present": true,
+                "status": "active",
+                "subscribed": true,
+                "price": "1000",
+                "payments": "3000",
+                "level_id": 1,
+                "level_name": "Premium",
+                "level_price": "1000"
+            }]
+        })
+        .to_string(),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // 3. Add a server with 5.00 EUR monthly billing
+    inv.add_server(&Server {
+        id: ServerId("node-1".into()),
+        address: "192.0.2.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+
+    inv.set_server_billing(
+        &ServerId("node-1".into()),
+        &vpnctl_inventory::ServerBillingInput {
+            due_date: "2026-10-01".into(),
+            billing_cycle: vpnctl_inventory::BillingCycle::Monthly,
+            amount_cents: 500, // 5.00 EUR
+            currency: "EUR".into(),
+            auto_renew: true,
+            billing_url: None,
+            notes: None,
+            initial_payments_count: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Set EUR/RUB rate = 100.00 (1 EUR = 100 RUB)
+    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+        base_currency: "EUR".into(),
+        target_currency: "RUB".into(),
+        rate_micros: 100_000_000,
+        source: "test".into(),
+        fetched_at: "2026-09-12T00:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+
+    // In EUR display currency with default 1.07 markup:
+    // Boosty MRR: 1000 RUB / 100 * 1.07 = 10.70 EUR
+    // Server Spend: 5.00 EUR
+    // Net Margin: 10.70 - 5.00 = +5.70 EUR
+    let html_pl = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(html_pl.contains("Financial Balance &amp; P&amp;L"));
+    assert!(html_pl.contains("Boosty Income (MRR)"));
+    assert!(html_pl.contains("10.70 €"), "MRR in EUR: {html_pl}");
+    assert!(html_pl.contains("5.00 €"), "Spend in EUR: {html_pl}");
+    assert!(html_pl.contains("+5.70 €"), "Net margin in EUR: {html_pl}");
+}
