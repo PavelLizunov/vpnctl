@@ -394,6 +394,11 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
         return "/admin/".to_string();
     };
     let path_only = path.split(['?', '#']).next().unwrap_or(path);
+    // Security: reject path-traversal (`..`), backslashes (`\`), or double slashes (`//`)
+    // which could escape `/admin/` or trigger protocol-relative open redirects in browsers.
+    if path_only.contains("..") || path_only.contains('\\') || path_only.contains("//") {
+        return "/admin/".to_string();
+    }
     if path_only == "/admin" || path_only.starts_with("/admin/") {
         path.to_string()
     } else {
@@ -609,5 +614,19 @@ mod tests {
         assert_eq!(cookie(&headers, "vpnctl_accent"), Some("blue"));
         assert_eq!(cookie(&headers, "other"), Some("123"));
         assert_eq!(cookie(&headers, "nonexistent"), None);
+    }
+
+    #[test]
+    fn sanitize_referer_rejects_open_redirects_and_path_traversal() {
+        assert_eq!(sanitize_referer(Some("/admin/../evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin//evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/\\evil.com")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin\\evil.com")), "/admin/");
+        assert_eq!(
+            sanitize_referer(Some("http://example.com/admin/../evil")),
+            "/admin/"
+        );
+        assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
+        assert_eq!(sanitize_referer(None), "/admin/");
     }
 }

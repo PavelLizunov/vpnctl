@@ -59,6 +59,9 @@ async fn admin_tweak_rejects_external_referer() {
         "http://evil.example.com/admin/", // path looks ok, host doesn't
         "//evil.example.com/admin/",      // protocol-relative
         "/etc/passwd",                    // path, but not under /admin
+        "/admin/../evil.com",             // path traversal
+        "/admin//evil.com",               // double slash protocol relative
+        "/admin/\\evil.com",              // backslash protocol relative
         "javascript:alert(1)",
         "data:text/html,<script>1</script>",
     ] {
