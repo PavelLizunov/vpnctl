@@ -202,6 +202,19 @@ async fn boosty_page_renders_and_is_in_nav() {
         !html.contains("var(--bad)"),
         "must not reference the undefined --bad token"
     );
+    // 1-Click Quick Connect bookmarklet card + receiver script
+    assert!(
+        html.contains("1-Click Quick Connect") || html.contains("Быстрое подключение в 1 клик"),
+        "page must render the quick connect card"
+    );
+    assert!(
+        html.contains("javascript:(function()"),
+        "page must render bookmarklet href"
+    );
+    assert!(
+        html.contains("id=\"boosty-settings-form\""),
+        "page must have boosty-settings-form for quick-connect submission"
+    );
     // Disabled bridge → the «polling off» pill.
     assert!(
         html.contains("polling off"),
