@@ -399,6 +399,14 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
     assert!(html.contains("dave"), "suppressed-disables banner renders");
     assert!(html.contains("Boosty roster snapshot"));
     assert!(html.contains("1500"), "cumulative payments value renders");
+    assert!(
+        html.contains("500.00 ₽"),
+        "MRR value renders in revenue strip"
+    );
+    assert!(
+        html.contains("1500.00 ₽"),
+        "total revenue renders in revenue strip"
+    );
     assert!(html.contains("boosty.subscriber.changed"));
     assert!(html.contains("{…}"), "full event payload is expandable");
     assert!(

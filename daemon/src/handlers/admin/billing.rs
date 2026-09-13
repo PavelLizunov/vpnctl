@@ -27,6 +27,8 @@ pub(crate) async fn servers_billing(
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    let boosty_report_opt = state.inv.boosty_last_report().await.ok().flatten();
+
     let today = Utc::now().date_naive();
     let display_cur = &settings.display_currency;
 
@@ -116,6 +118,44 @@ pub(crate) async fn servers_billing(
 
     let fleet_annual_converted_minor = fleet_monthly_converted_minor.saturating_mul(12);
 
+    let boosty_income = boosty_report_opt
+        .and_then(|(json, _)| serde_json::from_str::<vpnctl_boosty_bridge::SyncReport>(&json).ok())
+        .map(|r| r.income_summary());
+
+    let mut boosty_mrr_converted_minor: Option<i64> = None;
+    let mut boosty_total_revenue_converted_minor: Option<i64> = None;
+
+    if let Some(inc) = boosty_income {
+        if inc.mrr_rub_cents > 0 {
+            if let Ok(Some(conv)) = state
+                .inv
+                .convert_amount(inc.mrr_rub_cents, "RUB", display_cur)
+                .await
+            {
+                boosty_mrr_converted_minor = Some(conv.amount_minor);
+            }
+        } else {
+            boosty_mrr_converted_minor = Some(0);
+        }
+
+        if inc.total_revenue_rub_cents > 0 {
+            if let Ok(Some(conv)) = state
+                .inv
+                .convert_amount(inc.total_revenue_rub_cents, "RUB", display_cur)
+                .await
+            {
+                boosty_total_revenue_converted_minor = Some(conv.amount_minor);
+            }
+        } else {
+            boosty_total_revenue_converted_minor = Some(0);
+        }
+    }
+
+    let net_monthly_margin_minor: Option<i64> =
+        boosty_mrr_converted_minor.map(|mrr| mrr.saturating_sub(fleet_monthly_converted_minor));
+    let net_lifetime_margin_minor: Option<i64> = boosty_total_revenue_converted_minor
+        .map(|rev| rev.saturating_sub(fleet_total_spend_converted_minor));
+
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
 
@@ -197,6 +237,149 @@ pub(crate) async fn servers_billing(
                 (rates_text)
             }
         }
+
+        // Financial Overview & P&L (Boosty Income vs Server Fleet Expenses)
+        @if let Some(inc) = boosty_income {
+            div.ed-rule style="margin: 12px 0 16px;" {}
+            div.ed-headrow {
+                h2.ed-sumbar__h style="font-size: 15px;" {
+                    (crate::i18n::tr(lang, "Financial Balance & P&L", "Финансовый баланс и окупаемость (P&L)"))
+                }
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "Net margin comparing monthly Boosty subscriber revenue against server fleet leasing costs in the display currency.",
+                    "Сравнение регулярного дохода с подписок Boosty и расходов на аренду серверов в выбранной валюте сводки.",
+                )) { (icon("info")) }
+            }
+
+            div.ed-fact-grid style="margin: 10px 0 20px; grid-template-columns: repeat(3, minmax(0, 1fr));" {
+                // Card 1: Boosty Income (MRR & Total Revenue)
+                div.ed-fact {
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
+                        (crate::i18n::tr(lang, "Boosty Income (MRR)", "Доход Boosty (MRR)"))
+                    }
+                    div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
+                        @match boosty_mrr_converted_minor {
+                            Some(mrr) => {
+                                span style="color: var(--green);" { (format_amount(mrr, display_cur)) }
+                                " "
+                                span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                                    (crate::i18n::tr(lang, "/mo", "/мес"))
+                                }
+                            }
+                            None => {
+                                span style="color: var(--mute); font-style: italic; font-weight: 400;" {
+                                    (crate::i18n::tr(lang, "No rate for RUB", "Нет курса к RUB"))
+                                }
+                            }
+                        }
+                    }
+                    div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                        (inc.active_payers) " " (crate::i18n::tr(lang, "payers", "плательщиков"))
+                        " · "
+                        @if let Some(rev) = boosty_total_revenue_converted_minor {
+                            (crate::i18n::tr(lang, "total: ", "всего: ")) (format_amount(rev, display_cur))
+                        } @else {
+                            (crate::i18n::tr(lang, "total: ", "всего: ")) (format!("{:.0} ₽", inc.total_revenue_rub_cents as f64 / 100.0))
+                        }
+                    }
+                }
+
+                // Card 2: Server Expenses (Monthly & Total Spend)
+                div.ed-fact {
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
+                        (crate::i18n::tr(lang, "Server Expenses", "Расходы на серверы"))
+                    }
+                    div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
+                        @if fleet_monthly_converted_minor > 0 {
+                            (format_amount(fleet_monthly_converted_minor, display_cur))
+                            " "
+                            span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                                (crate::i18n::tr(lang, "/mo", "/мес"))
+                            }
+                        } @else {
+                            span style="color: var(--mute); font-style: italic; font-weight: 400;" {
+                                "0.00 " (currency_symbol(display_cur))
+                            }
+                        }
+                    }
+                    div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                        (configured_count) " " (crate::i18n::tr(lang, "servers", "серверов"))
+                        " · "
+                        (crate::i18n::tr(lang, "total spend: ", "всего расход: "))
+                        (format_amount(fleet_total_spend_converted_minor, display_cur))
+                    }
+                }
+
+                // Card 3: Net Margin / Monthly Run-rate
+                div.ed-fact {
+                    div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
+                        (crate::i18n::tr(lang, "Net Margin (P&L)", "Чистая прибыль (P&L)"))
+                    }
+                    div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600;" {
+                        @match net_monthly_margin_minor {
+                            Some(net) if net > 0 => {
+                                span style="color: var(--green);" {
+                                    "+" (format_amount(net, display_cur))
+                                }
+                                " "
+                                span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                                    (crate::i18n::tr(lang, "/mo", "/мес"))
+                                }
+                            }
+                            Some(net) if net < 0 => {
+                                span style="color: var(--warm);" {
+                                    "-" (format_amount(net.saturating_abs(), display_cur))
+                                }
+                                " "
+                                span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                                    (crate::i18n::tr(lang, "/mo", "/мес"))
+                                }
+                            }
+                            Some(_) => {
+                                span style="color: var(--ink);" {
+                                    (format_amount(0, display_cur))
+                                }
+                                " "
+                                span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
+                                    (crate::i18n::tr(lang, "/mo (breakeven)", "/мес (в ноль)"))
+                                }
+                            }
+                            None => {
+                                span style="color: var(--mute); font-style: italic; font-weight: 400;" {
+                                    (crate::i18n::tr(lang, "Awaiting sync", "Ожидает синка"))
+                                }
+                            }
+                        }
+                    }
+                    div style="margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                        @match net_lifetime_margin_minor {
+                            Some(lnet) if lnet >= 0 => {
+                                (crate::i18n::tr(lang, "lifetime net: +", "сальдо за всё время: +"))
+                                (format_amount(lnet, display_cur))
+                            }
+                            Some(lnet) => {
+                                (crate::i18n::tr(lang, "lifetime net: -", "сальдо за всё время: -"))
+                                (format_amount(lnet.saturating_abs(), display_cur))
+                            }
+                            None => {
+                                a href="/admin/boosty" style="color: var(--ink); text-decoration: underline;" {
+                                    (crate::i18n::tr(lang, "/admin/boosty", "/admin/boosty"))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } @else {
+            div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 0 0 16px 4px;" {
+                (crate::i18n::tr(lang, "Tip: Connect Boosty on ", "Подсказка: Подключите Boosty на "))
+                a href="/admin/boosty" style="color: var(--ink); text-decoration: underline;" { "/admin/boosty" }
+                (crate::i18n::tr(lang, " to see income and P&L net margin here.", " для отображения доходов и чистой прибыли."))
+            }
+        }
+
+        div.ed-rule style="margin: 12px 0 16px;" {}
 
         // Summary KPI Fact Grid
         div.ed-fact-grid style="margin: 14px 0 20px;" {
