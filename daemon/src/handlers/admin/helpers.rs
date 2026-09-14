@@ -411,8 +411,19 @@ pub(crate) fn valid_user_id(id: &str) -> bool {
     if !(2..=32).contains(&len) {
         return false;
     }
-    id.bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+    let bytes = id.as_bytes();
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return false;
+    }
+    if !bytes[len - 1].is_ascii_lowercase() && !bytes[len - 1].is_ascii_digit() {
+        return false;
+    }
+    if id.contains("..") {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 pub(crate) fn valid_server_id(id: &str) -> bool {
@@ -420,8 +431,16 @@ pub(crate) fn valid_server_id(id: &str) -> bool {
     if !(1..=64).contains(&len) {
         return false;
     }
-    id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    let bytes = id.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[len - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    if id.contains("..") {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 pub(crate) fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
@@ -628,5 +647,49 @@ mod tests {
         );
         assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
         assert_eq!(sanitize_referer(None), "/admin/");
+    }
+
+    #[test]
+    fn valid_user_id_validation() {
+        // Valid user IDs
+        assert!(valid_user_id("alice"));
+        assert!(valid_user_id("user.123"));
+        assert!(valid_user_id("user_name"));
+        assert!(valid_user_id("u-1"));
+
+        // Invalid user IDs
+        assert!(!valid_user_id("a")); // too short (len < 2)
+        assert!(!valid_user_id("a".repeat(33).as_str())); // too long (len > 32)
+        assert!(!valid_user_id("Alice")); // uppercase disallowed
+        assert!(!valid_user_id(".user")); // leading dot
+        assert!(!valid_user_id("user.")); // trailing dot
+        assert!(!valid_user_id("-user")); // leading dash
+        assert!(!valid_user_id("user-")); // trailing dash
+        assert!(!valid_user_id("_user")); // leading underscore
+        assert!(!valid_user_id("user_")); // trailing underscore
+        assert!(!valid_user_id("user..name")); // consecutive dots / path traversal
+        assert!(!valid_user_id("..")); // path traversal dots
+        assert!(!valid_user_id("user@domain")); // invalid character
+    }
+
+    #[test]
+    fn valid_server_id_validation() {
+        // Valid server IDs
+        assert!(valid_server_id("s"));
+        assert!(valid_server_id("srv-01"));
+        assert!(valid_server_id("Server_Node.1"));
+
+        // Invalid server IDs
+        assert!(!valid_server_id("")); // empty
+        assert!(!valid_server_id("s".repeat(65).as_str())); // too long
+        assert!(!valid_server_id(".server")); // leading dot
+        assert!(!valid_server_id("server.")); // trailing dot
+        assert!(!valid_server_id("-server")); // leading dash
+        assert!(!valid_server_id("server-")); // trailing dash
+        assert!(!valid_server_id("_server")); // leading underscore
+        assert!(!valid_server_id("server_")); // trailing underscore
+        assert!(!valid_server_id("srv..01")); // consecutive dots / path traversal
+        assert!(!valid_server_id("..")); // path traversal dots
+        assert!(!valid_server_id("srv/01")); // slash disallowed
     }
 }
