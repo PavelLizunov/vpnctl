@@ -286,8 +286,16 @@ async fn admin_user_create_rejects_bad_id() {
         "alice with space",
         "alice/slash",
         "alice?query",
-        "",        // empty
-        "русский", // non-ASCII
+        "",                    // empty
+        "русский",             // non-ASCII
+        "..",                  // path traversal
+        "user..name",          // consecutive dots
+        ".leadingdot",         // leading dot
+        "trailingdot.",        // trailing dot
+        "-leadingdash",        // leading dash
+        "trailingdash-",       // trailing dash
+        "_leadingunderscore",  // leading underscore
+        "trailingunderscore_", // trailing underscore
     ] {
         // Use raw body; we want to exercise the server-side validator,
         // not the URL-decoder. Spaces in body need to be `+` or `%20` to

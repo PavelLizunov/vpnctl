@@ -236,11 +236,12 @@ pub(crate) async fn servers(
             span.ed-inbar__label { (crate::i18n::tr(lang, "add server", "добавить сервер")) }
             input type="text" name="id" required="required"
                   placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
-                  pattern="[A-Za-z0-9._-]+"
+                  pattern="(?!.*\\.\\.)[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?"
+                  maxlength="64"
                   title=(crate::i18n::tr(
                       lang,
-                      "Letters, digits, dot, underscore, hyphen — no spaces or slashes",
-                      "Буквы, цифры, точка, подчёркивание, дефис — без пробелов и слешей",
+                      "1-64 chars: letters, digits, dot, underscore, hyphen; must start and end with alphanumeric; no consecutive dots",
+                      "1-64 символа: буквы, цифры, точка, подчёркивание, дефис; начинается и заканчивается на букву/цифру; без двойных точек",
                   ))
                   style="max-width: 130px;";
             input type="text" name="address" required="required"

@@ -115,7 +115,7 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         // text promised 1-64 mixed-case — now the message matches the
         // enforced policy exactly.
         return bad_request(&format!(
-            "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -)"
+            "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -; must start and end with alphanumeric; no consecutive dots)"
         ));
     }
 
