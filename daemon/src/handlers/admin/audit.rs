@@ -649,10 +649,13 @@ pub(crate) fn sanitize_header_filename(s: &str) -> String {
 /// double-quotes and double any internal quotes; otherwise return the field verbatim.
 fn csv_field(s: &str) -> String {
     // Formula-injection guard (audit 2026-06-10, OWASP CSV-injection):
-    // Excel/LibreOffice may execute = + - @ after leading whitespace.
+    // Excel/LibreOffice may execute = + - @ % | after leading whitespace (including DDE/command formulas).
     // Prefix a single quote so spreadsheets treat the field as text.
     let trimmed = s.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\x0b');
-    let injectable = matches!(trimmed.chars().next(), Some('=' | '+' | '-' | '@'));
+    let injectable = matches!(
+        trimmed.chars().next(),
+        Some('=' | '+' | '-' | '@' | '%' | '|')
+    );
     let s = if injectable {
         format!("'{s}")
     } else {
@@ -687,14 +690,16 @@ mod csv_tests {
     }
 
     /// OWASP CSV-injection pin (audit 2026-06-10): a field starting
-    /// with = + - @ must be neutralised with a leading quote so
-    /// Excel/LibreOffice render text instead of executing a formula.
+    /// with = + - @ % | must be neutralised with a leading quote so
+    /// Excel/LibreOffice render text instead of executing a formula or DDE command.
     #[test]
     fn csv_field_neutralises_formula_prefixes() {
         assert_eq!(csv_field("=HYPERLINK(1)"), "'=HYPERLINK(1)");
         assert_eq!(csv_field("+1"), "'+1");
         assert_eq!(csv_field("-srv"), "'-srv");
         assert_eq!(csv_field("@cmd"), "'@cmd");
+        assert_eq!(csv_field("%10"), "'%10");
+        assert_eq!(csv_field("|cmd"), "'|cmd");
         assert_eq!(csv_field("  =HYPERLINK(1)"), "'  =HYPERLINK(1)");
         assert_eq!(csv_field("\t=CMD(1)"), "\"'\t=CMD(1)\"");
         assert_eq!(csv_field("\r+1"), "\"'\r+1\"");
