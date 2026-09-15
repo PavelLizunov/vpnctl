@@ -473,6 +473,40 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Traversal and leading/trailing punctuation are rejected
+    for bad_id in [
+        "..",
+        "srv..01",
+        ".leadingdot",
+        "trailingdot.",
+        "-leadingdash",
+        "trailingdash-",
+        "_leadingunderscore",
+        "trailingunderscore_",
+        "slash/in/id",
+    ] {
+        let body = format!("id={bad_id}&address=203.0.113.10");
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/servers/quick-add")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "server id {bad_id:?} must be rejected"
+        );
+    }
     // …and over-long (65 chars).
     let long = format!("id={}&address=203.0.113.11", "a".repeat(65));
     let resp = app

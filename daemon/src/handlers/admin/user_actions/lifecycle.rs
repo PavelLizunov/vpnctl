@@ -115,7 +115,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
 
     if !valid_user_id(&id_decoded) {
         return bad_request(&format!(
-            "invalid user id '{id_decoded}' (allowed: 2-32 chars of a-z 0-9 . _ -; lowercase only)"
+            "invalid user id '{id_decoded}' (allowed: 2-32 chars of a-z 0-9 . _ -; must start and end with a-z 0-9; no consecutive dots)"
         ));
     }
 

@@ -257,13 +257,13 @@ pub(crate) async fn users(
                 // `pattern=` + server-side gate were the only guards.
                 input type="text" name="id" required="required"
                       placeholder="alice"
-                      pattern="[a-z0-9._-]{2,32}"
+                      pattern="(?!.*\\.\\.)[a-z0-9][a-z0-9._-]{0,30}[a-z0-9]"
                       maxlength="32"
                       data-lowercase-id
                       title=(crate::i18n::tr(
                           lang,
-                          "2-32 chars: a-z 0-9 . _ - only. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type.",
-                          "2-32 символа: a-z 0-9 . _ - только. Пробелы превращаются в дефисы; верхний регистр в нижний; остальные символы отбрасываются по мере набора.",
+                          "2-32 chars: a-z 0-9 . _ -; must start and end with a-z 0-9; no consecutive dots. Spaces become hyphens; uppercase becomes lowercase; other chars are stripped as you type.",
+                          "2-32 символа: a-z 0-9 . _ -; начинаются и заканчиваются на a-z 0-9; без двойных точек. Пробелы превращаются в дефисы; верхний регистр в нижний; остальные символы отбрасываются по мере набора.",
                       ))
                       style="width: 150px;";
                 label style="display: flex; align-items: center; gap: 4px;"

@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 150,527 (90,801 prod / 59,726 test)
+- **Total Rust LOC:** 150,636 (90,868 prod / 59,768 test)
 - **Database Migrations:** 58
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 5,026 (20) | 4,847 (12) | **9,873** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,834 (147) | 32,366 (59) | **83,200** |
-| **Total** | | | | **90,801 (276)** | **59,726 (134)** | **150,527** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,901 (147) | 32,408 (59) | **83,309** |
+| **Total** | | | | **90,868 (276)** | **59,768 (134)** | **150,636** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -42,13 +42,13 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,239 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,213 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,152 | `crates/inventory` | Prod |
-| `daemon/tests/admin_smoke/servers.rs` | 1,096 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,130 | `daemon` | Test |
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `crates/inventory/src/sqlite/models.rs` | 1,035 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,011 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 1,010 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/users.rs` | 991 | `daemon` | Test |
+| `daemon/tests/admin_smoke/users.rs` | 999 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
 | `daemon/src/handlers/admin/boosty.rs` | 947 | `daemon` | Prod |
