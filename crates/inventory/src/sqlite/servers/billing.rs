@@ -187,7 +187,6 @@ impl SqliteInventory {
 
     /// Advance the server's billing due date by its recurring cycle (+1 month, +3 months, etc.).
     pub async fn advance_server_billing_cycle(&self, sid: &ServerId) -> Result<ServerBilling> {
-        // Look up current billing outside transaction
         let current_billing = self.get_server_billing(sid).await?;
         let Some(curr) = current_billing else {
             return Err(SqliteInventoryError::Invalid(format!(
@@ -195,6 +194,36 @@ impl SqliteInventory {
                 sid.0
             )));
         };
+        let res = self
+            .advance_server_billing_cycle_guarded(sid, &curr.due_date, false)
+            .await?;
+        res.ok_or_else(|| {
+            SqliteInventoryError::Invalid(format!(
+                "billing due date for server '{}' changed concurrently",
+                sid.0
+            ))
+        })
+    }
+
+    /// Atomically advance the server's billing cycle and record payment ONLY IF
+    /// the server's current `due_date` matches `expected_due`, and if `require_auto_renew` is true,
+    /// only if `auto_renew = 1`. Returns `Ok(None)` if CAS check fails (preventing duplicate billing).
+    pub async fn advance_server_billing_cycle_guarded(
+        &self,
+        sid: &ServerId,
+        expected_due: &str,
+        require_auto_renew: bool,
+    ) -> Result<Option<ServerBilling>> {
+        let current_billing = self.get_server_billing(sid).await?;
+        let Some(curr) = current_billing else {
+            return Ok(None);
+        };
+        if curr.due_date != expected_due {
+            return Ok(None);
+        }
+        if require_auto_renew && !curr.auto_renew {
+            return Ok(None);
+        }
 
         let next_due = advance_date_by_cycle(&curr.due_date, curr.billing_cycle)?;
 
@@ -222,15 +251,22 @@ impl SqliteInventory {
 
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
+        let res = sqlx::query(
             "UPDATE server_billing
              SET due_date = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-             WHERE server_id = ?2",
+             WHERE server_id = ?2 AND due_date = ?3 AND (?4 = 0 OR auto_renew = 1)",
         )
         .bind(&next_due)
         .bind(&sid.0)
+        .bind(expected_due)
+        .bind(if require_auto_renew { 1i64 } else { 0i64 })
         .execute(&mut *tx)
         .await?;
+
+        if res.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
 
         // Snapshot payment in server_payments for immutable historical Total Spend
         sqlx::query(
@@ -262,16 +298,24 @@ impl SqliteInventory {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
+        let action_name = if require_auto_renew {
+            "server.billing.advance.auto"
+        } else {
+            "server.billing.advance"
+        };
+
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload)
-             VALUES ('admin', 'server.billing.advance', ?1, ?2)",
+             VALUES ('admin', ?1, ?2, ?3)",
         )
+        .bind(action_name)
         .bind(&sid.0)
         .bind(
             serde_json::to_string(&serde_json::json!({
-                "previous_due_date": curr.due_date,
+                "previous_due_date": expected_due,
                 "new_due_date": next_due,
                 "cycle": curr.billing_cycle.as_str(),
+                "auto_renew": require_auto_renew,
             }))
             .unwrap_or_default(),
         )
@@ -279,7 +323,7 @@ impl SqliteInventory {
         .await?;
 
         tx.commit().await?;
-        Ok(updated)
+        Ok(Some(updated))
     }
 
     /// Check all servers with `auto_renew = true` and advance the billing cycle
@@ -298,13 +342,11 @@ impl SqliteInventory {
                 continue;
             };
             if due <= today {
-                match self.advance_server_billing_cycle(&item.server_id).await {
-                    Ok(upd) => {
-                        advanced.push((item.server_id.clone(), upd.due_date));
-                    }
-                    Err(_) => {
-                        // Skip failed server and continue with rest of fleet
-                    }
+                if let Ok(Some(upd)) = self
+                    .advance_server_billing_cycle_guarded(&item.server_id, &b.due_date, true)
+                    .await
+                {
+                    advanced.push((item.server_id.clone(), upd.due_date));
                 }
             }
         }

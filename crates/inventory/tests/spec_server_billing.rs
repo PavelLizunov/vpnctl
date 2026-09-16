@@ -389,6 +389,76 @@ async fn advance_auto_renew_servers_advances_due_servers() {
 }
 
 #[tokio::test]
+async fn advance_server_billing_cycle_guarded_prevents_duplicate_billing() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("s_guarded", "hetzner");
+    inv.add_server(&s).await.unwrap();
+
+    let input = ServerBillingInput {
+        due_date: "2026-05-01".into(),
+        billing_cycle: BillingCycle::Monthly,
+        amount_cents: 1000,
+        currency: "EUR".into(),
+        auto_renew: true,
+        billing_url: None,
+        notes: None,
+        initial_payments_count: None,
+    };
+    inv.set_server_billing(&s.id, &input).await.unwrap();
+
+    // First call matches expected_due ("2026-05-01") -> succeeds
+    let first = inv
+        .advance_server_billing_cycle_guarded(&s.id, "2026-05-01", true)
+        .await
+        .unwrap();
+    assert!(first.is_some());
+    assert_eq!(first.unwrap().due_date, "2026-06-01");
+
+    // Second call with stale expected_due ("2026-05-01") -> returns None (CAS mismatch)
+    let second = inv
+        .advance_server_billing_cycle_guarded(&s.id, "2026-05-01", true)
+        .await
+        .unwrap();
+    assert!(
+        second.is_none(),
+        "CAS mismatch must prevent duplicate advancement"
+    );
+
+    // Payments count must be exactly 1
+    let payments = inv.list_server_payments(&s.id).await.unwrap();
+    assert_eq!(
+        payments.len(),
+        1,
+        "exactly one payment snapshot must be recorded"
+    );
+
+    // Third call with require_auto_renew=true on server with auto_renew=false -> returns None
+    let input_no_renew = ServerBillingInput {
+        due_date: "2026-06-01".into(),
+        billing_cycle: BillingCycle::Monthly,
+        amount_cents: 1000,
+        currency: "EUR".into(),
+        auto_renew: false,
+        billing_url: None,
+        notes: None,
+        initial_payments_count: None,
+    };
+    inv.set_server_billing(&s.id, &input_no_renew)
+        .await
+        .unwrap();
+
+    let third = inv
+        .advance_server_billing_cycle_guarded(&s.id, "2026-06-01", true)
+        .await
+        .unwrap();
+    assert!(
+        third.is_none(),
+        "auto_renew = false must reject auto advancement"
+    );
+}
+
+#[tokio::test]
 async fn convert_amount_spot_does_not_inflate_with_markup() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

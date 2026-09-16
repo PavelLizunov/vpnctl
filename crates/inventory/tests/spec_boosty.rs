@@ -291,4 +291,13 @@ async fn clear_boosty_access_token_cas_guard() {
     assert!(cleared_ok);
     let after_ok = inv.get_boosty_settings().await.unwrap();
     assert_eq!(after_ok.access_token, None);
+
+    let audits = inv.recent_audit(10).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|a| a.action == "boosty.access_token.cleared");
+    assert!(
+        audit.is_some(),
+        "audit row must be recorded on access token clear"
+    );
 }

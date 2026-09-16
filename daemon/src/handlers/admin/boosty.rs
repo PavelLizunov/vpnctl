@@ -133,8 +133,11 @@ pub(crate) async fn boosty_page(
     let admin_origin = format!("{proto}://{host}");
     let default_blog = settings.blog_url.as_deref().unwrap_or("ninitux");
 
+    let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
+    let default_blog_js = serde_json::to_string(default_blog).unwrap_or_default();
+
     let bookmarklet_js = format!(
-        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.innerHTML='<span style="font-size:22px;flex-shrink:0;">'+icon+'</span><div><b style="color:'+color+';font-size:14px;">'+title+'</b><div style="color:#d4d4d8;margin-top:2px;">'+desc+'</div></div>';}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на <b>boosty.to</b> и нажмите эту закладку на панели закладок браузера!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to под своим аккаунтом!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||'{default_blog}';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов Boosty: '+e,'#ef4444');}}}})();"#
+        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.textContent='';var iS=document.createElement('span');iS.style.cssText='font-size:22px;flex-shrink:0;';iS.textContent=icon;var cD=document.createElement('div');var tB=document.createElement('b');tB.style.cssText='color:'+color+';font-size:14px;';tB.textContent=title;var dD=document.createElement('div');dD.style.cssText='color:#d4d4d8;margin-top:2px;';dD.textContent=desc;cD.appendChild(tB);cD.appendChild(dD);el.appendChild(iS);el.appendChild(cD);}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на boosty.to и нажмите закладку снова!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||{default_blog_js};var origin={admin_origin_js};var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href=origin+'/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов: '+e,'#ef4444');}}}})();"#
     );
     let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
 
@@ -565,11 +568,13 @@ pub(crate) async fn boosty_page(
             }
             div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;" {
                 a.ed-abtn.ed-abtn--primary href=(bookmarklet_href) draggable="true"
-                  onclick="if(window.showBookmarkletHelp){showBookmarkletHelp();return false;}"
+                  data-bookmarklet-link=""
                   title=(tr(lang, "Drag this button to your bookmarks bar", "Перетащите эту кнопку на панель закладок")) {
                     (icon("link")) " " (tr(lang, "🔑 Connect Boosty", "🔑 Подключить Boosty"))
                 }
-                button.ed-abtn.ed-abtn--secondary type="button" onclick="var s=this.dataset.script;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(function(){alert('Скрипт скопирован в буфер обмена!');});}else{var t=document.createElement('textarea');t.value=s;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Скрипт скопирован в буфер обмена!');}" data-script=(bookmarklet_js) {
+                button.ed-abtn.ed-abtn--secondary type="button"
+                  data-copy-bookmarklet=""
+                  data-script=(bookmarklet_js) {
                     (icon("code")) " " (tr(lang, "Copy script", "Скопировать скрипт"))
                 }
             }
@@ -582,7 +587,7 @@ pub(crate) async fn boosty_page(
                     h3 style="margin: 0; font-size: 16px; font-family: var(--mono); font-weight: 600; color: var(--ink);" {
                         (tr(lang, "💡 1-Click Connect instructions", "💡 Как запустить быстрое подключение"))
                     }
-                    button type="button" onclick="document.getElementById('bookmarklet-help-modal').style.display='none'" style="border: none; background: none; cursor: pointer; font-size: 18px; color: var(--mute); padding: 0 4px;" { "✕" }
+                    button type="button" data-modal-close="bookmarklet-help-modal" style="border: none; background: none; cursor: pointer; font-size: 18px; color: var(--mute); padding: 0 4px;" { "✕" }
                 }
                 p style="font-size: 13px; margin: 0 0 12px;" {
                     (tr(
@@ -615,7 +620,7 @@ pub(crate) async fn boosty_page(
                     }
                 }
                 div style="display: flex; justify-content: flex-end; gap: 10px;" {
-                    button type="button" class="ed-abtn ed-abtn--primary" onclick="document.getElementById('bookmarklet-help-modal').style.display='none'" {
+                    button type="button" class="ed-abtn ed-abtn--primary" data-modal-close="bookmarklet-help-modal" {
                         (tr(lang, "Got it", "Понятно"))
                     }
                 }
@@ -629,12 +634,12 @@ pub(crate) async fn boosty_page(
                     b style="color: var(--green); font-size: 14px;" { (icon("check")) " " (tr(lang, "Boosty credentials detected!", "Учётные данные Boosty готовы к подключению!")) }
                     div id="quick-connect-blog-info" style="margin-top: 4px; color: var(--ink); font-family: var(--mono); font-size: 12px;" {}
                     div style="margin-top: 2px; color: var(--mute); font-size: 12px;" {
-                        (tr(lang, "One click will save credentials, enable background polling and run immediate sync.", "Один клик сохранит данные, включит фоновый опрос и сразу синхронизирует подписчиков."))
+                        (tr(lang, "Click the button to save credentials, enable background polling and run immediate sync.", "Нажмите кнопку, чтобы подтвердить данные, включить фоновый опрос и сразу синхронизировать подписчиков."))
                     }
                 }
                 div {
                     button type="submit" form="boosty-settings-form" name="quick_sync_now" value="1" class="ed-abtn ed-abtn--primary" style="padding: 6px 18px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px;" {
-                        (icon("rotate-cw")) (tr(lang, "🔑 Connect & Sync now", "🔑 Подключить и синхронизировать"))
+                        (icon("rotate-cw")) (tr(lang, "🔑 Confirm & Sync now", "🔑 Подтвердить подключение и синхронизировать"))
                     }
                 }
             }
@@ -725,78 +730,6 @@ pub(crate) async fn boosty_page(
                     }
                 }
             }
-        }
-
-        // Client-side receiver for 1-click quick-connect bookmarklet payload
-        script {
-            (maud::PreEscaped(r#"
-(function() {
-  var hash = window.location.hash || '';
-  if (hash.indexOf('#quick_connect=') === 0) {
-    var raw = hash.substring(15);
-    var data = null;
-    try {
-      data = JSON.parse(raw);
-    } catch (_) {
-      try {
-        data = JSON.parse(decodeURIComponent(raw));
-      } catch (e) {
-        console.error('Boosty quick connect error', e);
-      }
-    }
-    try {
-      history.replaceState(null, '', window.location.pathname);
-    } catch (_) {}
-
-    if (data) {
-      if (data.blog) {
-        var el = document.getElementById('boosty_blog_url');
-        if (el) el.value = data.blog;
-        var info = document.getElementById('quick-connect-blog-info');
-        if (info) info.textContent = 'Блог: ' + data.blog;
-      }
-      if (data.access_token) {
-        var el = document.getElementById('boosty_access');
-        if (el) el.value = data.access_token;
-      }
-      if (data.refresh_token) {
-        var el = document.getElementById('boosty_refresh');
-        if (el) el.value = data.refresh_token;
-      }
-      if (data.device_id) {
-        var el = document.getElementById('boosty_device');
-        if (el) el.value = data.device_id;
-      }
-      var cb = document.getElementById('boosty_enabled');
-      if (cb) cb.checked = true;
-
-      var banner = document.getElementById('quick-connect-banner');
-      if (banner) {
-        banner.style.display = 'block';
-      }
-
-      var form = document.getElementById('boosty-settings-form');
-      if (form) {
-        var overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;color:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:15px;font-weight:600;gap:12px;';
-        overlay.innerHTML = '<span style="font-size:24px;">🔄</span> <span>Подключаем Boosty и синхронизируем подписчиков...</span>';
-        document.body.appendChild(overlay);
-
-        var inp = document.createElement('input');
-        inp.type = 'hidden';
-        inp.name = 'quick_sync_now';
-        inp.value = '1';
-        form.appendChild(inp);
-        setTimeout(function() { form.submit(); }, 150);
-      }
-    }
-  }
-  window.showBookmarkletHelp = function() {
-    var m = document.getElementById('bookmarklet-help-modal');
-    if (m) m.style.display = 'flex';
-  };
-})();
-"#))
         }
     };
 
