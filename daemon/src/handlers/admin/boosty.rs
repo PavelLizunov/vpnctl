@@ -131,9 +131,10 @@ pub(crate) async fn boosty_page(
         .and_then(|p| p.to_str().ok())
         .unwrap_or("http");
     let admin_origin = format!("{proto}://{host}");
+    let default_blog = settings.blog_url.as_deref().unwrap_or("ninitux");
 
     let bookmarklet_js = format!(
-        r#"(function(){{if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{alert('Откройте страницу вашего блога на boosty.to и нажмите эту закладку снова!');return;}}function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{alert('Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}}catch(e){{alert('Ошибка чтения токенов Boosty: '+e);}}}})();"#
+        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.innerHTML='<span style="font-size:22px;flex-shrink:0;">'+icon+'</span><div><b style="color:'+color+';font-size:14px;">'+title+'</b><div style="color:#d4d4d8;margin-top:2px;">'+desc+'</div></div>';}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на <b>boosty.to</b> и нажмите эту закладку на панели закладок браузера!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to под своим аккаунтом!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||'{default_blog}';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов Boosty: '+e,'#ef4444');}}}})();"#
     );
     let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
 
@@ -563,11 +564,60 @@ pub(crate) async fn boosty_page(
                 ))
             }
             div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;" {
-                a.ed-abtn.ed-abtn--primary href=(bookmarklet_href) draggable="true" title=(tr(lang, "Drag this button to your bookmarks bar", "Перетащите эту кнопку на панель закладок")) {
+                a.ed-abtn.ed-abtn--primary href=(bookmarklet_href) draggable="true"
+                  onclick="if(window.showBookmarkletHelp){showBookmarkletHelp();return false;}"
+                  title=(tr(lang, "Drag this button to your bookmarks bar", "Перетащите эту кнопку на панель закладок")) {
                     (icon("link")) " " (tr(lang, "🔑 Connect Boosty", "🔑 Подключить Boosty"))
                 }
                 button.ed-abtn.ed-abtn--secondary type="button" onclick="var s=this.dataset.script;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(function(){alert('Скрипт скопирован в буфер обмена!');});}else{var t=document.createElement('textarea');t.value=s;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);alert('Скрипт скопирован в буфер обмена!');}" data-script=(bookmarklet_js) {
                     (icon("code")) " " (tr(lang, "Copy script", "Скопировать скрипт"))
+                }
+            }
+        }
+
+        // Help modal for clicking the bookmarklet button directly on the admin page
+        div id="bookmarklet-help-modal" style="display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,0.65); backdrop-filter: blur(2px); align-items: center; justify-content: center; padding: 16px;" {
+            div style="background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; max-width: 520px; width: 100%; padding: 22px 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.3); font-family: var(--serif); line-height: 1.5; color: var(--ink);" {
+                div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;" {
+                    h3 style="margin: 0; font-size: 16px; font-family: var(--mono); font-weight: 600; color: var(--ink);" {
+                        (tr(lang, "💡 1-Click Connect instructions", "💡 Как запустить быстрое подключение"))
+                    }
+                    button type="button" onclick="document.getElementById('bookmarklet-help-modal').style.display='none'" style="border: none; background: none; cursor: pointer; font-size: 18px; color: var(--mute); padding: 0 4px;" { "✕" }
+                }
+                p style="font-size: 13px; margin: 0 0 12px;" {
+                    (tr(
+                        lang,
+                        "Browsers block websites from directly accessing other tabs for security. The button works as a browser bookmark:",
+                        "Браузер запрещает админке напрямую считывать данные других вкладок из соображений безопасности. Эта кнопка работает как закладка в браузере:",
+                    ))
+                }
+                ol style="font-size: 13px; padding-left: 20px; margin: 0 0 16px; display: flex; flex-direction: column; gap: 8px;" {
+                    li {
+                        (tr(
+                            lang,
+                            "Enable the bookmarks bar: press Ctrl + Shift + B (or Cmd + Shift + B on Mac).",
+                            "Включите панель закладок: нажмите Ctrl + Shift + B (или Cmd + Shift + B на Mac).",
+                        ))
+                    }
+                    li {
+                        (tr(
+                            lang,
+                            "Drag the blue button «🔑 Connect Boosty» onto your bookmarks bar.",
+                            "Мышкой перетащите синюю кнопку «🔑 Подключить Boosty» вверх на панель закладок.",
+                        ))
+                    }
+                    li {
+                        (tr(
+                            lang,
+                            "Open your blog page on boosty.to and click that bookmark on your bookmarks bar!",
+                            "Откройте вкладку вашего блога на boosty.to и нажмите появившуюся закладку прямо там!",
+                        ))
+                    }
+                }
+                div style="display: flex; justify-content: flex-end; gap: 10px;" {
+                    button type="button" class="ed-abtn ed-abtn--primary" onclick="document.getElementById('bookmarklet-help-modal').style.display='none'" {
+                        (tr(lang, "Got it", "Понятно"))
+                    }
                 }
             }
         }
@@ -715,6 +765,10 @@ pub(crate) async fn boosty_page(
       console.error('Boosty quick connect error', e);
     }
   }
+  window.showBookmarkletHelp = function() {
+    var m = document.getElementById('bookmarklet-help-modal');
+    if (m) m.style.display = 'flex';
+  };
 })();
 "#))
         }
