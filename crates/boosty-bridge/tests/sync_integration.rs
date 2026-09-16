@@ -575,23 +575,128 @@ async fn rotated_refresh_token_persisted_even_when_roster_fetch_fails() {
     );
 }
 
-/// AC-A4: with BOTH credential kinds configured the refresh flow must win —
-/// a static access token expires within ~an hour and would kill the bridge
-/// on its first expiry.
+/// With BOTH credential kinds configured, the bearer flow is preferred first
+/// to avoid immediate invalid_grant rotation races, while preserving refresh
+/// credentials for recovery.
 #[tokio::test]
-async fn build_client_prefers_refresh_flow_when_both_creds_set() {
+async fn build_client_prefers_bearer_flow_when_both_creds_set() {
     let settings = BoostySettings {
         access_token: Some("static-acc".into()),
         refresh_token: Some("ref1".into()),
         device_id: Some("dev".into()),
         ..Default::default()
     };
-    // No network happens: configuring the refresh flow is lazy.
+    let client = build_client(&settings, "http://127.0.0.1:1").await.unwrap();
+    // When in bearer mode, client does not have refresh_token set on auth_provider
+    assert_eq!(
+        client.refresh_token().await.as_deref(),
+        None,
+        "client must be in bearer mode initially"
+    );
+}
+
+#[tokio::test]
+async fn build_client_uses_refresh_flow_when_only_refresh_creds_set() {
+    let settings = BoostySettings {
+        access_token: None,
+        refresh_token: Some("ref1".into()),
+        device_id: Some("dev".into()),
+        ..Default::default()
+    };
     let client = build_client(&settings, "http://127.0.0.1:1").await.unwrap();
     assert_eq!(
         client.refresh_token().await.as_deref(),
         Some("ref1"),
-        "client must be in refresh mode, not static-bearer mode"
+        "client must be in refresh mode when only refresh credentials exist"
+    );
+}
+
+#[tokio::test]
+async fn build_bearer_and_refresh_client_constructors() {
+    let bearer = vpnctl_boosty_bridge::build_bearer_client("acc123", "http://127.0.0.1:1")
+        .await
+        .unwrap();
+    assert_eq!(bearer.refresh_token().await.as_deref(), None);
+
+    let refresh =
+        vpnctl_boosty_bridge::build_refresh_client("ref123", "dev123", "http://127.0.0.1:1")
+            .await
+            .unwrap();
+    assert_eq!(refresh.refresh_token().await.as_deref(), Some("ref123"));
+}
+
+#[tokio::test]
+async fn sync_from_settings_recovers_via_refresh_flow_on_bearer_401() {
+    let mut server = mockito::Server::new_async().await;
+    // 1. Initial request with dead bearer token returns 401 Unauthorized
+    let m_unauth = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .match_header("authorization", "Bearer dead-acc")
+        .with_status(401)
+        .create_async()
+        .await;
+
+    // 2. Refresh call against /oauth/token/ succeeds and rotates refresh token
+    let refresh_body = json!({
+        "access_token": "new-acc",
+        "refresh_token": "new-ref",
+        "expires_in": 3600
+    })
+    .to_string();
+    let m_refresh = server
+        .mock("POST", "/oauth/token/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(refresh_body)
+        .create_async()
+        .await;
+
+    // 3. Subsequent request with recovered bearer token succeeds
+    let roster_body = json!({
+        "data": [subscriber_priced(100, "Alice", "active", 500.0, "Tier1")],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let m_subscribers = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .match_header("authorization", "Bearer new-acc")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(roster_body)
+        .create_async()
+        .await;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let settings = BoostySettings {
+        enabled: true,
+        blog_url: Some("ninitux".into()),
+        access_token: Some("dead-acc".into()),
+        refresh_token: Some("old-ref".into()),
+        device_id: Some("dev-1".into()),
+        ..Default::default()
+    };
+    inv.set_boosty_settings(&settings).await.unwrap();
+
+    let report = sync_from_settings_at(&inv, &settings, ApplyMode::DryRun, &server.url())
+        .await
+        .expect("sync must recover via refresh flow on bearer 401");
+
+    assert_eq!(report.active_subscribers, 1);
+    m_unauth.assert_async().await;
+    m_refresh.assert_async().await;
+    m_subscribers.assert_async().await;
+
+    // Verify rotated token was saved and stale access token was cleared
+    let after = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(after.refresh_token.as_deref(), Some("new-ref"));
+    assert_eq!(
+        after.access_token, None,
+        "stale access token must be cleared after recovery"
     );
 }
 

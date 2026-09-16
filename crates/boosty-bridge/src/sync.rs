@@ -84,8 +84,9 @@ pub async fn sync_from_settings_at(
         .ok_or_else(|| BridgeError::Config("blog_url not set".into()))?;
 
     let client = build_client(settings, base_url).await?;
+    let mut active_client = client;
     let mut result = sync_once_with_policy(
-        &client,
+        &active_client,
         inv,
         blog,
         mode,
@@ -94,13 +95,56 @@ pub async fn sync_from_settings_at(
     )
     .await;
 
+    // Refresh recovery: if initial Bearer request failed with auth failure,
+    // and refresh credentials are configured, try once with refresh flow.
+    if let Err(ref err) = result
+        && err.is_auth_failure()
+        && settings.access_token.is_some()
+        && let (Some(refresh), Some(device)) = (
+            settings.refresh_token.as_deref(),
+            settings.device_id.as_deref(),
+        )
+        && !refresh.is_empty()
+        && !device.is_empty()
+    {
+        tracing::info!(
+            target = "boosty_bridge",
+            "bearer token returned auth failure; attempting refresh recovery flow"
+        );
+        if let Ok(refresh_client) =
+            crate::client::build_refresh_client(refresh, device, base_url).await
+        {
+            active_client = refresh_client;
+            result = sync_once_with_policy(
+                &active_client,
+                inv,
+                blog,
+                mode,
+                settings.grace_days,
+                settings.auto_create_users,
+            )
+            .await;
+            if result.is_ok() {
+                // Stale bearer token successfully recovered via refresh; clear it so
+                // future sync passes use the valid refreshed credentials directly.
+                if let Err(e) = inv.clear_boosty_access_token().await {
+                    tracing::warn!(
+                        target = "boosty_bridge",
+                        error = %e,
+                        "clearing stale access token after refresh recovery failed"
+                    );
+                }
+            }
+        }
+    }
+
     // Boosty rotates the refresh token on every refresh and invalidates the
     // old one, and every pass starts with a refresh (fresh client). Persist
     // the rotated value BEFORE propagating a sync error: a pass that
     // authenticated but failed mid-fetch has already consumed the stored
     // token — losing the rotated one would brick auth on the next pass.
     if let Some(expected) = settings.refresh_token.as_deref()
-        && let Some(rotated) = client.refresh_token().await
+        && let Some(rotated) = active_client.refresh_token().await
         && expected != rotated
     {
         match inv.rotate_boosty_refresh_token(expected, &rotated).await {

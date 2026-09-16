@@ -264,6 +264,20 @@ impl SqliteInventory {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Clear the access token when refresh recovery succeeds, so future sync passes
+    /// use the refreshed credentials directly.
+    pub async fn clear_boosty_access_token(&self) -> Result<()> {
+        sqlx::query(
+            "UPDATE boosty_settings
+                SET access_token = NULL,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = 1",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Cross-process lease for the rotating Boosty credential and the
     /// snapshot→event transaction. Expired leases recover automatically.
     pub async fn acquire_boosty_sync_lease(&self, owner: &str, ttl_secs: i64) -> Result<bool> {
