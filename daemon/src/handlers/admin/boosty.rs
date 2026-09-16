@@ -689,6 +689,8 @@ pub(crate) async fn boosty_page(
       if (data.blog) {
         var el = document.getElementById('boosty_blog_url');
         if (el) el.value = data.blog;
+        var info = document.getElementById('quick-connect-blog-info');
+        if (info) info.textContent = 'Блог: ' + data.blog;
       }
       if (data.access_token) {
         var el = document.getElementById('boosty_access');
@@ -818,6 +820,10 @@ async fn run_boosty_sync_and_deploy(
     };
     match vpnctl_boosty_bridge::sync_from_inventory(&state.inv, mode).await {
         Ok(report) => {
+            let _ = state
+                .inv
+                .ack_open_alerts(crate::boosty_sync_poller::SYNC_FAILED_ALERT_KIND, None)
+                .await;
             tracing::info!(
                 target = "vpnctld::boosty",
                 enabled = report.enabled.len(),

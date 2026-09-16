@@ -282,6 +282,36 @@ impl SqliteInventory {
         Ok(updated)
     }
 
+    /// Check all servers with `auto_renew = true` and advance the billing cycle
+    /// for any whose `due_date <= today`. Returns the list of advanced servers and new due dates.
+    pub async fn advance_auto_renew_servers(&self) -> Result<Vec<(ServerId, String)>> {
+        let fleet = self.list_fleet_billing().await?;
+        let today = chrono::Utc::now().date_naive();
+        let mut advanced = Vec::new();
+
+        for item in fleet {
+            let Some(b) = item.billing else { continue };
+            if !b.auto_renew {
+                continue;
+            }
+            let Ok(due) = validate_due_date(&b.due_date) else {
+                continue;
+            };
+            if due <= today {
+                match self.advance_server_billing_cycle(&item.server_id).await {
+                    Ok(upd) => {
+                        advanced.push((item.server_id.clone(), upd.due_date));
+                    }
+                    Err(_) => {
+                        // Skip failed server and continue with rest of fleet
+                    }
+                }
+            }
+        }
+
+        Ok(advanced)
+    }
+
     /// List billing records for all fleet servers, ordered by due_date ascending (earliest first),
     /// with unconfigured servers placed at the end.
     pub async fn list_fleet_billing(&self) -> Result<Vec<ServerBillingItem>> {

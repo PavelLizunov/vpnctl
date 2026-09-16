@@ -264,3 +264,31 @@ async fn boosty_user_and_all_server_grants_are_created_atomically() {
         "a duplicate cannot add partial grants"
     );
 }
+
+#[tokio::test]
+async fn clear_boosty_access_token_cas_guard() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    let settings = BoostySettings {
+        enabled: true,
+        access_token: Some("current-token".into()),
+        ..Default::default()
+    };
+    inv.set_boosty_settings(&settings).await.unwrap();
+
+    // Mismatched expected token -> no-op, returns false, keeps current token
+    let cleared = inv.clear_boosty_access_token("wrong-token").await.unwrap();
+    assert!(!cleared);
+    let after_failed = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(after_failed.access_token.as_deref(), Some("current-token"));
+
+    // Matching expected token -> clears token, returns true
+    let cleared_ok = inv
+        .clear_boosty_access_token("current-token")
+        .await
+        .unwrap();
+    assert!(cleared_ok);
+    let after_ok = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(after_ok.access_token, None);
+}

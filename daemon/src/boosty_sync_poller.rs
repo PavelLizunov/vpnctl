@@ -33,7 +33,7 @@ const DEFAULT_INTERVAL_SECS: u64 = 3600;
 
 /// Alert kind for a failed sync pass. One bridge → one instance (no
 /// per-server suffix); the partial-UNIQUE dedup keeps a single open row.
-const SYNC_FAILED_ALERT_KIND: &str = "boosty.sync.failed";
+pub(crate) const SYNC_FAILED_ALERT_KIND: &str = "boosty.sync.failed";
 
 /// Spawn the Boosty sync poller. Returns the handle so production (which
 /// discards) and tests share one interface, matching the other pollers.

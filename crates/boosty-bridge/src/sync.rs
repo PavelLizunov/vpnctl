@@ -125,14 +125,17 @@ pub async fn sync_from_settings_at(
             )
             .await;
             if result.is_ok() {
-                // Stale bearer token successfully recovered via refresh; clear it so
-                // future sync passes use the valid refreshed credentials directly.
-                if let Err(e) = inv.clear_boosty_access_token().await {
-                    tracing::warn!(
-                        target = "boosty_bridge",
-                        error = %e,
-                        "clearing stale access token after refresh recovery failed"
-                    );
+                // Stale bearer token successfully recovered via refresh; clear it with CAS guard
+                // so future sync passes use the valid refreshed credentials directly without overwriting
+                // any fresh access token concurrently entered by the operator.
+                if let Some(stale_token) = settings.access_token.as_deref() {
+                    if let Err(e) = inv.clear_boosty_access_token(stale_token).await {
+                        tracing::warn!(
+                            target = "boosty_bridge",
+                            error = %e,
+                            "clearing stale access token after refresh recovery failed"
+                        );
+                    }
                 }
             }
         }

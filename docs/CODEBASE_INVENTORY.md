@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 150,878 (90,990 prod / 59,888 test)
+- **Total Rust LOC:** 151,116 (91,082 prod / 60,034 test)
 - **Database Migrations:** 58
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
@@ -15,16 +15,16 @@
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
 | `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 6,351 (20) | 969 (2) | **7,320** |
-| `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,522 (6) | 975 (2) | **2,497** |
+| `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,525 (6) | 975 (2) | **2,500** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 16,643 (52) | 18,043 (47) | **34,686** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 16,716 (52) | 18,189 (47) | **34,905** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 5,026 (20) | 4,847 (12) | **9,873** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,943 (147) | 32,423 (59) | **83,366** |
-| **Total** | | | | **90,990 (276)** | **59,888 (134)** | **150,878** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,959 (147) | 32,423 (59) | **83,382** |
+| **Total** | | | | **91,082 (276)** | **60,034 (134)** | **151,116** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -49,7 +49,7 @@
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,011 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 1,010 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 999 | `daemon` | Test |
-| `daemon/src/handlers/admin/boosty.rs` | 989 | `daemon` | Prod |
+| `daemon/src/handlers/admin/boosty.rs` | 995 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
