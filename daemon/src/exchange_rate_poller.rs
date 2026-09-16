@@ -147,6 +147,13 @@ pub fn spawn_exchange_rate_poller(inv: SqliteInventory) -> tokio::task::JoinHand
                 );
             }
         }
+        if let Err(e) = inv.advance_auto_renew_servers().await {
+            tracing::warn!(
+                target = "vpnctld::currency",
+                error = %e,
+                "initial auto-advance of server billing cycles failed"
+            );
+        }
 
         loop {
             tick.tick().await;
@@ -164,6 +171,13 @@ pub fn spawn_exchange_rate_poller(inv: SqliteInventory) -> tokio::task::JoinHand
                         "periodic exchange rate refresh failed; existing cached rates preserved"
                     );
                 }
+            }
+            if let Err(e) = inv.advance_auto_renew_servers().await {
+                tracing::warn!(
+                    target = "vpnctld::currency",
+                    error = %e,
+                    "periodic auto-advance of server billing cycles failed"
+                );
             }
         }
     })

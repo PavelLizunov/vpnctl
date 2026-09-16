@@ -314,3 +314,121 @@ async fn server_billing_initial_payments_and_advance_snapshot() {
     assert_eq!(count4, 4);
     assert_eq!(spend4, 2800);
 }
+
+#[tokio::test]
+async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("s2", "hetzner");
+    inv.add_server(&s).await.unwrap();
+
+    // Insert 1 EUR = 100 RUB rate (1 EUR = 100_000_000 micros)
+    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+        base_currency: "EUR".into(),
+        target_currency: "RUB".into(),
+        rate_micros: 100_000_000,
+        source: "test".into(),
+        fetched_at: "2026-09-16T12:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+
+    let input = ServerBillingInput {
+        due_date: "2026-10-10".into(),
+        billing_cycle: BillingCycle::Monthly,
+        amount_cents: 1000, // 10.00 EUR
+        currency: "EUR".into(),
+        auto_renew: false,
+        billing_url: None,
+        notes: None,
+        initial_payments_count: Some(2),
+    };
+    inv.set_server_billing(&s.id, &input).await.unwrap();
+
+    // Spend in EUR: 2 payments of 10.00 EUR = 2000 cents
+    let (spend_eur, count_eur) = inv.server_spend_and_count(&s.id, "EUR").await.unwrap();
+    assert_eq!(count_eur, 2);
+    assert_eq!(spend_eur, 2000);
+
+    // Operator switches display currency to RUB: payments must not vanish!
+    let (spend_rub, count_rub) = inv.server_spend_and_count(&s.id, "RUB").await.unwrap();
+    assert_eq!(
+        count_rub, 2,
+        "count must never drop to 0 on currency switch"
+    );
+    assert!(spend_rub > 0, "spend must dynamically convert to RUB");
+}
+
+#[tokio::test]
+async fn advance_auto_renew_servers_advances_due_servers() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("s3", "aeza");
+    inv.add_server(&s).await.unwrap();
+
+    // Set server due yesterday with auto_renew = true
+    let input = ServerBillingInput {
+        due_date: "2026-01-01".into(),
+        billing_cycle: BillingCycle::Monthly,
+        amount_cents: 500,
+        currency: "EUR".into(),
+        auto_renew: true,
+        billing_url: None,
+        notes: None,
+        initial_payments_count: None,
+    };
+    inv.set_server_billing(&s.id, &input).await.unwrap();
+
+    let advanced = inv.advance_auto_renew_servers().await.unwrap();
+    assert_eq!(advanced.len(), 1);
+    assert_eq!(advanced[0].0, s.id);
+    assert_eq!(advanced[0].1, "2026-02-01");
+
+    let updated = inv.get_server_billing(&s.id).await.unwrap().unwrap();
+    assert_eq!(updated.due_date, "2026-02-01");
+}
+
+#[tokio::test]
+async fn convert_amount_spot_does_not_inflate_with_markup() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    // Set up settings with 15% default markup (+1500 bps = 11500)
+    let settings_input = vpnctl_inventory::CurrencySettingsInput {
+        display_currency: Some("EUR".into()),
+        default_markup_bps: Some(11500),
+        markup_overrides: None,
+        rate_overrides: None,
+        auto_refresh: Some(false),
+    };
+    inv.set_currency_settings(&settings_input).await.unwrap();
+
+    // Rate: 1 EUR = 100 RUB
+    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+        base_currency: "EUR".into(),
+        target_currency: "RUB".into(),
+        rate_micros: 100_000_000,
+        source: "test".into(),
+        fetched_at: "2026-09-16T12:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+
+    // 1000 RUB -> EUR at spot rate
+    let spot = inv
+        .convert_amount_spot(100_000, "RUB", "EUR")
+        .await
+        .unwrap()
+        .unwrap();
+    let with_markup = inv
+        .convert_amount(100_000, "RUB", "EUR")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        spot.amount_minor < with_markup.amount_minor,
+        "spot conversion must not apply fee markup multiplier"
+    );
+    assert_eq!(spot.markup_bps, 10_000);
+}

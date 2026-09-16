@@ -1106,21 +1106,21 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     .await
     .unwrap();
 
-    // In EUR display currency with default 1.07 markup:
-    // Boosty MRR: 1000 RUB / 100 * 1.07 = 10.70 EUR
+    // In EUR display currency at spot rate (without inflating revenue by expense markup):
+    // Boosty MRR: 1000 RUB / 100 = 10.00 EUR
     // Server Spend: 5.00 EUR
-    // Net Margin: 10.70 - 5.00 = +5.70 EUR
+    // Net Margin: 10.00 - 5.00 = +5.00 EUR
     let html_pl = fetch_html(app.clone(), "/admin/servers/billing").await;
     assert!(html_pl.contains("Financial Balance &amp; P&amp;L"));
     assert!(html_pl.contains("Boosty Income (MRR)"));
-    assert!(html_pl.contains("10.70 €"), "MRR in EUR: {html_pl}");
+    assert!(html_pl.contains("10.00 €"), "MRR in EUR: {html_pl}");
     assert!(html_pl.contains("5.00 €"), "Spend in EUR: {html_pl}");
-    assert!(html_pl.contains("+5.70 €"), "Net margin in EUR: {html_pl}");
+    assert!(html_pl.contains("+5.00 €"), "Net margin in EUR: {html_pl}");
     assert!(
-        html_pl.contains("cost coverage: 214% (2.1×)")
-            || html_pl.contains("cost coverage: 214% (2.1x)")
-            || html_pl.contains("покрытие расходов: 214% (2.1×)")
-            || html_pl.contains("покрытие расходов: 214% (2.1x)"),
+        html_pl.contains("cost coverage: 200% (2.0×)")
+            || html_pl.contains("cost coverage: 200% (2.0x)")
+            || html_pl.contains("покрытие расходов: 200% (2.0×)")
+            || html_pl.contains("покрытие расходов: 200% (2.0x)"),
         "coverage ratio missing in html: {html_pl}"
     );
     assert!(

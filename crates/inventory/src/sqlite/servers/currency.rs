@@ -405,16 +405,12 @@ impl SqliteInventory {
 
     // ── Currency conversion engine ──────────────────────────────────────
 
-    /// Convert an amount from one currency to another using the operator's
-    /// current settings (rate overrides, markup).
-    ///
-    /// Returns `Ok(None)` when no rate is available for the pair.  Returns
-    /// identity conversion (1:1, no markup) when source == target.
-    pub async fn convert_amount(
+    async fn convert_amount_with_markup(
         &self,
         amount_minor: i64,
         source_currency: &str,
         target_currency: &str,
+        markup_bps: i64,
     ) -> Result<Option<ConversionResult>> {
         // Same currency → identity, no markup.
         if source_currency == target_currency {
@@ -444,25 +440,56 @@ impl SqliteInventory {
             None => return Ok(None),
         };
 
-        // Determine markup.
+        let converted = convert_minor(amount_minor, rate.rate_micros, markup_bps);
+        match converted {
+            Some(v) => Ok(Some(ConversionResult {
+                amount_minor: v,
+                target_currency: target_currency.into(),
+                rate_micros: rate.rate_micros,
+                markup_bps,
+                identity: false,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Convert an amount from one currency to another using the operator's
+    /// current settings (rate overrides, markup).
+    ///
+    /// Returns `Ok(None)` when no rate is available for the pair.  Returns
+    /// identity conversion (1:1, no markup) when source == target.
+    pub async fn convert_amount(
+        &self,
+        amount_minor: i64,
+        source_currency: &str,
+        target_currency: &str,
+    ) -> Result<Option<ConversionResult>> {
         let settings = self.get_currency_settings().await?;
         let markup = settings
             .markup_overrides
             .get(target_currency)
             .copied()
             .unwrap_or(settings.default_markup_bps);
+        self.convert_amount_with_markup(amount_minor, source_currency, target_currency, markup)
+            .await
+    }
 
-        let converted = convert_minor(amount_minor, rate.rate_micros, markup);
-        match converted {
-            Some(v) => Ok(Some(ConversionResult {
-                amount_minor: v,
-                target_currency: target_currency.into(),
-                rate_micros: rate.rate_micros,
-                markup_bps: markup,
-                identity: false,
-            })),
-            None => Ok(None),
-        }
+    /// Convert an amount at spot market rate without applying the operator's
+    /// expense fee markup. Used for incoming revenue (e.g. Boosty MRR) so that
+    /// payment processor markups do not artificially inflate revenue.
+    pub async fn convert_amount_spot(
+        &self,
+        amount_minor: i64,
+        source_currency: &str,
+        target_currency: &str,
+    ) -> Result<Option<ConversionResult>> {
+        self.convert_amount_with_markup(
+            amount_minor,
+            source_currency,
+            target_currency,
+            IDENTITY_MARKUP_BPS,
+        )
+        .await
     }
 
     // ── Payment history ─────────────────────────────────────────────────
@@ -621,36 +648,50 @@ impl SqliteInventory {
     }
 
     /// Historical total spend and payment count for one server in the display currency.
+    ///
+    /// Uses recorded conversion snapshots when `display_currency` matches, and dynamically
+    /// converts original amounts when the operator views historical spend in an alternative
+    /// display currency (so past payments never vanish upon currency switch).
     pub async fn server_spend_and_count(
         &self,
         sid: &ServerId,
         display_currency: &str,
     ) -> Result<(i64, i64)> {
-        let row: (i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(SUM(converted_minor), 0), COUNT(*)
+        let rows: Vec<(i64, String, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT amount_minor, currency, converted_minor, display_currency
              FROM server_payments
-             WHERE server_id = ?1 AND display_currency = ?2",
+             WHERE server_id = ?1",
         )
         .bind(&sid.0)
-        .bind(display_currency)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(row)
+
+        let count = rows.len() as i64;
+        let mut total_spend = 0i64;
+
+        for (amount, curr, conv_opt, disp_opt) in rows {
+            if disp_opt.as_deref() == Some(display_currency) {
+                if let Some(conv) = conv_opt {
+                    total_spend = total_spend.saturating_add(conv);
+                    continue;
+                }
+            }
+            if curr == display_currency {
+                total_spend = total_spend.saturating_add(amount);
+                continue;
+            }
+            if let Ok(Some(c)) = self.convert_amount(amount, &curr, display_currency).await {
+                total_spend = total_spend.saturating_add(c.amount_minor);
+            }
+        }
+
+        Ok((total_spend, count))
     }
 
-    /// Historical total spend for one server in the display currency,
-    /// summed from immutable payment snapshots.
+    /// Historical total spend for one server in the display currency.
     pub async fn server_total_spend(&self, sid: &ServerId, display_currency: &str) -> Result<i64> {
-        let total: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(converted_minor), 0)
-             FROM server_payments
-             WHERE server_id = ?1 AND display_currency = ?2",
-        )
-        .bind(&sid.0)
-        .bind(display_currency)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(total.unwrap_or(0))
+        let (spend, _) = self.server_spend_and_count(sid, display_currency).await?;
+        Ok(spend)
     }
 
     // ── Fleet billing summary ───────────────────────────────────────────

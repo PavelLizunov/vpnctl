@@ -265,17 +265,19 @@ impl SqliteInventory {
     }
 
     /// Clear the access token when refresh recovery succeeds, so future sync passes
-    /// use the refreshed credentials directly.
-    pub async fn clear_boosty_access_token(&self) -> Result<()> {
-        sqlx::query(
+    /// use the refreshed credentials directly. Safe against concurrent UI updates:
+    /// only clears if the stored access token still matches `expected`.
+    pub async fn clear_boosty_access_token(&self, expected: &str) -> Result<bool> {
+        let result = sqlx::query(
             "UPDATE boosty_settings
                 SET access_token = NULL,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-              WHERE id = 1",
+              WHERE id = 1 AND access_token = ?1",
         )
+        .bind(expected)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     /// Cross-process lease for the rotating Boosty credential and the

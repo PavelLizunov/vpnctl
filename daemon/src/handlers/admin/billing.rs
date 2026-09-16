@@ -74,12 +74,8 @@ pub(crate) async fn servers_billing(
 
         if let Some(ref b) = item.billing {
             configured_count += 1;
-            let monthly_cents = match b.billing_cycle {
-                BillingCycle::Monthly => b.amount_cents,
-                BillingCycle::Quarterly => b.amount_cents / 3,
-                BillingCycle::SemiAnnual => b.amount_cents / 6,
-                BillingCycle::Annual => b.amount_cents / 12,
-            };
+            let monthly_cents =
+                vpnctl_inventory::monthly_equivalent(b.amount_cents, b.billing_cycle);
             *monthly_totals_raw.entry(b.currency.clone()).or_default() += monthly_cents;
 
             if let Ok(Some(conv)) = state
@@ -129,7 +125,7 @@ pub(crate) async fn servers_billing(
         if inc.mrr_rub_cents > 0 {
             if let Ok(Some(conv)) = state
                 .inv
-                .convert_amount(inc.mrr_rub_cents, "RUB", display_cur)
+                .convert_amount_spot(inc.mrr_rub_cents, "RUB", display_cur)
                 .await
             {
                 boosty_mrr_converted_minor = Some(conv.amount_minor);
@@ -141,7 +137,7 @@ pub(crate) async fn servers_billing(
         if inc.total_revenue_rub_cents > 0 {
             if let Ok(Some(conv)) = state
                 .inv
-                .convert_amount(inc.total_revenue_rub_cents, "RUB", display_cur)
+                .convert_amount_spot(inc.total_revenue_rub_cents, "RUB", display_cur)
                 .await
             {
                 boosty_total_revenue_converted_minor = Some(conv.amount_minor);
@@ -352,7 +348,7 @@ pub(crate) async fn servers_billing(
                             }
                             None => {
                                 span style="color: var(--mute); font-style: italic; font-weight: 400;" {
-                                    (crate::i18n::tr(lang, "Awaiting sync", "Ожидает синка"))
+                                    (crate::i18n::tr(lang, "No rate for RUB", "Нет курса к RUB"))
                                 }
                             }
                         }
