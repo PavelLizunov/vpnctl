@@ -133,7 +133,7 @@ pub(crate) async fn boosty_page(
     let admin_origin = format!("{proto}://{host}");
 
     let bookmarklet_js = format!(
-        r#"(function(){{if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{alert('Откройте страницу вашего блога на boosty.to и нажмите эту закладку снова!');return;}}function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var a=c('auth'),d=c('_clientId');if(!a||!d){{alert('Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{blog:b,refresh_token:j.refreshToken||'',access_token:j.accessToken||'',device_id:d}};location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}}catch(e){{alert('Ошибка чтения токенов Boosty: '+e);}}}})();"#
+        r#"(function(){{if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{alert('Откройте страницу вашего блога на boosty.to и нажмите эту закладку снова!');return;}}function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{alert('Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';if(!b){{b=prompt('Укажите имя вашего блога на Boosty (например: yourblog):')||'';}}var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};location.href='{admin_origin}/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}}catch(e){{alert('Ошибка чтения токенов Boosty: '+e);}}}})();"#
     );
     let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
 
@@ -545,27 +545,13 @@ pub(crate) async fn boosty_page(
             (tr(lang, "Bridge settings", "Настройки моста")) " "
             span.ed-tip title=(tr(
                 lang,
-                "Boosty API credentials + poll cadence. Secret fields are masked after save; leave blank to keep the stored value, clear + save to remove. Interval applies after a daemon restart.",
-                "Учётные данные API Boosty + интервал опроса. Секретные поля маскируются после сохранения; пусто = оставить, очистить + сохранить = удалить. Интервал применяется после рестарта демона.",
+                "Boosty API credentials + poll cadence. Preferred: 1-Click Quick Connect. Manual fields are available below in fallback settings.",
+                "Учётные данные API Boosty + интервал опроса. Основной способ: 1-Click подключение. Ручные поля доступны ниже в резервных настройках.",
             )) { (icon("info")) }
-        }
-        // Current credential state (masked) so the operator sees what's
-        // stored without the write-only form fields revealing it.
-        div style="display: flex; flex-wrap: wrap; gap: 24px; margin: 8px 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-            span { (tr(lang, "access fallback ", "резервный access ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
-            span { (tr(lang, "refresh preferred ", "основной refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
-            span { (tr(lang, "device · with refresh ", "device · для refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
-        }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px;" {
-            (tr(
-                lang,
-                "Preferred: refresh token + device id (renewed automatically). Access token is a short-lived fallback used only when that pair is incomplete.",
-                "Основной способ: refresh token + device id (обновляются автоматически). Access token — короткоживущий резерв, он используется только если пара заполнена не полностью.",
-            ))
         }
 
         // ── 1-Click Quick Connect Bookmarklet Card ───────────────
-        div.ed-card style="margin: 10px 0 20px; border: 1px solid color-mix(in oklab, var(--accent) 50%, var(--rule)); background: color-mix(in oklab, var(--accent) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
+        div.ed-card style="margin: 10px 0 16px; border: 1px solid color-mix(in oklab, var(--accent) 50%, var(--rule)); background: color-mix(in oklab, var(--accent) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
             div.ed-card__hd {
                 (tr(lang, "1-Click Quick Connect (No DevTools / F12)", "Быстрое подключение в 1 клик (без F12 и консоли)"))
             }
@@ -587,56 +573,26 @@ pub(crate) async fn boosty_page(
         }
 
         // Import success banner (shown when loaded with #quick_connect=...)
-        div id="quick-connect-banner" style="display: none; border: 1px solid var(--green); border-left-width: 4px; background: color-mix(in oklab, var(--green) 10%, var(--paper)); padding: 12px 16px; margin: 12px 0 16px; font-family: var(--serif); font-size: 13px; line-height: 1.5;" {
-            b style="color: var(--green);" { (icon("check")) " " (tr(lang, "Boosty credentials imported!", "Учётные данные Boosty импортированы!")) }
-            span style="color: var(--ink);" {
-                " "
-                (tr(lang, "Review the pre-filled fields below and click Save settings to apply.", "Проверьте заполненные поля ниже и нажмите кнопку «Сохранить» для применения."))
+        div id="quick-connect-banner" style="display: none; border: 1px solid var(--green); border-left-width: 4px; background: color-mix(in oklab, var(--green) 10%, var(--paper)); padding: 14px 18px; margin: 12px 0 16px; font-family: var(--serif); font-size: 13px; line-height: 1.5;" {
+            div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px;" {
+                div {
+                    b style="color: var(--green); font-size: 14px;" { (icon("check")) " " (tr(lang, "Boosty credentials detected!", "Учётные данные Boosty готовы к подключению!")) }
+                    div id="quick-connect-blog-info" style="margin-top: 4px; color: var(--ink); font-family: var(--mono); font-size: 12px;" {}
+                    div style="margin-top: 2px; color: var(--mute); font-size: 12px;" {
+                        (tr(lang, "One click will save credentials, enable background polling and run immediate sync.", "Один клик сохранит данные, включит фоновый опрос и сразу синхронизирует подписчиков."))
+                    }
+                }
+                div {
+                    button type="submit" form="boosty-settings-form" name="quick_sync_now" value="1" class="ed-abtn ed-abtn--primary" style="padding: 6px 18px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px;" {
+                        (icon("rotate-cw")) (tr(lang, "🔑 Connect & Sync now", "🔑 Подключить и синхронизировать"))
+                    }
+                }
             }
         }
 
         form id="boosty-settings-form" method="post" action="/admin/boosty/settings" {
-            div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
-                label for="boosty_blog_url" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "blog url / slug", "блог url / slug"))
-                }
-                input id="boosty_blog_url" type="text" name="blog_url"
-                      value=(settings.blog_url.as_deref().unwrap_or(""))
-                      placeholder="boosty.to/yourblog";
-
-                label for="boosty_access" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "access token · fallback", "access token · резервный"))
-                }
-                input id="boosty_access" type="password" name="access_token" autocomplete="off"
-                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
-
-                label for="boosty_refresh" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "refresh token · preferred", "refresh token · основной"))
-                }
-                input id="boosty_refresh" type="password" name="refresh_token" autocomplete="off"
-                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
-
-                label for="boosty_device" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "device id · with refresh", "device id · для refresh"))
-                }
-                input id="boosty_device" type="password" name="device_id" autocomplete="off"
-                      placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
-
-                label for="boosty_interval" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "poll interval (s)", "интервал опроса (с)"))
-                }
-                input id="boosty_interval" type="number" name="poll_interval_secs" min="60"
-                      title=(tr(lang, "Minimum 60 seconds. Applies after a daemon restart.", "Минимум 60 секунд. Применяется после рестарта демона."))
-                      value=(settings.poll_interval_secs);
-
-                label for="boosty_grace_days" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "disable grace (days)", "отсрочка отключения (дни)"))
-                }
-                input id="boosty_grace_days" type="number" name="grace_days" min="0" max="365"
-                      title=(tr(lang, "Automatic disable waits this many days after Boosty off_time or the first observed lapse.", "Авто-отключение ждёт столько дней после Boosty off_time или первого обнаружения просрочки."))
-                      value=(settings.grace_days);
-            }
-            div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0;" {
+            // Main automation policy controls (always visible)
+            div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0 16px; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 4px;" {
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
                     input id="boosty_enabled" type="checkbox" name="enabled" checked[settings.enabled];
                     (tr(lang, "enabled (poller runs)", "включено (поллер работает)"))
@@ -649,9 +605,75 @@ pub(crate) async fn boosty_page(
                     input type="checkbox" name="auto_create_users" checked[settings.auto_create_users];
                     (tr(lang, "auto-create users for new paid subscribers", "авто-создавать пользователей для новых платных подписчиков"))
                 }
+                button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" style="margin-left: auto;" {
+                    (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
+                }
             }
-            button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
+
+            // Fallback: Manual settings hidden inside a spoiler details element
+            details.ed-spoiler style="margin-top: 14px; border: 1px solid var(--rule); border-radius: 4px; padding: 12px 16px; background: var(--paper-2);" {
+                summary style="cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--mute); font-weight: 600; user-select: none;" {
+                    (tr(lang, "⚙️ Fallback: Manual settings & technical parameters", "⚙️ Резервный способ — ручная настройка и параметры"))
+                }
+                div style="margin-top: 14px;" {
+                    div style="display: flex; flex-wrap: wrap; gap: 24px; margin: 0 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                        span { (tr(lang, "access fallback ", "резервный access ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
+                        span { (tr(lang, "refresh preferred ", "основной refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
+                        span { (tr(lang, "device · with refresh ", "device · для refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
+                    }
+                    p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px;" {
+                        (tr(
+                            lang,
+                            "Preferred: refresh token + device id (renewed automatically). Access token is a short-lived fallback used only when that pair is incomplete.",
+                            "Основной способ: refresh token + device id (обновляются автоматически). Access token — короткоживущий резерв, он используется только если пара заполнена не полностью.",
+                        ))
+                    }
+                    div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
+                        label for="boosty_blog_url" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "blog url / slug", "блог url / slug"))
+                        }
+                        input id="boosty_blog_url" type="text" name="blog_url"
+                              value=(settings.blog_url.as_deref().unwrap_or(""))
+                              placeholder="boosty.to/yourblog";
+
+                        label for="boosty_access" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "access token · fallback", "access token · резервный"))
+                        }
+                        input id="boosty_access" type="password" name="access_token" autocomplete="off"
+                              placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                        label for="boosty_refresh" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "refresh token · preferred", "refresh token · основной"))
+                        }
+                        input id="boosty_refresh" type="password" name="refresh_token" autocomplete="off"
+                              placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                        label for="boosty_device" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "device id · with refresh", "device id · для refresh"))
+                        }
+                        input id="boosty_device" type="password" name="device_id" autocomplete="off"
+                              placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
+
+                        label for="boosty_interval" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "poll interval (s)", "интервал опроса (с)"))
+                        }
+                        input id="boosty_interval" type="number" name="poll_interval_secs" min="60"
+                              title=(tr(lang, "Minimum 60 seconds. Applies after a daemon restart.", "Минимум 60 секунд. Применяется после рестарта демона."))
+                              value=(settings.poll_interval_secs);
+
+                        label for="boosty_grace_days" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                            (tr(lang, "disable grace (days)", "отсрочка отключения (дни)"))
+                        }
+                        input id="boosty_grace_days" type="number" name="grace_days" min="0" max="365"
+                              title=(tr(lang, "Automatic disable waits this many days after Boosty off_time or the first observed lapse.", "Авто-отключение ждёт столько дней после Boosty off_time или первого обнаружения просрочки."))
+                              value=(settings.grace_days);
+                    }
+                    div style="margin-top: 14px;" {
+                        button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                            (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
+                        }
+                    }
+                }
             }
         }
 
@@ -770,24 +792,26 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
     {
         tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.configure failed");
     }
+
+    if form_field(&body, "quick_sync_now").is_some() && s.enabled {
+        if let Err(resp) =
+            run_boosty_sync_and_deploy(&state, s.auto_disable_lapsed, "boosty.quick_connect").await
+        {
+            return resp;
+        }
+    }
+
     Redirect::to("/admin/boosty").into_response()
 }
 
-/// `POST /admin/boosty/sync` — run one reconcile now (auto-enable active,
-/// surface lapses). Redirects back; the report is logged.
-pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
+/// Shared helper to execute a Boosty sync and background-deploy flipped users.
+async fn run_boosty_sync_and_deploy(
+    state: &AppState,
+    auto_disable_lapsed: bool,
+    source_tag: &'static str,
+) -> Result<(), Response> {
     use vpnctl_boosty_bridge::ApplyMode;
-
-    let settings = match state.inv.get_boosty_settings().await {
-        Ok(s) => s,
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-    // A disabled bridge must not apply flips or deploy nodes — «sync now»
-    // is a manual tick of the ENABLED bridge, not a bypass of the switch.
-    if !settings.enabled {
-        return bad_request("boosty bridge is disabled — enable it in the settings first");
-    }
-    let mode = if settings.auto_disable_lapsed {
+    let mode = if auto_disable_lapsed {
         ApplyMode::Full
     } else {
         ApplyMode::EnableOnly
@@ -798,10 +822,9 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
                 target = "vpnctld::boosty",
                 enabled = report.enabled.len(),
                 disabled = report.disabled.len(),
-                "manual boosty sync"
+                provisioned = report.provisioned.len(),
+                "{source_tag} boosty sync"
             );
-            // Push the applied flips to the nodes (same pipeline as the
-            // poller tick); backgrounded so the redirect stays instant.
             let flipped: Vec<String> = report
                 .enabled
                 .iter()
@@ -815,17 +838,36 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
                 let key = crate::app::deploy_key_path();
                 tokio::spawn(async move {
                     crate::boosty_sync_poller::deploy_flipped_users(
-                        &inv,
-                        &registry,
-                        &key,
-                        &flipped,
-                        "boosty.sync_now",
+                        &inv, &registry, &key, &flipped, source_tag,
                     )
                     .await;
                 });
             }
+            Ok(())
         }
-        Err(e) => return bad_request(&format!("boosty sync failed: {e}")),
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::boosty", error = %e, "{source_tag} sync failed");
+            Err(bad_request(&format!("boosty sync failed: {e}")))
+        }
+    }
+}
+
+/// `POST /admin/boosty/sync` — run one reconcile now (auto-enable active,
+/// surface lapses). Redirects back; the report is logged.
+pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
+    let settings = match state.inv.get_boosty_settings().await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    // A disabled bridge must not apply flips or deploy nodes — «sync now»
+    // is a manual tick of the ENABLED bridge, not a bypass of the switch.
+    if !settings.enabled {
+        return bad_request("boosty bridge is disabled — enable it in the settings first");
+    }
+    if let Err(resp) =
+        run_boosty_sync_and_deploy(&state, settings.auto_disable_lapsed, "boosty.sync_now").await
+    {
+        return resp;
     }
     Redirect::to("/admin/boosty").into_response()
 }

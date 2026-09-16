@@ -215,6 +215,21 @@ async fn boosty_page_renders_and_is_in_nav() {
         html.contains("id=\"boosty-settings-form\""),
         "page must have boosty-settings-form for quick-connect submission"
     );
+    // Fallback spoiler wraps manual settings
+    assert!(
+        html.contains("ed-spoiler"),
+        "page must hide manual fields in an ed-spoiler details block"
+    );
+    assert!(
+        html.contains("Резервный способ — ручная настройка")
+            || html.contains("Fallback: Manual settings"),
+        "page must label the fallback spoiler"
+    );
+    // 1-Click quick connect banner carries the single connect & sync button
+    assert!(
+        html.contains("name=\"quick_sync_now\""),
+        "quick-connect banner must feature quick_sync_now button"
+    );
     // Disabled bridge → the «polling off» pill.
     assert!(
         html.contains("polling off"),
