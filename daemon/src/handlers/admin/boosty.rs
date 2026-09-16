@@ -731,11 +731,24 @@ pub(crate) async fn boosty_page(
         script {
             (maud::PreEscaped(r#"
 (function() {
-  if (window.location.hash.indexOf('#quick_connect=') === 0) {
+  var hash = window.location.hash || '';
+  if (hash.indexOf('#quick_connect=') === 0) {
+    var raw = hash.substring(15);
+    var data = null;
     try {
-      var raw = decodeURIComponent(window.location.hash.substring(15));
-      var data = JSON.parse(raw);
+      data = JSON.parse(raw);
+    } catch (_) {
+      try {
+        data = JSON.parse(decodeURIComponent(raw));
+      } catch (e) {
+        console.error('Boosty quick connect error', e);
+      }
+    }
+    try {
       history.replaceState(null, '', window.location.pathname);
+    } catch (_) {}
+
+    if (data) {
       if (data.blog) {
         var el = document.getElementById('boosty_blog_url');
         if (el) el.value = data.blog;
@@ -756,13 +769,26 @@ pub(crate) async fn boosty_page(
       }
       var cb = document.getElementById('boosty_enabled');
       if (cb) cb.checked = true;
+
       var banner = document.getElementById('quick-connect-banner');
       if (banner) {
         banner.style.display = 'block';
-        banner.scrollIntoView({ behavior: 'smooth' });
       }
-    } catch (e) {
-      console.error('Boosty quick connect error', e);
+
+      var form = document.getElementById('boosty-settings-form');
+      if (form) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;color:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:15px;font-weight:600;gap:12px;';
+        overlay.innerHTML = '<span style="font-size:24px;">🔄</span> <span>Подключаем Boosty и синхронизируем подписчиков...</span>';
+        document.body.appendChild(overlay);
+
+        var inp = document.createElement('input');
+        inp.type = 'hidden';
+        inp.name = 'quick_sync_now';
+        inp.value = '1';
+        form.appendChild(inp);
+        setTimeout(function() { form.submit(); }, 150);
+      }
     }
   }
   window.showBookmarkletHelp = function() {
