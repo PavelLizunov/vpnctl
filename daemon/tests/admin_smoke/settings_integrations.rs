@@ -230,6 +230,23 @@ async fn boosty_page_renders_and_is_in_nav() {
         html.contains("name=\"quick_sync_now\""),
         "quick-connect banner must feature quick_sync_now button"
     );
+    // CSP enforcement: no inline script tags or onclick handlers
+    assert!(
+        !html.contains("<script>"),
+        "boosty page must carry no inline script blocks"
+    );
+    assert!(
+        !html.contains("onclick="),
+        "boosty page must carry no inline onclick handlers"
+    );
+    assert!(
+        html.contains("data-bookmarklet-link"),
+        "page must use data-bookmarklet-link attribute"
+    );
+    assert!(
+        html.contains("data-copy-bookmarklet"),
+        "page must use data-copy-bookmarklet attribute"
+    );
     // Disabled bridge → the «polling off» pill.
     assert!(
         html.contains("polling off"),

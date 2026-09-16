@@ -267,7 +267,9 @@ impl SqliteInventory {
     /// Clear the access token when refresh recovery succeeds, so future sync passes
     /// use the refreshed credentials directly. Safe against concurrent UI updates:
     /// only clears if the stored access token still matches `expected`.
+    /// Records an audit log row on actual change.
     pub async fn clear_boosty_access_token(&self, expected: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE boosty_settings
                 SET access_token = NULL,
@@ -275,9 +277,29 @@ impl SqliteInventory {
               WHERE id = 1 AND access_token = ?1",
         )
         .bind(expected)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('system', 'boosty.access_token.cleared', 'boosty_settings', ?1)",
+            )
+            .bind(
+                serde_json::json!({
+                    "reason": "refresh_recovery_success"
+                })
+                .to_string(),
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+            Ok(true)
+        } else {
+            tx.rollback().await?;
+            Ok(false)
+        }
     }
 
     /// Cross-process lease for the rotating Boosty credential and the

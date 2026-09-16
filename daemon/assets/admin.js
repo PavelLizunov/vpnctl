@@ -309,11 +309,116 @@
     });
   }
 
+  // ── Boosty Quick Connect (CSP-compliant external handler) ──────
+  function wireBoostyQuickConnect() {
+    var bmlLink = document.querySelector("[data-bookmarklet-link]");
+    var modal = document.getElementById("bookmarklet-help-modal");
+    if (bmlLink && modal) {
+      bmlLink.addEventListener("click", function (e) {
+        e.preventDefault();
+        modal.style.display = "flex";
+      });
+    }
+
+    var closeButtons = document.querySelectorAll("[data-modal-close]");
+    for (var i = 0; i < closeButtons.length; i++) {
+      closeButtons[i].addEventListener("click", function () {
+        var mId = this.getAttribute("data-modal-close");
+        var m = document.getElementById(mId);
+        if (m) m.style.display = "none";
+      });
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && modal && modal.style.display === "flex") {
+        modal.style.display = "none";
+      }
+    });
+
+    var copyBtn = document.querySelector("[data-copy-bookmarklet]");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", function () {
+        var s = this.getAttribute("data-script") || "";
+        function feedback() {
+          var orig = copyBtn.textContent;
+          copyBtn.textContent = "Скопировано!";
+          setTimeout(function () { copyBtn.textContent = orig; }, 1800);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(s).then(feedback).catch(function () {
+            prompt("Скопируйте скрипт:", s);
+          });
+        } else {
+          var t = document.createElement("textarea");
+          t.value = s;
+          document.body.appendChild(t);
+          t.select();
+          try {
+            document.execCommand("copy");
+            feedback();
+          } catch (_) {
+            prompt("Скопируйте скрипт:", s);
+          }
+          document.body.removeChild(t);
+        }
+      });
+    }
+
+    var hash = window.location.hash || "";
+    if (hash.indexOf("#quick_connect=") === 0) {
+      var raw = hash.substring(15);
+      var data = null;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        try {
+          data = JSON.parse(decodeURIComponent(raw));
+        } catch (e) {
+          console.error("Boosty quick connect error", e);
+        }
+      }
+
+      try {
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+      } catch (_) {}
+
+      if (data && typeof data === "object") {
+        if (data.blog) {
+          var elBlog = document.getElementById("boosty_blog_url");
+          if (elBlog) elBlog.value = data.blog;
+          var info = document.getElementById("quick-connect-blog-info");
+          if (info) info.textContent = "Блог: " + data.blog;
+        }
+        if (data.access_token) {
+          var elAccess = document.getElementById("boosty_access");
+          if (elAccess) elAccess.value = data.access_token;
+        }
+        if (data.refresh_token) {
+          var elRefresh = document.getElementById("boosty_refresh");
+          if (elRefresh) elRefresh.value = data.refresh_token;
+        }
+        if (data.device_id) {
+          var elDevice = document.getElementById("boosty_device");
+          if (elDevice) elDevice.value = data.device_id;
+        }
+        var cb = document.getElementById("boosty_enabled");
+        if (cb) cb.checked = true;
+
+        var banner = document.getElementById("quick-connect-banner");
+        if (banner) {
+          banner.style.display = "block";
+          banner.scrollIntoView({ behavior: "smooth" });
+        }
+      }
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     wireSearchHotkey();
     wireSelectOnClick();
     wireLowercaseId();
     wireFormSubmitFeedback();
+    wireBoostyQuickConnect();
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
     var autos = document.querySelectorAll("[data-sse-autostart]");
