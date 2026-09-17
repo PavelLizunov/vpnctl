@@ -702,21 +702,19 @@ mod tests {
         assert!(!valid_server_id("srv/01")); // slash disallowed
     }
 
-    #[test]
-    fn set_tweak_cookie_truncates_oversized_invalid_values() {
+    #[tokio::test]
+    async fn set_tweak_cookie_truncates_oversized_invalid_values() {
         let headers = HeaderMap::new();
         let long_val = "a".repeat(100);
         let body = format!("value={long_val}");
         let resp = set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        // Check that the returned body contains the truncated value and not the full 100 'a's
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
         let expected_truncated = format!("{}…", "a".repeat(64));
-        assert!(
-            format!("{expected_truncated}' for tweak 'vpnctl_theme'").len() > 0
-        );
-        // We verify that the 100-length raw string is NOT present in error output
-        let body_str = format!("{resp:?}"); // response debug representation
+        assert!(body_str.contains(&expected_truncated));
         assert!(!body_str.contains(&long_val));
     }
 }
