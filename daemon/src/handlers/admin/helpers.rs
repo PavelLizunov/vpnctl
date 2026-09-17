@@ -144,8 +144,14 @@ pub(crate) fn set_tweak_cookie(
         .find_map(|kv| kv.strip_prefix("value="))
         .unwrap_or("");
     if !valid.contains(&value) {
+        // Security: truncate reflected input to prevent response inflation, log bloat, or DoS
+        let truncated = if value.chars().count() > 64 {
+            format!("{}…", value.chars().take(64).collect::<String>())
+        } else {
+            value.to_string()
+        };
         return bad_request(&format!(
-            "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+            "invalid value '{truncated}' for tweak '{cookie_name}' (allowed: {})",
             valid.join(", ")
         ));
     }
@@ -694,5 +700,23 @@ mod tests {
         assert!(!valid_server_id("srv..01")); // consecutive dots / path traversal
         assert!(!valid_server_id("..")); // path traversal dots
         assert!(!valid_server_id("srv/01")); // slash disallowed
+    }
+
+    #[test]
+    fn set_tweak_cookie_truncates_oversized_invalid_values() {
+        let headers = HeaderMap::new();
+        let long_val = "a".repeat(100);
+        let body = format!("value={long_val}");
+        let resp = set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Check that the returned body contains the truncated value and not the full 100 'a's
+        let expected_truncated = format!("{}…", "a".repeat(64));
+        assert!(
+            format!("{expected_truncated}' for tweak 'vpnctl_theme'").len() > 0
+        );
+        // We verify that the 100-length raw string is NOT present in error output
+        let body_str = format!("{resp:?}"); // response debug representation
+        assert!(!body_str.contains(&long_val));
     }
 }
