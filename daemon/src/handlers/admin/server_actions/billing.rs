@@ -159,12 +159,20 @@ pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: S
 fn safe_return_to(raw: Option<String>) -> String {
     match raw {
         Some(r)
-            if r.starts_with("/admin/servers")
-                && !r.contains("//")
+            if !r.contains("//")
                 && !r.contains("..")
                 && !r.contains(['\r', '\n', '\\']) =>
         {
-            r
+            if let Some(rest) = r.strip_prefix("/admin/servers") {
+                if rest.is_empty()
+                    || rest.starts_with('/')
+                    || rest.starts_with('?')
+                    || rest.starts_with('#')
+                {
+                    return r;
+                }
+            }
+            "/admin/servers/billing".to_string()
         }
         _ => "/admin/servers/billing".to_string(),
     }
@@ -216,5 +224,68 @@ fn parse_amount_to_cents(s: &str) -> std::result::Result<i64, String> {
             Ok(units.saturating_mul(100).saturating_add(cents))
         }
         _ => Err("invalid decimal format".into()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod safe_return_to_tests {
+    use super::safe_return_to;
+
+    #[test]
+    fn accepts_valid_server_return_paths() {
+        assert_eq!(
+            safe_return_to(Some("/admin/servers".to_string())),
+            "/admin/servers"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/billing".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/srv-1".to_string())),
+            "/admin/servers/srv-1"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers?tab=billing".to_string())),
+            "/admin/servers?tab=billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers#billing".to_string())),
+            "/admin/servers#billing"
+        );
+    }
+
+    #[test]
+    fn rejects_path_prefix_confusion_and_malicious_urls() {
+        assert_eq!(
+            safe_return_to(Some("/admin/servers_evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers.evil.com".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers//evil.com".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/../evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\\evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\revil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\nevil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(safe_return_to(None), "/admin/servers/billing");
     }
 }
