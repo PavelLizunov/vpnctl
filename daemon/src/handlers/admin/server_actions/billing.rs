@@ -230,7 +230,10 @@ mod tests {
     #[test]
     fn safe_return_to_validation() {
         // Valid return_to targets
-        assert_eq!(safe_return_to(Some("/admin/servers".into())), "/admin/servers");
+        assert_eq!(
+            safe_return_to(Some("/admin/servers".into())),
+            "/admin/servers"
+        );
         assert_eq!(
             safe_return_to(Some("/admin/servers/billing".into())),
             "/admin/servers/billing"
