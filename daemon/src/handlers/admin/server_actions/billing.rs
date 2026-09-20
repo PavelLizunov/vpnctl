@@ -158,15 +158,25 @@ pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: S
 
 fn safe_return_to(raw: Option<String>) -> String {
     match raw {
-        Some(r)
-            if r.starts_with("/admin/servers")
+        Some(r) => {
+            let tail = match r.strip_prefix("/admin/servers") {
+                Some(t) => t,
+                None => return "/admin/servers/billing".to_string(),
+            };
+            if (tail.is_empty()
+                || tail.starts_with('/')
+                || tail.starts_with('?')
+                || tail.starts_with('#'))
                 && !r.contains("//")
                 && !r.contains("..")
-                && !r.contains(['\r', '\n', '\\']) =>
-        {
-            r
+                && !r.contains(['\r', '\n', '\\'])
+            {
+                r
+            } else {
+                "/admin/servers/billing".to_string()
+            }
         }
-        _ => "/admin/servers/billing".to_string(),
+        None => "/admin/servers/billing".to_string(),
     }
 }
 
@@ -216,5 +226,72 @@ fn parse_amount_to_cents(s: &str) -> std::result::Result<i64, String> {
             Ok(units.saturating_mul(100).saturating_add(cents))
         }
         _ => Err("invalid decimal format".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_return_to_validation() {
+        // Valid targets
+        assert_eq!(
+            safe_return_to(Some("/admin/servers".to_string())),
+            "/admin/servers"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/billing".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/srv-01".to_string())),
+            "/admin/servers/srv-01"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers?sort=due".to_string())),
+            "/admin/servers?sort=due"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers#tag".to_string())),
+            "/admin/servers#tag"
+        );
+
+        // Path prefix confusion attempts -> fallback
+        assert_eq!(
+            safe_return_to(Some("/admin/servers_evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers.evil.com".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers-other".to_string())),
+            "/admin/servers/billing"
+        );
+
+        // Path traversal / open redirect / CRLF attempts -> fallback
+        assert_eq!(
+            safe_return_to(Some("/admin/servers//evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/../users".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\\evil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\revil".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("http://evil.com/admin/servers".to_string())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(safe_return_to(None), "/admin/servers/billing");
     }
 }
