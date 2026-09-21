@@ -159,10 +159,7 @@ pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: S
 fn safe_return_to(raw: Option<String>) -> String {
     match raw {
         Some(r) => {
-            if !r.contains("//")
-                && !r.contains("..")
-                && !r.contains(['\r', '\n', '\\'])
-            {
+            if !r.contains("//") && !r.contains("..") && !r.contains(['\r', '\n', '\\']) {
                 if let Some(rest) = r.strip_prefix("/admin/servers") {
                     if rest.is_empty()
                         || rest.starts_with('/')
