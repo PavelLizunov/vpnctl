@@ -160,6 +160,10 @@ fn safe_return_to(raw: Option<String>) -> String {
     match raw {
         Some(r)
             if r.starts_with("/admin/servers")
+                && (r["/admin/servers".len()..].is_empty()
+                    || r["/admin/servers".len()..].starts_with('/')
+                    || r["/admin/servers".len()..].starts_with('?')
+                    || r["/admin/servers".len()..].starts_with('#'))
                 && !r.contains("//")
                 && !r.contains("..")
                 && !r.contains(['\r', '\n', '\\']) =>
@@ -216,5 +220,54 @@ fn parse_amount_to_cents(s: &str) -> std::result::Result<i64, String> {
             Ok(units.saturating_mul(100).saturating_add(cents))
         }
         _ => Err("invalid decimal format".into()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_return_to_validates_path_boundaries() {
+        assert_eq!(
+            safe_return_to(Some("/admin/servers".into())),
+            "/admin/servers"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/billing".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers?tab=billing".into())),
+            "/admin/servers?tab=billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers#section".into())),
+            "/admin/servers#section"
+        );
+
+        // Path prefix confusion and open redirect attempts must be rejected
+        assert_eq!(
+            safe_return_to(Some("/admin/servers_evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/serverssomething".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers//evil.com".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/../evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\\evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(safe_return_to(None), "/admin/servers/billing");
     }
 }
