@@ -230,8 +230,14 @@ mod tests {
     #[test]
     fn safe_return_to_validates_admin_servers_paths() {
         // Valid paths matching /admin/servers
-        assert_eq!(safe_return_to(Some("/admin/servers".into())), "/admin/servers");
-        assert_eq!(safe_return_to(Some("/admin/servers/".into())), "/admin/servers/");
+        assert_eq!(
+            safe_return_to(Some("/admin/servers".into())),
+            "/admin/servers"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/".into())),
+            "/admin/servers/"
+        );
         assert_eq!(
             safe_return_to(Some("/admin/servers/billing".into())),
             "/admin/servers/billing"
