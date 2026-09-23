@@ -158,13 +158,17 @@ pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: S
 
 fn safe_return_to(raw: Option<String>) -> String {
     match raw {
-        Some(r)
-            if r.starts_with("/admin/servers")
-                && !r.contains("//")
-                && !r.contains("..")
-                && !r.contains(['\r', '\n', '\\']) =>
-        {
-            r
+        Some(r) if !r.contains("//") && !r.contains("..") && !r.contains(['\r', '\n', '\\']) => {
+            if let Some(rest) = r.strip_prefix("/admin/servers") {
+                if rest.is_empty()
+                    || rest.starts_with('/')
+                    || rest.starts_with('?')
+                    || rest.starts_with('#')
+                {
+                    return r;
+                }
+            }
+            "/admin/servers/billing".to_string()
         }
         _ => "/admin/servers/billing".to_string(),
     }
@@ -216,5 +220,66 @@ fn parse_amount_to_cents(s: &str) -> std::result::Result<i64, String> {
             Ok(units.saturating_mul(100).saturating_add(cents))
         }
         _ => Err("invalid decimal format".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_return_to_validates_admin_servers_paths() {
+        // Valid paths matching /admin/servers
+        assert_eq!(safe_return_to(Some("/admin/servers".into())), "/admin/servers");
+        assert_eq!(safe_return_to(Some("/admin/servers/".into())), "/admin/servers/");
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/billing".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers?tab=1".into())),
+            "/admin/servers?tab=1"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers#anchor".into())),
+            "/admin/servers#anchor"
+        );
+
+        // Invalid path prefix confusion attempts
+        assert_eq!(
+            safe_return_to(Some("/admin/servers_evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers.evil.com".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/serversfoo".into())),
+            "/admin/servers/billing"
+        );
+
+        // Rejections for path traversal / control characters
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/../evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers//evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\\evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\revil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\nevil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(safe_return_to(None), "/admin/servers/billing");
     }
 }
