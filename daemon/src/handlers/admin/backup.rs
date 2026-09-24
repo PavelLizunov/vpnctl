@@ -119,6 +119,10 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str("application/octet-stream") {
         headers.insert(header::CONTENT_TYPE, v);
     }
+    // Security: prevent database backup snapshots containing secrets/keys from being cached by proxies/browsers.
+    if let Ok(v) = HeaderValue::from_str("no-store") {
+        headers.insert(header::CACHE_CONTROL, v);
+    }
     let safe_name = sanitize_header_filename(&name);
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);

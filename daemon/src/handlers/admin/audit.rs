@@ -541,6 +541,7 @@ pub(crate) async fn user_access_csv(
         StatusCode::OK,
         [
             ("content-type", "text/csv; charset=utf-8".to_string()),
+            ("cache-control", "no-store".to_string()),
             (
                 "content-disposition",
                 format!("attachment; filename=\"{filename}\""),
@@ -619,6 +620,7 @@ pub(crate) async fn audit_csv(
         StatusCode::OK,
         [
             ("content-type", "text/csv; charset=utf-8".to_string()),
+            ("cache-control", "no-store".to_string()),
             (
                 "content-disposition",
                 format!("attachment; filename=\"{filename}\""),

@@ -446,6 +446,15 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         ct.starts_with("text/plain"),
         "Content-Type should be text/plain for .conf, got {ct:?}"
     );
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        cc, "no-store",
+        "Cache-Control must be no-store for .conf download containing private keys, got {cc:?}"
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&body).unwrap();
     assert!(

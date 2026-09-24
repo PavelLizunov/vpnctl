@@ -82,6 +82,10 @@ pub(crate) async fn user_wireguard_conf_download(
     if let Ok(v) = HeaderValue::from_str("text/plain; charset=utf-8") {
         headers.insert(header::CONTENT_TYPE, v);
     }
+    // Security: prevent sensitive WireGuard private keys in .conf downloads from being cached by proxies/browsers.
+    if let Ok(v) = HeaderValue::from_str("no-store") {
+        headers.insert(header::CACHE_CONTROL, v);
+    }
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
