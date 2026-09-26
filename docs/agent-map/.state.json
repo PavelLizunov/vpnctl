@@ -1,0 +1,1727 @@
+{
+  "version": 1,
+  "total_files": 410,
+  "total_lines": 151289,
+  "domains": {
+    "crates/core": {
+      "status": "completed",
+      "file_count": 12,
+      "loc": 1848,
+      "doc_artifact": "docs/agent-map/crates-core.md",
+      "files": [
+        {
+          "path": "crates/core/src/protocol.rs",
+          "loc": 247
+        },
+        {
+          "path": "crates/core/src/registry.rs",
+          "loc": 529
+        },
+        {
+          "path": "crates/core/src/url_host.rs",
+          "loc": 127
+        },
+        {
+          "path": "crates/core/src/shell.rs",
+          "loc": 123
+        },
+        {
+          "path": "crates/core/src/error.rs",
+          "loc": 26
+        },
+        {
+          "path": "crates/core/src/models.rs",
+          "loc": 319
+        },
+        {
+          "path": "crates/core/src/id.rs",
+          "loc": 27
+        },
+        {
+          "path": "crates/core/src/version.rs",
+          "loc": 121
+        },
+        {
+          "path": "crates/core/src/humanize.rs",
+          "loc": 193
+        },
+        {
+          "path": "crates/core/src/transport.rs",
+          "loc": 17
+        },
+        {
+          "path": "crates/core/src/kernel.rs",
+          "loc": 91
+        },
+        {
+          "path": "crates/core/src/lib.rs",
+          "loc": 28
+        }
+      ]
+    },
+    "crates/crypto": {
+      "status": "completed",
+      "file_count": 2,
+      "loc": 575,
+      "doc_artifact": "docs/agent-map/crates-crypto.md",
+      "files": [
+        {
+          "path": "crates/crypto/tests/spec_wireguard_keypair_matches.rs",
+          "loc": 129
+        },
+        {
+          "path": "crates/crypto/src/lib.rs",
+          "loc": 446
+        }
+      ]
+    },
+    "crates/host-fingerprint": {
+      "status": "completed",
+      "file_count": 3,
+      "loc": 902,
+      "doc_artifact": "docs/agent-map/crates-host-fingerprint.md",
+      "files": [
+        {
+          "path": "crates/host-fingerprint/tests/spec_host_fingerprint.rs",
+          "loc": 409
+        },
+        {
+          "path": "crates/host-fingerprint/tests/spec_extract_all_fingerprints.rs",
+          "loc": 117
+        },
+        {
+          "path": "crates/host-fingerprint/src/lib.rs",
+          "loc": 376
+        }
+      ]
+    },
+    "crates/ssh": {
+      "status": "completed",
+      "file_count": 9,
+      "loc": 2739,
+      "doc_artifact": "docs/agent-map/crates-ssh.md",
+      "files": [
+        {
+          "path": "crates/ssh/tests/integration.rs",
+          "loc": 106
+        },
+        {
+          "path": "crates/ssh/tests/spec_password_auth.rs",
+          "loc": 347
+        },
+        {
+          "path": "crates/ssh/tests/spec_privilege_semantics.rs",
+          "loc": 132
+        },
+        {
+          "path": "crates/ssh/tests/e2e_sshd.rs",
+          "loc": 108
+        },
+        {
+          "path": "crates/ssh/src/russh_transport.rs",
+          "loc": 473
+        },
+        {
+          "path": "crates/ssh/src/subprocess.rs",
+          "loc": 901
+        },
+        {
+          "path": "crates/ssh/src/mock.rs",
+          "loc": 92
+        },
+        {
+          "path": "crates/ssh/src/russh_transport_tests.rs",
+          "loc": 560
+        },
+        {
+          "path": "crates/ssh/src/lib.rs",
+          "loc": 20
+        }
+      ]
+    },
+    "crates/boosty-bridge": {
+      "status": "completed",
+      "file_count": 8,
+      "loc": 2500,
+      "doc_artifact": "docs/agent-map/crates-boosty-bridge.md",
+      "files": [
+        {
+          "path": "crates/boosty-bridge/tests/spec_auth_classification.rs",
+          "loc": 60
+        },
+        {
+          "path": "crates/boosty-bridge/tests/sync_integration.rs",
+          "loc": 915
+        },
+        {
+          "path": "crates/boosty-bridge/src/types.rs",
+          "loc": 353
+        },
+        {
+          "path": "crates/boosty-bridge/src/sync.rs",
+          "loc": 546
+        },
+        {
+          "path": "crates/boosty-bridge/src/roster.rs",
+          "loc": 234
+        },
+        {
+          "path": "crates/boosty-bridge/src/client.rs",
+          "loc": 84
+        },
+        {
+          "path": "crates/boosty-bridge/src/reconcile.rs",
+          "loc": 281
+        },
+        {
+          "path": "crates/boosty-bridge/src/lib.rs",
+          "loc": 27
+        }
+      ]
+    },
+    "crates/protocols": {
+      "status": "completed",
+      "file_count": 32,
+      "loc": 9873,
+      "doc_artifact": "docs/agent-map/crates-protocols.md",
+      "files": [
+        {
+          "path": "crates/protocols/tests/spec_ipv6_sharelink_brackets.rs",
+          "loc": 275
+        },
+        {
+          "path": "crates/protocols/tests/spec_shadowsocks2022.rs",
+          "loc": 443
+        },
+        {
+          "path": "crates/protocols/tests/spec_anytls.rs",
+          "loc": 285
+        },
+        {
+          "path": "crates/protocols/tests/spec_wireguard.rs",
+          "loc": 472
+        },
+        {
+          "path": "crates/protocols/tests/spec_vless_ws.rs",
+          "loc": 351
+        },
+        {
+          "path": "crates/protocols/tests/spec_amneziawg_versions.rs",
+          "loc": 919
+        },
+        {
+          "path": "crates/protocols/tests/spec_hysteria2.rs",
+          "loc": 642
+        },
+        {
+          "path": "crates/protocols/tests/spec_trojan.rs",
+          "loc": 191
+        },
+        {
+          "path": "crates/protocols/tests/spec_vless_xhttp.rs",
+          "loc": 570
+        },
+        {
+          "path": "crates/protocols/tests/spec_share_link_byte_equality.rs",
+          "loc": 472
+        },
+        {
+          "path": "crates/protocols/tests/spec_vless_reality_ports.rs",
+          "loc": 154
+        },
+        {
+          "path": "crates/protocols/tests/spec_stock_singbox.rs",
+          "loc": 73
+        },
+        {
+          "path": "crates/protocols/src/trojan.rs",
+          "loc": 140
+        },
+        {
+          "path": "crates/protocols/src/vless_reality.rs",
+          "loc": 259
+        },
+        {
+          "path": "crates/protocols/src/naive.rs",
+          "loc": 421
+        },
+        {
+          "path": "crates/protocols/src/wireguard.rs",
+          "loc": 81
+        },
+        {
+          "path": "crates/protocols/src/vless_xhttp.rs",
+          "loc": 294
+        },
+        {
+          "path": "crates/protocols/src/wg_addressing.rs",
+          "loc": 162
+        },
+        {
+          "path": "crates/protocols/src/shadowsocks2022.rs",
+          "loc": 200
+        },
+        {
+          "path": "crates/protocols/src/vless_ws.rs",
+          "loc": 532
+        },
+        {
+          "path": "crates/protocols/src/amneziawg.rs",
+          "loc": 507
+        },
+        {
+          "path": "crates/protocols/src/tuic_v5.rs",
+          "loc": 266
+        },
+        {
+          "path": "crates/protocols/src/encoding.rs",
+          "loc": 63
+        },
+        {
+          "path": "crates/protocols/src/hysteria2.rs",
+          "loc": 303
+        },
+        {
+          "path": "crates/protocols/src/anytls.rs",
+          "loc": 144
+        },
+        {
+          "path": "crates/protocols/src/lib.rs",
+          "loc": 35
+        },
+        {
+          "path": "crates/protocols/src/amneziawg/tests.rs",
+          "loc": 451
+        },
+        {
+          "path": "crates/protocols/src/wireguard/protocol.rs",
+          "loc": 221
+        },
+        {
+          "path": "crates/protocols/src/wireguard/tests.rs",
+          "loc": 478
+        },
+        {
+          "path": "crates/protocols/src/wireguard/render.rs",
+          "loc": 103
+        },
+        {
+          "path": "crates/protocols/src/wireguard/amnezia.rs",
+          "loc": 296
+        },
+        {
+          "path": "crates/protocols/src/wireguard/helpers.rs",
+          "loc": 70
+        }
+      ]
+    },
+    "crates/kernels": {
+      "status": "completed",
+      "file_count": 17,
+      "loc": 7072,
+      "doc_artifact": "docs/agent-map/crates-kernels.md",
+      "files": [
+        {
+          "path": "crates/kernels/tests/spec_awg_endpoint_assembly.rs",
+          "loc": 120
+        },
+        {
+          "path": "crates/kernels/tests/spec_endpoint_reserved_ports.rs",
+          "loc": 17
+        },
+        {
+          "path": "crates/kernels/tests/status_versions.rs",
+          "loc": 113
+        },
+        {
+          "path": "crates/kernels/examples/awg_runtime_fixture.rs",
+          "loc": 142
+        },
+        {
+          "path": "crates/kernels/src/xray.rs",
+          "loc": 608
+        },
+        {
+          "path": "crates/kernels/src/caddy.rs",
+          "loc": 278
+        },
+        {
+          "path": "crates/kernels/src/amnezia_wg_tests.rs",
+          "loc": 473
+        },
+        {
+          "path": "crates/kernels/src/amnezia_wg.rs",
+          "loc": 481
+        },
+        {
+          "path": "crates/kernels/src/sing_box.rs",
+          "loc": 388
+        },
+        {
+          "path": "crates/kernels/src/lib.rs",
+          "loc": 39
+        },
+        {
+          "path": "crates/kernels/src/caddy/tests.rs",
+          "loc": 1519
+        },
+        {
+          "path": "crates/kernels/src/caddy/render.rs",
+          "loc": 559
+        },
+        {
+          "path": "crates/kernels/src/caddy/builder.rs",
+          "loc": 272
+        },
+        {
+          "path": "crates/kernels/src/sing_box/tests.rs",
+          "loc": 1481
+        },
+        {
+          "path": "crates/kernels/src/sing_box/scripts.rs",
+          "loc": 440
+        },
+        {
+          "path": "crates/kernels/src/sing_box/arch.rs",
+          "loc": 19
+        },
+        {
+          "path": "crates/kernels/src/sing_box/guards.rs",
+          "loc": 123
+        }
+      ]
+    },
+    "crates/inventory": {
+      "status": "completed",
+      "file_count": 99,
+      "loc": 35048,
+      "doc_artifact": "docs/agent-map/crates-inventory.md",
+      "files": [
+        {
+          "path": "crates/inventory/tests/spec_quality_readiness.rs",
+          "loc": 709
+        },
+        {
+          "path": "crates/inventory/tests/spec_operator_protocols.rs",
+          "loc": 300
+        },
+        {
+          "path": "crates/inventory/tests/spec_is_known_server_address.rs",
+          "loc": 158
+        },
+        {
+          "path": "crates/inventory/tests/spec_sub_rate_bans.rs",
+          "loc": 202
+        },
+        {
+          "path": "crates/inventory/tests/spec_quality.rs",
+          "loc": 126
+        },
+        {
+          "path": "crates/inventory/tests/spec_sub_token.rs",
+          "loc": 383
+        },
+        {
+          "path": "crates/inventory/tests/spec_bootstrap_amnezia.rs",
+          "loc": 131
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_stats.rs",
+          "loc": 14
+        },
+        {
+          "path": "crates/inventory/tests/spec_protocol_visibility.rs",
+          "loc": 297
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_roles.rs",
+          "loc": 255
+        },
+        {
+          "path": "crates/inventory/tests/spec_sub_access.rs",
+          "loc": 1050
+        },
+        {
+          "path": "crates/inventory/tests/spec_user_last_seen.rs",
+          "loc": 338
+        },
+        {
+          "path": "crates/inventory/tests/spec_reserved_ports.rs",
+          "loc": 165
+        },
+        {
+          "path": "crates/inventory/tests/spec_remove_dns_tunnel.rs",
+          "loc": 633
+        },
+        {
+          "path": "crates/inventory/tests/spec_protocol_assurance.rs",
+          "loc": 125
+        },
+        {
+          "path": "crates/inventory/tests/spec_boosty.rs",
+          "loc": 303
+        },
+        {
+          "path": "crates/inventory/tests/spec_traffic_breakdown.rs",
+          "loc": 214
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_display_name.rs",
+          "loc": 152
+        },
+        {
+          "path": "crates/inventory/tests/spec_inventory.rs",
+          "loc": 417
+        },
+        {
+          "path": "crates/inventory/tests/spec_grants_per_server_uuid.rs",
+          "loc": 664
+        },
+        {
+          "path": "crates/inventory/tests/spec_sub_access_origins.rs",
+          "loc": 576
+        },
+        {
+          "path": "crates/inventory/tests/spec_admin_alerts.rs",
+          "loc": 746
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_udp_pair.rs",
+          "loc": 101
+        },
+        {
+          "path": "crates/inventory/tests/spec_uptime.rs",
+          "loc": 296
+        },
+        {
+          "path": "crates/inventory/tests/spec_info_queries.rs",
+          "loc": 708
+        },
+        {
+          "path": "crates/inventory/tests/spec_servers_pending_deploy.rs",
+          "loc": 787
+        },
+        {
+          "path": "crates/inventory/tests/spec_grant_dates_pending.rs",
+          "loc": 190
+        },
+        {
+          "path": "crates/inventory/tests/spec_access_buckets.rs",
+          "loc": 233
+        },
+        {
+          "path": "crates/inventory/tests/spec_remove_wgturn.rs",
+          "loc": 491
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_auto_suppress.rs",
+          "loc": 129
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_billing.rs",
+          "loc": 504
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_router_device_id.rs",
+          "loc": 251
+        },
+        {
+          "path": "crates/inventory/tests/spec_aggregations.rs",
+          "loc": 301
+        },
+        {
+          "path": "crates/inventory/tests/spec_atomic_secret_bootstrap.rs",
+          "loc": 402
+        },
+        {
+          "path": "crates/inventory/tests/spec_audit_paginated.rs",
+          "loc": 293
+        },
+        {
+          "path": "crates/inventory/tests/spec_client_detour.rs",
+          "loc": 311
+        },
+        {
+          "path": "crates/inventory/tests/spec_idle_users.rs",
+          "loc": 240
+        },
+        {
+          "path": "crates/inventory/tests/spec_node_health.rs",
+          "loc": 1033
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_cumulative.rs",
+          "loc": 658
+        },
+        {
+          "path": "crates/inventory/tests/spec_notification_settings.rs",
+          "loc": 477
+        },
+        {
+          "path": "crates/inventory/tests/spec_ack_all_alerts.rs",
+          "loc": 239
+        },
+        {
+          "path": "crates/inventory/tests/spec_server_cascade_complete.rs",
+          "loc": 478
+        },
+        {
+          "path": "crates/inventory/tests/spec_operator_grants.rs",
+          "loc": 363
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_stats/rollups.rs",
+          "loc": 359
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_stats/sessions.rs",
+          "loc": 698
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_stats/common.rs",
+          "loc": 70
+        },
+        {
+          "path": "crates/inventory/tests/spec_vpn_stats/core.rs",
+          "loc": 698
+        },
+        {
+          "path": "crates/inventory/src/quality.rs",
+          "loc": 299
+        },
+        {
+          "path": "crates/inventory/src/bootstrap.rs",
+          "loc": 205
+        },
+        {
+          "path": "crates/inventory/src/backup.rs",
+          "loc": 82
+        },
+        {
+          "path": "crates/inventory/src/jump_resolver.rs",
+          "loc": 200
+        },
+        {
+          "path": "crates/inventory/src/operation_lock.rs",
+          "loc": 124
+        },
+        {
+          "path": "crates/inventory/src/assurance.rs",
+          "loc": 92
+        },
+        {
+          "path": "crates/inventory/src/migrate.rs",
+          "loc": 78
+        },
+        {
+          "path": "crates/inventory/src/sqlite.rs",
+          "loc": 33
+        },
+        {
+          "path": "crates/inventory/src/lib.rs",
+          "loc": 47
+        },
+        {
+          "path": "crates/inventory/src/sqlite/settings.rs",
+          "loc": 126
+        },
+        {
+          "path": "crates/inventory/src/sqlite/stats.rs",
+          "loc": 6
+        },
+        {
+          "path": "crates/inventory/src/sqlite/audit.rs",
+          "loc": 237
+        },
+        {
+          "path": "crates/inventory/src/sqlite/boosty.rs",
+          "loc": 387
+        },
+        {
+          "path": "crates/inventory/src/sqlite/sessions.rs",
+          "loc": 642
+        },
+        {
+          "path": "crates/inventory/src/sqlite/tests.rs",
+          "loc": 1378
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers.rs",
+          "loc": 13
+        },
+        {
+          "path": "crates/inventory/src/sqlite/health.rs",
+          "loc": 1152
+        },
+        {
+          "path": "crates/inventory/src/sqlite/users.rs",
+          "loc": 4
+        },
+        {
+          "path": "crates/inventory/src/sqlite/base.rs",
+          "loc": 290
+        },
+        {
+          "path": "crates/inventory/src/sqlite/models.rs",
+          "loc": 1035
+        },
+        {
+          "path": "crates/inventory/src/sqlite/assurance.rs",
+          "loc": 117
+        },
+        {
+          "path": "crates/inventory/src/sqlite/alerts.rs",
+          "loc": 551
+        },
+        {
+          "path": "crates/inventory/src/sqlite/access.rs",
+          "loc": 3
+        },
+        {
+          "path": "crates/inventory/src/sqlite/stats/rollups.rs",
+          "loc": 233
+        },
+        {
+          "path": "crates/inventory/src/sqlite/stats/server_activity.rs",
+          "loc": 247
+        },
+        {
+          "path": "crates/inventory/src/sqlite/stats/ingest.rs",
+          "loc": 484
+        },
+        {
+          "path": "crates/inventory/src/sqlite/stats/limits.rs",
+          "loc": 300
+        },
+        {
+          "path": "crates/inventory/src/sqlite/access/logging.rs",
+          "loc": 509
+        },
+        {
+          "path": "crates/inventory/src/sqlite/access/analytics.rs",
+          "loc": 573
+        },
+        {
+          "path": "crates/inventory/src/sqlite/access/bans.rs",
+          "loc": 129
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/currency.rs",
+          "loc": 887
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/address.rs",
+          "loc": 433
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/billing.rs",
+          "loc": 439
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/protocols.rs",
+          "loc": 427
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/role.rs",
+          "loc": 371
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/crud.rs",
+          "loc": 328
+        },
+        {
+          "path": "crates/inventory/src/sqlite/servers/deploy.rs",
+          "loc": 455
+        },
+        {
+          "path": "crates/inventory/src/sqlite/users/keys.rs",
+          "loc": 427
+        },
+        {
+          "path": "crates/inventory/src/sqlite/users/grants.rs",
+          "loc": 320
+        },
+        {
+          "path": "crates/inventory/src/sqlite/users/crud.rs",
+          "loc": 227
+        },
+        {
+          "path": "crates/inventory/src/sqlite/users/lifecycle.rs",
+          "loc": 231
+        },
+        {
+          "path": "crates/inventory/src/backup/tests.rs",
+          "loc": 453
+        },
+        {
+          "path": "crates/inventory/src/backup/snapshot.rs",
+          "loc": 93
+        },
+        {
+          "path": "crates/inventory/src/backup/restore.rs",
+          "loc": 167
+        },
+        {
+          "path": "crates/inventory/src/backup/listing.rs",
+          "loc": 117
+        },
+        {
+          "path": "crates/inventory/src/backup/retention.rs",
+          "loc": 91
+        },
+        {
+          "path": "crates/inventory/src/backup/verify.rs",
+          "loc": 433
+        },
+        {
+          "path": "crates/inventory/src/migrate/types.rs",
+          "loc": 110
+        },
+        {
+          "path": "crates/inventory/src/migrate/tests.rs",
+          "loc": 636
+        },
+        {
+          "path": "crates/inventory/src/migrate/parsers.rs",
+          "loc": 159
+        },
+        {
+          "path": "crates/inventory/src/migrate/executor.rs",
+          "loc": 170
+        },
+        {
+          "path": "crates/inventory/src/migrate/planner.rs",
+          "loc": 230
+        }
+      ]
+    },
+    "daemon": {
+      "status": "completed",
+      "file_count": 206,
+      "loc": 83412,
+      "doc_artifact": "docs/agent-map/daemon.md",
+      "files": [
+        {
+          "path": "daemon/tests/vpn_router_endpoint.rs",
+          "loc": 30
+        },
+        {
+          "path": "daemon/tests/packaging.rs",
+          "loc": 329
+        },
+        {
+          "path": "daemon/tests/sub_endpoint.rs",
+          "loc": 18
+        },
+        {
+          "path": "daemon/tests/subprocess_ssh_e2e.rs",
+          "loc": 266
+        },
+        {
+          "path": "daemon/tests/sub_security.rs",
+          "loc": 384
+        },
+        {
+          "path": "daemon/tests/operator_restore_e2e.rs",
+          "loc": 562
+        },
+        {
+          "path": "daemon/tests/vpn_router_catchall.rs",
+          "loc": 490
+        },
+        {
+          "path": "daemon/tests/admin_smoke.rs",
+          "loc": 35
+        },
+        {
+          "path": "daemon/tests/restore_e2e.rs",
+          "loc": 261
+        },
+        {
+          "path": "daemon/tests/vpn_router_endpoint/protocols.rs",
+          "loc": 909
+        },
+        {
+          "path": "daemon/tests/vpn_router_endpoint/core_http.rs",
+          "loc": 356
+        },
+        {
+          "path": "daemon/tests/vpn_router_endpoint/common.rs",
+          "loc": 895
+        },
+        {
+          "path": "daemon/tests/vpn_router_endpoint/client_detour_capability.rs",
+          "loc": 378
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/payloads.rs",
+          "loc": 324
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/mihomo.rs",
+          "loc": 924
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/client_detour.rs",
+          "loc": 348
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/awg_compatibility.rs",
+          "loc": 278
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/common.rs",
+          "loc": 130
+        },
+        {
+          "path": "daemon/tests/sub_endpoint/rate_limiting.rs",
+          "loc": 612
+        },
+        {
+          "path": "daemon/tests/admin_smoke/shell_nav.rs",
+          "loc": 10
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants.rs",
+          "loc": 12
+        },
+        {
+          "path": "daemon/tests/admin_smoke/wizard.rs",
+          "loc": 800
+        },
+        {
+          "path": "daemon/tests/admin_smoke/servers.rs",
+          "loc": 1130
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail.rs",
+          "loc": 18
+        },
+        {
+          "path": "daemon/tests/admin_smoke/users.rs",
+          "loc": 999
+        },
+        {
+          "path": "daemon/tests/admin_smoke/deploy_actions.rs",
+          "loc": 819
+        },
+        {
+          "path": "daemon/tests/admin_smoke/monitoring.rs",
+          "loc": 318
+        },
+        {
+          "path": "daemon/tests/admin_smoke/readiness_quality_spec.rs",
+          "loc": 268
+        },
+        {
+          "path": "daemon/tests/admin_smoke/dashboard.rs",
+          "loc": 1315
+        },
+        {
+          "path": "daemon/tests/admin_smoke/alerts_health.rs",
+          "loc": 1717
+        },
+        {
+          "path": "daemon/tests/admin_smoke/settings_integrations.rs",
+          "loc": 2099
+        },
+        {
+          "path": "daemon/tests/admin_smoke/icon_fixtures.rs",
+          "loc": 127
+        },
+        {
+          "path": "daemon/tests/admin_smoke/common.rs",
+          "loc": 539
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail.rs",
+          "loc": 12
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/chain_subscription.rs",
+          "loc": 73
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/subscription_share_links.rs",
+          "loc": 1239
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/access_origins_presence.rs",
+          "loc": 262
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/wireguard.rs",
+          "loc": 734
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/mihomo_subscription.rs",
+          "loc": 54
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/traffic_activity.rs",
+          "loc": 978
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/amneziawg.rs",
+          "loc": 430
+        },
+        {
+          "path": "daemon/tests/admin_smoke/user_detail/overview_routes.rs",
+          "loc": 502
+        },
+        {
+          "path": "daemon/tests/admin_smoke/shell_nav/search_errors.rs",
+          "loc": 348
+        },
+        {
+          "path": "daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs",
+          "loc": 1011
+        },
+        {
+          "path": "daemon/tests/admin_smoke/shell_nav/tweaks_i18n.rs",
+          "loc": 772
+        },
+        {
+          "path": "daemon/tests/admin_smoke/shell_nav/csrf_security.rs",
+          "loc": 657
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail/drift_traffic.rs",
+          "loc": 929
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail/kernels.rs",
+          "loc": 376
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail/protocols.rs",
+          "loc": 446
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail/overview_telemetry.rs",
+          "loc": 604
+        },
+        {
+          "path": "daemon/tests/admin_smoke/server_detail/setup_config.rs",
+          "loc": 1369
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants/server_side.rs",
+          "loc": 93
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants/bulk.rs",
+          "loc": 479
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants/user_side.rs",
+          "loc": 294
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants/auto_deploy.rs",
+          "loc": 625
+        },
+        {
+          "path": "daemon/tests/admin_smoke/grants/protocol_overrides.rs",
+          "loc": 1368
+        },
+        {
+          "path": "daemon/src/main.rs",
+          "loc": 109
+        },
+        {
+          "path": "daemon/src/snapshot_cache.rs",
+          "loc": 616
+        },
+        {
+          "path": "daemon/src/singbox_stats.rs",
+          "loc": 135
+        },
+        {
+          "path": "daemon/src/node_probe.rs",
+          "loc": 954
+        },
+        {
+          "path": "daemon/src/geoip_update_runner.rs",
+          "loc": 456
+        },
+        {
+          "path": "daemon/src/rate_limit.rs",
+          "loc": 580
+        },
+        {
+          "path": "daemon/src/wizard.rs",
+          "loc": 482
+        },
+        {
+          "path": "daemon/src/clash_api.rs",
+          "loc": 419
+        },
+        {
+          "path": "daemon/src/ua.rs",
+          "loc": 141
+        },
+        {
+          "path": "daemon/src/http_util.rs",
+          "loc": 304
+        },
+        {
+          "path": "daemon/src/ssh_subprocess.rs",
+          "loc": 3
+        },
+        {
+          "path": "daemon/src/exchange_rate_poller.rs",
+          "loc": 211
+        },
+        {
+          "path": "daemon/src/i18n.rs",
+          "loc": 579
+        },
+        {
+          "path": "daemon/src/config.rs",
+          "loc": 348
+        },
+        {
+          "path": "daemon/src/real_ip.rs",
+          "loc": 485
+        },
+        {
+          "path": "daemon/src/health_monitor.rs",
+          "loc": 80
+        },
+        {
+          "path": "daemon/src/geoip.rs",
+          "loc": 300
+        },
+        {
+          "path": "daemon/src/dns_resolver.rs",
+          "loc": 298
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap.rs",
+          "loc": 106
+        },
+        {
+          "path": "daemon/src/quality_poller.rs",
+          "loc": 1010
+        },
+        {
+          "path": "daemon/src/app.rs",
+          "loc": 15
+        },
+        {
+          "path": "daemon/src/access_log.rs",
+          "loc": 528
+        },
+        {
+          "path": "daemon/src/wg_stats_poller.rs",
+          "loc": 517
+        },
+        {
+          "path": "daemon/src/protocol_assurance_poller.rs",
+          "loc": 705
+        },
+        {
+          "path": "daemon/src/alert_sink.rs",
+          "loc": 830
+        },
+        {
+          "path": "daemon/src/sharing_score.rs",
+          "loc": 209
+        },
+        {
+          "path": "daemon/src/clash_poller.rs",
+          "loc": 507
+        },
+        {
+          "path": "daemon/src/boosty_sync_poller.rs",
+          "loc": 432
+        },
+        {
+          "path": "daemon/src/alert_text.rs",
+          "loc": 42
+        },
+        {
+          "path": "daemon/src/node_probe_poller.rs",
+          "loc": 58
+        },
+        {
+          "path": "daemon/src/ip_kind.rs",
+          "loc": 111
+        },
+        {
+          "path": "daemon/src/lib.rs",
+          "loc": 135
+        },
+        {
+          "path": "daemon/src/app/registry.rs",
+          "loc": 97
+        },
+        {
+          "path": "daemon/src/app/schedulers.rs",
+          "loc": 679
+        },
+        {
+          "path": "daemon/src/app/routes.rs",
+          "loc": 777
+        },
+        {
+          "path": "daemon/src/app/state.rs",
+          "loc": 394
+        },
+        {
+          "path": "daemon/src/node_probe_poller/tests.rs",
+          "loc": 217
+        },
+        {
+          "path": "daemon/src/node_probe_poller/fail_state.rs",
+          "loc": 174
+        },
+        {
+          "path": "daemon/src/node_probe_poller/alerts.rs",
+          "loc": 723
+        },
+        {
+          "path": "daemon/src/node_probe_poller/scheduler.rs",
+          "loc": 97
+        },
+        {
+          "path": "daemon/src/node_probe_poller/probe_inspector.rs",
+          "loc": 256
+        },
+        {
+          "path": "daemon/src/handlers/stats.rs",
+          "loc": 97
+        },
+        {
+          "path": "daemon/src/handlers/vpn_router.rs",
+          "loc": 78
+        },
+        {
+          "path": "daemon/src/handlers/csrf.rs",
+          "loc": 231
+        },
+        {
+          "path": "daemon/src/handlers/mod.rs",
+          "loc": 7
+        },
+        {
+          "path": "daemon/src/handlers/health.rs",
+          "loc": 21
+        },
+        {
+          "path": "daemon/src/handlers/sub.rs",
+          "loc": 20
+        },
+        {
+          "path": "daemon/src/handlers/auth.rs",
+          "loc": 896
+        },
+        {
+          "path": "daemon/src/handlers/vpn_router/tests.rs",
+          "loc": 242
+        },
+        {
+          "path": "daemon/src/handlers/vpn_router/routes.rs",
+          "loc": 469
+        },
+        {
+          "path": "daemon/src/handlers/vpn_router/collectors.rs",
+          "loc": 632
+        },
+        {
+          "path": "daemon/src/handlers/vpn_router/compat.rs",
+          "loc": 144
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_access.rs",
+          "loc": 164
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy.rs",
+          "loc": 338
+        },
+        {
+          "path": "daemon/src/handlers/admin/audit.rs",
+          "loc": 711
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions.rs",
+          "loc": 22
+        },
+        {
+          "path": "daemon/src/handlers/admin/mod.rs",
+          "loc": 38
+        },
+        {
+          "path": "daemon/src/handlers/admin/search.rs",
+          "loc": 234
+        },
+        {
+          "path": "daemon/src/handlers/admin/boosty.rs",
+          "loc": 1008
+        },
+        {
+          "path": "daemon/src/handlers/admin/icons.rs",
+          "loc": 24
+        },
+        {
+          "path": "daemon/src/handlers/admin/backup.rs",
+          "loc": 363
+        },
+        {
+          "path": "daemon/src/handlers/admin/servers.rs",
+          "loc": 333
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail.rs",
+          "loc": 14
+        },
+        {
+          "path": "daemon/src/handlers/admin/users.rs",
+          "loc": 343
+        },
+        {
+          "path": "daemon/src/handlers/admin/billing.rs",
+          "loc": 889
+        },
+        {
+          "path": "daemon/src/handlers/admin/monitoring.rs",
+          "loc": 542
+        },
+        {
+          "path": "daemon/src/handlers/admin/alerts.rs",
+          "loc": 475
+        },
+        {
+          "path": "daemon/src/handlers/admin/ui.rs",
+          "loc": 211
+        },
+        {
+          "path": "daemon/src/handlers/admin/helpers.rs",
+          "loc": 698
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/kernels.rs",
+          "loc": 144
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/grants.rs",
+          "loc": 455
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/billing.rs",
+          "loc": 220
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/protocols.rs",
+          "loc": 198
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/config.rs",
+          "loc": 545
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/lifecycle.rs",
+          "loc": 399
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/deploy.rs",
+          "loc": 661
+        },
+        {
+          "path": "daemon/src/handlers/admin/server_actions/deploy/existing_key_spec_tests.rs",
+          "loc": 568
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings.rs",
+          "loc": 14
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections.rs",
+          "loc": 27
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings_geoip_sse.rs",
+          "loc": 83
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/kernel_update_sse.rs",
+          "loc": 156
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/wizard_ui.rs",
+          "loc": 339
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/shell.rs",
+          "loc": 274
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/dashboard.rs",
+          "loc": 10
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/deploy_sse.rs",
+          "loc": 373
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail.rs",
+          "loc": 24
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings/telegram.rs",
+          "loc": 322
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings/render.rs",
+          "loc": 864
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings/system.rs",
+          "loc": 142
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/settings/backups.rs",
+          "loc": 282
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/types.rs",
+          "loc": 97
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/drift.rs",
+          "loc": 484
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/grants.rs",
+          "loc": 73
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/telemetry.rs",
+          "loc": 420
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/activity.rs",
+          "loc": 650
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/render.rs",
+          "loc": 1213
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/config_protocols.rs",
+          "loc": 616
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/routes.rs",
+          "loc": 55
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/protocol_grid.rs",
+          "loc": 151
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/config.rs",
+          "loc": 481
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/server_detail/protocols_section.rs",
+          "loc": 214
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/dashboard/fleet.rs",
+          "loc": 852
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/dashboard/telemetry.rs",
+          "loc": 388
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/dashboard/render.rs",
+          "loc": 513
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/dashboard/abuse.rs",
+          "loc": 218
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections/origins.rs",
+          "loc": 685
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections/sessions.rs",
+          "loc": 217
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections/tasks.rs",
+          "loc": 77
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections/share_links.rs",
+          "loc": 471
+        },
+        {
+          "path": "daemon/src/handlers/admin/legacy/user_sections/traffic.rs",
+          "loc": 841
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/types.rs",
+          "loc": 49
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/overview.rs",
+          "loc": 120
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/render.rs",
+          "loc": 698
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/routes.rs",
+          "loc": 57
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/mod.rs",
+          "loc": 5
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/overview.rs",
+          "loc": 296
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/activity.rs",
+          "loc": 284
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/delivery.rs",
+          "loc": 606
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/traffic.rs",
+          "loc": 30
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_detail/tabs/access.rs",
+          "loc": 273
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_actions/mod.rs",
+          "loc": 7
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_actions/credentials.rs",
+          "loc": 201
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_actions/delivery.rs",
+          "loc": 261
+        },
+        {
+          "path": "daemon/src/handlers/admin/user_actions/lifecycle.rs",
+          "loc": 570
+        },
+        {
+          "path": "daemon/src/handlers/sub/singbox.rs",
+          "loc": 329
+        },
+        {
+          "path": "daemon/src/handlers/sub/handler.rs",
+          "loc": 554
+        },
+        {
+          "path": "daemon/src/handlers/sub/mihomo.rs",
+          "loc": 264
+        },
+        {
+          "path": "daemon/src/handlers/sub/tests.rs",
+          "loc": 112
+        },
+        {
+          "path": "daemon/src/handlers/sub/v2ray.rs",
+          "loc": 149
+        },
+        {
+          "path": "daemon/src/health_monitor/specialized_checks.rs",
+          "loc": 421
+        },
+        {
+          "path": "daemon/src/health_monitor/diff.rs",
+          "loc": 237
+        },
+        {
+          "path": "daemon/src/health_monitor/tests.rs",
+          "loc": 1629
+        },
+        {
+          "path": "daemon/src/health_monitor/fingerprint_drift.rs",
+          "loc": 306
+        },
+        {
+          "path": "daemon/src/health_monitor/remediation.rs",
+          "loc": 257
+        },
+        {
+          "path": "daemon/src/health_monitor/poller.rs",
+          "loc": 402
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/types.rs",
+          "loc": 57
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/audit.rs",
+          "loc": 122
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/bootstrap.rs",
+          "loc": 473
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/autodeploy.rs",
+          "loc": 384
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/kernel_update.rs",
+          "loc": 324
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/autodeploy_pipeline_tests.rs",
+          "loc": 214
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/tests.rs",
+          "loc": 722
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/autodeploy_tests.rs",
+          "loc": 303
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/util.rs",
+          "loc": 150
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/redeploy.rs",
+          "loc": 527
+        },
+        {
+          "path": "daemon/src/wizard_bootstrap/guard.rs",
+          "loc": 88
+        },
+        {
+          "path": "daemon/src/alert_text/templates.rs",
+          "loc": 683
+        },
+        {
+          "path": "daemon/src/alert_text/tests.rs",
+          "loc": 544
+        },
+        {
+          "path": "daemon/src/alert_text/formatting.rs",
+          "loc": 100
+        },
+        {
+          "path": "daemon/src/alert_text/digest.rs",
+          "loc": 70
+        }
+      ]
+    },
+    "cli": {
+      "status": "completed",
+      "file_count": 22,
+      "loc": 7320,
+      "doc_artifact": "docs/agent-map/cli.md",
+      "files": [
+        {
+          "path": "cli/tests/spec_operator_parity.rs",
+          "loc": 214
+        },
+        {
+          "path": "cli/src/main.rs",
+          "loc": 553
+        },
+        {
+          "path": "cli/src/registry.rs",
+          "loc": 67
+        },
+        {
+          "path": "cli/src/key_path.rs",
+          "loc": 24
+        },
+        {
+          "path": "cli/src/ui.rs",
+          "loc": 102
+        },
+        {
+          "path": "cli/src/cmd/user.rs",
+          "loc": 512
+        },
+        {
+          "path": "cli/src/cmd/status.rs",
+          "loc": 69
+        },
+        {
+          "path": "cli/src/cmd/bootstrap.rs",
+          "loc": 230
+        },
+        {
+          "path": "cli/src/cmd/mod.rs",
+          "loc": 18
+        },
+        {
+          "path": "cli/src/cmd/boosty.rs",
+          "loc": 472
+        },
+        {
+          "path": "cli/src/cmd/registry_cmd.rs",
+          "loc": 33
+        },
+        {
+          "path": "cli/src/cmd/server.rs",
+          "loc": 921
+        },
+        {
+          "path": "cli/src/cmd/backup.rs",
+          "loc": 230
+        },
+        {
+          "path": "cli/src/cmd/render.rs",
+          "loc": 407
+        },
+        {
+          "path": "cli/src/cmd/user_tests.rs",
+          "loc": 755
+        },
+        {
+          "path": "cli/src/cmd/sub.rs",
+          "loc": 405
+        },
+        {
+          "path": "cli/src/cmd/geoip.rs",
+          "loc": 262
+        },
+        {
+          "path": "cli/src/cmd/migrate.rs",
+          "loc": 585
+        },
+        {
+          "path": "cli/src/cmd/update_kernels.rs",
+          "loc": 540
+        },
+        {
+          "path": "cli/src/cmd/admin.rs",
+          "loc": 110
+        },
+        {
+          "path": "cli/src/cmd/grant.rs",
+          "loc": 382
+        },
+        {
+          "path": "cli/src/cmd/deploy.rs",
+          "loc": 429
+        }
+      ]
+    }
+  }
+}
