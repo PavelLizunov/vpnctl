@@ -966,6 +966,15 @@ async fn v2_user_activity_log_pagination_and_csv() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(ct.contains("text/csv"), "CSV must be text/csv, got {ct}");
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        cc, "no-store",
+        "Cache-Control must be no-store for access CSV export, got {cc:?}"
+    );
     let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
         .await
         .unwrap();

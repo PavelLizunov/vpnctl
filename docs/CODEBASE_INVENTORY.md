@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 151,289 (91,159 prod / 60,130 test)
+- **Total Rust LOC:** 151,320 (91,163 prod / 60,157 test)
 - **Database Migrations:** 58
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 5,026 (20) | 4,847 (12) | **9,873** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,972 (147) | 32,440 (59) | **83,412** |
-| **Total** | | | | **91,159 (276)** | **60,130 (134)** | **151,289** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 50,976 (147) | 32,467 (59) | **83,443** |
+| **Total** | | | | **91,163 (276)** | **60,157 (134)** | **151,320** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -46,11 +46,11 @@
 | `crates/inventory/tests/spec_sub_access.rs` | 1,050 | `crates/inventory` | Test |
 | `crates/inventory/src/sqlite/models.rs` | 1,035 | `crates/inventory` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,033 | `crates/inventory` | Test |
-| `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,011 | `daemon` | Test |
+| `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,020 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 1,010 | `daemon` | Prod |
 | `daemon/src/handlers/admin/boosty.rs` | 1,008 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 999 | `daemon` | Test |
-| `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 978 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 987 | `daemon` | Test |
 | `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
