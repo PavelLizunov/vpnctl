@@ -165,6 +165,9 @@ fn safe_return_to(raw: Option<String>) -> String {
                 || r.starts_with("/admin/servers#"))
                 && !r.contains("//")
                 && !r.contains("..")
+                && !r.to_ascii_lowercase().contains("%2e")
+                && !r.to_ascii_lowercase().contains("%2f")
+                && !r.to_ascii_lowercase().contains("%5c")
                 && !r.contains(['\r', '\n', '\\']) =>
         {
             r
@@ -251,7 +254,15 @@ mod tests {
             "/admin/servers#details"
         );
 
-        // Invalid return_to targets (prefix confusion / path traversal / open redirect / CRLF)
+        // Invalid return_to targets (prefix confusion / path traversal / percent-encoding / open redirect / CRLF)
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/%2e%2e/users".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/%2E%2E/users".into())),
+            "/admin/servers/billing"
+        );
         assert_eq!(
             safe_return_to(Some("/admin/servers_evil".into())),
             "/admin/servers/billing"

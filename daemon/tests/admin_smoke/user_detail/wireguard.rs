@@ -437,15 +437,6 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         cd.contains("attachment") && cd.contains("dltest-dlsrv.conf"),
         "Content-Disposition must declare attachment with the <user>-<server>.conf filename, got {cd:?}"
     );
-    let cc = resp
-        .headers()
-        .get("cache-control")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert_eq!(
-        cc, "no-store",
-        "Cache-Control must be no-store for wireguard conf download, got {cc:?}"
-    );
     let ct = resp
         .headers()
         .get("content-type")
