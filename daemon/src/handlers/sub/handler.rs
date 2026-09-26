@@ -461,7 +461,15 @@ pub(crate) async fn get(
                 },
             );
 
-            (StatusCode::OK, [("content-type", content_type)], body).into_response()
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", content_type),
+                    ("cache-control", "no-store"),
+                ],
+                body,
+            )
+                .into_response()
         }
         Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
         Err(SubError::Internal(msg)) => {
