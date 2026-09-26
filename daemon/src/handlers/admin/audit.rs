@@ -545,6 +545,7 @@ pub(crate) async fn user_access_csv(
                 "content-disposition",
                 format!("attachment; filename=\"{filename}\""),
             ),
+            ("cache-control", "no-store".to_string()),
         ],
         out,
     )
@@ -623,6 +624,7 @@ pub(crate) async fn audit_csv(
                 "content-disposition",
                 format!("attachment; filename=\"{filename}\""),
             ),
+            ("cache-control", "no-store".to_string()),
         ],
         out,
     )
