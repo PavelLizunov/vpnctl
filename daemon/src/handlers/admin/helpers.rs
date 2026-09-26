@@ -144,8 +144,14 @@ pub(crate) fn set_tweak_cookie(
         .find_map(|kv| kv.strip_prefix("value="))
         .unwrap_or("");
     if !valid.contains(&value) {
+        // Security: truncate reflected input to prevent response inflation, log bloat, or DoS
+        let truncated = if value.chars().count() > 64 {
+            format!("{}…", value.chars().take(64).collect::<String>())
+        } else {
+            value.to_string()
+        };
         return bad_request(&format!(
-            "invalid value '{value}' for tweak '{cookie_name}' (allowed: {})",
+            "invalid value '{truncated}' for tweak '{cookie_name}' (allowed: {})",
             valid.join(", ")
         ));
     }
@@ -694,5 +700,21 @@ mod tests {
         assert!(!valid_server_id("srv..01")); // consecutive dots / path traversal
         assert!(!valid_server_id("..")); // path traversal dots
         assert!(!valid_server_id("srv/01")); // slash disallowed
+    }
+
+    #[tokio::test]
+    async fn set_tweak_cookie_truncates_oversized_invalid_values() {
+        let headers = HeaderMap::new();
+        let long_val = "a".repeat(100);
+        let body = format!("value={long_val}");
+        let resp = set_tweak_cookie(&headers, COOKIE_THEME, VALID_THEMES, &body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        let expected_truncated = format!("{}…", "a".repeat(64));
+        assert!(body_str.contains(&expected_truncated));
+        assert!(!body_str.contains(&long_val));
     }
 }
