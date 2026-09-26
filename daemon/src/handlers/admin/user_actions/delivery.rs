@@ -85,6 +85,7 @@ pub(crate) async fn user_wireguard_conf_download(
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }
 

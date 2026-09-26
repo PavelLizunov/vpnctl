@@ -123,6 +123,7 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }
 
