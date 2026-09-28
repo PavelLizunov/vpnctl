@@ -654,7 +654,10 @@ fn csv_field(s: &str) -> String {
     // Excel/LibreOffice may execute = + - @ % | after leading whitespace.
     // Prefix a single quote so spreadsheets treat the field as text.
     let trimmed = s.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\x0b');
-    let injectable = matches!(trimmed.chars().next(), Some('=' | '+' | '-' | '@' | '%' | '|'));
+    let injectable = matches!(
+        trimmed.chars().next(),
+        Some('=' | '+' | '-' | '@' | '%' | '|')
+    );
     let s = if injectable {
         format!("'{s}")
     } else {
