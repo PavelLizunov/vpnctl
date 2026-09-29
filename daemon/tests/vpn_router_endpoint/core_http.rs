@@ -354,3 +354,24 @@ async fn vpn_router_cleared_suppression_returns_server() {
         "cleared suppression returns de to the subscription"
     );
 }
+
+#[tokio::test]
+async fn vpn_router_carries_cache_control_no_store() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/app/config/{TEST_DEVICE_ID}"))
+                .header("user-agent", "Mozilla/5.0 Firefox/138.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+}
