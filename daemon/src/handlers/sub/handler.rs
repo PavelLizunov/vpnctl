@@ -461,7 +461,16 @@ pub(crate) async fn get(
                 },
             );
 
-            (StatusCode::OK, [("content-type", content_type)], body).into_response()
+            // Prevent caching of sensitive subscription data containing user private keys and secrets.
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                body,
+            )
+                .into_response()
         }
         Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
         Err(SubError::Internal(msg)) => {
