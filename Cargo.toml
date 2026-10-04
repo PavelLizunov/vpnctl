@@ -57,3 +57,4 @@ print_stderr = "allow"
 # Pedantic but useful:
 clone_on_ref_ptr = "warn"
 needless_pass_by_value = "warn"
+double_must_use = "allow"
