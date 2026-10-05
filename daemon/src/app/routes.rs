@@ -89,6 +89,12 @@ pub fn router(state: AppState) -> Router {
                 axum::http::header::REFERRER_POLICY,
                 axum::http::HeaderValue::from_static("no-referrer"),
             ),
+        )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            ),
         );
 
     public_router
