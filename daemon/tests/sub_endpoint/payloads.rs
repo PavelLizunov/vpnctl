@@ -298,10 +298,7 @@ async fn public_endpoints_carry_security_response_headers() {
         resp.headers().get("referrer-policy").unwrap(),
         "no-referrer"
     );
-    assert_eq!(
-        resp.headers().get("cache-control").unwrap(),
-        "no-store"
-    );
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 
     let dir2 = TempDir::new().unwrap();
     let (state2, token2) = seed(&dir2).await;
@@ -325,8 +322,5 @@ async fn public_endpoints_carry_security_response_headers() {
         resp.headers().get("referrer-policy").unwrap(),
         "no-referrer"
     );
-    assert_eq!(
-        resp.headers().get("cache-control").unwrap(),
-        "no-store"
-    );
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
