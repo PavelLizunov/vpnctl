@@ -54,6 +54,7 @@ todo = "warn"
 dbg_macro = "deny"
 print_stdout = "allow"  # CLI legitimately prints to stdout
 print_stderr = "allow"
+double_must_use = "allow"  # async_trait expansion on Rust 1.99+
 # Pedantic but useful:
 clone_on_ref_ptr = "warn"
 needless_pass_by_value = "warn"
