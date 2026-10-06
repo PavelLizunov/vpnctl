@@ -8,6 +8,7 @@ use crate::models::{RenderCtx, User};
 use crate::protocol::Protocol;
 use crate::transport::SshTransport;
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Kernel: fmt::Debug + Send + Sync {
     fn id(&self) -> KernelId;

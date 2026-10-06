@@ -741,3 +741,57 @@ async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() 
         "expected the canonical 'wireguard protocol not enabled' message, got {text:?}"
     );
 }
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_refuses_when_user_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("dis-srv".into()),
+        address: "203.0.113.100".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("dis-user".into()),
+        uuid: "77777777-7777-7777-7777-777777777777".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-dis".into()),
+        vpn_router_device_id: None,
+        disabled: true,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("dis-user".into()), &ServerId("dis-srv".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/dis-user/wireguard/conf/dis-srv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("user 'dis-user' is disabled"),
+        "expected 'user is disabled' error message, got {text:?}"
+    );
+}

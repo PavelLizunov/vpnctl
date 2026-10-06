@@ -5,6 +5,7 @@ use crate::error::Result;
 
 /// Минимальный SSH-контракт: что-нибудь, что умеет дёрнуть команду.
 /// Реальная impl — в `vpnctl-ssh` поверх `russh`. В тестах — мок.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SshTransport: fmt::Debug + Send + Sync {
     /// Execute a managed-node command with the transport's privileged semantics.
