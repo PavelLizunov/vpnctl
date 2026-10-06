@@ -7,3 +7,8 @@
 **Vulnerability:** File download and CSV export endpoints (such as WireGuard configurations containing user private keys, database backup snapshots containing full inventory state/secrets, and audit/access CSV logs) were missing `Cache-Control: no-store` HTTP headers, exposing private keys and sensitive logs to browser or proxy cache persistence.
 **Learning:** Returning `Content-Disposition: attachment` without explicit `Cache-Control: no-store` allows shared or browser caches to store private client configuration files, database backups, and access records.
 **Prevention:** Always include `Cache-Control: no-store` on HTTP response headers for any endpoint serving sensitive file downloads, secrets, backups, or access logs.
+
+## 2026-07-10 - Enforce User Soft-Suspension on Direct Configuration Downloads
+**Vulnerability:** Direct WireGuard `.conf` download endpoint (`/admin/users/{user_id}/wireguard/conf/{server_id}`) checked grant existence but failed to verify `user.disabled`, allowing soft-suspended users' active private keys and WireGuard client configurations to still be downloaded.
+**Learning:** Checking grant membership or server protocol enablement is insufficient for access control if account suspension (`user.disabled`) is not checked in the query chain or handler logic.
+**Prevention:** Always enforce `if user.disabled` early in handlers serving credentials, subscriptions, or configuration downloads, and filter out disabled users from peer lists.
