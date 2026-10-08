@@ -27,10 +27,7 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        resp.headers().get("cache-control").unwrap(),
-        "no-store"
-    );
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
     let ct = resp
         .headers()
         .get("content-type")
