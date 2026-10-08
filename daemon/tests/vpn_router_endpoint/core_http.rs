@@ -20,14 +20,22 @@ async fn vpn_router_valid_device_id_browser_ua_returns_json_wrapper() {
     let state = seed_state(&dir).await;
     let app = router(state);
 
-    let (status, body, ct) = get(
-        app,
-        &format!("/api/v1/app/config/{TEST_DEVICE_ID}"),
-        "Mozilla/5.0 Firefox/138.0",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let req = Request::builder()
+        .uri(format!("/api/v1/app/config/{TEST_DEVICE_ID}"))
+        .header("user-agent", "Mozilla/5.0 Firefox/138.0")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     assert!(ct.starts_with("application/json"), "ct={ct}");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
 
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "ok");
