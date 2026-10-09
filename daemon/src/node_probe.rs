@@ -281,6 +281,8 @@ echo "PROBE_OK"
 /// Trait the poller calls. Defined to mirror `ClashClient` for
 /// consistency + so chunk 3 can wrap with retry/metrics layers
 /// without re-implementing the parser.
+// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProbeClient: Send + Sync {
     async fn snapshot(&self) -> Result<Probe, ProbeError>;

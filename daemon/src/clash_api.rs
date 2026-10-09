@@ -185,6 +185,8 @@ pub const POLL_CONNECTIONS_CMD: &str = concat!(
 /// Trait the poller calls. Defined as a trait so chunk 2 can wrap
 /// it with a retry layer / metrics layer without re-implementing
 /// the parser.
+// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ClashClient: Send + Sync {
     async fn snapshot(&self) -> Result<Snapshot, ClashApiError>;

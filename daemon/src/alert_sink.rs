@@ -68,6 +68,8 @@ use vpnctl_core::shell::single_quote;
 /// operator wants to be notified. Delivery errors are returned via
 /// the `Result` so the caller can decide whether to surface them
 /// (test-send handler) or swallow them (production fire-and-forget).
+// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AlertSink: Send + Sync {
     /// Send one alert. `text` is the ALREADY-RENDERED message body

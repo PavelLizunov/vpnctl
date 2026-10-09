@@ -72,6 +72,8 @@ fn parse_output(raw: &str) -> Result<CumulativeSnapshot, StatsError> {
     })
 }
 
+// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait StatsClient: Send + Sync {
     async fn cumulative_snapshot(&self) -> Result<CumulativeSnapshot, StatsError>;
