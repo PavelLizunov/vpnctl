@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 151,403 (91,246 prod / 60,157 test)
+- **Total Rust LOC:** 151,415 (91,258 prod / 60,157 test)
 - **Database Migrations:** 58
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
 
@@ -16,15 +16,15 @@
 |---|---|---|---|---|---|---|
 | `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 6,351 (20) | 969 (2) | **7,320** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,525 (6) | 975 (2) | **2,500** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,848 (12) | 0 (0) | **1,848** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,852 (12) | 0 (0) | **1,852** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 446 (1) | 129 (1) | **575** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 376 (1) | 526 (2) | **902** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 16,780 (52) | 18,268 (47) | **35,048** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 6,349 (13) | 723 (4) | **7,072** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 5,026 (20) | 4,847 (12) | **9,873** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,486 (4) | 1,253 (5) | **2,739** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 51,059 (147) | 32,467 (59) | **83,526** |
-| **Total** | | | | **91,246 (276)** | **60,157 (134)** | **151,403** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 51,067 (147) | 32,467 (59) | **83,534** |
+| **Total** | | | | **91,258 (276)** | **60,157 (134)** | **151,415** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -51,7 +51,7 @@
 | `daemon/src/handlers/admin/boosty.rs` | 1,008 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 999 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 987 | `daemon` | Test |
-| `daemon/src/node_probe.rs` | 954 | `daemon` | Prod |
+| `daemon/src/node_probe.rs` | 956 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/server_detail/drift_traffic.rs` | 929 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 924 | `daemon` | Test |
 | `cli/src/cmd/server.rs` | 921 | `cli` | Prod |
