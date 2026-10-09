@@ -8,6 +8,8 @@ use crate::models::{RenderCtx, User};
 use crate::protocol::Protocol;
 use crate::transport::SshTransport;
 
+// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Kernel: fmt::Debug + Send + Sync {
     fn id(&self) -> KernelId;
