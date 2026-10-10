@@ -35,6 +35,9 @@ pub(crate) async fn user_wireguard_conf_download(
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    if user.disabled {
+        return bad_request(&format!("user '{user_id_str}' is disabled"));
+    }
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
