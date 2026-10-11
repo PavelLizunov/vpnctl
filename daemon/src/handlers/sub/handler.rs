@@ -461,7 +461,15 @@ pub(crate) async fn get(
                 },
             );
 
-            (StatusCode::OK, [("content-type", content_type)], body).into_response()
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", content_type),
+                    ("cache-control", "no-store"),
+                ],
+                body,
+            )
+                .into_response()
         }
         Err(SubError::NotFound) => (StatusCode::NOT_FOUND, "unknown token\n").into_response(),
         Err(SubError::Internal(msg)) => {
@@ -524,6 +532,7 @@ pub(crate) fn rate_limited(retry_after_secs: u64, gate: &'static str) -> axum::r
         [
             ("retry-after", retry_after_secs.to_string()),
             ("content-type", "text/plain; charset=utf-8".to_string()),
+            ("cache-control", "no-store".to_string()),
         ],
         format!("rate limited ({gate}); retry in {retry_after_secs}s\n"),
     )

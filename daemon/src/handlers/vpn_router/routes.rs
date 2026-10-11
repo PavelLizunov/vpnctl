@@ -55,7 +55,10 @@ pub(crate) fn empty_response(want_raw: bool, now: u64) -> Response {
     if want_raw {
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             String::new(),
         )
             .into_response();
@@ -87,7 +90,10 @@ pub(crate) fn json_response<T: Serialize>(value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(bytes) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             bytes,
         )
             .into_response(),
@@ -95,7 +101,10 @@ pub(crate) fn json_response<T: Serialize>(value: &T) -> Response {
             tracing::error!(target = "vpnctld::vpn_router", error = %e, "json serialisation failed; falling back to empty 200");
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
                 br#"{"status":"device_not_registered","app":"vpn-router","version":"2.4.1","update_available":false,"config":null,"check_interval":3600,"timestamp":0}"#.as_slice(),
             )
                 .into_response()
@@ -450,7 +459,10 @@ pub(crate) async fn get_config(
     if want_raw {
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             config,
         )
             .into_response();
