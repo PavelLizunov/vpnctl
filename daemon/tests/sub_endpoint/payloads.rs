@@ -321,4 +321,5 @@ async fn public_endpoints_carry_security_response_headers() {
         resp.headers().get("referrer-policy").unwrap(),
         "no-referrer"
     );
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
