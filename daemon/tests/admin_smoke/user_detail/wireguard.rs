@@ -204,6 +204,71 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
 }
 
 #[tokio::test]
+async fn admin_user_wireguard_conf_download_refuses_when_user_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("dis-srv".into()),
+        address: "203.0.113.201".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("dis-srv".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("dis-user".into()),
+        uuid: "99999999-9999-9999-9999-999999999999".into(),
+        tuic_password: None,
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st".into()),
+        vpn_router_device_id: None,
+        disabled: true,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("dis-user".into()), &ServerId("dis-srv".into()))
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/dis-user/wireguard/conf/dis-srv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "disabled user must return 400 Bad Request, not serve the .conf"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("user 'dis-user' is disabled"),
+        "expected 'user is disabled' message, got {text:?}"
+    );
+}
+
+#[tokio::test]
 async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
