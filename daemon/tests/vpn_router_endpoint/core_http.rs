@@ -371,8 +371,5 @@ async fn vpn_router_responses_carry_cache_control_no_store() {
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        resp.headers().get("cache-control").unwrap(),
-        "no-store"
-    );
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
