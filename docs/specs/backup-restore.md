@@ -2,9 +2,6 @@
 
 ## 1. Intent & Invariants
 
-- What: backups are critical, not optional. If the prod host dies, every
-  `sub_token` is lost and every client must re-import unless a tested restore
-  path exists.
 - Invariants:
   - The bundle MUST include the deploy SSH key — a restored vpnctld without it
     cannot reach ANY VPN node (silent failure).

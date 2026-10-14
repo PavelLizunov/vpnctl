@@ -120,10 +120,6 @@ also run `just mutants-protocols` when the mutation tooling is installed
 
 Scoped diff; the gates pass with recorded exit codes; target-specific checks
 proven or explicitly marked not-run; secret scan clean; pre-existing failures
-reported separately. For a production deploy additionally: binary backup
-(`sudo cp -a /opt/vpnctl/vpnctld /opt/vpnctl/vpnctld.bak-<tag>`), systemd
-active, health 200, UI/version verified. A local commit is not a live release —
-report `local`, `main`, and `production` state separately.
 
 ## Specs and backlog
 
