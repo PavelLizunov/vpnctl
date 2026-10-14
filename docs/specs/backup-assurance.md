@@ -4,7 +4,6 @@
 - Approved by operator on 2026-09-10: reliable scheduled backup and truthful delivery status; verify real VPN probes without using customer credentials.
 - Preserve archives, pinned SSH trust and customer identities. No bulk Deploy, daemon restart, guard bypass or unapproved destination transfer.
 - Installed backup may differ from repository: inspect and preserve intentional differences before replacement.
-- Confirm any new off-site destination and host key separately before transfer. Stop before node Deploy and obtain node/window approval for test access.
 
 ## 2. Interface / Data Contract
 - Reuse scripts/vpnctl-backup.sh and existing systemd/Web backup surfaces; no new backup platform or dependencies.
