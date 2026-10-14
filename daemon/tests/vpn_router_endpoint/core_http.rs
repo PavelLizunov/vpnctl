@@ -354,3 +354,22 @@ async fn vpn_router_cleared_suppression_returns_server() {
         "cleared suppression returns de to the subscription"
     );
 }
+
+/// Baseline security response header Cache-Control: no-store must be set on
+/// VPN router app config responses to prevent proxies/caches from caching secret config payloads.
+#[tokio::test]
+async fn vpn_router_responses_carry_cache_control_no_store() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let app = router(state);
+
+    let req = Request::builder()
+        .uri(format!("/api/v1/app/config/{TEST_DEVICE_ID}"))
+        .header("user-agent", "Mozilla/5.0")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+}
