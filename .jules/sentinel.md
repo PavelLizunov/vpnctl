@@ -7,3 +7,8 @@
 **Vulnerability:** File download and CSV export endpoints (such as WireGuard configurations containing user private keys, database backup snapshots containing full inventory state/secrets, and audit/access CSV logs) were missing `Cache-Control: no-store` HTTP headers, exposing private keys and sensitive logs to browser or proxy cache persistence.
 **Learning:** Returning `Content-Disposition: attachment` without explicit `Cache-Control: no-store` allows shared or browser caches to store private client configuration files, database backups, and access records.
 **Prevention:** Always include `Cache-Control: no-store` on HTTP response headers for any endpoint serving sensitive file downloads, secrets, backups, or access logs.
+
+## 2026-10-01 - Standard CSV Formula Injection Triggers Are Strictly `= + - @`
+**Vulnerability:** Attempted to add `%` and `|` to the `csv_field` formula injection guard.
+**Learning:** Adding `%` and `|` to the CSV formula guard was rejected in #241 because there is no reproducible formula execution for `%` or `|` in major spreadsheet applications; OWASP CSV injection triggers are strictly `=`, `+`, `-`, and `@`.
+**Prevention:** Do not extend the CSV formula injection guard beyond `=`, `+`, `-`, and `@`.
