@@ -846,8 +846,8 @@ pub(super) async fn server_detail_render(
                                     Some(ts) => (format_msk_iso(ts)),
                                     None => span title=(crate::i18n::tr(
                                         lang,
-                                        "Grant predates migration 0039 (2026-07-10) — the date wasn't recorded back then.",
-                                        "Грант старше миграции 0039 (2026-07-10) — дата тогда не записывалась.",
+                                        "Grant is older than grant-date tracking; its date was not recorded.",
+                                        "Грант старше учёта дат выдачи; дата не записана.",
                                     )) { "—" },
                                 }
                             }

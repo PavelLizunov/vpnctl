@@ -93,8 +93,8 @@ fn server_row(
                 }
             }
             td {
+                span.ed-grid__mut { (s.ssh_user) "@" }
                 (s.address) ":" (s.ssh_port)
-                " " span.ed-grid__mut { "· " (s.ssh_user) "@" }
             }
             td.ed-grid__mut { (s.hoster) }
             td.num { b { (user_count) } " " (tr(lang, "users", "польз.")) }

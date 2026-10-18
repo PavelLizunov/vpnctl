@@ -133,7 +133,7 @@ enum Cmd {
         #[arg(long, short)]
         kernel: Option<String>,
     },
-    /// Manage `inv.db` snapshots (Phase C-4 backups). Subcommands:
+    /// Manage `inv.db` snapshots. Subcommands:
     /// `snapshot` (take one now), `list` (newest-first), `prune`
     /// (apply default retention).
     Backup {
@@ -151,8 +151,8 @@ enum Cmd {
         /// or downloaded from the Settings page.
         snapshot: PathBuf,
     },
-    /// Migrate state from the legacy bash `vpn-control` project (Phase
-    /// C-5). Subcommand `from-bash <dir>` reads each `<IP>.env`, SSHs
+    /// Migrate state from the legacy bash `vpn-control` project.
+    /// Subcommand `from-bash <dir>` reads each `<IP>.env`, SSHs
     /// to each server read-only to pull `/etc/sing-box/{config.json,keys.env}`,
     /// builds a plan, and (with `--apply`) inserts servers/users/grants
     /// into vpnctl's inv.db preserving UUIDs + TUIC passwords. Default
@@ -172,12 +172,8 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// `vpnctld` admin-side utilities. Today: hash an admin password
-    /// into the Argon2id PHC format expected by
-    /// `VPNCTLD_ADMIN_PASSWORD`. Was referenced in `daemon/handlers/
-    /// auth.rs` doc-comment for 9 months without an actual implementation
-    /// (audit B2, 2026-05-22) — anyone following the docs got
-    /// «unrecognized subcommand». Now real.
+    /// `vpnctld` admin-side utilities: hash an admin password into the
+    /// Argon2id PHC format expected by `VPNCTLD_ADMIN_PASSWORD`.
     Admin {
         #[command(subcommand)]
         cmd: AdminCmd,

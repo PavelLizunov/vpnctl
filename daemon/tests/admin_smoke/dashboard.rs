@@ -131,7 +131,10 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
         "dashboard must surface the new VPN-activity tile; got: {}",
         &html[..200.min(html.len())]
     );
-    assert!(html.contains("NM-11"), "tile must surface NM-11 explainer");
+    assert!(
+        html.contains("does not report"),
+        "tile must explain why per-user numbers come from elsewhere"
+    );
     let activity_pos = html
         .find("VPN activity · 24h")
         .expect("VPN activity tile must render");

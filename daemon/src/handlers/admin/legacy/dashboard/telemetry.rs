@@ -127,8 +127,8 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (tr(
                     lang,
-                    "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user numbers come from the access-log scraper on each user's page (clash-api itself omits the User field upstream — NM-11).",
-                    "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user цифры считает скрейпер access-логов — смотри страницу юзера (сам clash-api не передаёт поле User — NM-11).",
+                    "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user numbers come from the access-log scraper on each user's page (sing-box's clash-api does not report which user a connection belongs to).",
+                    "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user цифры считает скрейпер access-логов — смотри страницу юзера (clash-api в sing-box не сообщает, какому юзеру принадлежит соединение).",
                 ))
             }
             @if !any_polled {

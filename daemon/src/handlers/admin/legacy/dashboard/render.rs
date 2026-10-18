@@ -364,7 +364,6 @@ async fn dashboard_render(
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         (dashboard_summary_bar(&stats, conns_now, lang))
         (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
-        (dashboard_quality_ranking(&fleet_quality, lang))
         (detail_tabs(
             "/admin",
             tab.slug(),
@@ -377,6 +376,7 @@ async fn dashboard_render(
         ))
 
         @if tab == DashboardTab::Overview {
+            (dashboard_quality_ranking(&fleet_quality, lang))
             div.ed-dash-cols {
                 (dashboard_abuse_summary(&likely_shared, lang))
                 (dashboard_health_feed(&recent_alerts, unacked_total, lang))

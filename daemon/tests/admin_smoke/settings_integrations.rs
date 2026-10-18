@@ -2013,3 +2013,28 @@ async fn admin_public_url_post_rejects_cross_origin_without_mutation() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn admin_error_bodies_carry_the_prefix_exactly_once() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/billing")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("due_date="))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body =
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert!(body.starts_with("vpnctl admin: "), "{body}");
+    assert!(!body.contains("vpnctl admin: vpnctl admin:"), "{body}");
+}

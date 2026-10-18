@@ -494,23 +494,23 @@ pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
                     "TCP-подключения с vpnctld после ввода в работу, для одного набора целей. Неудачные подключения — не потери пакетов и не проверка VPN-handshake. Сервис и SSH/control оцениваются отдельно; старые замеры сохраняются в истории.",
                 ))
             }
-            table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px;" {
-                thead { tr style="border-bottom:1px solid var(--ink);" {
-                    th style="text-align:right;padding:5px 8px;" { "#" }
-                    th style="text-align:left;padding:5px 8px;" { (tr(lang, "server", "сервер")) }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 24h", "сервис 24ч")) }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "service 7d", "сервис 7д")) }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "availability", "доступность")) }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "TCP connection failures · 24h", "Неудачные TCP-подключения · 24ч")) }
-                    th style="text-align:right;padding:5px 8px;" { "p95" }
-                    th style="text-align:right;padding:5px 8px;" { (tr(lang, "control 24h", "control 24ч")) }
+            div.ed-grid-wrap { table.ed-grid style="margin-top: 8px;" {
+                thead { tr {
+                    th.num { "#" }
+                    th { (tr(lang, "server", "сервер")) }
+                    th.num { (tr(lang, "service 24h", "сервис 24ч")) }
+                    th.num { (tr(lang, "service 7d", "сервис 7д")) }
+                    th.num { (tr(lang, "availability", "доступность")) }
+                    th.num { (tr(lang, "TCP connection failures · 24h", "Неудачные TCP-подключения · 24ч")) }
+                    th.num { "p95" }
+                    th.num { (tr(lang, "control 24h", "control 24ч")) }
                 } }
                 tbody {
                     @for (index, (id, q24, q7)) in rows.iter().enumerate() {
-                        tr data-quality-server=(id.0) style="border-bottom:1px dotted var(--rule);" {
-                            td style="text-align:right;padding:5px 8px;color:var(--mute);" { (index + 1) }
-                            td style="padding:5px 8px;" {
-                                a href=(format!("/admin/servers/{}", path_segment_encode(&id.0))) style="color:var(--ink);" { (id.0) }
+                        tr data-quality-server=(id.0) {
+                            td.num.ed-grid__mut { (index + 1) }
+                            td {
+                                a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&id.0))) { (id.0) }
                                 div style="font-size:9px;color:var(--mute);" {
                                     (q24.vantage.as_deref().unwrap_or("unknown")) " · "
                                     (tr(lang, "checked: ", "проверено: "))
@@ -520,16 +520,16 @@ pub(in crate::handlers::admin::legacy) fn dashboard_quality_ranking(
                                     }
                                 }
                             }
-                            td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
-                            td style=(format!("text-align:right;padding:5px 8px;color:{};", quality_score_color(q7.score))) { (q7.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
-                            td style="text-align:right;padding:5px 8px;" { (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
-                            td style="text-align:right;padding:5px 8px;" { (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
-                            td style="text-align:right;padding:5px 8px;" { (q24.p95_rtt_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
-                            td style="text-align:right;padding:5px 8px;" { (q24.control_score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                            td.num style=(format!("color:{};", quality_score_color(q24.score))) { (q24.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                            td.num style=(format!("color:{};", quality_score_color(q7.score))) { (q7.score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
+                            td.num { (q24.availability_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                            td.num { (q24.packet_loss_pct.map_or_else(|| "—".into(), |v| format!("{v:.1}%"))) }
+                            td.num { (q24.p95_rtt_ms.map_or_else(|| "—".into(), |v| format!("{v} ms"))) }
+                            td.num { (q24.control_score.map_or_else(|| "—".into(), |v| format!("{v}/100"))) }
                         }
                     }
                 }
-            }
+            } }
         }
     }
 }

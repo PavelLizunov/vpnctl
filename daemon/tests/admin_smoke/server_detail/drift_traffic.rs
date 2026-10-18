@@ -132,8 +132,8 @@ async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
         "server-detail must surface the Phase 4b live-activity section eyebrow"
     );
     assert!(
-        html.contains("NM-11"),
-        "section must mention NM-11 upstream caveat so the operator knows why per-user is zero"
+        html.contains("server-wide totals are exact"),
+        "section must explain the sing-box caveat so the operator knows why per-user is zero"
     );
     assert!(
         html.contains("active now") && html.contains("upload 24h") && html.contains("download 24h"),
@@ -267,8 +267,8 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
     assert!(html.contains(">tcp<") || html.contains("tcp"));
     assert!(html.contains("udp"));
     assert!(
-        html.contains("NM-11"),
-        "section must surface NM-11 explainer"
+        html.contains("does not report the user of a connection"),
+        "section must explain the per-user attribution caveat"
     );
 }
 
@@ -633,8 +633,9 @@ async fn server_detail_top_users_renders_nm11_empty_state() {
         "top-users eyebrow missing"
     );
     assert!(
-        html.contains("NM-11"),
-        "empty top-users card must carry the NM-11 explainer"
+        html.contains("No per-user traffic attributed on this server yet")
+            && html.contains("does not report users per connection; see the dashboard note"),
+        "empty top-users card must explain the per-user attribution caveat"
     );
 }
 
@@ -663,8 +664,8 @@ async fn server_detail_top_users_lists_users_with_links_when_present() {
     let top_section = html.split("Top users · last 24h").nth(1).unwrap_or("");
     let next_section = top_section.split("TCP / UDP split").next().unwrap_or("");
     assert!(
-        !next_section.contains("NM-11"),
-        "NM-11 empty-state must not render once per-user rows exist"
+        !next_section.contains("No per-user traffic attributed"),
+        "per-user empty-state must not render once per-user rows exist"
     );
 }
 

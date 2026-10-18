@@ -78,8 +78,8 @@ pub(crate) async fn user_online_badge(
             span.ed-stat.ed-stat--active
                 title=(tr(
                     lang,
-                    "Presence — live from each node's clash-api snapshot (≤5 min old). NM-11 fallback attributes unresolved connections by source IP; unseen IPs remain uncounted.",
-                    "Присутствие — live-снимок clash-api каждой ноды (не старше 5 мин). NM-11 fallback атрибутирует соединения по source IP; незнакомые IP не учитываются.",
+                    "Presence — live from each node's clash-api snapshot (≤5 min old). Connections without a known user are attributed by source IP; unseen IPs remain uncounted.",
+                    "Присутствие — live-снимок clash-api каждой ноды (не старше 5 мин). Соединения без известного юзера атрибутируются по source IP; незнакомые IP не учитываются.",
                 )) {
                 (icon("circle"))
                 b { (tr(lang, "online", "онлайн")) }

@@ -134,8 +134,8 @@ pub(super) fn server_detail_push_deploy_key_section(
             span.ed-mono { "~/.ssh/authorized_keys" }
             (tr(
                 lang,
-                " before probes, deploys, or the Telegram via-server proxy can work. The Phase E wizard at ",
-                " этого сервера, иначе не работают probe-ы, деплои и Telegram via-server прокси. Мастер Phase E на ",
+                " before probes, deploys, or the Telegram via-server proxy can work. The add-server wizard at ",
+                " этого сервера, иначе не работают probe-ы, деплои и Telegram via-server прокси. Мастер добавления сервера на ",
             ))
             span.ed-mono { "/admin/servers/new" }
             (tr(lang, " does this automatically. For servers added via ", " делает это автоматически. Для серверов добавленных через "))
