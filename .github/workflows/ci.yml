@@ -114,7 +114,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: pre-pull sshd image (cuts test latency, surfaces network errors here)
-        run: docker pull lscr.io/linuxserver/openssh-server:latest
+        run: |
+          for i in 1 2 3 4 5; do
+            docker pull lscr.io/linuxserver/openssh-server:latest && exit 0
+            sleep $((i * 20))
+          done
+          exit 1
       - name: e2e_sshd
         run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
       - name: spec_password_auth (independent test-writer-agent suite)
