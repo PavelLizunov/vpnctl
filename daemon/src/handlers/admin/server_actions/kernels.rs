@@ -89,6 +89,14 @@ pub(crate) async fn server_disable_kernel(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
+    let mut after = server.clone();
+    after.kernels.retain(|k| k != &kid);
+    if after.kernels.len() != server.kernels.len() {
+        if let Some(msg) = unsupported_change(&state.registry, &server, &after) {
+            return bad_request(&format!("cannot disable kernel '{kernel_id_str}': {msg}"));
+        }
+    }
+
     let removed = match state.inv.remove_server_kernel(&sid, &kid).await {
         Ok(n) => n,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -128,4 +136,58 @@ pub(crate) async fn server_disable_kernel(
         path_segment_encode(&server_id_str)
     ))
     .into_response()
+}
+
+fn orphaned_protocols(
+    registry: &vpnctl_core::Registry,
+    server: &vpnctl_core::Server,
+) -> Vec<vpnctl_core::ProtocolId> {
+    server
+        .enabled_protocols
+        .iter()
+        .filter(|pid| {
+            !server.kernels.iter().any(|kid| {
+                registry
+                    .kernel(kid)
+                    .is_some_and(|k| k.supported_protocols().contains(pid))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn unsupported_change(
+    registry: &vpnctl_core::Registry,
+    before: &vpnctl_core::Server,
+    after: &vpnctl_core::Server,
+) -> Option<String> {
+    let already = orphaned_protocols(registry, before);
+    let orphaned: Vec<vpnctl_core::ProtocolId> = orphaned_protocols(registry, after)
+        .into_iter()
+        .filter(|pid| !already.contains(pid))
+        .collect();
+    if orphaned.is_empty() {
+        return (after.kernels.is_empty() && !before.kernels.is_empty())
+            .then(|| "a server needs at least one kernel".to_string());
+    }
+    let names: Vec<&str> = orphaned.iter().map(|p| p.0.as_str()).collect();
+    let supporters: Vec<String> = registry
+        .kernel_ids()
+        .into_iter()
+        .filter(|kid| {
+            registry
+                .kernel(kid)
+                .is_some_and(|k| orphaned.iter().any(|p| k.supported_protocols().contains(p)))
+        })
+        .map(|k| k.0)
+        .collect();
+    Some(format!(
+        "no kernel on this server would serve {} — {}",
+        names.join(", "),
+        if supporters.is_empty() {
+            "no registered kernel supports it".to_string()
+        } else {
+            format!("keep or enable one of: {}", supporters.join(", "))
+        }
+    ))
 }

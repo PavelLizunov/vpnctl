@@ -33,6 +33,16 @@ pub(crate) async fn server_enable_protocol(
         ));
     }
 
+    if !server.enabled_protocols.contains(&pid) {
+        let mut after = server.clone();
+        after.enabled_protocols.push(pid.clone());
+        if let Some(msg) = super::kernels::unsupported_change(&state.registry, &server, &after) {
+            return bad_request(&format!(
+                "cannot enable protocol '{protocol_id_str}': {msg}"
+            ));
+        }
+    }
+
     let inserted = match state.inv.add_server_protocol(&sid, &pid).await {
         Ok(n) => n,
         Err(e) => return internal_error(anyhow::Error::new(e)),

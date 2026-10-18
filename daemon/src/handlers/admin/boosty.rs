@@ -320,7 +320,8 @@ pub(crate) async fn boosty_page(
                 }
                 div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;" {
                     @for uid in &r.lapsed_pending {
-                        form method="post" action=(format!("/admin/boosty/disable/{uid}")) style="margin: 0;" {
+                        form method="post" action=(format!("/admin/boosty/disable/{uid}")) style="margin: 0;"
+                             data-confirm=(crate::i18n::tr(lang, "Disable this user's VPN access?", "Отключить VPN-доступ этого пользователя?")) {
                             button type="submit"
                                    title=(tr(lang, "Disable this user's VPN access (subscription lapsed).", "Отключить VPN-доступ юзера (подписка истекла)."))
                                    class="ed-abtn ed-abtn--warning ed-abtn--sm" {
@@ -393,7 +394,8 @@ pub(crate) async fn boosty_page(
                             td { a.ed-grid__id href=(format!("/admin/users/{uid_enc}")) { (uid.0) } }
                             td.ed-grid__mut { (sid) }
                             td.num {
-                                form method="post" action=(format!("/admin/boosty/unlink/{}", uid_enc)) style="margin: 0;" {
+                                form method="post" action=(format!("/admin/boosty/unlink/{}", uid_enc)) style="margin: 0;"
+                                     data-confirm=(crate::i18n::tr(lang, "Unlink this user from the Boosty subscriber? Automatic enable/disable stops for them.", "Отвязать пользователя от подписчика Boosty? Автоматическое включение и отключение для него прекратится.")) {
                                     button type="submit"
                                            title=(tr(lang, "Remove the Boosty↔user link. Does NOT disable the VPN user; just stops the subscription driving their access.", "Убрать связь Boosty↔юзер. НЕ отключает VPN-юзера; лишь перестаёт управлять доступом по подписке."))
                                            class="ed-abtn ed-abtn--secondary ed-abtn--sm" {

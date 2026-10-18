@@ -162,8 +162,11 @@ pub(crate) async fn users(
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
                     (sort_link("id", "id"))
-                    (sort_link("servers-desc", crate::i18n::tr(lang, "servers", "серверы")))
-                    (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
+                    @if sort_kind == "servers-desc" {
+                        (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
+                    } @else {
+                        (sort_link("servers-desc", crate::i18n::tr(lang, "servers", "серверы")))
+                    }
                 }
             }
         }
@@ -193,12 +196,12 @@ pub(crate) async fn users(
                     }
                 }
             }
-            form method="post" action="/admin/users"
-                 style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--acc);" {
+            form.ed-users-new method="post" action="/admin/users"
+                 style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--acc);" {
                 span.ed-inbar__label { (crate::i18n::tr(lang, "new user", "новый пользователь")) }
                 input type="text" name="id" required="required"
                       placeholder="alice"
-                      pattern="(?!.*\\.\\.)[a-z0-9][a-z0-9._-]{0,30}[a-z0-9]"
+                      pattern="(?!.*\\.\\.)[a-z0-9][a-z0-9._\\-]{0,30}[a-z0-9]"
                       maxlength="32"
                       data-lowercase-id
                       title=(crate::i18n::tr(

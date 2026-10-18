@@ -965,3 +965,29 @@ form[data-submitting] .ed-abtn,
   }
 }
 
+
+.ed-alert { margin: 10px 0; padding: 10px 14px; border: 1px solid var(--rule-s); border-left-width: 3px; background: var(--paper-2); font-size: 12px; }
+.ed-alert--warn { border-color: var(--warm); background: color-mix(in oklab, var(--warm) 8%, var(--paper)); }
+.ed-alert p { margin: 6px 0 0; }
+#deployment-status[data-deploy-state="failed"] { border-color: var(--red); background: color-mix(in oklab, var(--red) 6%, var(--paper)); }
+#deployment-status[data-deploy-state="applied"] { border-color: var(--green); }
+.ed-deck { font-family: var(--serif); font-style: italic; color: var(--soft); margin: 4px 0 14px; }
+.ed-muted { color: var(--mute); }
+.ed-time { font-family: var(--mono); font-size: 11px; color: var(--mute); white-space: nowrap; }
+.ed-grid-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ed-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+.ed-table th, .ed-table td { padding: 6px 8px; border-bottom: 1px solid var(--rule); text-align: left; }
+.ed-spoiler > summary { cursor: pointer; }
+.ed-kvers__value { font-family: var(--mono); }
+.ed-grid__id { white-space: nowrap; }
+
+@media (max-width: 768px) {
+  html, body, #root, .ed { height: auto; min-height: 100%; }
+  .ed { overflow: visible; }
+  .ed-main { overflow: visible; padding: 20px 16px 24px; }
+  .ed-foot { padding: 10px 16px 14px; flex-wrap: wrap; gap: 4px 12px; }
+  .ed-foot__l { flex-wrap: wrap; gap: 4px 12px; }
+  .ed-tb__who button, .ed-tb__who a { min-height: 24px; padding: 4px 2px; }
+  .ed-main button, .ed-main .ed-abtn { min-height: 24px; }
+  .ed-users-new { margin-left: 0 !important; padding-left: 0 !important; border-left: none !important; width: 100%; }
+}

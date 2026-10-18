@@ -40,7 +40,14 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
         );
     }
     if let Err(e) = snapshot_result {
-        return internal_error(anyhow::Error::new(e));
+        tracing::error!(target = "vpnctld::backup", error = %e, "manual snapshot failed");
+        return super::helpers::error_resp(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(
+                "snapshot into {} failed: {e}",
+                crate::app::DEFAULT_BACKUP_DIR
+            ),
+        );
     }
     Redirect::to("/admin/settings/backups#backups-section").into_response()
 }
@@ -98,7 +105,7 @@ pub(crate) async fn backup_self_test(
     let Some(latest) = snapshots.into_iter().next() else {
         return error_resp(
             StatusCode::CONFLICT,
-            "no snapshot to verify yet — click 'snapshot now' on /admin/settings first, \
+            "no snapshot to verify yet — click 'snapshot now' on /admin/settings/backups first, \
              or wait for the hourly scheduler to fire",
         );
     };
@@ -242,8 +249,8 @@ fn render_self_test_report(
             tbody {
                 @for c in &report.checks {
                     @let color = match c.status {
-                        CheckStatus::Ok => "var(--ok, #2e7d32)",
-                        CheckStatus::Warn => "var(--warn, #e6a23c)",
+                        CheckStatus::Ok => "var(--green)",
+                        CheckStatus::Warn => "var(--warm)",
                         CheckStatus::Fail => "var(--red, #c62828)",
                     };
                     tr style="border-bottom: 1px dotted var(--rule);" {

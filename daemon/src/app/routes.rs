@@ -390,6 +390,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/backup/self-test", post(admin::backup_self_test))
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
         .route("/admin/logout", post(admin::logout))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin::html_error_pages,
+        ))
         .nest_service("/admin/assets", ServeDir::new(&assets_dir))
         .with_state(state);
 

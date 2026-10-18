@@ -598,10 +598,10 @@ pub(in crate::handlers::admin::legacy) fn server_detail_assurance_section(
                     @for row in rows {
                         @let state = row.state.as_str();
                         @let color = match row.state {
-                            vpnctl_inventory::AssuranceState::Verified => "var(--ok)",
+                            vpnctl_inventory::AssuranceState::Verified => "var(--green)",
                             vpnctl_inventory::AssuranceState::Unknown => "var(--mute)",
-                            vpnctl_inventory::AssuranceState::Degraded => "var(--warn)",
-                            vpnctl_inventory::AssuranceState::Blocked => "var(--err)",
+                            vpnctl_inventory::AssuranceState::Degraded => "var(--warm)",
+                            vpnctl_inventory::AssuranceState::Blocked => "var(--red)",
                         };
                         tr {
                             td.ed-mono { (&row.protocol_id.0) }

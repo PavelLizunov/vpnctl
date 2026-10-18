@@ -63,6 +63,17 @@ pub(super) async fn server_detail_render(
 
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.ok();
     let operation_status = crate::wizard_bootstrap::autodeploy_status(&state.inv, &sid.0);
+    let last_deploy_failure = state
+        .inv
+        .recent_audit_paginated(5, 0, None, Some("server.deploy.failed"), Some(&sid.0), None)
+        .await
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|row| row.target.as_deref() == Some(sid.0.as_str()))
+        })
+        .and_then(|row| row.payload)
+        .and_then(|payload| deploy_failure_reason(&payload));
 
     let clash_ok = state.snapshot_cache.get_live(&sid).is_some();
 
@@ -442,9 +453,13 @@ pub(super) async fn server_detail_render(
             (server.address) ":" (server.ssh_port)
             " · " (crate::i18n::tr(lang, "ssh as ", "ssh как ")) (server.ssh_user)
             " · "
-            @if server.kernels.len() == 1 { (crate::i18n::tr(lang, "kernel ", "ядро ")) }
-            @else { (crate::i18n::tr(lang, "kernels ", "ядра ")) }
-            (ordered_kernel_ids(&server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            @if server.kernels.is_empty() {
+                span style="color: var(--red);" { (crate::i18n::tr(lang, "no kernel assigned", "ядро не назначено")) }
+            } @else {
+                @if server.kernels.len() == 1 { (crate::i18n::tr(lang, "kernel ", "ядро ")) }
+                @else { (crate::i18n::tr(lang, "kernels ", "ядра ")) }
+                (ordered_kernel_ids(&server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
+            }
             " · " (crate::i18n::tr(lang, "hoster ", "хостер ")) (server.hoster)
         }
 
@@ -469,8 +484,16 @@ pub(super) async fn server_detail_render(
                 _ => { (crate::i18n::tr(lang, "status unknown; reload to retry reading deployment state", "статус неизвестен; обнови страницу для повторной проверки")) }
             }
             @if deploy_state == "failed" {
-                @if let Some(operation) = operation_status.as_ref() {
+                @if let Some(reason) = last_deploy_failure.as_deref() {
+                    p.ed-mono style="margin: 6px 0 0; font-size: 11px; word-break: break-word;" {
+                        (crate::i18n::tr(lang, "last error: ", "последняя ошибка: ")) (reason)
+                    }
+                } @else if let Some(operation) = operation_status.as_ref() {
                     p { (operation.message) }
+                }
+                a href=(format!("/admin/audit?target={}&action=server.deploy", path_segment_encode(&server.id.0)))
+                  style="color: var(--acc); font-size: 12px;" {
+                    (icon("history")) (crate::i18n::tr(lang, "deployment log", "журнал деплоя"))
                 }
             }
         }
@@ -831,6 +854,7 @@ pub(super) async fn server_detail_render(
                             td.num {
                                 form method="post"
                                      action=(format!("/admin/servers/{sid_enc_b}/grants/{uid_enc}/revoke"))
+                                     data-confirm=(crate::i18n::tr(lang, "Revoke this user's access to the server? Access ends after the next deploy.", "Отозвать доступ пользователя к серверу? Доступ пропадёт после следующего деплоя."))
                                      style="margin: 0; padding: 0; display: inline;" {
                                     button type="submit"
                                            title=(match lang {
@@ -986,4 +1010,24 @@ pub(super) async fn server_detail_render(
         }
     };
     Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
+}
+
+fn deploy_failure_reason(payload: &serde_json::Value) -> Option<String> {
+    let reason = payload
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            payload
+                .get("ssh_errors")
+                .and_then(|v| v.as_array())
+                .and_then(|errs| errs.first())
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    Some(reason.chars().take(300).collect())
 }

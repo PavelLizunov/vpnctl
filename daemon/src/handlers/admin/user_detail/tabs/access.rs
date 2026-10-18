@@ -95,6 +95,7 @@ pub(crate) fn render_access_tab(
                             @if is_granted {
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}/revoke"))
+                                     data-confirm=(crate::i18n::tr(lang, "Revoke this user's access to the server? Access ends after the next deploy.", "Отозвать доступ пользователя к серверу? Доступ пропадёт после следующего деплоя."))
                                      style="margin: 0; padding: 0; display: inline;" {
                                     button type="submit" class="ed-abtn ed-abtn--warning ed-abtn--sm" {
                                         (icon("minus")) (crate::i18n::tr(lang, "revoke", "отозвать"))
@@ -192,6 +193,7 @@ pub(crate) fn render_access_tab(
                                          action=(format!("/admin/users/{}/grants/{}/revoke",
                                                          path_segment_encode(&user.id.0),
                                                          path_segment_encode(&s.id.0)))
+                                         data-confirm=(crate::i18n::tr(lang, "Revoke this user's access to the server? Access ends after the next deploy.", "Отозвать доступ пользователя к серверу? Доступ пропадёт после следующего деплоя."))
                                          style="margin: 0;" {
                                         @let title_str = match lang {
                                             crate::i18n::Locale::En => format!("Revoke {}'s access to {}", user.id.0, s.id.0),
