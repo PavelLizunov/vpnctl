@@ -3,6 +3,7 @@
 set -euo pipefail
 umask 077
 
+## ── tunables ────────────────────────────────────────────────────────────
 DB_PATH=${DB_PATH:-/var/lib/vpnctl/inv.db}
 ENV_FILE=${ENV_FILE:-/etc/vpnctl/vpnctld.env}
 ASSETS_DIR=${ASSETS_DIR:-/opt/vpnctl/assets}
@@ -26,6 +27,7 @@ OFFSITE_KEY=${OFFSITE_KEY:-$DEPLOY_KEY}
 OFFSITE_RETENTION_DAYS=${OFFSITE_RETENTION_DAYS:-30}
 TMPDIR=${TMPDIR:-/tmp}
 
+## ── derived ─────────────────────────────────────────────────────────────
 STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 ARCHIVE_NAME="${STAMP}.tar.zst.age"
 LOCAL_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
