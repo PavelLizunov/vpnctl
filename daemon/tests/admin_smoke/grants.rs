@@ -1,5 +1,3 @@
-//! Grant management and protocol overrides integration smoke tests.
-
 #[path = "grants/auto_deploy.rs"]
 mod auto_deploy;
 #[path = "grants/bulk.rs"]

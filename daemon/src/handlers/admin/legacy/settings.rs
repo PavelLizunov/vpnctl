@@ -1,6 +1,3 @@
-//! Admin UI settings handlers — disaster recovery, GeoIP status, render/routes,
-//! and Telegram/notification actions.
-
 mod backups;
 mod render;
 mod system;

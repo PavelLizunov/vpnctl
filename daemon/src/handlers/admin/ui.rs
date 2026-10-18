@@ -1,10 +1,7 @@
-//! UI Primitives and Page Components for admin HTML generation.
-
 use super::icons::icon;
 use maud::{Markup, html};
 
 pub(crate) fn glyph(size: u32) -> Markup {
-    // Geometry stays fixed in the viewBox, including at favicon sizes.
     let stroke = 1.8;
     let r = 2.4;
     html! {

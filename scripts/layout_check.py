@@ -86,9 +86,6 @@ async def wait_event(ws, name: str, max_msgs: int = 200):
     raise RuntimeError(f"never saw {name}")
 
 
-# JS that returns an array of {selector, count, boxes:[{x,y,w,h}…]}.
-# Runs in the page; uses native `getBoundingClientRect()` for accurate
-# post-CSS dimensions (handles `min-height`, transforms, scrollbars).
 QUERY_JS = """
 (() => {
   const out = [];
@@ -152,7 +149,6 @@ async def query_boxes(
             )
             await cdp_call(ws, 7, "Page.navigate", {"url": url})
             await wait_event(ws, "Page.loadEventFired")
-            # Tiny settle for font swap + layout shift.
             await asyncio.sleep(0.6)
             sel_literal = json.dumps(selectors)
             expr = "const SELECTORS = " + sel_literal + "; " + QUERY_JS
@@ -171,7 +167,6 @@ async def query_boxes(
             pass
 
 
-# ── Assertions ──────────────────────────────────────────────────────
 
 
 def all_equal_width(boxes: list[dict], tolerance_px: int = 1) -> tuple[bool, str]:
@@ -214,16 +209,9 @@ def at_least_one(boxes: list[dict], _tolerance_px: int = 0) -> tuple[bool, str]:
     return False, "selector matched nothing — element may have been removed"
 
 
-# ── Check definitions ──────────────────────────────────────────────
-#
-# Each row: (path on prod, [(selector, assertion_fn, tol_px, msg), ...]).
-# Add a new (URL, checks) pair when you add a new page that needs
-# layout guarantees.
 
 CHECKS: list[tuple[str, list[tuple[str, callable, int, str]]]] = [
     (
-        # User-detail with QRs + cross-nav links. Pin the Flow A/B/C/D
-        # column-alignment bug Pavel screenshotted twice.
         "/admin/users/brat",
         [
             (
@@ -241,7 +229,6 @@ CHECKS: list[tuple[str, list[tuple[str, callable, int, str]]]] = [
         ],
     ),
     (
-        # Servers page — sanity check the page renders.
         "/admin/servers",
         [(".ed-art-h1", at_least_one, 0, "servers page H1 must render")],
     ),

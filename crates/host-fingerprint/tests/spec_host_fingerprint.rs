@@ -1,12 +1,3 @@
-//! Spec tests for `vpnctl-host-fingerprint`.
-//!
-//! These tests pin the contract that the three former call-sites
-//! (CLI `vpnctl server set-fingerprint`, daemon
-//! `POST /admin/servers/{id}/set-fingerprint`, daemon wizard
-//! `ssh_keyscan_fingerprint`) rely on. If a test starts failing,
-//! check whether the implementation drifted OR the spec was
-//! ambiguous; don't weaken a test to make it pass.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use vpnctl_host_fingerprint::{
@@ -14,11 +5,8 @@ use vpnctl_host_fingerprint::{
     normalize_sha256, pick_key_line, validate_shape,
 };
 
-// ─── validate_shape ──────────────────────────────────────────────
-
 #[test]
 fn validate_accepts_canonical_unpadded_sha256() {
-    // Exactly 43 base64 chars unpadded, standard alphabet.
     assert!(validate_shape(
         "SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
     ));
@@ -26,7 +14,6 @@ fn validate_accepts_canonical_unpadded_sha256() {
 
 #[test]
 fn validate_accepts_padded_sha256() {
-    // 44 chars with trailing `=` — some emitters keep the pad byte.
     assert!(validate_shape(
         "SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ="
     ));
@@ -34,8 +21,6 @@ fn validate_accepts_padded_sha256() {
 
 #[test]
 fn validate_accepts_url_safe_alphabet() {
-    // URL-safe base64: `-` and `_` instead of `+` and `/`.
-    // Real-world: GitHub UI copy-button output, jq one-liners.
     assert!(validate_shape(
         "SHA256:-cuHezsjR805tS_zcSG25H1InN2OHqpzIJlTmCDctS4"
     ));
@@ -50,7 +35,6 @@ fn validate_rejects_md5_prefix() {
 
 #[test]
 fn validate_rejects_no_prefix() {
-    // 43 chars but missing the SHA256: prefix.
     assert!(!validate_shape(
         "+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
     ));
@@ -63,22 +47,18 @@ fn validate_rejects_empty_body() {
 
 #[test]
 fn validate_rejects_too_short_body() {
-    // 42 chars — SHA-256 is exactly 32 bytes → 43 base64 chars
-    // unpadded; anything shorter is structurally wrong.
     let body: String = "A".repeat(42);
     assert!(!validate_shape(&format!("SHA256:{body}")));
 }
 
 #[test]
 fn validate_rejects_too_long_body() {
-    // 45 chars — beyond the longest possible representation.
     let body: String = "A".repeat(45);
     assert!(!validate_shape(&format!("SHA256:{body}")));
 }
 
 #[test]
 fn validate_rejects_invalid_chars() {
-    // Whitespace, `:`, `!`, etc. are not in either base64 alphabet.
     assert!(!validate_shape(
         "SHA256:!!cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"
     ));
@@ -97,11 +77,8 @@ fn validate_rejects_just_prefix_with_extra_colon() {
     assert!(!validate_shape("SHA256::"));
 }
 
-// ─── pick_key_line ───────────────────────────────────────────────
-
 #[test]
 fn pick_prefers_ed25519_over_rsa() {
-    // Real ssh-keyscan output (whitespace + 2 keys, ed25519 second).
     let out = "\
 example.com ssh-rsa AAAAB3NzaC1yc2EAAAA...rsa-body-here
 example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...ed25519-body
@@ -122,11 +99,6 @@ example.com ssh-rsa AAAAB3NzaC1yc2EAAAA...rsa-body
 
 #[test]
 fn pick_uses_positional_algo_match_not_substring() {
-    // Regression for a real DNS-legal pathology: hostname literally
-    // containing `ssh-ed25519` on a line that's actually rsa. The old
-    // substring-based picker would falsely promote the rsa line and we
-    // would silently pin the wrong fingerprint. The fix is positional:
-    // look at the second whitespace token (the algo).
     let out = "\
 ssh-ed25519.example.com ssh-rsa AAAAB3NzaC1yc2EAAAA...rsa-body
 real.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...ed25519-body
@@ -165,11 +137,8 @@ fn pick_returns_none_on_empty_input() {
     assert!(pick_key_line("").is_none());
 }
 
-// ─── extract_sha256_token ────────────────────────────────────────
-
 #[test]
 fn extract_pulls_sha256_from_canonical_ssh_keygen_output() {
-    // Format: `<bits> SHA256:<body> <comment> (<ALGO>)`.
     let out = "256 SHA256:+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4 root@host (ED25519)\n";
     assert_eq!(
         extract_sha256_token(out),
@@ -197,8 +166,6 @@ fn extract_returns_none_on_empty_input() {
     assert!(extract_sha256_token("").is_none());
 }
 
-// ─── Error Display contract ──────────────────────────────────────
-
 #[test]
 fn error_display_mentions_host_and_port_on_keyscan_failed() {
     let e = Error::KeyscanFailed {
@@ -216,15 +183,8 @@ fn error_display_mentions_host_and_port_on_keyscan_failed() {
     );
 }
 
-// ─── build_keyscan_args (security-contract pin) ──────────────────
-
 #[test]
 fn keyscan_args_include_double_dash_before_host() {
-    // The `--` separator is the load-bearing defense against
-    // flag-injection via an attacker-controlled (or typo'd) inventory
-    // address starting with `-`. Without it, `ssh-keyscan -fsomething`
-    // reads attacker-controlled file. This test fails immediately if a
-    // future refactor reorders or drops the separator.
     let args = build_keyscan_args("2222", "-fmalicious");
     let dash_dash_pos = args
         .iter()
@@ -238,7 +198,6 @@ fn keyscan_args_include_double_dash_before_host() {
         dash_dash_pos < host_pos,
         "`--` must come BEFORE host in argv: got args={args:?}"
     );
-    // Belt-and-braces: `--` must be IMMEDIATELY before host.
     assert_eq!(
         host_pos,
         dash_dash_pos + 1,
@@ -282,8 +241,6 @@ fn error_display_quotes_output_on_no_fingerprint_token() {
     let msg = e.to_string();
     assert!(msg.contains("garbage"), "expected output in error: {msg}");
 }
-
-// ─── canonicalize_sha256 & normalize_sha256 ───────────────────────
 
 #[test]
 fn canonicalize_accepts_canonical_unpadded_sha256() {
@@ -334,27 +291,22 @@ fn canonicalize_rejects_malformed_inputs() {
         canonicalize_sha256("+cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"),
         None
     );
-    // Too short (42 chars body)
     assert_eq!(
         canonicalize_sha256(&format!("SHA256:{}", "A".repeat(42))),
         None
     );
-    // Too long (45 chars body)
     assert_eq!(
         canonicalize_sha256(&format!("SHA256:{}", "A".repeat(45))),
         None
     );
-    // 44 chars not ending in '='
     assert_eq!(
         canonicalize_sha256(&format!("SHA256:{}", "A".repeat(44))),
         None
     );
-    // 43 chars containing '='
     assert_eq!(
         canonicalize_sha256(&format!("SHA256:{}=", "A".repeat(42))),
         None
     );
-    // Invalid characters
     assert_eq!(
         canonicalize_sha256("SHA256:!!cuHezsjR805tS/zcSG25H1InN2OHqpzIJlTmCDctS4"),
         None
@@ -364,8 +316,6 @@ fn canonicalize_rejects_malformed_inputs() {
         None
     );
 }
-
-// ─── fingerprints_match ──────────────────────────────────────────
 
 #[test]
 fn fingerprints_match_accepts_equivalent_variants() {

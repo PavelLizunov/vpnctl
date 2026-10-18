@@ -1,12 +1,5 @@
-//! Canonical protocol and kernel registry construction for the daemon.
-
 use vpnctl_core::Registry;
 
-/// Same canonical Registry as the CLI uses. Kept in a tiny helper so a
-/// future shared `crate vpnctl-registry` can replace this without changing
-/// callers. `pub(crate)` so secret-minting tests (and any other in-crate
-/// caller that needs the canonical protocol set) build the real registry
-/// rather than a hand-rolled subset that could drift.
 pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
     use vpnctl_protocols::{
@@ -17,12 +10,7 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new()))?;
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
-    // Caddy + forwardproxy@naive — serves the `naive` protocol with a
-    // real masquerade website. MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(Caddy::new()))?;
-    // Xray-core — serves VLESS+Reality+xhttp on a standalone port
-    // (9443/TCP), companion to sing-box-lx's client-side xhttp support.
-    // MUST stay in lockstep with cli/registry.rs.
     reg.register_kernel(Box::new(Xray::new()))?;
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
@@ -33,17 +21,8 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
     reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))?;
     reg.register_protocol(Box::new(AnyTls::new()))?;
     reg.register_protocol(Box::new(Trojan::new()))?;
-    // naive — Chromium-fingerprint proxy served by the Caddy kernel.
-    // Without this the daemon's /sub render + admin dpi-chip silently
-    // drop naive (the CLI deploy still worked, hiding the gap).
     reg.register_protocol(Box::new(Naive::new()))?;
-    // vless-ws — VLESS/WebSocket+TLS direct (Caddy kernel). Without this
-    // the daemon's /sub + ninitux render + admin dpi-chip silently drop
-    // it. MUST stay in lockstep with cli/registry.rs.
     reg.register_protocol(Box::new(VlessWs::new()))?;
-    // vless+xhttp — Xray-core-served xhttp transport, reuses the REALITY
-    // keypair vless+reality already mints. MUST stay in lockstep with
-    // cli/registry.rs.
     reg.register_protocol(Box::new(VlessXhttp::new()))?;
     Ok(reg)
 }
@@ -53,13 +32,6 @@ pub(crate) fn build_registry() -> anyhow::Result<Registry> {
 mod registry_drift_guard {
     use super::build_registry;
 
-    /// The daemon's registry MUST stay in lockstep with
-    /// `cli/src/registry.rs::build` — the `/sub` render and the admin
-    /// dpi-chip resolve protocols through THIS registry, so anything
-    /// registered in the CLI but not here is silently dropped from every
-    /// subscription (exactly what happened to `naive` until 2026-06-04).
-    /// Full-set pin: adding/removing a protocol or kernel at one site
-    /// without the other (or this list) trips the assert.
     #[test]
     fn build_registry_matches_canonical_set() {
         let reg = build_registry().unwrap();

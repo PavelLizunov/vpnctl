@@ -70,7 +70,6 @@ class RunnerTest(unittest.TestCase):
                 f"printf {extra_env.get('FAKE_HTTP_CODE', '204')}\nexit {extra_env.get('FAKE_CURL_EXIT', '0')}\n"
             )
             self.curl.chmod(0o755)
-        # Test copy replaces only curl path, preserving production script.
         copy = self.root / "runner"
         copy.write_text(RUNNER.read_text().replace('"/usr/bin/curl"', repr(str(self.curl))))
         copy.chmod(0o755)

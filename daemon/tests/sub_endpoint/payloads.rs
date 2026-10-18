@@ -36,10 +36,6 @@ async fn health_returns_stable_runtime_contract() {
         "application/json"
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    // Stable contract: `version` stays plain SemVer (machine-readable,
-    // greppable); `build` carries provenance `<semver>+<short-git-sha>`
-    // so the deployed commit is identifiable without breaking scripts
-    // that parse `version`.
     let expected = format!(
         r#"{{"status":"ok","version":"{}","build":"{}"}}"#,
         env!("CARGO_PKG_VERSION"),
@@ -85,12 +81,9 @@ async fn sub_valid_token_returns_full_envelope_with_tags() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&body).unwrap();
 
-    // Real envelope has `log`, `route`, AND outbounds with selector +
-    // direct + block. Shim-test would have missed this.
     assert!(v["log"].is_object());
     assert!(v["route"].is_object());
     let outbounds = v["outbounds"].as_array().unwrap();
-    // Expected: [selector, srv-vless+reality, srv-tuic-v5, direct, block] = 5
     assert_eq!(outbounds.len(), 5, "outbounds: {outbounds:?}");
     assert_eq!(outbounds[0]["type"], "selector");
     assert_eq!(outbounds[0]["tag"], "proxy");
@@ -102,16 +95,6 @@ async fn sub_valid_token_returns_full_envelope_with_tags() {
     assert!(serialised.contains("pw-alice"));
 }
 
-/// Sibling of the protocol exclusion tests for WireGuard.
-/// WireGuard's `client_config()` is an INTERNAL `{ type: "wireguard",
-/// interface, peer }` object (the wg-quick / AmneziaWG shape), NOT a
-/// valid sing-box outbound — sing-box's wireguard outbound is a flat
-/// `server` / `server_port` / `private_key` / `peer_public_key` object.
-/// Pre-fix the protocol inherited the default `appears_in_sing_box_sub()
-/// == true`, so a mixed server leaked this internal object into the /sub
-/// envelope and sing-box / Hiddify dropped EVERY route. This pins the
-/// exclusion end-to-end through the real router: the valid vless outbound
-/// survives, the wireguard internal object does not.
 #[tokio::test]
 async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
     let dir = TempDir::new().unwrap();
@@ -122,14 +105,8 @@ async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
-    // Register wireguard so the registry lookup succeeds — the WHOLE
-    // point is to verify the handler then SKIPS its client_config rather
-    // than emitting the internal `{"type":"wireguard", interface, peer}`.
     reg.register_protocol(Box::new(WireGuard::new())).unwrap();
 
-    // Server with BOTH protocols enabled. Without the filter, the sub
-    // envelope would carry the internal wireguard object and sing-box
-    // would refuse the entire config.
     let server = Server {
         id: ServerId("mixed".into()),
         address: "10.0.0.52".into(),
@@ -152,9 +129,6 @@ async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
     inv.set_server_secret(&server.id, "vless.short_id", "12345678")
         .await
         .unwrap();
-    // WireGuard server pubkey present so that, IF the filter were
-    // missing, client_config WOULD render (proving the test isn't
-    // vacuously passing because of a missing-secret skip).
     inv.set_server_secret(
         &server.id,
         "wireguard.server_public_key",
@@ -199,7 +173,6 @@ async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
     let v: Value = serde_json::from_slice(&body).unwrap();
     let outbounds = v["outbounds"].as_array().expect("outbounds is array");
 
-    // No outbound may carry the internal wireguard object.
     for ob in outbounds {
         let ty = ob["type"].as_str().unwrap_or("");
         assert_ne!(
@@ -208,7 +181,6 @@ async fn sub_skips_wireguard_protocol_in_sing_box_envelope() {
              /sub handler must filter via Protocol::appears_in_sing_box_sub()."
         );
     }
-    // And the legit vless+reality outbound IS present.
     let has_vless = outbounds
         .iter()
         .any(|ob| ob["type"].as_str() == Some("vless"));
@@ -263,16 +235,11 @@ async fn sub_token_for_user_with_no_grants_yields_only_direct_block() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&body).unwrap();
     let outbounds = v["outbounds"].as_array().unwrap();
-    // No selector when no grants — but `direct` and `block` always present.
     assert_eq!(outbounds.len(), 2, "outbounds: {outbounds:?}");
     assert_eq!(outbounds[0]["type"], "direct");
     assert_eq!(outbounds[1]["type"], "block");
 }
 
-/// Baseline security response headers (X-Content-Type-Options: nosniff,
-/// X-Frame-Options: DENY, Referrer-Policy: no-referrer) must be attached to
-/// public API and subscription endpoints for defense-in-depth against MIME
-/// sniffing, framing, and leaking secret subscription tokens / device IDs.
 #[tokio::test]
 async fn public_endpoints_carry_security_response_headers() {
     let dir = TempDir::new().unwrap();

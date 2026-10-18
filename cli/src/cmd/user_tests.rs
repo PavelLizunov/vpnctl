@@ -1,7 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// `vpnctl user show` redacts bearer credentials by default (#7).
-// `user add` / `regen-sub` keep their one-time secret output — those
-// are the moments the operator legitimately needs the value once.
 use super::*;
 use vpnctl_core::{KernelId, ProtocolId, Server};
 
@@ -58,7 +55,6 @@ fn user_show_json_omits_secrets_by_default() {
         v.get("vpn_router_device_id").is_none(),
         "default JSON must not carry vpn_router_device_id"
     );
-    // Non-secret fields still present (byte-identical to the old path).
     assert_eq!(v.get("uuid").and_then(|x| x.as_str()), Some("uuid-alice"));
 }
 
@@ -208,7 +204,6 @@ async fn user_disable_and_enable_mutates_and_audits() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("inv.db");
 
-    // 1. Add user
     run(
         UserCmd::Add {
             id: "david".into(),
@@ -231,7 +226,6 @@ async fn user_disable_and_enable_mutates_and_audits() {
         .unwrap();
     assert!(!u.disabled, "user starts enabled");
 
-    // 2. Disable user
     run(
         UserCmd::Disable { id: "david".into() },
         Some(db_path.clone()),
@@ -256,7 +250,6 @@ async fn user_disable_and_enable_mutates_and_audits() {
     assert_eq!(disable_row.target.as_deref(), Some("david"));
     assert_eq!(disable_row.payload, Some(json!({ "disabled": true })));
 
-    // 3. No-op disable writes no extra audit row
     let count_before = audit.iter().filter(|a| a.action == "user.disable").count();
     run(
         UserCmd::Disable { id: "david".into() },
@@ -275,7 +268,6 @@ async fn user_disable_and_enable_mutates_and_audits() {
         "no-op disable must not add audit row"
     );
 
-    // 4. Enable user
     run(
         UserCmd::Enable { id: "david".into() },
         Some(db_path.clone()),
@@ -300,7 +292,6 @@ async fn user_disable_and_enable_mutates_and_audits() {
     assert_eq!(enable_row.target.as_deref(), Some("david"));
     assert_eq!(enable_row.payload, Some(json!({ "disabled": false })));
 
-    // 5. No-op enable writes no extra audit row
     let enable_count_before = audit_enable
         .iter()
         .filter(|a| a.action == "user.enable")
@@ -373,7 +364,6 @@ async fn user_traffic_limit_set_and_clear_persists_and_audits() {
 
     let inv = SqliteInventory::open(&db_path).await.unwrap();
 
-    // 1. Set limit (25.5 GiB, 85%)
     run(
         UserCmd::TrafficLimit {
             id: "elena".into(),
@@ -411,7 +401,6 @@ async fn user_traffic_limit_set_and_clear_persists_and_audits() {
         }))
     );
 
-    // 2. Clear limit with --clear
     run(
         UserCmd::TrafficLimit {
             id: "elena".into(),
@@ -444,7 +433,6 @@ async fn user_traffic_limit_set_and_clear_persists_and_audits() {
         }))
     );
 
-    // 3. Setting limit on unknown user fails
     let err = run(
         UserCmd::TrafficLimit {
             id: "ghost".into(),
@@ -487,7 +475,6 @@ async fn user_regen_wireguard_dry_run_and_execution() {
     let old_pub = u_initial.wireguard_pubkey.unwrap();
     let old_priv = u_initial.wireguard_private.unwrap();
 
-    // 1. Dry run
     run(
         UserCmd::RegenWireguard {
             id: "frank".into(),
@@ -513,7 +500,6 @@ async fn user_regen_wireguard_dry_run_and_execution() {
         Some(old_priv.as_str())
     );
 
-    // 2. Confirmed regen
     run(
         UserCmd::RegenWireguard {
             id: "frank".into(),
@@ -556,7 +542,6 @@ async fn user_regen_wireguard_dry_run_and_execution() {
         "audit payload must never log the private key"
     );
 
-    // 3. Unknown user fails
     let err = run(
         UserCmd::RegenWireguard {
             id: "ghost".into(),
@@ -578,7 +563,6 @@ async fn user_wireguard_conf_validations_and_export() {
     let db_path = dir.path().join("inv.db");
     let inv = SqliteInventory::open(&db_path).await.unwrap();
 
-    // Seed server with wireguard
     inv.add_server(&Server {
         id: ServerId("gw-1".into()),
         address: "203.0.113.10".into(),
@@ -594,7 +578,6 @@ async fn user_wireguard_conf_validations_and_export() {
     .await
     .unwrap();
 
-    // Server without wireguard
     inv.add_server(&Server {
         id: ServerId("vless-only".into()),
         address: "203.0.113.20".into(),
@@ -618,7 +601,6 @@ async fn user_wireguard_conf_validations_and_export() {
     .await
     .unwrap();
 
-    // Add user with wireguard keypair
     run(
         UserCmd::Add {
             id: "grace".into(),
@@ -633,7 +615,6 @@ async fn user_wireguard_conf_validations_and_export() {
     .await
     .unwrap();
 
-    // 1. User does not exist
     let err_user = run(
         UserCmd::WireguardConf {
             user: "no-user".into(),
@@ -647,7 +628,6 @@ async fn user_wireguard_conf_validations_and_export() {
     assert!(err_user.is_err());
     assert!(err_user.unwrap_err().to_string().contains("no such user"));
 
-    // 2. Server does not exist
     let err_srv = run(
         UserCmd::WireguardConf {
             user: "grace".into(),
@@ -661,7 +641,6 @@ async fn user_wireguard_conf_validations_and_export() {
     assert!(err_srv.is_err());
     assert!(err_srv.unwrap_err().to_string().contains("no such server"));
 
-    // 3. Server does not enable wireguard
     let err_proto = run(
         UserCmd::WireguardConf {
             user: "grace".into(),
@@ -680,7 +659,6 @@ async fn user_wireguard_conf_validations_and_export() {
             .contains("does not enable the 'wireguard' protocol")
     );
 
-    // 4. User is not granted on server
     let err_grant = run(
         UserCmd::WireguardConf {
             user: "grace".into(),
@@ -699,7 +677,6 @@ async fn user_wireguard_conf_validations_and_export() {
             .contains("is not granted on server")
     );
 
-    // 5. Grant user on gw-1 and export conf to stdout
     inv.grant(&UserId("grace".into()), &ServerId("gw-1".into()))
         .await
         .unwrap();
@@ -716,7 +693,6 @@ async fn user_wireguard_conf_validations_and_export() {
     .await;
     assert!(ok_stdout.is_ok());
 
-    // 6. Export conf to file (--out)
     let out_file = dir.path().join("grace-gw-1.conf");
     let ok_out = run(
         UserCmd::WireguardConf {

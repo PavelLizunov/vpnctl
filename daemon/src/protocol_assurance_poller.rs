@@ -1,10 +1,3 @@
-//! Per-protocol assurance on top of the existing quality cadence.
-//!
-//! Built-in checks never claim a protocol handshake: render, listener and TCP
-//! reachability are classified locally. Full client handshakes are delegated to
-//! an optional operator-owned runner (`VPNCTLD_PROTOCOL_ASSURANCE_RUNNER`).
-//! The runner receives JSON on stdin; its stdout must be one small JSON result.
-
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::SocketAddr;

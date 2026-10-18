@@ -1,10 +1,3 @@
-//! Audit timeline page (`/admin/audit`) with filters + pagination, the
-//! CSV exports (`/admin/audit.csv`, `/admin/users/{id}/access.csv`), and
-//! the audit-payload helpers (summary / redaction / action kind) shared
-//! with the dashboard and Boosty surfaces.
-//!
-//! Extracted from `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -17,21 +10,6 @@ use super::helpers::{
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// Pull human-relevant fields out of an audit row's JSON payload
-/// for the timeline display. Targets the high-frequency mutations
-/// (protocol/kernel enable+disable, grant/revoke, regen, etc.) and
-/// emits a compact `key=value` summary. Keys not in the explicit
-/// allowlist are skipped (audit payloads sometimes include large
-/// arrays we don't want to render inline). Returns empty string
-/// when nothing useful surfaces — caller suppresses the separator.
-///
-/// **NEVER expose secrets** — the allowlist is positive (only the
-/// names we explicitly want to render); raw token/password fields
-/// stay invisible by default. Pinned by
-/// `audit_summary_never_leaks_secret_fields`.
-/// v2 5b — deep-copy a payload with secret-looking values replaced, so
-/// the <details> expander can show the STRUCTURE without leaking what
-/// the summary whitelist deliberately hides. Denylist by key substring.
 pub(crate) fn redact_audit_payload(payload: &serde_json::Value) -> serde_json::Value {
     match payload {
         serde_json::Value::Object(map) => serde_json::Value::Object(
@@ -63,11 +41,6 @@ pub(crate) fn summarize_audit_payload(payload: &serde_json::Value) -> String {
         return String::new();
     };
     let mut parts: Vec<String> = Vec::new();
-    // Whitelist of fields safe to render inline. Order = display order.
-    // `protocol`, `kernel`, `user`, `from`, `wg_keypair_provenance`,
-    // `new_pubkey`, `newly_added`, `was_present`, `address`,
-    // `ssh_port`, `users` (count), `kernels_rendered`,
-    // `config_bytes_total`, `protocols` (count).
     const SAFE_KEYS: &[&str] = &[
         "protocol",
         "kernel",
@@ -78,8 +51,6 @@ pub(crate) fn summarize_audit_payload(payload: &serde_json::Value) -> String {
         "was_present",
         "address",
         "ssh_port",
-        // R2 2026-07-10 — alert.fire rows read as blanks without their
-        // kind; bulk grant/ack rows without their count.
         "kind",
         "count",
         "server",
@@ -90,8 +61,6 @@ pub(crate) fn summarize_audit_payload(payload: &serde_json::Value) -> String {
     ];
     for k in SAFE_KEYS {
         if let Some(v) = map.get(*k) {
-            // Render as plain string/number/bool — no nested objects
-            // (those usually carry secrets). Lists too (could be long).
             let s = match v {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Number(n) => n.to_string(),
@@ -104,11 +73,6 @@ pub(crate) fn summarize_audit_payload(payload: &serde_json::Value) -> String {
     parts.join(" ")
 }
 
-/// Map an audit action like "server.deploy" to a CSS modifier matching
-/// the editorial palette (deploy/create/grant/revoke/...). Unknown
-/// suffixes fall back to "other" — never to a known kind, otherwise a
-/// new untyped action would silently masquerade as a deploy in the
-/// timeline.
 pub(crate) fn action_kind(action: &str) -> &'static str {
     let kind = action.split('.').next_back().unwrap_or("");
     match kind {
@@ -123,12 +87,6 @@ pub(crate) fn action_kind(action: &str) -> &'static str {
     }
 }
 
-/// Phase D — paginated, filterable audit timeline. Replaces the
-/// Phase A placeholder body. Reads `?actor=`, `?action=`, `?page=`
-/// from the query string; renders a filter form, sticky-date
-/// section headers (Today / Yesterday / `<YYYY-MM-DD>`), and
-/// prev/next pagination links. CSV export lives at a separate
-/// endpoint (`/admin/audit.csv`) keyed by the same query params.
 pub(crate) async fn audit(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -141,20 +99,11 @@ pub(crate) async fn audit(
     let target = q.target.as_deref().filter(|s| !s.is_empty());
     let exclude = q.action_exclude();
     let hiding = exclude.is_some();
-    /// Hard cap so `?page=99999...` can't overflow `page * PAGE_SIZE`.
-    /// 1M pages × 50/page = 50M rows — way past any plausible audit
-    /// history; clamping there is friendlier than panicking on overflow.
     const MAX_PAGE: i64 = 1_000_000;
     let page = q.page.unwrap_or(0).clamp(0, MAX_PAGE);
 
-    /// Page size — small enough that even a busy operator scans
-    /// each page quickly, large enough that 99% of audit history
-    /// lookups don't need pagination at all.
     const PAGE_SIZE: i64 = 50;
 
-    // Fetch one extra row to detect "is there a next page?".
-    // `page` is already clamped to MAX_PAGE above, so `* PAGE_SIZE` can't
-    // overflow i64.
     let offset = page * PAGE_SIZE;
     let entries = state
         .inv
@@ -162,7 +111,6 @@ pub(crate) async fn audit(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // v2 5b — «N events on file · M match» header counts.
     let (audit_total, audit_matched) = state
         .inv
         .audit_counts(actor, action, target, exclude)
@@ -203,9 +151,6 @@ pub(crate) async fn audit(
                     (crate::i18n::tr(lang, "match the filter", "подходят под фильтр"))
                 }
             }
-            // Housekeeping toggle — the hourly backup.snapshot rows
-            // otherwise fill the whole first page (design review
-            // 2026-07-10). Preserves the other filters either way.
             @if hiding {
                 a href=(audit_url("/admin/audit", actor, action, target, false, None))
                   style="color: var(--acc);"
@@ -250,10 +195,6 @@ pub(crate) async fn audit(
             label { (crate::i18n::tr(lang, "action prefix", "префикс действия")) }
             input type="text" name="action"
                   value=(action.unwrap_or(""))
-                  // Hint refreshed post-grant-rename (2026-06-10):
-                  // grants now write `user.grant` / `user.revoke` /
-                  // `server.grants.bulk_*` — the old bare `grant.` hint
-                  // matched only the protocol-override actions.
                   placeholder="server. / user.grant / user. / settings."
                   title=(crate::i18n::tr(
                       lang,
@@ -359,26 +300,16 @@ pub(crate) async fn audit(
     Ok(render_page(&state, "audit", &theme, &accent, lang, body).await)
 }
 
-/// Query-string args for the audit timeline. All optional; empty
-/// string is treated as "no filter on this axis" by the handler.
 #[derive(serde::Deserialize, Debug, Default)]
 pub(crate) struct AuditQuery {
     pub actor: Option<String>,
     pub action: Option<String>,
-    /// v2 5b — substring filter on the target column.
     pub target: Option<String>,
-    /// Housekeeping visibility. The hourly `backup.snapshot` rows are
-    /// hidden BY DEFAULT (they filled the whole first screen — R2
-    /// 2026-07-10); `?hide=none` shows everything. The R1 value
-    /// `?hide=snapshots` still parses as the (now default) hidden
-    /// state so bookmarks keep working.
     pub hide: Option<String>,
     pub page: Option<i64>,
 }
 
 impl AuditQuery {
-    /// The exact audit action excluded by the current `hide` value —
-    /// single source for the handler, the CSV export and the chip URL.
     pub(crate) fn action_exclude(&self) -> Option<&'static str> {
         match self.hide.as_deref() {
             Some("none") => None,
@@ -387,10 +318,6 @@ impl AuditQuery {
     }
 }
 
-/// Build a `/admin/audit*` URL preserving the current filter query.
-/// Pass `Some(page)` for paginated HTML targets, `None` for the CSV
-/// export endpoint (which doesn't paginate). Single helper avoids the
-/// near-duplicate URL builders that the previous chunk had.
 fn audit_url(
     base: &str,
     actor: Option<&str>,
@@ -417,8 +344,6 @@ fn audit_url(
         sep = '&';
     }
     if !hide_snapshots {
-        // Hidden is the default — only the SHOW-everything state needs
-        // a query param.
         q.push(sep);
         q.push_str("hide=none");
         sep = '&';
@@ -430,20 +355,12 @@ fn audit_url(
     q
 }
 
-/// Render the entries grouped by date with sticky `Today / Yesterday
-/// / <date>` section headers. Reuses the existing `dashboard_audit`
-/// row markup so the visual style stays consistent.
 fn audit_timeline_grouped(
     entries: &[&vpnctl_inventory::AuditEntry],
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
     use chrono::{Duration, Utc};
-    // 2026-05-23 — group day-by-day in the operator-configured
-    // display TZ. Otherwise an event at 23:30 UTC (= 02:30 MSK
-    // next day) falls into the wrong day-header relative to the
-    // ts shown beside it (which is rendered via format_msk_iso =
-    // local TZ).
     let tz = display_tz();
     let today = Utc::now().with_timezone(&tz).date_naive();
     let yesterday = today - Duration::days(1);
@@ -482,8 +399,6 @@ fn audit_timeline_grouped(
                             @if !summary.is_empty() {
                                 " · " span.ed-mono { (summary) }
                             }
-                            // v2 5b — full payload behind a pure-HTML
-                            // <details> expander (CSP-safe, no JS).
                             " "
                             details style="display: inline-block; vertical-align: baseline;" {
                                 summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { (icon("code")) "{…}" }
@@ -500,8 +415,6 @@ fn audit_timeline_grouped(
     }
 }
 
-/// `GET /admin/users/{id}/access.csv` — v2 4c: the full GeoIP-resolved
-/// sub-access log for one user as CSV (up to 10k newest rows).
 pub(crate) async fn user_access_csv(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
@@ -552,11 +465,6 @@ pub(crate) async fn user_access_csv(
         .into_response()
 }
 
-/// `GET /admin/audit.csv?actor=...&action=...` — same filter set as
-/// the HTML timeline but returns a CSV body with `Content-Disposition:
-/// attachment; filename="vpnctl-audit-<YYYYMMDD>.csv"`. Limit is high
-/// (10000 rows) — operator running a yearly export shouldn't have to
-/// page; if they need more they bump the limit query.
 pub(crate) async fn audit_csv(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<AuditQuery>,
@@ -566,8 +474,6 @@ pub(crate) async fn audit_csv(
     let target = q.target.as_deref().filter(|s| !s.is_empty());
     let exclude = q.action_exclude();
 
-    /// Generous cap; the operator can re-export with ?limit= once we
-    /// add that to AuditQuery in a follow-up.
     const CSV_LIMIT: i64 = 10_000;
 
     let entries = match state
@@ -579,9 +485,6 @@ pub(crate) async fn audit_csv(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    // Build CSV manually — adding the `csv` crate for one writer
-    // would be over-engineering for 4 columns. Quote any field
-    // containing `"`, `,` or newline; double-up internal quotes.
     let mut out = String::from("ts,actor,action,target,payload\n");
     for e in &entries {
         out.push_str(&csv_field(&e.ts.to_rfc3339()));
@@ -592,9 +495,6 @@ pub(crate) async fn audit_csv(
         out.push(',');
         out.push_str(&csv_field(e.target.as_deref().unwrap_or("")));
         out.push(',');
-        // serde_json::to_string on a Value should never fail, but if
-        // it ever did the row would silently lose its payload column.
-        // Log instead of swallowing so the operator notices.
         let payload_str = match &e.payload {
             None => String::new(),
             Some(v) => match serde_json::to_string(&redact_audit_payload(v)) {
@@ -631,9 +531,6 @@ pub(crate) async fn audit_csv(
         .into_response()
 }
 
-/// Sanitize dynamic strings before using in HTTP header filenames (e.g. Content-Disposition).
-/// Keeps only ASCII alphanumeric characters, `-`, `_`, and `.`. Falls back to `"download"`
-/// if no valid ASCII characters remain, guaranteeing a valid ASCII HeaderValue.
 pub(crate) fn sanitize_header_filename(s: &str) -> String {
     let clean: String = s
         .chars()
@@ -646,13 +543,7 @@ pub(crate) fn sanitize_header_filename(s: &str) -> String {
     }
 }
 
-/// Quote a single CSV field per RFC 4180. If the field contains
-/// `"`, `,`, `\n`, `\r`, or ASCII control whitespace we wrap it in
-/// double-quotes and double any internal quotes; otherwise return the field verbatim.
 fn csv_field(s: &str) -> String {
-    // Formula-injection guard (audit 2026-06-10, OWASP CSV-injection):
-    // Excel/LibreOffice may execute = + - @ after leading whitespace.
-    // Prefix a single quote so spreadsheets treat the field as text.
     let trimmed = s.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\x0b');
     let injectable = matches!(trimmed.chars().next(), Some('=' | '+' | '-' | '@'));
     let s = if injectable {
@@ -688,9 +579,6 @@ mod csv_tests {
         assert_eq!(sanitize_header_filename(""), "download");
     }
 
-    /// OWASP CSV-injection pin (audit 2026-06-10): a field starting
-    /// with = + - @ must be neutralised with a leading quote so
-    /// Excel/LibreOffice render text instead of executing a formula.
     #[test]
     fn csv_field_neutralises_formula_prefixes() {
         assert_eq!(csv_field("=HYPERLINK(1)"), "'=HYPERLINK(1)");
@@ -703,9 +591,7 @@ mod csv_tests {
         assert_eq!(csv_field("\n@cmd"), "\"'\n@cmd\"");
         assert_eq!(csv_field("\x0b=CMD(1)"), "\"'\x0b=CMD(1)\"");
         assert_eq!(csv_field("\x0c+1"), "\"'\x0c+1\"");
-        // Quoting still composes with the injection guard.
         assert_eq!(csv_field("=a,b"), "\"'=a,b\"");
-        // Plain fields stay untouched.
         assert_eq!(csv_field("  user.grant"), "  user.grant");
         assert_eq!(csv_field("user.grant"), "user.grant");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");

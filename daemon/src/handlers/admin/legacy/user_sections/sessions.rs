@@ -11,11 +11,6 @@ use crate::handlers::admin::helpers::{
 use crate::http_util::path_segment_encode;
 use crate::i18n::{Locale, tr};
 
-/// Phase 5c — «Когда была активна» session timeline. Builds an
-/// implicit «active from-to» window per (user, server) from the
-/// 5-min clash-poll observations: consecutive ticks extend the
-/// session; a gap > 15 minutes closes it. Empty until the
-/// poller has run at least one tick post-Phase-5c deploy.
 pub(crate) async fn user_sessions_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
@@ -30,8 +25,6 @@ pub(crate) async fn user_sessions_section(
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "recent_sessions_for_user failed");
             Vec::new()
         });
-    // TT-4: a session is "live" if its last tick landed within ~one
-    // poll interval (5-min poll + slack) of now.
     let now = Utc::now();
     let live_cutoff = Duration::minutes(6);
     html! {
@@ -80,10 +73,6 @@ pub(crate) async fn user_sessions_section(
                     @for r in &rows {
                         @let dur = r.duration();
                         @let mins = dur.num_minutes().max(0);
-                        // TT-4: single-tick windows (started==last_seen)
-                        // are «≤5m» not the misleading «0m» — the user
-                        // WAS active, we just can't resolve below the
-                        // 5-min poll granularity.
                         @let dur_str = if mins == 0 {
                             "≤5m".to_string()
                         } else if mins >= 60 {
@@ -115,10 +104,6 @@ pub(crate) async fn user_sessions_section(
     }
 }
 
-/// Phase 5b — «Куда ходит этот юзер» section. Top destinations
-/// over the last 7 days, ranked by hit count (number of 5-min
-/// clash-poll ticks where the pair was observed). Empty until
-/// the poller has run at least one tick post-Phase-5b deploy.
 pub(crate) async fn user_top_destinations_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
@@ -135,14 +120,6 @@ pub(crate) async fn user_top_destinations_section(
             Vec::new()
         });
 
-    // Phase 5d: enrich bare-IP labels via `dns_ptr_cache`. The
-    // poller writes `IP:port` when sing-box's metadata.host was
-    // empty (most TCP-to-IP traffic); the resolver background
-    // job populates `dns_ptr_cache` separately. At render time we
-    // bulk-lookup so each row that's still a bare IP can be shown
-    // as `hostname:port (ip)` — matching the format
-    // `snapshot_cache::aggregate_by_destination` uses on the
-    // server-detail page (one canonical render shape for both).
     let mut ip_candidates: Vec<String> = rows
         .iter()
         .filter_map(|r| extract_ip_from_label(&r.destination_label).map(str::to_owned))

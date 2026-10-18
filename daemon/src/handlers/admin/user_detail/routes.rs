@@ -1,5 +1,3 @@
-//! Axum route handlers for the user-detail admin page and its sub-tabs.
-
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -9,8 +7,6 @@ use super::render::user_detail_render;
 use super::types::{UserDetailQuery, UserTab};
 use crate::AppState;
 
-// Thin axum handlers — one per tab route in app.rs. Bare
-// `/admin/users/{id}` (+ trailing slash) + `/overview` both land here.
 pub(crate) async fn user_detail(
     headers: HeaderMap,
     State(state): State<AppState>,

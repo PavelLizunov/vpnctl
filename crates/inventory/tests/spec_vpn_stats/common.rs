@@ -38,8 +38,6 @@ pub(crate) fn server(id: &str) -> Server {
     }
 }
 
-/// Like `server`, but with an explicit Marzban-style traffic
-/// multiplier so the usage-coefficient weighting can be exercised.
 pub(crate) fn server_coeff(id: &str, usage_coefficient: f64) -> Server {
     Server {
         usage_coefficient,

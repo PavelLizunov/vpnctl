@@ -353,11 +353,9 @@ fn awg2_share_link_renders_expected_uri() {
     );
     assert!(link.ends_with("#alice"), "tag: {link}");
 
-    // Generic Protocol::share_link returns unsupported error
     let proto = AmneziaWg2::new();
     assert!(proto.share_link(&ctx, &alice).is_err());
 
-    // AmneziaWg3 share_link also returns unsupported error
     let proto3 = AmneziaWg3::new();
     assert!(proto3.share_link(&ctx, &alice).is_err());
 }
@@ -371,7 +369,6 @@ fn awg2_share_link_errors_when_user_not_granted() {
     let users = [alice.clone()];
     let ctx = RenderCtx::with_peers(&server, &secrets, &users);
 
-    // bob is not in ctx.peers
     assert!(awg2_share_link(&ctx, &bob).is_err());
 }
 
@@ -440,10 +437,8 @@ fn awg3_share_link_errors_when_user_not_granted_or_secrets_missing() {
     let users = [alice.clone()];
     let ctx = RenderCtx::with_peers(&server, &secrets, &users);
 
-    // bob is not in ctx.peers
     assert!(awg3_share_link(&ctx, &bob).is_err());
 
-    // Missing header protection key fails closed
     let mut missing_secrets = secrets.clone();
     missing_secrets.remove(HEADER_KEY);
     let ctx_missing = RenderCtx::with_peers(&server, &missing_secrets, &users);

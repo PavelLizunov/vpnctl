@@ -1,5 +1,3 @@
-//! Overview summary card for user-detail right column.
-
 use crate::handlers::admin::icons::{icon, status};
 use maud::{Markup, html};
 
@@ -7,9 +5,6 @@ use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
 use crate::handlers::admin::legacy::user_is_likely_shared;
 use crate::http_util::path_segment_encode;
 
-/// Densified overview for the user-detail right column: four facts,
-/// 24h traffic split, and the grant summary. It only rearranges data
-/// already loaded by `user_detail_render`; no extra query or client state.
 pub(crate) fn user_overview_summary(
     user: &vpnctl_core::User,
     facts: (

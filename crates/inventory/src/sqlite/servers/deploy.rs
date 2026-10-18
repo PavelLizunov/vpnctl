@@ -27,9 +27,6 @@ pub(crate) const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
     )";
 
 impl SqliteInventory {
-    /// Stable snapshot of every inventory value that can change a node
-    /// deploy. Compare before/after the SSH work so a concurrent Web edit
-    /// cannot be masked by a later canonical `server.deploy` audit row.
     pub async fn deploy_input_revision(&self, id: &ServerId) -> Result<String> {
         Ok(sqlx::query_scalar(DEPLOY_INPUT_REVISION_SQL)
             .bind(&id.0)
@@ -37,9 +34,6 @@ impl SqliteInventory {
             .await?)
     }
 
-    /// Atomically compare deploy inputs and write either the canonical
-    /// baseline or a stale attempt. The no-op UPDATE acquires SQLite's write
-    /// lock before the comparison, so no mutation can commit between them.
     pub async fn audit_deploy_if_revision(
         &self,
         actor: &str,
@@ -77,18 +71,6 @@ impl SqliteInventory {
         Ok(matches)
     }
 
-    /// Read the per-server reserved-ports list (migration 0028).
-    /// Returns an empty Vec for servers that haven't had any ports
-    /// reserved — most installs are byte-equivalent to pre-0028
-    /// behaviour. Returns `Ok(vec![])` if the server doesn't exist
-    /// (caller already passed an unknown id — no need to double-
-    /// report; the deploy path will fail later with a useful
-    /// «unknown server» error).
-    ///
-    /// Stored as a JSON array of u16. Parse failures (corrupted DB)
-    /// degrade to empty — fail-OPEN on read because a wrong empty is
-    /// safer than crash-looping the deploy path; the write side
-    /// (`set_reserved_ports`) is the authoritative validator.
     pub async fn get_reserved_ports(&self, sid: &ServerId) -> Result<Vec<u16>> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT reserved_ports FROM servers WHERE id = ?1")
@@ -99,26 +81,10 @@ impl SqliteInventory {
             Some((s,)) => s,
             None => return Ok(Vec::new()),
         };
-        // Lenient parse — operator could have hand-edited the row in
-        // sqlite3, or a future schema migration could change shape.
-        // Either way, the deploy guard fails open on parse error.
         let parsed: Vec<u16> = serde_json::from_str(&json).unwrap_or_default();
         Ok(parsed)
     }
 
-    /// Replace the per-server reserved-ports list. `ports` is
-    /// caller-validated to fit u16 (the parsing layer in admin /
-    /// CLI rejects values outside 1..=65535 before calling). The
-    /// stored format is a JSON array; duplicates are de-duped and
-    /// the array is sorted ascending so `audit_log` payloads diff
-    /// cleanly across calls.
-    ///
-    /// Writes one `server.reserved_ports.set` audit row whenever the
-    /// stored value would change (NM-10 audit-on-actual-mutation
-    /// contract). Idempotent re-saves of the same list are silent.
-    /// Errors with `Invalid` if `sid` doesn't exist (matches the
-    /// behaviour of `set_server_fingerprint` — caller passing an
-    /// unknown id is a logic bug, not an expected condition).
     pub async fn set_reserved_ports(&self, sid: &ServerId, ports: &[u16]) -> Result<()> {
         let mut sorted: Vec<u16> = ports.to_vec();
         sorted.sort_unstable();
@@ -153,8 +119,6 @@ impl SqliteInventory {
             .execute(&mut *tx)
             .await?;
 
-        // Audit payload carries both old + new sorted lists so
-        // operator can diff at a glance from the audit timeline.
         let payload = serde_json::json!({
             "server_id": sid.0,
             "old": serde_json::from_str::<serde_json::Value>(&prior_json).unwrap_or(serde_json::json!([])),
@@ -189,18 +153,11 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Initialize one declared secret or a coherent pair without replacing
-    /// existing values. Candidates may have been generated from a stale
-    /// bootstrap snapshot: reread under SQLite's writer lock before deciding.
-    /// Partial sets fail closed; inserts and name-only audits commit together.
     pub(crate) async fn initialize_server_secret_set(
         &self,
         id: &ServerId,
         candidates: &[(&str, String)],
     ) -> Result<(HashMap<String, String>, bool)> {
-        // Acquire the writer lock BEFORE reading. A deferred read transaction
-        // can fail to upgrade with SQLITE_BUSY_SNAPSHOT after another bootstrap
-        // commits, even with busy_timeout configured. IMMEDIATE waits instead.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut stored = HashMap::with_capacity(candidates.len());
         for (key, _) in candidates {
@@ -225,8 +182,6 @@ impl SqliteInventory {
         let minted = stored.is_empty();
         if minted {
             for (key, value) in candidates {
-                // No upsert: the writer lock makes the absence check and all
-                // inserts indivisible, including across independent pools.
                 sqlx::query(
                     "INSERT INTO server_secrets (server_id, key, value) VALUES (?1, ?2, ?3)",
                 )
@@ -273,39 +228,6 @@ impl SqliteInventory {
         Ok(map)
     }
 
-    /// **Pending-deploy detection** (Option B from the 2026-05-23
-    /// «user-create → silent server miss» quickfix discussion).
-    ///
-    /// Given a user_id + list of granted server_ids, return the
-    /// subset of servers whose **latest `server.deploy` audit row
-    /// is older than the user's latest mutation** (`user.add`,
-    /// `user.grant`, `user.revoke`, `user.set_vpn_router_device_id`,
-    /// `user.disable`, `user.enable`, and the Boosty-bridge flips
-    /// `boosty.disable` / `boosty.enable`). Those servers' running sing-box
-    /// config does NOT yet include the user's current state — clicking
-    /// their detail page's «deploy» button pushes the fresh render and
-    /// closes the gap.
-    ///
-    /// **Scoped since 2026-07-10** (was «coarse by design» before):
-    /// `user.grant` / `user.revoke` rows count only against the server
-    /// named in their `payload.server` — post-#92 the grant path
-    /// auto-deploys that very server, so the old any-mutation-flags-
-    /// every-server rule left a permanent phantom banner on all OTHER
-    /// nodes after each grant (live repro: granting main-brat on `us`
-    /// flagged cdn/de/is/nl «not deployed» though nothing about them
-    /// changed). Genuinely server-agnostic mutations (`user.add`,
-    /// device-id, disable/enable — they alter every node's desired
-    /// config) still flag ALL granted servers, and legacy grant rows
-    /// WITHOUT a `payload.server` field keep the old coarse reading
-    /// (can't tell which server → assume relevant).
-    ///
-    /// **`None`-deploy case:** a server with no successful deploy audit
-    /// baseline is pending if the user has any relevant mutation.
-    ///
-    /// **Only SUCCESSFUL deploys count as a baseline:** all deploy paths
-    /// reserve the canonical `server.deploy` action for a config actually
-    /// applied from an unchanged inventory revision. Failed, skipped, and
-    /// stale attempts use distinct actions and cannot clear the banner.
     pub async fn servers_pending_deploy_for_user(
         &self,
         user_id: &UserId,
@@ -314,11 +236,6 @@ impl SqliteInventory {
         if granted_server_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // For each granted server: latest RELEVANT user-mutation id
-        // (grant/revoke scoped to this server via payload.server;
-        // server-agnostic mutations + legacy no-payload rows always
-        // relevant) vs the server's latest good deploy. Loop is cheap
-        // at homelab scale (≤100 servers ⇒ ≤200 indexed lookups).
         let mut out: Vec<ServerId> = Vec::new();
         for sid in granted_server_ids {
             let user_row = sqlx::query(
@@ -342,9 +259,6 @@ impl SqliteInventory {
             .await?;
             let user_latest_id: Option<i64> = user_row.try_get("id")?;
             let Some(user_latest_id) = user_latest_id else {
-                // No mutation relevant to this server (legacy import
-                // with zero audit rows, or all grants target other
-                // nodes) — nothing to flag here.
                 continue;
             };
             let row = sqlx::query(
@@ -355,8 +269,6 @@ impl SqliteInventory {
             .fetch_one(&self.pool)
             .await?;
             let deploy_id: Option<i64> = row.try_get("id")?;
-            // Pending if: no deploy ever recorded (None) OR last
-            // deploy is older than the user's last relevant change.
             match deploy_id {
                 None => out.push(sid.clone()),
                 Some(id) if id < user_latest_id => out.push(sid.clone()),
@@ -366,30 +278,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// **Server-side pending-deploy detection** (audit 2026-06-10,
-    /// review follow-up to the revoke unification). The per-user
-    /// detector above can't cover one case at all: after a REVOKE the
-    /// server leaves the user's granted list, so no user-detail banner
-    /// will ever mention it — yet that node is exactly the one still
-    /// running the revoked UUID. This is the server-detail counterpart:
-    /// «has this server's grant MEMBERSHIP changed since its last
-    /// deploy?»
-    ///
-    /// Keys on the canonical per-user rows (`user.grant` /
-    /// `user.revoke`) via their `payload.server` field — both written
-    /// since the 2026-06-04/2026-06-10 unifications, and only for
-    /// ACTUAL mutations, so an idempotent re-grant can't raise a false
-    /// pending here. Pre-unification legacy rows (`action='grant'`,
-    /// target=server) are invisible to this query — acceptable: any
-    /// server deployed since then has a fresher `server.deploy` row
-    /// anyway.
-    ///
-    /// Also covers audited protocol/kernel and current granted-user changes.
-    /// Operation hints are process-local, so this durable detector must retain
-    /// pending state for credential/enable changes after daemon restart.
-    ///
-    /// Only the canonical successful `server.deploy` action counts as a
-    /// baseline, matching `servers_pending_deploy_for_user`.
     pub async fn server_pending_deploy(&self, server_id: &ServerId) -> Result<bool> {
         let row = sqlx::query(
             "SELECT MAX(id) AS id FROM audit_log
@@ -425,14 +313,7 @@ impl SqliteInventory {
         })
     }
 
-    /// **Q-4e** — newest `kernel_versions_json` per server across the
-    /// fleet. Returns the raw JSON string (caller extracts the
-    /// `\"sing-box\"` key); `None` for servers whose latest row predates
-    /// version capture or had no versions. Backs the dashboard
-    /// kernel-version fleet card. Served by `idx_node_health_server_ts`.
     pub async fn kernel_versions_fleet(&self) -> Result<Vec<(ServerId, Option<String>)>> {
-        // Correlated subquery picks the newest ts per server; the outer
-        // row then reads that row's JSON. One row per server.
         let rows = sqlx::query(
             "SELECT nh.server_id AS server_id,
                     nh.kernel_versions_json AS kernel_versions_json

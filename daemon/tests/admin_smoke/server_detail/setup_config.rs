@@ -37,7 +37,7 @@ async fn admin_server_detail_naive_section_renders_when_enabled() {
 async fn admin_server_detail_naive_section_absent_when_not_enabled() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // seeded server is vless+reality only
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
     assert!(
         !html.contains("/naive-config"),
@@ -118,7 +118,6 @@ async fn admin_server_set_udp_pair_toggles_and_audits() {
         "default off"
     );
 
-    // Enable via the handler.
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -147,7 +146,6 @@ async fn admin_server_set_udp_pair_toggles_and_audits() {
         "audit row server.udp_pair.set must land"
     );
 
-    // Disable via the handler.
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -194,9 +192,6 @@ async fn admin_server_set_naive_config_rejects_injection_in_domain() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv.add_server(&naive_server("nv")).await.unwrap();
-    // `evil{block}` — a `{` would break out of the forward_proxy block
-    // in the rendered Caddyfile. Must be rejected at save-time (400),
-    // and nothing may persist.
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -243,9 +238,6 @@ async fn admin_server_set_naive_config_404_on_missing_server() {
 
 #[tokio::test]
 async fn server_detail_renders_push_deploy_key_section() {
-    // Phase G chunk 3.5 follow-up — every server-detail page must
-    // expose a «push deploy key» form so the operator can append
-    // the daemon's pubkey without dropping to a terminal.
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     st.inv
@@ -373,12 +365,6 @@ async fn server_push_deploy_key_rejects_invalid_ssh_user_before_connecting() {
 
 #[tokio::test]
 async fn server_push_deploy_key_rejects_empty_password_without_reference_key() {
-    // Defensive: empty password reaches the handler if the
-    // browser bypasses the `required` attr (curl, custom client).
-    // Must 400 with a clear message — NEVER attempt the SSH call
-    // with no password (sshpass would silently retry without
-    // password and the failure mode would look like generic
-    // network error).
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     st.inv
@@ -435,7 +421,6 @@ async fn admin_server_detail_shows_deploy_button() {
         "deploy form must POST to /admin/servers/<id>/deploy (noscript fallback)"
     );
     assert!(html.contains(">deploy →<"), "submit button label drifted");
-    // Item-1 SSE deploy: JS-driven button streams progress to a log pane.
     assert!(
         html.contains(r#"data-sse-url="/admin/servers/sb/deploy/sse""#),
         "deploy button must carry the SSE trigger URL"
@@ -448,7 +433,6 @@ async fn admin_server_detail_shows_deploy_button() {
         html.contains(r#"src="/admin/assets/admin.js""#),
         "external admin.js (CSP-safe SSE wiring) must be loaded"
     );
-    // The POST fallback must be inside <noscript> (JS path is primary).
     assert!(
         html.contains("<noscript>"),
         "synchronous POST deploy must be the <noscript> fallback"
@@ -543,7 +527,6 @@ async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
         .await
         .unwrap();
     let app = router(s);
-    // Pre-deploy: no WG keys.
     let before = inv
         .list_server_secrets(&ServerId("wg-node".into()))
         .await
@@ -565,7 +548,6 @@ async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
-    // Post-deploy: WG server keypair minted.
     let after = inv
         .list_server_secrets(&ServerId("wg-node".into()))
         .await
@@ -578,7 +560,6 @@ async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
     assert!(priv_.ends_with('='));
     assert_ne!(pub_, priv_, "pub != priv");
 
-    // The attempt is recorded, but not as the canonical success baseline.
     let audit = inv.recent_audit(5).await.unwrap();
     let row = audit
         .iter()
@@ -604,10 +585,6 @@ async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
         .as_ref()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    // Post-refactor (2026-05-30 server_secret_specs): the `bootstrapped`
-    // audit field records the minted secret KEY NAMES (not human labels),
-    // so the WG keypair shows as its primary key. Asserting the key name
-    // is strictly more precise than the old "wireguard server keypair".
     assert!(
         payload.contains("wireguard.server_private_key"),
         "deploy audit payload should record the minted WG key; got {payload}"
@@ -616,12 +593,6 @@ async fn admin_server_deploy_bootstraps_keys_but_keeps_pending_on_failure() {
 
 #[tokio::test]
 async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
-    // UNIQUE server-id per deploy-POST test: the per-server deploy gate
-    // (`wizard_bootstrap::DeployGuard`) is a process-wide static, so two
-    // parallel tests deploying the SAME id would race — the loser gets a
-    // 409 "deploy already running" and mints no secrets. Each deploy test
-    // must therefore own its server-id (here `wg-idem`, distinct from the
-    // sibling `wg-node` mint test).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -642,7 +613,6 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
         .unwrap();
     let app = router(s);
 
-    // First click.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -663,7 +633,6 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
         .unwrap()
         .clone();
 
-    // Second click — keys must NOT change (idempotent).
     app.oneshot(
         add_same_origin(
             Request::builder()
@@ -690,9 +659,6 @@ async fn admin_server_deploy_idempotent_re_click_no_dup_keys() {
 
 #[tokio::test]
 async fn admin_server_detail_deploy_caption_describes_ssh_push() {
-    // 2026-05-17 — Pavel: подпись «Mints missing keys… Subscription
-    // URLs go live immediately» неполная: реальный deploy включает
-    // ensure_installed + apply_config + restart. Pin the new copy.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -713,7 +679,6 @@ async fn admin_server_detail_deploy_caption_describes_ssh_push() {
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/deploysrv").await;
 
-    // New caption mentions the real SSH-side work, not just secret mint.
     assert!(
         html.contains("ensure_installed"),
         "deploy caption must mention ensure_installed (apt-get install side)"
@@ -722,21 +687,16 @@ async fn admin_server_detail_deploy_caption_describes_ssh_push() {
         html.contains("apply_config"),
         "deploy caption must mention apply_config (systemctl restart side)"
     );
-    // Old half-truth wording is gone.
     assert!(
         !html.contains("Mints missing keys for every enabled protocol."),
         "deploy caption regressed to the old keys-only wording"
     );
-    // Tooltip on the button mentions the full cycle too.
     assert!(
         html.contains("Full deploy:") || html.contains("Full deploy "),
         "deploy button title attribute must lead with 'Full deploy:'"
     );
 }
 
-/// The server-detail page must surface a "danger zone" link to the
-/// delete-confirm page. Without it the operator has no UI path to remove
-/// a decommissioned server (the bug this feature fixes).
 #[tokio::test]
 async fn admin_server_detail_has_delete_link() {
     let dir = TempDir::new().unwrap();
@@ -758,14 +718,12 @@ async fn admin_server_set_reality_config_saves_valid_port_and_audits() {
         .await
         .unwrap();
 
-    // UI section renders on the protocols tab for a reality-enabled node.
     let html = fetch_html(router(s.clone()), "/admin/servers/cdn/protocols").await;
     assert!(
         html.contains(r#"action="/admin/servers/cdn/reality-config""#),
         "reality config form must POST to the right route"
     );
 
-    // 8443 frees tcp/443 for naive → guard passes → 303 + persisted.
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -802,9 +760,6 @@ async fn admin_server_set_reality_config_saves_valid_port_and_audits() {
 
 #[tokio::test]
 async fn admin_server_set_reality_config_rejects_zero_with_single_prefix() {
-    // listen_port=0 → 400, and the body carries EXACTLY ONE
-    // `vpnctl admin: ` prefix — `error_text` is the single source of
-    // truth (PR #139 round-2 finding 1).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -842,7 +797,6 @@ async fn admin_server_set_reality_config_rejects_zero_with_single_prefix() {
         !body.starts_with("vpnctl admin: vpnctl admin:"),
         "doubled prefix regressed: {body:?}"
     );
-    // Nothing persisted on rejection.
     assert_eq!(
         s.inv
             .get_server_secret(&vpnctl_core::ServerId("cdn".into()), "vless.listen_port")
@@ -1144,11 +1098,6 @@ async fn admin_server_routing_policy_rejects_invalid_routes_unchanged() {
 
 #[tokio::test]
 async fn admin_server_set_reality_config_rejects_naive_collision_at_save_time() {
-    // naive owns tcp/443 on this node; blank listen_port means reality
-    // falls back to its default 443 → the save-time guard must reject
-    // with the port-conflict copy BEFORE anything persists (deploy
-    // stays the authoritative gate, but the operator gets the answer
-    // at save time — symmetry with the vless-ws form).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -1242,10 +1191,8 @@ async fn admin_server_client_detour_sets_clears_and_audits() {
     let sid1 = ServerId("s1".into());
     let sid2 = ServerId("s2".into());
 
-    // Initially None
     assert_eq!(s.inv.client_detour_via(&sid1).await.unwrap(), None);
 
-    // Set detour s1 -> s2
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -1277,7 +1224,6 @@ async fn admin_server_client_detour_sets_clears_and_audits() {
         "audit row server.client_detour.set must land"
     );
 
-    // Clear detour s1 -> direct
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -1323,7 +1269,6 @@ async fn admin_server_client_detour_rejects_invalid_detour_error() {
     let s = state(&dir).await;
     s.inv.add_server(&client_detour_server("s1")).await.unwrap();
 
-    // Self-reference s1 -> s1 is invalid
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(

@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn full_sha_is_shortened_to_seven_chars() {
-        let sha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40 hex
+        let sha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
         assert_eq!(with_provenance("0.9.0", Some(sha)), "0.9.0+a1b2c3d");
     }
 
@@ -103,15 +103,12 @@ mod tests {
 
     #[test]
     fn non_hex_sha_falls_back_to_unknown() {
-        // Right length, but not a hex digest (e.g. a branch name).
         assert_eq!(with_provenance("0.9.0", Some("notasha")), "0.9.0+unknown");
         assert_eq!(with_provenance("0.9.0", Some("zzzzzzz")), "0.9.0+unknown");
     }
 
     #[test]
     fn build_version_carries_the_package_semver() {
-        // Whatever the compile-time SHA, the SemVer prefix is always the
-        // crate's CARGO_PKG_VERSION.
         let v = build_version();
         assert!(
             v.starts_with(&format!("{}+", env!("CARGO_PKG_VERSION"))),

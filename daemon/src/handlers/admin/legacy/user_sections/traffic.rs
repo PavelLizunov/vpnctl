@@ -11,23 +11,13 @@ use crate::handlers::admin::legacy::server_detail::status_tile;
 use crate::http_util::path_segment_encode;
 use crate::i18n::{K, Locale, t, tr};
 
-/// Window spec for `vpn_sparkline` — fixed grid of cells, each
-/// `bucket_hours` long, ending at «now». 24h × 1h = 24 cells. 7d
-/// × 24h = 7 cells. 30d × 24h = 30 cells. all-time uses a stretch
-/// bucket so the operator always sees ≤30 bars even when the
-/// daemon has been running for months.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::handlers::admin::legacy) struct VpnSparklineWindow {
-    /// Tab id used in the URL (`?window=24h`).
     pub(in crate::handlers::admin::legacy) slug: &'static str,
-    /// Human label rendered in the tab + caption.
     pub(in crate::handlers::admin::legacy) label_en: &'static str,
     pub(in crate::handlers::admin::legacy) label_ru: &'static str,
-    /// Cells in the grid.
     pub(in crate::handlers::admin::legacy) cells: u32,
-    /// Hours covered by each cell.
     pub(in crate::handlers::admin::legacy) bucket_hours: u32,
-    /// Optional caption-suffix override (else «per <bucket>»).
     pub(in crate::handlers::admin::legacy) per_bucket_en: &'static str,
     pub(in crate::handlers::admin::legacy) per_bucket_ru: &'static str,
 }
@@ -82,10 +72,6 @@ pub(in crate::handlers::admin::legacy) fn pick_vpn_sparkline_window(
         .unwrap_or(VPN_SPARKLINE_WINDOWS[0])
 }
 
-/// Round a byte count up to a «nice» tick value for Y-axis labels.
-/// Powers-of-1024 family: 1, 2, 5, 10, 20, 50 × {KiB, MiB, GiB, TiB}.
-/// Picks the smallest nice value ≥ `n`. Returns 1 KiB minimum so we
-/// never emit a `0`-labelled axis for trace-but-nonzero traffic.
 fn nice_byte_ceiling(n: u64) -> u64 {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -132,16 +118,6 @@ fn nice_byte_ceiling(n: u64) -> u64 {
     n
 }
 
-/// Format an X-axis tick label for the given bucket-start instant.
-/// 1h buckets → `HH:MM` (e.g. «14:00»). 24h buckets → `MMM DD`
-/// (e.g. «May 17»). 30d buckets → `MMM YYYY` (e.g. «May 2026»).
-///
-/// 2026-05-23 — converts to MSK (+03:00) before formatting. The
-/// hourly bucket label especially matters: a peak at «14:00 UTC»
-/// shown as «14:00» reads as 14:00 MSK, which is 11:00 UTC actually
-/// — operator's intuition («it's 5pm Moscow time») gets the wrong
-/// bar. Daily and monthly labels also shift, but the visual delta
-/// is tiny (one day at most).
 fn x_axis_tick_label(t: chrono::DateTime<Utc>, bucket_hours: u32) -> String {
     let fmt = if bucket_hours == 1 {
         "%H:%M"
@@ -153,13 +129,6 @@ fn x_axis_tick_label(t: chrono::DateTime<Utc>, bucket_hours: u32) -> String {
     t.with_timezone(&display_tz()).format(fmt).to_string()
 }
 
-/// user#6 — per-cell (upload + download) byte totals for the compact
-/// `sparkline_svg` trend folded into `live_vpn_stats_section`. Buckets
-/// `rows` into `window.cells` cells of `window.bucket_hours` each,
-/// newest cell on the right — identical bucketing to `vpn_traffic_chart`
-/// so the sparkline and the full chart can't disagree. Returns one f64
-/// per cell (bytes); an all-zero series means «no traffic in window»
-/// and the caller skips rendering the sparkline.
 fn vpn_traffic_trend_series(
     rows: &[vpnctl_inventory::VpnStatsRow],
     window: VpnSparklineWindow,
@@ -187,34 +156,6 @@ fn vpn_traffic_trend_series(
     per_cell.into_iter().map(|v| v as f64).collect()
 }
 
-/// PowerBI / Tableau-style stacked bar chart for VPN traffic.
-///
-/// Replaces the previous bare-bones sparkline. The redesign is
-/// 2026-05-23 follow-up to Pavel's feedback: «график без явных
-/// осей x и у… посмотри как оформляют аналитические данные в
-/// powerbi или в tableau». Now includes:
-///
-/// * **Y-axis** on the left with 5 tick labels (`0`, `25%`, `50%`,
-///   `75%`, `100%` of the «nice»-rounded max) — each labeled with
-///   the byte count, not a raw percentage.
-/// * **Horizontal grid lines** at every Y tick, drawn in
-///   `var(--rule)` so they recede visually behind the bars.
-/// * **X-axis** below with date / time labels at meaningful
-///   intervals (every 6h for 24h, every day for 7d, every 5 days
-///   for 30d, every 6 months for «all»). Dense windows skip ticks
-///   to avoid label collision.
-/// * **Stacked bars** — upload at bottom, download on top, both
-///   in the editorial accent palette.
-/// * **Legend** (`■ download · ■ upload`) below the chart so the
-///   colour mapping is unambiguous.
-/// * **Per-bar tooltip** via SVG `<title>` showing bucket start +
-///   absolute byte values.
-/// * **Summary line** below legend: `max X per Y · total Z`.
-///
-/// Chart geometry: 720×240 viewBox with 56 px left padding for
-/// Y labels and 32 px bottom padding for X labels. Scales
-/// responsively via `style="width: 100%; max-width: 720px;
-/// height: auto"`.
 pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
     rows: &[vpnctl_inventory::VpnStatsRow],
     window: VpnSparklineWindow,
@@ -257,20 +198,13 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
         .zip(dn_per_cell.iter())
         .map(|(u, d)| u.saturating_add(*d))
         .sum();
-    // Y-axis ceiling rounded UP to the nearest «nice» power-of-1024
-    // step so the topmost label reads clean («10 GiB» instead of
-    // «8.7 GiB» — operators round in their head anyway, the chart
-    // should do it for them).
     let y_max = nice_byte_ceiling(raw_max);
-    // Chart geometry. Coordinates are in SVG-user units; the outer
-    // <svg> uses `viewBox` so the chart scales responsively to its
-    // container width without distorting proportions.
     let vb_w = 720;
     let vb_h = 240;
-    let pad_l = 64; // y-axis label column
-    let pad_r = 16; // breathing room on right
-    let pad_t = 12; // top breathing room
-    let pad_b = 44; // x-axis label row + legend
+    let pad_l = 64;
+    let pad_r = 16;
+    let pad_t = 12;
+    let pad_b = 44;
     let plot_w = (vb_w - pad_l - pad_r) as f64;
     let plot_h = (vb_h - pad_t - pad_b) as f64;
     let n_ticks_y: usize = 4;
@@ -278,21 +212,15 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
     let bar_gap = if cells > 14 { 2.0 } else { 4.0 };
     let bar_w = (bar_slot - bar_gap).max(2.0);
     let mut svg_inner = String::new();
-    // Y-axis grid lines + labels at 0, 25%, 50%, 75%, 100% of y_max.
     for t in 0..=n_ticks_y {
         let frac = t as f64 / n_ticks_y as f64;
         let val = ((y_max as f64) * frac) as u64;
         let y = pad_t as f64 + plot_h - frac * plot_h;
-        // Grid line spans the plot area only (not over the label
-        // column) so the chart-area / label-column separation is
-        // clean. Skip the topmost line if it'd touch the chart
-        // border.
         svg_inner.push_str(&format!(
             r#"<line x1="{x1}" y1="{y:.1}" x2="{x2}" y2="{y:.1}" stroke="var(--rule)" stroke-width="0.5"/>"#,
             x1 = pad_l,
             x2 = vb_w - pad_r,
         ));
-        // Right-aligned Y label.
         svg_inner.push_str(&format!(
             r#"<text x="{x:.1}" y="{ty:.1}" text-anchor="end" font-family="var(--mono)" font-size="10" fill="var(--mute)">{label}</text>"#,
             x = pad_l as f64 - 6.0,
@@ -304,17 +232,12 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
             },
         ));
     }
-    // X-axis baseline (the «0» line is implicit in the lowest grid
-    // row above, but draw an explicit darker line so the chart has
-    // a clear floor).
     svg_inner.push_str(&format!(
         r#"<line x1="{x1}" y1="{y:.1}" x2="{x2}" y2="{y:.1}" stroke="var(--ink)" stroke-width="0.8"/>"#,
         x1 = pad_l,
         x2 = vb_w - pad_r,
         y = pad_t as f64 + plot_h,
     ));
-    // Bars + per-bar tooltips. Iterate cells; for each non-zero
-    // total, draw upload then download stacked.
     for i in 0..cells {
         let up = up_per_cell[i];
         let dn = dn_per_cell[i];
@@ -329,10 +252,6 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
             up_h = humanize_bytes(up),
             t_h = humanize_bytes(total),
         );
-        // Empty bar still gets a hover-rect so tooltip works even
-        // on quiet hours («0 download, 0 upload at 03:00»). Hover
-        // rect is invisible (fill="transparent") but full plot
-        // height for easy targeting.
         svg_inner.push_str(&format!(
             r#"<g><title>{tooltip}</title><rect x="{x:.1}" y="{ht_y}" width="{w:.1}" height="{ht_h:.1}" fill="transparent"/>"#,
             x = x_left,
@@ -362,8 +281,6 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
         }
         svg_inner.push_str("</g>");
     }
-    // X-axis labels. Pick tick interval so we render ~5-8 labels
-    // total — denser windows skip ticks to avoid collision.
     let tick_every = match cells {
         0..=8 => 1,
         9..=16 => 2,
@@ -390,8 +307,6 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
     html! {
         div style="margin: 12px 0; padding: 12px 14px; background: var(--paper); border: 1px solid var(--rule);" {
             (maud::PreEscaped(svg))
-            // Legend + summary line. Inline-flex so they stay on
-            // one row when there's space and wrap on narrow viewports.
             div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 12px; font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 4px; padding: 0 4px;" {
                 span {
                     span style="display: inline-block; width: 10px; height: 10px; background: var(--acc); vertical-align: middle; margin-right: 4px;" {}
@@ -412,19 +327,6 @@ pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
     }
 }
 
-/// Top-of-page «time window» picker (2026-05-23 — Pavel «возможность
-/// выбора как window: 24h / 7 days / 30 days / all»).
-///
-/// Renders ONE shared picker that drives every time-series tile on
-/// the page below (VPN activity, Heavy users, Fleet traffic chart,
-/// user-detail Live VPN stats, …). Sits at the top so the operator
-/// picks once and scrolls down to see all tiles in sync.
-///
-/// Tab links use `#timeframe` anchor so a click jumps the browser
-/// BACK to this picker (not the page top) after the reload —
-/// preserves Pavel's «scroll-to-top is annoying» feedback.
-///
-/// `base_url` is the absolute path WITHOUT query string.
 pub(in crate::handlers::admin::legacy) fn window_picker_section(
     base_url: &str,
     active_slug: &str,
@@ -464,14 +366,8 @@ pub(in crate::handlers::admin::legacy) fn window_picker_section(
     }
 }
 
-/// Daemon-wide default threshold when a user has none set. 80% is
-/// the magic number — operators historically miss the limit when
-/// alerts only fire at 100% (by then the user is already over).
-/// Picked once here so changing it later is one constant edit.
 pub(crate) const DEFAULT_TRAFFIC_THRESHOLD_PCT: u8 = 80;
 
-/// Format bytes as `1.2 GiB / 5 GiB (24%)` — used in the usage
-/// progress bar copy.
 fn fmt_traffic_progress(used: u64, limit: u64) -> String {
     let pct = if limit == 0 {
         0
@@ -485,32 +381,17 @@ fn fmt_traffic_progress(used: u64, limit: u64) -> String {
     )
 }
 
-/// user#3 — straight-line month-end traffic projection. Extrapolates
-/// `used` (month-to-date bytes) to a full-month estimate assuming the
-/// rest of the month matches the daily average so far:
-/// `used / day_of_month × days_in_month`.
-///
-/// Returns `None` when `used == 0` (nothing to project — the «0»
-/// projection is noise, not signal) so the caller can skip the line.
-/// `day_of_month` is calendar-1-based and therefore never 0, but the
-/// `.max(1)` guard makes the division provably panic-free regardless
-/// of any future clock-skew bug. Saturating arithmetic throughout.
 fn project_month_end(used: u64) -> Option<u64> {
     if used == 0 {
         return None;
     }
     let now = Utc::now();
-    let day = u64::from(now.day()).max(1); // 1..=31, guarded
+    let day = u64::from(now.day()).max(1);
     let days_in_month = u64::from(days_in_month(now.year(), now.month()));
-    // used / day × days_in_month, computed in u128 to avoid an
-    // intermediate overflow on a multi-TiB month, then saturated back.
     let projected = (u128::from(used) * u128::from(days_in_month)) / u128::from(day);
     Some(projected.min(u128::from(u64::MAX)) as u64)
 }
 
-/// Calendar days in `(year, month)`. Handles leap Februaries. Returns
-/// 30 for an out-of-range month (defensive — `chrono::Month` is always
-/// 1..=12 in practice, but the fallback keeps the projection finite).
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -523,11 +404,6 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
-/// Per-user traffic-limit section on the user-detail page. Shows
-/// the month-to-date total + the configured limit (if any) + an
-/// inline form to change both. Operator can set a cap even when
-/// no traffic has accrued yet — alerts fire only after the limit
-/// is crossed.
 pub(crate) async fn user_traffic_limit_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
@@ -579,13 +455,6 @@ pub(crate) async fn user_traffic_limit_section(
                 div style="height: 8px; background: var(--rule); margin-bottom: 16px; overflow: hidden;" {
                     div style=(format!("height: 100%; width: {bar_pct}%; background: {bar_fill};")) {}
                 }
-                // user#3 — straight-line month-end projection. «If the
-                // rest of the month looks like the part so far»:
-                // used / day-of-month × days-in-month. Guards the
-                // day-of-month == 0 impossibility (calendar days are
-                // 1-based; the guard is belt-and-suspenders so a future
-                // clock bug can't divide by zero). Only meaningful with
-                // a cap set, so it lives in this arm.
                 @if let Some(projected) = project_month_end(used) {
                     @let proj_pct = ((projected as u128 * 100) / lim as u128).min(999) as u32;
                     @let proj_over = proj_pct >= 100;
@@ -620,10 +489,6 @@ pub(crate) async fn user_traffic_limit_section(
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
                 (tr(lang, "limit", "лимит"))
             }
-            // Operator-friendly input: GiB. Backend converts to
-            // bytes. 0 / empty = clear the limit. With no cap the
-            // field renders EMPTY + a placeholder — a literal «0.0»
-            // read as "limit is zero" (design review 2026-07-10).
             @let limit_gib_value = limit_opt
                 .map(|b| format!("{:.1}", b as f64 / 1_073_741_824.0))
                 .unwrap_or_default();
@@ -690,11 +555,6 @@ pub(crate) async fn live_vpn_stats_section(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 (tr(
                     lang,
-                    // Honest copy (audit 2026-06-10): the scheduler is
-                    // LIVE (spawn_clash_poller, 5-min cadence) — blank
-                    // here means no snapshot reached this user yet:
-                    // poller can't SSH the node, sing-box clash-api off,
-                    // or the user simply hasn't connected.
                     "No live stats yet. The clash-api poller runs every 5 minutes — blank means no snapshot has covered this user yet: the node may be unreachable over SSH, its sing-box may lack the clash-api block, or the user hasn't connected. The poller needs the SSH key on the vpnctld host's ",
                     "Живой статистики пока нет. Поллер clash-api снимает снэпшоты каждые 5 минут — пусто значит ни один снэпшот ещё не зацепил этого юзера: нода может быть недоступна по SSH, в её sing-box может не быть clash-api блока, либо юзер не подключался. Поллеру нужен SSH-ключ на хосте vpnctld в ",
                 ))
@@ -708,8 +568,6 @@ pub(crate) async fn live_vpn_stats_section(
         };
     }
 
-    // Aggregate over the window: total up + down (sum of all rows
-    // for this user), peak active_connections.
     let mut total_up: u64 = 0;
     let mut total_dn: u64 = 0;
     let mut peak_conns: u32 = 0;
@@ -750,14 +608,6 @@ pub(crate) async fn live_vpn_stats_section(
             (status_tile("downloaded", &humanize_bytes(total_dn), "var(--ink)"))
             (status_tile("peak conns", &peak_conns.to_string(), "var(--ink)"))
         }
-        // user#6 — 7d/30d traffic trend folded in here. A
-        // `window_picker_section` scoped to THIS user's detail page lets
-        // the operator widen the window (24h / 7d / 30d / all) without a
-        // separate query — the section already re-fetched `rows` at the
-        // picked window above, so the compact `sparkline_svg` below just
-        // re-buckets those same rows into per-cell (up+down) totals. The
-        // full PowerBI-style chart still renders below; this is the
-        // at-a-glance shape so a 30-day trend is one click away.
         (window_picker_section(
             &format!("/admin/users/{}/traffic", path_segment_encode(&uid.0)),
             window.slug,
@@ -770,9 +620,6 @@ pub(crate) async fn live_vpn_stats_section(
                 div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin-bottom: 2px;" {
                     (tr(lang, "traffic trend · ", "тренд трафика · ")) (window_label)
                 }
-                // R2 2026-07-10: label_max off — the in-SVG label printed
-                // RAW BYTES («max 84028835»); the humanized caption below
-                // replaces it. Width matches the tables (was 720 ≈ half).
                 (sparkline_svg_scaled(&trend, 1160, 60, None, false))
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
                     (tr(lang, "max ", "макс ")) (humanize_bytes(trend_max as u64))
@@ -815,12 +662,6 @@ pub(crate) async fn live_vpn_stats_section(
                 }
             }
         }
-        // 2026-05-23 — PowerBI-style chart. Window picker now
-        // lives at top of page (`window_picker_section`); chart-
-        // internal tabs removed so the operator has one mental
-        // model «pick once, all tiles update». Anchor stays so
-        // tab clicks from the top picker (or anchor links from
-        // elsewhere) scroll back to the chart.
         div id="vpn-traffic" {
             (vpn_traffic_chart(&rows, window, lang))
         }

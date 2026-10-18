@@ -2,11 +2,6 @@ use super::*;
 use vpnctl_core::{User, UserId};
 
 impl SqliteInventory {
-    // ── Boosty bridge (migration 0040) ──────────────────────────────────
-
-    /// All user → Boosty-subscriber links (users with a non-NULL
-    /// `boosty_subscriber_id`). The reconciler joins these with each
-    /// user's `disabled` state.
     pub async fn list_boosty_links(&self) -> Result<Vec<(UserId, i64)>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT id, boosty_subscriber_id FROM users
@@ -21,7 +16,6 @@ impl SqliteInventory {
             .collect())
     }
 
-    /// Boosty links with the persisted start of the current lapse spell.
     pub async fn list_boosty_links_with_lapse(&self) -> Result<Vec<(UserId, i64, Option<i64>)>> {
         let rows: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
             "SELECT id, boosty_subscriber_id, boosty_lapsed_since FROM users
@@ -36,18 +30,7 @@ impl SqliteInventory {
             .collect())
     }
 
-    /// Link a vpnctl user to a Boosty subscriber id. Errors only if the user
-    /// doesn't exist. Returns whether anything changed (`false` = this user
-    /// already carried this exact subscriber id) so callers audit only actual
-    /// mutations.
-    ///
-    /// **Many-to-one is allowed** (migration 0041): one Boosty subscriber can
-    /// gate SEVERAL users — one paying person's multiple devices
-    /// (`demonnot-1..5`). The reconciler evaluates each link independently, so
-    /// they all follow that subscriber's active state.
     pub async fn link_boosty_subscriber(&self, user: &UserId, subscriber_id: i64) -> Result<bool> {
-        // `IS NOT ?1` (NULL-safe) makes a same-value re-link match 0 rows →
-        // reported as an idempotent no-op below (audit-on-actual-mutation).
         let res = sqlx::query(
             "UPDATE users
                 SET boosty_subscriber_id = ?1, boosty_lapsed_since = NULL
@@ -60,8 +43,6 @@ impl SqliteInventory {
         if res.rows_affected() > 0 {
             return Ok(true);
         }
-        // 0 rows: either the user doesn't exist, or it already holds this
-        // exact subscriber id. Disambiguate with a presence check.
         let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = ?1")
             .bind(&user.0)
             .fetch_one(&self.pool)
@@ -75,8 +56,6 @@ impl SqliteInventory {
         Ok(false)
     }
 
-    /// Remove a user's Boosty link. Idempotent; returns whether a link was
-    /// actually removed so callers audit only actual mutations.
     pub async fn unlink_boosty_subscriber(&self, user: &UserId) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE users
@@ -89,8 +68,6 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Record the start of a lapse spell, keeping the earliest observation.
-    /// Passing `None` clears the marker after a paid subscription recovers.
     pub async fn observe_boosty_lapse(
         &self,
         user: &UserId,
@@ -133,7 +110,6 @@ impl SqliteInventory {
         })
     }
 
-    /// Atomically create a Boosty-owned user and grant every current server.
     pub async fn add_boosty_user(&self, user: &User, subscriber_id: i64) -> Result<u64> {
         let token = match user.sub_token.as_deref() {
             Some(token) if !token.is_empty() => token.to_string(),
@@ -171,7 +147,6 @@ impl SqliteInventory {
         Ok(grants)
     }
 
-    /// Read the singleton bridge settings row.
     pub async fn get_boosty_settings(&self) -> Result<BoostySettings> {
         let row: Option<BoostySettingsRow> = sqlx::query_as(
             "SELECT enabled, blog_url, access_token, refresh_token, device_id,
@@ -208,7 +183,6 @@ impl SqliteInventory {
         })
     }
 
-    /// Overwrite the singleton bridge settings row.
     pub async fn set_boosty_settings(&self, s: &BoostySettings) -> Result<()> {
         sqlx::query(
             "UPDATE boosty_settings
@@ -233,7 +207,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Persist a rotated refresh token (Boosty rotates it on every refresh).
     pub async fn set_boosty_refresh_token(&self, refresh_token: &str) -> Result<()> {
         sqlx::query(
             "UPDATE boosty_settings
@@ -247,9 +220,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Persist a rotated token only if the credential used to obtain it is
-    /// still current. A token pasted in the Web UI during an in-flight poll
-    /// must win instead of being overwritten by that older poll.
     pub async fn rotate_boosty_refresh_token(&self, expected: &str, rotated: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE boosty_settings
@@ -264,10 +234,6 @@ impl SqliteInventory {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Clear the access token when refresh recovery succeeds, so future sync passes
-    /// use the refreshed credentials directly. Safe against concurrent UI updates:
-    /// only clears if the stored access token still matches `expected`.
-    /// Records an audit log row on actual change.
     pub async fn clear_boosty_access_token(&self, expected: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
@@ -302,8 +268,6 @@ impl SqliteInventory {
         }
     }
 
-    /// Cross-process lease for the rotating Boosty credential and the
-    /// snapshot→event transaction. Expired leases recover automatically.
     pub async fn acquire_boosty_sync_lease(&self, owner: &str, ttl_secs: i64) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE boosty_settings
@@ -331,16 +295,10 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Persist the last APPLIED sync report (serialized `SyncReport`).
-    /// `/admin/boosty` renders its actionable sections from this instead of
-    /// doing a live (state-mutating) sync on GET.
     pub async fn set_boosty_last_report(&self, report_json: &str) -> Result<()> {
         self.set_boosty_report_and_events(report_json, &[]).await
     }
 
-    /// Atomically replace the applied Boosty snapshot and append its derived
-    /// subscriber events. The transaction prevents a crash from writing an
-    /// event twice (or losing it) on the next poll.
     pub async fn set_boosty_report_and_events(
         &self,
         report_json: &str,
@@ -371,8 +329,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// The last applied sync report as `(report_json, synced_at)`, when one
-    /// has ever been stored.
     pub async fn boosty_last_report(&self) -> Result<Option<(String, String)>> {
         let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT last_report_json, last_sync_at FROM boosty_settings WHERE id = 1",

@@ -1,18 +1,3 @@
-//! Integration tests for migration `0050_remove_dns_tunnel.sql`.
-//!
-//! Invariants pinned:
-//! 1. Migration audits each actually affected server (active protocols, kernels, or overrides)
-//!    exactly once with `actor = 'system'`, `action = 'protocol.remove_dns_tunnel'`, `target = server_id`,
-//!    and a payload recording counts of removed entities and retained server secrets.
-//! 2. Deletes all `dns-tunnel` grant protocol overrides, `dns-tunnel` server protocols,
-//!    and `dns-tunnel` server kernels.
-//! 3. Preserves all `dns-tunnel:*` server secrets as rollback material.
-//! 4. Preserves all non-DNS protocols, kernels, secrets, and overrides.
-//! 5. Preserves pre-existing audit log history.
-//! 6. Emits zero audit rows on an empty database, on a database without dns-tunnel,
-//!    or on a server with only stale secrets.
-//! 7. Respects foreign keys and SQLite constraints.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -76,17 +61,8 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
     let db_path = dir.path().join("test_migration.db");
     let pool = create_raw_pool(&db_path).await;
 
-    // Apply migrations up to 0049
     apply_migrations_up_to_0049(&pool).await;
 
-    // Seed servers:
-    // s1: fully populated with dns-tunnel + non-dns
-    // s2: non-dns only
-    // s3: only dns-tunnel:domain secret (no dns-tunnel protocol/kernel/override) -> stale secret only, no audit
-    // s4: only dns-tunnel protocol
-    // s5: only dns-tunnel kernel
-    // s6: only dns-tunnel override
-    // s7: clean server
     let seed_sql = r#"
         INSERT INTO servers (id, address, ssh_port, ssh_user, hoster) VALUES
             ('s1', '1.1.1.1', 22, 'root', 'generic'),
@@ -138,10 +114,8 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
 
     sqlx::raw_sql(seed_sql).execute(&pool).await.unwrap();
 
-    // Run migration 0050
     apply_migration_0050(&pool).await;
 
-    // Check audit_log
     #[derive(sqlx::FromRow, Debug)]
     struct AuditRow {
         actor: String,
@@ -156,19 +130,16 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
             .await
             .unwrap();
 
-    // 1 pre-existing row + 4 affected servers (s1, s4, s5, s6) = 5 rows
     assert_eq!(
         audit_rows.len(),
         5,
         "expected 5 audit rows, got {audit_rows:?}"
     );
 
-    // Historical audit row is preserved
     assert_eq!(audit_rows[0].actor, "admin");
     assert_eq!(audit_rows[0].action, "server.create");
     assert_eq!(audit_rows[0].target.as_deref(), Some("s1"));
 
-    // Check affected servers
     let dns_tunnel_audits: Vec<&AuditRow> = audit_rows
         .iter()
         .filter(|r| r.action == "protocol.remove_dns_tunnel")
@@ -212,7 +183,6 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
         }
     }
 
-    // Unaffected servers (s2, s7) and stale-secret-only servers (s3) must NOT be audited
     assert!(
         dns_tunnel_audits
             .iter()
@@ -222,7 +192,6 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
         "s2, s3, and s7 must not be audited"
     );
 
-    // Verify active dns-tunnel bindings are deleted
     let dns_tunnel_protocols: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM server_protocols WHERE protocol_id = 'dns-tunnel'")
             .fetch_one(&pool)
@@ -245,7 +214,6 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
     .unwrap();
     assert_eq!(dns_tunnel_overrides.0, 0);
 
-    // Verify dns-tunnel:* secrets ARE PRESERVED as rollback material
     let dns_tunnel_secrets: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM server_secrets WHERE key LIKE 'dns-tunnel:%'")
             .fetch_one(&pool)
@@ -253,7 +221,6 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
             .unwrap();
     assert_eq!(dns_tunnel_secrets.0, 4);
 
-    // Verify non-DNS data is preserved
     #[derive(sqlx::FromRow, Debug, PartialEq, Eq)]
     struct ProtoRow {
         server_id: String,
@@ -372,7 +339,6 @@ async fn migration_0050_removes_dns_tunnel_and_audits_affected_servers_only() {
         ]
     );
 
-    // Foreign key check
     let fk_violations: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&pool)
         .await
@@ -453,8 +419,6 @@ async fn sqlite_inventory_open_applies_embedded_0050_and_crud_works() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("inventory_applied_0050.db");
 
-    // 1. Create DB and apply migrations 0001..=0049 via sqlx::migrate::Migrator
-    // so _sqlx_migrations is properly tracked
     {
         let migrations_temp_dir = TempDir::new().unwrap();
         let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
@@ -494,10 +458,8 @@ async fn sqlite_inventory_open_applies_embedded_0050_and_crud_works() {
         pool.close().await;
     }
 
-    // 2. Open via SqliteInventory::open — runs embedded MIGRATOR including 0050
     let inv = SqliteInventory::open(&db_path).await.unwrap();
 
-    // Verify dns-tunnel was removed from active protocols/kernels
     let server = inv
         .get_server(&ServerId("s_dns".into()))
         .await
@@ -509,14 +471,12 @@ async fn sqlite_inventory_open_applies_embedded_0050_and_crud_works() {
     );
     assert_eq!(server.kernels, vec![KernelId("sing-box".into())]);
 
-    // Retained secret is preserved
     let secret = inv
         .get_server_secret(&ServerId("s_dns".into()), "dns-tunnel:domain")
         .await
         .unwrap();
     assert_eq!(secret.as_deref(), Some("dt.example.com"));
 
-    // Verify audit entry
     let audit = inv.audit_for_server("s_dns", 10).await.unwrap();
     let dt_audit = audit
         .iter()
@@ -529,7 +489,6 @@ async fn sqlite_inventory_open_applies_embedded_0050_and_crud_works() {
     assert_eq!(payload["server_kernels"], 1);
     assert_eq!(payload["retained_server_secrets"], 1);
 
-    // 3. Perform CRUD operations to ensure DB is fully operational
     let new_srv = Server {
         id: ServerId("srv2".into()),
         address: "192.0.2.2".into(),

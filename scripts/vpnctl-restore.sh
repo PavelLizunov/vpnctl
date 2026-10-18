@@ -1,31 +1,4 @@
 #!/usr/bin/env bash
-# vpnctl-restore.sh — decrypt + verify a vpnctl backup snapshot.
-#
-# Usage:
-#   vpnctl-restore.sh <archive.tar.zst.age> <age-private-key-file>
-#
-# The script DOES NOT touch /var/lib/vpnctl/inv.db — restore is a
-# manual step (operator decides whether to overwrite, merge, or
-# inspect first). This helper just decrypts the archive into a
-# scratch directory and verifies the inv.db can be opened by sqlite3.
-#
-# Output (on success):
-#   restored to: /tmp/vpnctl-restore-<stamp>/vpnctl-snap/
-#     - inv.db          ← verified openable
-#     - vpnctld.env     ← basic-auth creds
-#     - assets/         ← favicon + admin.css
-#
-# Manual steps after a successful restore (typical recovery flow):
-#   sudo systemctl stop vpnctld
-#   sudo cp /tmp/vpnctl-restore-XXX/vpnctl-snap/inv.db /var/lib/vpnctl/inv.db
-#   sudo chown user:user /var/lib/vpnctl/inv.db
-#   sudo cp /tmp/vpnctl-restore-XXX/vpnctl-snap/vpnctld.env /etc/vpnctl/
-#   sudo cp -r /tmp/vpnctl-restore-XXX/vpnctl-snap/assets/. /opt/vpnctl/assets/
-#   sudo systemctl start vpnctld
-#   curl -sSf http://127.0.0.1:18402/api/v1/health
-#
-# The script is intentionally idempotent and read-only on production
-# state — running it twice has no side effects beyond two scratch dirs.
 
 set -euo pipefail
 
@@ -64,10 +37,6 @@ log "extracting snap.tar"
 tar -xf snap.tar
 rm -f snap.tar
 
-# Locate the inv.db — the backup script puts everything under
-# `vpnctl-snap/`, but absolute paths inside the tar mean some entries
-# (like /etc/vpnctl/vpnctld.env) get extracted to relative paths
-# stripped of the leading `/`. Tolerate either layout.
 INV=$(find "$WORK" -name inv.db -type f | head -1)
 [ -n "$INV" ] || { log "FAIL: no inv.db inside archive"; exit 67; }
 
@@ -78,24 +47,7 @@ if [ "$INTEGRITY" != "ok" ]; then
     exit 68
 fi
 
-# Quick sanity: row counts of the user-visible tables.
-#
-# PRAGMA integrity_check above is STRUCTURAL only — it validates the
-# B-tree / page layout but says NOTHING about schema completeness. A
-# structurally-valid SQLite file with a whole table dropped passes
-# integrity_check cleanly. So we additionally probe each KNOWN/required
-# table with a COUNT(*) and treat a query error (missing table, etc.)
-# as a HARD failure: a backup missing `users`/`servers`/`grants`/…
-# is operationally useless and must NOT be reported as "verified".
-# (Mirrors the Rust self-test in crates/inventory/src/backup.rs, which
-# surfaces COUNT-query failures as distinct Fail checks.)
-#
-# Sentinel: ✗ marks a failed COUNT. We collect every failure so the
-# operator sees ALL missing tables in one pass, then exit non-zero.
 count_table() {
-    # echoes the row count, or "✗" on any query error (missing table,
-    # locked, malformed). Captures stderr so a real sqlite error is
-    # logged rather than silently swallowed.
     local table=$1 out
     if out=$(sqlite3 "$INV" "SELECT COUNT(*) FROM ${table}" 2>&1); then
         printf '%s' "$out"
@@ -105,9 +57,6 @@ count_table() {
     fi
 }
 
-# KNOWN/required core tables. A snapshot missing any of these is not a
-# usable inventory backup. _sqlx_migrations is included because an
-# empty/absent migration ledger means the schema itself is suspect.
 REQUIRED_TABLES=(users servers grants sub_access_log _sqlx_migrations)
 MISSING=()
 declare -A COUNTS=()

@@ -31,27 +31,6 @@ pub(crate) async fn render_overview_tab(
     html! {
         div.ed-user-overview {
             aside.ed-user-overview__sub {
-            // Subscription URL + QR — the headline for this page.
-            //
-            // Two URLs may exist per user post-Phase-5 (ninitux cutover,
-            // 2026-05-19):
-            //   * PRIMARY: the ninitux production URL
-            //     `https://ninitux.com/api/v1/app/config/<device_id>` —
-            //     the URL clients actually fetch. Only present when the
-            //     user has a `vpn_router_device_id` pinned (33/33
-            //     production users do; legacy bash-only or freshly-
-            //     created users may not).
-            //   * SECONDARY / LAN fallback: the legacy `/sub/<token>`
-            //     URL served by vpnctld directly on port 18402. Useful
-            //     for LAN debugging and as the fallback artefact for
-            //     users without a device_id.
-            //
-            // The QR encodes the PRIMARY URL when available — that's
-            // what a mobile-app user must scan. Showing the LAN URL in
-            // the QR (the pre-Phase-5 behaviour) silently broke any
-            // share-via-QR workflow because the client app can't reach
-            // 192.168.0.236 from outside the operator's LAN. Caught by
-            // visual review 2026-05-19; this block is the fix.
             div.ed-art-eyebrow style="margin-top: 28px;" {
                 (crate::i18n::tr(lang, "Subscription", "Подписка"))
                 " "
@@ -63,7 +42,6 @@ pub(crate) async fn render_overview_tab(
             }
             @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
                 (Some(device_id), Some(ninitux), _, _) => {
-                    // Primary: ninitux production URL — QR scans this.
                     div style="padding: 12px 14px; background: var(--paper-2); border: 1px solid var(--rule); margin-top: 8px;" {
                         div style="display: flex; justify-content: center; margin-bottom: 12px;" {
                             (qr_svg(ninitux))
@@ -88,8 +66,6 @@ pub(crate) async fn render_overview_tab(
                             }
                         }
                     }
-                    // Legacy LAN fallback — collapsed below the primary,
-                    // muted styling, only useful for LAN debugging.
                     @if let (Some(token), Some(legacy_url)) = (sub_token.as_ref(), sub_url_str.as_ref()) {
                         details style="margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                             summary style="cursor: pointer;" { (icon("link")) "legacy /sub/<token> fallback (LAN-only)" }
@@ -114,10 +90,6 @@ pub(crate) async fn render_overview_tab(
                     }
                 }
                 (None, _, Some(token), Some(url)) => {
-                    // No device_id pinned — fall back to legacy /sub/<token>
-                    // as the primary. Operator should pin a device_id to
-                    // unlock the ninitux URL (import script or future web
-                    // action).
                     div style="padding: 8px 0;" {
                         (qr_svg(url))
                         div style="font-family: var(--mono); font-size: 11px; line-height: 1.7; min-width: 0;" {
@@ -168,10 +140,6 @@ pub(crate) async fn render_overview_tab(
                 }
             }
 
-            // Extra-protocol per-user password — TUIC / naive / Hysteria2 all
-            // reuse `tuic_password`. Shown ONLY when absent: a user without it
-            // silently gets NO naive/HY2/TUIC links (the cdn 2026-06-07
-            // incident). One-click mint turns that silent skip into a fix.
             @if user.tuic_password.is_none() {
                 div.ed-rule {}
                 div.ed-art-eyebrow { (crate::i18n::tr(lang, "Extra-protocol password", "Пароль доп-протоколов")) }
@@ -218,29 +186,9 @@ pub(crate) async fn render_overview_tab(
             }
         }
 
-            // WireGuard / AmneziaWG key material + distribution. Always
-            // shows the pubkey verbatim (it's public). Private key marker
-            // only — actual value flows through `/sub/<token>` (sing-box-
-            // style clients) AND as inline QR/share-links below for
-            // WG-native clients (AmneziaVPN, official WireGuard app).
-            // Per CLAUDE.md "users are low-tech" — the operator must see
-            // every artefact needed to onboard the user in one place.
 
-            // ── Traffic limit + alert threshold (Pavel D.6c) ──────────
-            // Show current month-to-date usage + the configured cap
-            // (if any) + an inline form to change both, plus the user#3
-            // month-end projection when a cap is set. Re-runs the usage
-            // query so the page-after-redirect immediately reflects new
-            // limits.
             (user_traffic_limit_section(state, &user.id, lang).await)
 
-            // B1.user (audit 2026-05-22) — soft suspend. Banner +
-            // toggle button. When user.disabled = true, an amber banner
-            // says «this user is paused»; button reads «enable». When
-            // false, just the «disable» button as part of the normal
-            // user-detail card flow. No double-submit confirm because
-            // the action is fully reversible (one click in either
-            // direction, no secrets rotated, no grants lost).
             div.ed-rule {}
             div.ed-art-eyebrow style="margin-top: 24px;" {
                 (crate::i18n::tr(lang, "Access state", "Состояние доступа"))

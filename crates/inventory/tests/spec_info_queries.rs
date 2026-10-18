@@ -1,9 +1,3 @@
-//! Spec for the PR-Q informativeness query layer on `SqliteInventory`:
-//! `top_users_by_traffic_for_server`, `user_traffic_by_server`,
-//! `audit_for_server`, `user_lifecycle`, `kernel_versions_fleet`,
-//! `alerts_by_kind_severity`, `today_digest`, `likely_shared_summary`.
-//! Written from the spec only — impl NOT consulted beyond signatures.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -65,8 +59,6 @@ fn ud(uid: Option<&str>, up: u64, down: u64, conns: u32) -> VpnStatsDelta {
     }
 }
 
-// ── Q-4a top_users_by_traffic_for_server ─────────────────────────────
-
 #[tokio::test]
 async fn q4a_empty_returns_empty() {
     let dir = TempDir::new().unwrap();
@@ -88,9 +80,6 @@ async fn q4a_scoped_to_server_and_weighted_by_coefficient() {
     inv.add_user(&user("alice")).await.unwrap();
     inv.add_user(&user("bob")).await.unwrap();
 
-    // alice has traffic on BOTH servers; bob only on `single`. The
-    // per-server query for `double` must see only alice's `double` row,
-    // weighted ×2.
     inv.record_vpn_stats(
         &ServerId("double".into()),
         &[ud(Some("alice"), 100_000, 100_000, 1)],
@@ -106,7 +95,6 @@ async fn q4a_scoped_to_server_and_weighted_by_coefficient() {
     )
     .await
     .unwrap();
-    // Server-wide rollup row (user_id NULL) must be EXCLUDED.
     inv.record_vpn_stats(&ServerId("double".into()), &[ud(None, 9, 9, 1)])
         .await
         .unwrap();
@@ -122,8 +110,6 @@ async fn q4a_scoped_to_server_and_weighted_by_coefficient() {
         "200_000 raw × 2.0 coefficient = 400_000"
     );
 
-    // On `single`, bob (1M raw, ×1) outranks alice (1M raw, ×1) only by
-    // tie — both 1M; assert both present and ranking is by total.
     let on_single = inv
         .top_users_by_traffic_for_server(&ServerId("single".into()), 24, 10)
         .await
@@ -158,8 +144,6 @@ async fn q4a_limit_is_respected() {
     assert_eq!(top2[1].0.0, "u2");
 }
 
-// ── Q-4b user_traffic_by_server ──────────────────────────────────────
-
 #[tokio::test]
 async fn q4b_groups_per_server_with_up_down_and_weighting() {
     let dir = TempDir::new().unwrap();
@@ -189,7 +173,6 @@ async fn q4b_groups_per_server_with_up_down_and_weighting() {
     assert_eq!(on_double.2, 400, "double down: 200 × 2.0");
     assert_eq!(on_single.1, 10, "single up: ×1");
     assert_eq!(on_single.2, 20, "single down: ×1");
-    // Ordered by total (up+down) desc → double first.
     assert_eq!(by_server[0].0.0, "double");
 }
 
@@ -205,18 +188,14 @@ async fn q4b_empty_for_user_with_no_traffic() {
     assert!(got.is_empty());
 }
 
-// ── Q-4c audit_for_server ────────────────────────────────────────────
-
 #[tokio::test]
 async fn q4c_matches_target_or_payload_server_id_newest_first() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // Row 1: server is the audit target.
     inv.audit("admin", "server.create", Some("srv1"), None)
         .await
         .unwrap();
-    // Row 2: server referenced only in the JSON payload (deploy row).
     inv.audit(
         "admin",
         "server.deploy",
@@ -225,14 +204,12 @@ async fn q4c_matches_target_or_payload_server_id_newest_first() {
     )
     .await
     .unwrap();
-    // Row 3: a DIFFERENT server — must NOT match.
     inv.audit("admin", "server.create", Some("srv2"), None)
         .await
         .unwrap();
 
     let rows = inv.audit_for_server("srv1", 50).await.unwrap();
     assert_eq!(rows.len(), 2, "target match + payload match, not srv2");
-    // Newest-first by id: the deploy row (id 2) before the create (id 1).
     assert_eq!(rows[0].action, "server.deploy");
     assert_eq!(rows[1].action, "server.create");
     assert!(
@@ -256,20 +233,16 @@ async fn q4c_limit_and_empty() {
     assert!(none.is_empty());
 }
 
-// ── Q-4d user_lifecycle ──────────────────────────────────────────────
-
 #[tokio::test]
 async fn q4d_reports_created_at_last_fetch_and_age() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
 
-    // No sub fetch yet → last_sub_fetch None, age_days 0 (just created).
     let lc0 = inv.user_lifecycle(&UserId("alice".into())).await.unwrap();
     assert!(lc0.last_sub_fetch.is_none(), "no /sub hit yet");
     assert_eq!(lc0.age_days, 0, "created just now → 0 whole days");
 
-    // A real /sub fetch updates last_sub_fetch.
     inv.log_sub_access(&UserId("alice".into()), "1.2.3.4", None, 200, 100)
         .await
         .unwrap();
@@ -288,8 +261,6 @@ async fn q4d_unknown_user_errors() {
     assert!(res.is_err(), "no such user must Err, got {res:?}");
 }
 
-// ── Q-4e kernel_versions_fleet ───────────────────────────────────────
-
 #[tokio::test]
 async fn q4e_latest_json_per_server() {
     let dir = TempDir::new().unwrap();
@@ -298,7 +269,6 @@ async fn q4e_latest_json_per_server() {
     inv.add_server(&server("s2")).await.unwrap();
     inv.add_server(&server("s3")).await.unwrap();
 
-    // s1: two rows — newest wins.
     inv.record_node_health(
         &ServerId("s1".into()),
         Some(true),
@@ -338,7 +308,6 @@ async fn q4e_latest_json_per_server() {
     )
     .await
     .unwrap();
-    // s2: a row with NULL versions (old node / partial probe).
     inv.record_node_health(
         &ServerId("s2".into()),
         Some(true),
@@ -358,7 +327,6 @@ async fn q4e_latest_json_per_server() {
     )
     .await
     .unwrap();
-    // s3: no probes at all → absent from the result.
 
     let mut fleet = inv.kernel_versions_fleet().await.unwrap();
     fleet.sort_by(|a, b| a.0.0.cmp(&b.0.0));
@@ -380,14 +348,10 @@ async fn q4e_empty_fleet() {
     assert!(inv.kernel_versions_fleet().await.unwrap().is_empty());
 }
 
-// ── Q-4f alerts_by_kind_severity ─────────────────────────────────────
-
 #[tokio::test]
 async fn q4f_groups_unacked_by_kind_and_severity() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // The unique-unacked constraint (0013) is on (kind, server_id), so
-    // to get TWO unacked `disk.full` rows we put them on two servers.
     for s in ["s1", "s2", "s3"] {
         inv.add_server(&server(s)).await.unwrap();
     }
@@ -401,7 +365,6 @@ async fn q4f_groups_unacked_by_kind_and_severity() {
     inv.insert_alert("disk.full", Some(&s2), "critical", "y", None)
         .await
         .unwrap();
-    // Same kind, different severity → its own group.
     inv.insert_alert("disk.full", Some(&s3), "warning", "z", None)
         .await
         .unwrap();
@@ -409,7 +372,6 @@ async fn q4f_groups_unacked_by_kind_and_severity() {
         .insert_alert("mem.high", Some(&s1), "warning", "w", None)
         .await
         .unwrap();
-    // Ack one alert — it must drop out of the breakdown.
     inv.ack_alert(acked).await.unwrap();
 
     let mut groups = inv.alerts_by_kind_severity().await.unwrap();
@@ -431,8 +393,6 @@ async fn q4f_empty_when_no_unacked() {
     assert!(inv.alerts_by_kind_severity().await.unwrap().is_empty());
 }
 
-// ── Q-4g today_digest ────────────────────────────────────────────────
-
 #[tokio::test]
 async fn q4g_buckets_today_audit_actions() {
     let dir = TempDir::new().unwrap();
@@ -453,7 +413,6 @@ async fn q4g_buckets_today_audit_actions() {
     inv.audit("admin", "server.deploy", Some("s1"), None)
         .await
         .unwrap();
-    // An unrelated action must not land in any bucket.
     inv.audit("admin", "user.disable", Some("u1"), None)
         .await
         .unwrap();
@@ -468,9 +427,6 @@ async fn q4g_buckets_today_audit_actions() {
 async fn q4g_excludes_pre_midnight_rows() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // Inject a row dated 2 days ago through a second pool to the same DB
-    // file (the public `audit` always stamps now); the midnight cutoff
-    // must exclude it. Same raw-pool back-door pattern as spec_sub_access.
     let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
         .await
         .unwrap();
@@ -490,8 +446,6 @@ async fn q4g_excludes_pre_midnight_rows() {
     assert_eq!(d.users_added, 1, "only today's user.create counts");
 }
 
-// ── Q-4h likely_shared_summary ───────────────────────────────────────
-
 #[tokio::test]
 async fn q4h_flags_users_over_asn_threshold() {
     let dir = TempDir::new().unwrap();
@@ -499,7 +453,6 @@ async fn q4h_flags_users_over_asn_threshold() {
     inv.add_user(&user("sharer")).await.unwrap();
     inv.add_user(&user("solo")).await.unwrap();
 
-    // sharer: 3 distinct ASNs / 3 IPs / 2 countries — over threshold.
     let sharer = UserId("sharer".into());
     for (ip, asn, country) in [
         ("1.1.1.1", "AS111 A", "US"),
@@ -524,7 +477,6 @@ async fn q4h_flags_users_over_asn_threshold() {
         .unwrap();
     }
 
-    // solo: only one ASN — below the threshold of 3.
     inv.log_sub_access_rich(
         &UserId("solo".into()),
         "9.9.9.9",
@@ -556,12 +508,9 @@ async fn q4h_excludes_vpn_egress_rows() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("u")).await.unwrap();
-    // Register a server whose address is the egress IP; the
-    // sub_access_log trigger marks rows from that IP is_vpn_egress=1.
     inv.add_server(&server("egress-node")).await.unwrap();
     let egress_ip = "egress-node.example.com";
 
-    // Two real-client ASNs (below threshold 3 on their own).
     inv.log_sub_access_rich(
         &UserId("u".into()),
         "1.1.1.1",
@@ -594,8 +543,6 @@ async fn q4h_excludes_vpn_egress_rows() {
     )
     .await
     .unwrap();
-    // Two egress rows with NEW distinct ASNs — if these were counted,
-    // the user would cross threshold 3. They must be EXCLUDED.
     for asn in ["AS3 Three", "AS4 Four"] {
         inv.log_sub_access_rich(
             &UserId("u".into()),
@@ -615,13 +562,11 @@ async fn q4h_excludes_vpn_egress_rows() {
         .unwrap();
     }
 
-    // With egress excluded, only 2 distinct real ASNs → below 3.
     let flagged3 = inv.likely_shared_summary(3).await.unwrap();
     assert!(
         flagged3.is_empty(),
         "egress ASNs must NOT count → 2 real ASNs is below 3"
     );
-    // At threshold 2 the user shows with exactly the 2 REAL ASNs.
     let flagged2 = inv.likely_shared_summary(2).await.unwrap();
     assert_eq!(flagged2.len(), 1);
     assert_eq!(flagged2[0].1, 2, "2 distinct real IPs (egress excluded)");
@@ -634,18 +579,10 @@ async fn q4h_excludes_vpn_egress_rows() {
 
 #[tokio::test]
 async fn q4h_excludes_deleted_user_null_rows_no_blank_row() {
-    // abuse-origins bug fix: `sub_access_log.user_id` is nullable
-    // (`ON DELETE SET NULL`, migration 0004). Rows from since-deleted
-    // users carry NULL user_id; `GROUP BY user_id` folded them into one
-    // blank group the dashboard rendered as a nameless row. The added
-    // `AND user_id IS NOT NULL AND user_id != ''` predicate must drop
-    // that group entirely.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("ghost")).await.unwrap();
 
-    // Seed enough distinct ASNs that, if the NULL group were counted, it
-    // would cross even a high threshold.
     for (ip, asn, country) in [
         ("1.1.1.1", "AS111 A", "US"),
         ("2.2.2.2", "AS222 B", "DE"),
@@ -670,9 +607,6 @@ async fn q4h_excludes_deleted_user_null_rows_no_blank_row() {
         .unwrap();
     }
 
-    // Delete the user via raw SQL (no public delete_user yet) with FK
-    // enforcement ON so the CASCADE→SET NULL rule fires, NULLing user_id
-    // on every one of ghost's rows.
     let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
         .await
         .unwrap();
@@ -684,7 +618,6 @@ async fn q4h_excludes_deleted_user_null_rows_no_blank_row() {
         .execute(&raw)
         .await
         .unwrap();
-    // Sanity: the rows survived with NULL user_id.
     let null_rows: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sub_access_log WHERE user_id IS NULL")
             .fetch_one(&raw)
@@ -693,8 +626,6 @@ async fn q4h_excludes_deleted_user_null_rows_no_blank_row() {
     assert_eq!(null_rows, 4, "deleted-user rows must survive with NULL id");
     raw.close().await;
 
-    // The summary must NOT surface a blank-name row for the NULL group,
-    // even at threshold 1 (which any real user with 1 ASN would hit).
     let flagged = inv.likely_shared_summary(1).await.unwrap();
     assert!(
         flagged.is_empty(),

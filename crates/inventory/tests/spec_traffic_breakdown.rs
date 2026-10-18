@@ -1,7 +1,3 @@
-//! Spec for NIC ground-truth traffic accounting: `sum_nic_deltas` (pure
-//! per-interval delta + reboot/reset guard) and `server_traffic_breakdown`
-//! (NIC total vs clash-attributed vs the GAP). Written from spec only.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -14,7 +10,6 @@ async fn open(dir: &TempDir) -> SqliteInventory {
         .expect("open")
 }
 
-/// Add a minimal server (node_health + vpn_connection_stats FK to it).
 async fn add_srv(inv: &SqliteInventory, id: &str) -> ServerId {
     let sid = ServerId(id.into());
     inv.add_server(&Server {
@@ -34,8 +29,6 @@ async fn add_srv(inv: &SqliteInventory, id: &str) -> ServerId {
     sid
 }
 
-// record_node_health has many infra args; this trims the noise for tests
-// that only care about the NIC counters.
 #[allow(clippy::too_many_arguments)]
 async fn rec_nic(inv: &SqliteInventory, sid: &ServerId, iface: &str, rx: u64, tx: u64) {
     inv.record_node_health(
@@ -60,16 +53,12 @@ async fn rec_nic(inv: &SqliteInventory, sid: &ServerId, iface: &str, rx: u64, tx
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
 }
 
-// ─── sum_nic_deltas (pure) ───────────────────────────────────────────
-
-/// (iface, rx, tx) reading builder — trims the `.to_string()` noise.
 fn rd(iface: &str, rx: u64, tx: u64) -> (String, u64, u64) {
     (iface.to_string(), rx, tx)
 }
 
 #[test]
 fn sum_nic_deltas_monotonic_sums_intervals() {
-    // Same iface, cumulative oldest→newest → summed per-interval deltas.
     let r = [
         rd("eth0", 100, 10),
         rd("eth0", 300, 30),
@@ -87,8 +76,6 @@ fn sum_nic_deltas_needs_two_readings() {
 
 #[test]
 fn sum_nic_deltas_reset_guard_counts_new_value() {
-    // 1000→1200 (Δ200), 1200→50 reboot (Δ50, NOT a huge wrap), 50→90 (Δ40)
-    // = 290. Without the guard a naive subtraction would underflow/explode.
     let r = [
         rd("eth0", 1000, 0),
         rd("eth0", 1200, 0),
@@ -100,9 +87,6 @@ fn sum_nic_deltas_reset_guard_counts_new_value() {
 
 #[test]
 fn sum_nic_deltas_iface_change_breaks_continuity() {
-    // eth0 1000→1500 (Δ500), then iface renames to ens18 with a HIGHER
-    // counter 9000 — must NOT diff across ifaces (would be 7500 garbage).
-    // Treated as a reset: count 9000 itself → 500 + 9000 = 9500.
     let r = [
         rd("eth0", 1000, 0),
         rd("eth0", 1500, 0),
@@ -111,18 +95,13 @@ fn sum_nic_deltas_iface_change_breaks_continuity() {
     assert_eq!(sum_nic_deltas(&r).0, 9500);
 }
 
-// ─── server_traffic_breakdown ────────────────────────────────────────
-
 #[tokio::test]
 async fn breakdown_computes_nic_attributed_and_gap() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     let sid = add_srv(&inv, "de").await;
-    // Two NIC readings (insertion order = chronological via the rowid
-    // tiebreak): rx 1000→1500 (Δ500), tx 500→800 (Δ300) → nic_total 800.
     rec_nic(&inv, &sid, "ens18", 1000, 500).await;
     rec_nic(&inv, &sid, "ens18", 1500, 800).await;
-    // Clash-attributed: one user delta up=100 dn=200 → attributed 300.
     inv.record_vpn_stats(
         &sid,
         &[VpnStatsDelta {
@@ -157,8 +136,6 @@ async fn breakdown_empty_when_no_nic_samples() {
 
 #[tokio::test]
 async fn breakdown_gap_saturates_when_attributed_exceeds_nic() {
-    // At window edges clash can momentarily exceed NIC — the gap must
-    // saturate at 0, never underflow.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     let sid = add_srv(&inv, "is").await;
@@ -183,12 +160,11 @@ async fn breakdown_gap_saturates_when_attributed_exceeds_nic() {
 
 #[tokio::test]
 async fn breakdown_attributed_sums_per_user_and_server_wide_rows() {
-    // Attributed = ALL clash rows (per-user + NULL server-wide remainder).
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     let sid = add_srv(&inv, "nl").await;
     rec_nic(&inv, &sid, "ens18", 0, 0).await;
-    rec_nic(&inv, &sid, "ens18", 5000, 5000).await; // nic_total 10000
+    rec_nic(&inv, &sid, "ens18", 5000, 5000).await;
     inv.record_vpn_stats(
         &sid,
         &[
@@ -199,7 +175,7 @@ async fn breakdown_attributed_sums_per_user_and_server_wide_rows() {
                 active_connections: 1,
             },
             VpnStatsDelta {
-                user_id: None, // server-wide remainder
+                user_id: None,
                 upload_bytes: 500,
                 download_bytes: 0,
                 active_connections: 0,

@@ -4,30 +4,6 @@ use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-/// Trojan — venerable TLS-mimic protocol. Predates REALITY, simpler
-/// than AnyTLS, fits as a third "TLS-looking" channel when an
-/// operator wants maximum protocol diversity on a node.
-///
-/// **Why ship it:** widely-deployed and well-understood; many older
-/// VPN clients ship Trojan support but not REALITY/AnyTLS. Adds
-/// another channel without significant cost.
-///
-/// **Sing-box version:** any (Trojan has been in sing-box since
-/// v0.1; no version concern).
-///
-/// **Per-user secret:** reuses `User.tuic_password` as the Trojan
-/// password. Same trade-off as Hysteria2/AnyTLS: leak in any
-/// client compromises all sibling protocols using that secret.
-///
-/// **TLS cert paths:** reuses `tuic.cert_path` / `tuic.key_path`.
-/// One self-signed cert per node, shared across TUIC/Hy2/AnyTLS/Trojan.
-///
-/// **Port:** TCP 8643. Convention rolls forward —
-/// 443/TCP=VLESS+REALITY, 8443/UDP=TUIC, 8444/UDP=Hy2, 8843/TCP=AnyTLS,
-/// 8643/TCP=Trojan. Could move to 443 if operator drops REALITY on
-/// a node.
-///
-/// **Stateless**, like every other Protocol in this crate.
 #[derive(Debug, Default)]
 pub struct Trojan;
 
@@ -37,8 +13,6 @@ impl Trojan {
     }
 }
 
-/// Listen port. Public so admin's drift detector can recognize the
-/// inbound on a probe.
 pub const TROJAN_PORT: u16 = 8643;
 
 impl Protocol for Trojan {
@@ -51,19 +25,6 @@ impl Protocol for Trojan {
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
-        // Our Trojan inbound serves a self-signed cert with NO
-        // `fallback:` upstream (see `server_inbound` below — only
-        // `tls.certificate_path` + `tls.key_path`, no fallback).
-        // Active TLS probe → self-signed cert without a real serving
-        // website behind it → textbook "Trojan-without-fallback"
-        // fingerprint blocked in RU/CN since 2022. Without a real
-        // upstream this protocol is no better than raw SS-2022 in a
-        // probing environment. Review-agent NM-12: «active TLS probes
-        // get a self-signed cert with no real HTML behind it».
-        //
-        // To upgrade to Moderate/Strong: wire a real nginx fallback
-        // on 443 + plumb its address into `tls.fallback.server` and
-        // document the operator burden.
         vpnctl_core::DpiRisk::Weak
     }
 
@@ -118,16 +79,8 @@ impl Protocol for Trojan {
                 user.id.0
             ))
         })?;
-        // Trojan URI scheme (de-facto standard, widely supported):
-        //   trojan://<password>@<host>:<port>?sni=<sni>&allowInsecure=1#<tag>
-        // Note `allowInsecure` (camelCase), NOT `insecure` — Trojan
-        // clients historically use this parameter name; switching to
-        // `insecure` would break older clients silently.
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
-        // `host` is the URL authority host — IPv6 literals MUST be
-        // bracketed here (RFC 3986). `sni` is a bare TLS server-name,
-        // NOT a URL host, so it keeps the raw address.
         Ok(format!(
             "trojan://{pw}@{host}:{port}?sni={sni}&allowInsecure=1#{name}",
             pw = pw,

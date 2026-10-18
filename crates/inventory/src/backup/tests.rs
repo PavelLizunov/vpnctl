@@ -49,17 +49,11 @@ async fn snapshot_refuses_to_overwrite_existing_file() {
     std::fs::create_dir_all(&backup_dir).unwrap();
     let target = backup_dir.join("inv.db.2026-01-01T00-00-00.000Z.bak");
     std::fs::write(&target, b"pre-existing").unwrap();
-    // VACUUM INTO refuses to overwrite. Caller would have used
-    // a fresh timestamp to avoid this; the test pins the safety
-    // net. The exact wording is SQLite's choice — we accept
-    // anything sqlx surfaces as an error (rather than silently
-    // overwriting which is the actual safety risk).
     let err = snapshot_to(&inv, &target).await;
     assert!(
         err.is_err(),
         "snapshot_to MUST refuse to clobber an existing file"
     );
-    // Verify the original file is intact (sqlite didn't half-write).
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"pre-existing",
@@ -71,9 +65,6 @@ async fn snapshot_refuses_to_overwrite_existing_file() {
 async fn prune_keeps_recent_hourly_and_per_day_per_month() {
     let dir = tempfile::tempdir().unwrap();
     let backup_dir = dir.path().to_path_buf();
-    // Seed 50 snapshots: every 15 minutes for ~12 hours, then a
-    // few daily-spaced and a few monthly-spaced ones farther
-    // back. Cheap empty files — we don't care about content.
     let mut at = chrono::DateTime::parse_from_rfc3339("2026-05-17T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -111,18 +102,12 @@ async fn prune_keeps_recent_hourly_and_per_day_per_month() {
     assert!(removed > 0, "should have removed some old snapshots");
 }
 
-// ponytail: unix-only — restore_from renames tmp over db_path; POSIX
-// allows rename over a just-closed SQLite path, NTFS refuses it (async
-// close + lingering -wal/-shm handles). vpnctld is Linux-only in prod,
-// so this asserts POSIX fs semantics. Skipped on Windows so the local
-// dev gate passes; still runs on Linux + CI.
 #[cfg(unix)]
 #[tokio::test]
 async fn restore_swaps_db_when_snapshot_valid() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = SqliteInventory::open(&db).await.unwrap();
-    // Mark the live DB with a known server so we can prove restore happened.
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
     inv.add_server(&Server {
         id: ServerId("live-only".into()),
@@ -138,9 +123,7 @@ async fn restore_swaps_db_when_snapshot_valid() {
     })
     .await
     .unwrap();
-    // Take the snapshot. At this point the snapshot has 'live-only'.
     let snap = snapshot_now(&inv, dir.path()).await.unwrap();
-    // Add another server — this MUST NOT be in the restored DB.
     inv.add_server(&Server {
         id: ServerId("after-snapshot".into()),
         address: "203.0.113.100".into(),
@@ -155,11 +138,8 @@ async fn restore_swaps_db_when_snapshot_valid() {
     })
     .await
     .unwrap();
-    // Close the live pool BEFORE restoring (mimics "daemon stopped").
     drop(inv);
-    // Restore.
     restore_from(&snap, &db).await.unwrap();
-    // Re-open and confirm the post-snapshot server is GONE.
     let restored = SqliteInventory::open(&db).await.unwrap();
     let servers = restored.list_servers().await.unwrap();
     let ids: std::collections::HashSet<String> = servers.into_iter().map(|s| s.id.0).collect();
@@ -186,14 +166,11 @@ async fn restore_rejects_non_sqlite_file() {
             || format!("{err}").to_lowercase().contains("sqlite"),
         "expected validation error, got: {err}"
     );
-    // db_path must NOT have been created if validation failed.
     assert!(
         !target.exists(),
         "restore must not create target on validation failure"
     );
 }
-
-// ── Phase 5c — verify_snapshot tests ─────────────────────────────────
 
 #[tokio::test]
 async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
@@ -201,8 +178,6 @@ async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = SqliteInventory::open(&db).await.unwrap();
-    // Seed: 1 user + 1 server + 1 grant + sub_token. This is the
-    // minimum «would actually restore into something usable» shape.
     inv.add_user(&User {
         id: UserId("alice".into()),
         uuid: "11111111-1111-1111-1111-111111111111".into(),
@@ -246,13 +221,11 @@ async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
     assert_eq!(report.users_with_sub_token, 1);
     assert!(report.schema_migrations_applied > 0);
     assert!(report.snapshot_size_bytes > 0);
-    // Snapshot just minted → age must be tiny (single-digit seconds).
     assert!(
         report.snapshot_age_seconds.unwrap_or(i64::MAX) < 60,
         "freshly minted snapshot should be < 1min old, got {:?}",
         report.snapshot_age_seconds
     );
-    // Every per-check entry must be Ok.
     for c in &report.checks {
         assert_eq!(
             c.status,
@@ -269,9 +242,6 @@ async fn verify_snapshot_warns_when_grants_empty() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = SqliteInventory::open(&db).await.unwrap();
-    // User + server but NO grants — restore would succeed but
-    // the user would have access to nothing. Both presence checks
-    // are Ok; only `grants_present` should Warn → overall=Warn.
     inv.add_user(&User {
         id: UserId("alice".into()),
         uuid: "11111111-1111-1111-1111-111111111111".into(),
@@ -311,12 +281,8 @@ async fn verify_snapshot_warns_when_grants_empty() {
 
 #[tokio::test]
 async fn verify_snapshot_fails_on_empty_db() {
-    // Empty SQLite file = `sqlite_master` empty = the «backup
-    // pulled before migrations ran» bug class.
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.db.bak");
-    // Touch a syntactically-valid empty SQLite file by opening
-    // a fresh sqlx connection and immediately dropping it.
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -335,7 +301,6 @@ async fn verify_snapshot_fails_on_empty_db() {
         .find(|c| c.name == "sqlite_master_non_empty")
         .expect("sqlite_master_non_empty check must be present");
     assert_eq!(master_check.status, CheckStatus::Fail);
-    // Early-out: no metric checks should have run.
     assert!(
         report
             .checks
@@ -348,8 +313,6 @@ async fn verify_snapshot_fails_on_empty_db() {
 
 #[tokio::test]
 async fn verify_snapshot_errors_on_missing_file() {
-    // The function reserves Err for «could not even RUN» —
-    // file-not-found qualifies.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nope.bak");
     let err = verify_snapshot(&missing).await.unwrap_err();
@@ -362,8 +325,6 @@ async fn verify_snapshot_errors_on_missing_file() {
 
 #[tokio::test]
 async fn verify_snapshot_errors_on_non_sqlite_file() {
-    // Mirrors restore's input validation — `verify_snapshot`
-    // must reject the same garbage with the same precision.
     let dir = tempfile::tempdir().unwrap();
     let bogus = dir.path().join("not-a-db.bak");
     std::fs::write(&bogus, b"hello not a database").unwrap();
@@ -377,22 +338,10 @@ async fn verify_snapshot_errors_on_non_sqlite_file() {
 
 #[tokio::test]
 async fn verify_snapshot_fails_when_snapshot_is_from_newer_binary() {
-    // Schema-drift detection for the «we tried to restore a
-    // backup made by a NEWER vpnctld binary than the one we're
-    // running» case. sqlx's migrator refuses to run when the
-    // snapshot's `_sqlx_migrations` includes a version number
-    // the binary's embedded migrator doesn't know about — this
-    // is the exact bug class operators would hit during a
-    // post-incident downgrade. Verify the failure surfaces as a
-    // `schema_migrations_match_binary` Fail (NOT silently
-    // swallowed into Ok).
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = SqliteInventory::open(&db).await.unwrap();
     let snap = snapshot_now(&inv, dir.path()).await.unwrap();
-    // Inject a fake future migration row. The binary's migrator
-    // will reject it with «migration <N+1> was previously applied
-    // but is missing in the resolved migrations».
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&snap))
@@ -430,9 +379,7 @@ async fn verify_snapshot_fails_when_snapshot_is_from_newer_binary() {
         "Fail detail should explain it was a migration replay failure, got: {}",
         mig_check.detail
     );
-    // Overall must be Fail (this is the «cannot restore» branch).
     assert_eq!(report.overall, CheckStatus::Fail);
-    // Early-return: data-presence checks should NOT have run.
     assert!(
         !report
             .checks
@@ -445,8 +392,6 @@ async fn verify_snapshot_fails_when_snapshot_is_from_newer_binary() {
 
 #[test]
 fn check_status_label_is_lowercase_for_html_class_compatibility() {
-    // Pinned because the admin UI uses the label as a CSS class
-    // (`.self-test-check--ok / --warn / --fail`).
     assert_eq!(CheckStatus::Ok.label(), "ok");
     assert_eq!(CheckStatus::Warn.label(), "warn");
     assert_eq!(CheckStatus::Fail.label(), "fail");

@@ -1,7 +1,3 @@
-//! End-to-end operator test verifying snapshot and restore preserving
-//! user, grant, protocol visibility, grant protocol/uuid overrides, and
-//! app/sub artifact SHA256 digests byte-for-byte.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
@@ -48,7 +44,6 @@ async fn seed_live_state(db_path: &std::path::Path) -> AppState {
     let inv = SqliteInventory::open(db_path).await.unwrap();
     let reg = build_registry();
 
-    // 1. Servers: `de` and `is` with vless+reality and tuic-v5 enabled.
     for sid in ["de", "is"] {
         let server = Server {
             id: ServerId(sid.into()),
@@ -74,12 +69,10 @@ async fn seed_live_state(db_path: &std::path::Path) -> AppState {
             .unwrap();
     }
 
-    // 2. Protocol visibility: hide tuic-v5 on server `de`
     inv.set_server_protocol_hidden(&ServerId("de".into()), &ProtocolId("tuic-v5".into()), true)
         .await
         .unwrap();
 
-    // 3. User Alice (active)
     let alice = User {
         id: UserId("alice".into()),
         uuid: ALICE_GLOBAL_UUID.into(),
@@ -94,13 +87,10 @@ async fn seed_live_state(db_path: &std::path::Path) -> AppState {
     inv.grant(&alice.id, &ServerId("de".into())).await.unwrap();
     inv.grant(&alice.id, &ServerId("is".into())).await.unwrap();
 
-    // Alice overrides:
-    // a) Per-server client UUID override on `de`
     inv.set_grant_client_uuid(&alice.id, &ServerId("de".into()), ALICE_DE_OVERRIDE_UUID)
         .await
         .unwrap();
 
-    // b) Per-grant protocol deny override on `is` for tuic-v5
     inv.set_grant_protocol_override(
         &alice.id,
         &ServerId("is".into()),
@@ -110,7 +100,6 @@ async fn seed_live_state(db_path: &std::path::Path) -> AppState {
     .await
     .unwrap();
 
-    // 4. User Bob (disabled)
     let bob = User {
         id: UserId("bob".into()),
         uuid: BOB_GLOBAL_UUID.into(),
@@ -135,8 +124,6 @@ async fn open_existing_state(db_path: &std::path::Path) -> AppState {
     state
 }
 
-/// Fetch app config via `/api/v1/app/config/<device_id>` and return the config payload
-/// as well as the SHA256 digest of the config base64 string.
 async fn fetch_app_artifact_digest(app: axum::Router, device_id: &str) -> (String, String) {
     let resp = app
         .oneshot(
@@ -160,7 +147,6 @@ async fn fetch_app_artifact_digest(app: axum::Router, device_id: &str) -> (Strin
     (config_b64, digest)
 }
 
-/// Fetch sing-box subscription via `/sub/<token>` and return raw bytes + SHA256 digest.
 async fn fetch_sub_singbox_digest(app: axum::Router, token: &str) -> (Vec<u8>, String) {
     let resp = app
         .oneshot(
@@ -188,7 +174,6 @@ async fn fetch_sub_singbox_digest(app: axum::Router, token: &str) -> (Vec<u8>, S
     (body, digest)
 }
 
-/// Fetch v2ray-style subscription via `/sub/<token>` and return raw bytes + SHA256 digest.
 async fn fetch_sub_v2ray_digest(app: axum::Router, token: &str) -> (Vec<u8>, String) {
     let resp = app
         .oneshot(
@@ -223,10 +208,8 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
     let snap_path = dir.path().join("snapshot.bak");
     let restored_db = dir.path().join("restored.db");
 
-    // ── 1. Seed live state and capture pre-snapshot metrics & digests ─
     let state = seed_live_state(&live_db).await;
 
-    // Verify initial users
     let alice_before = state
         .inv
         .get_user(&UserId("alice".into()))
@@ -254,9 +237,8 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
     assert_eq!(bob_before.uuid, BOB_GLOBAL_UUID);
     assert!(bob_before.disabled);
 
-    // Verify initial grants and counts
     let grants_count_before = state.inv.count_grants().await.unwrap();
-    assert_eq!(grants_count_before, 3); // alice -> de, is; bob -> de
+    assert_eq!(grants_count_before, 3);
 
     let alice_servers_before = state
         .inv
@@ -265,7 +247,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         .unwrap();
     assert_eq!(alice_servers_before.len(), 2);
 
-    // Verify visibility pre-snapshot
     let de_tuic_hidden = state
         .inv
         .is_server_protocol_hidden(&ServerId("de".into()), &ProtocolId("tuic-v5".into()))
@@ -280,7 +261,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         .unwrap();
     assert!(!is_tuic_hidden, "tuic-v5 on server is is not hidden");
 
-    // Verify overrides pre-snapshot
     let alice_overrides = state
         .inv
         .list_protocol_overrides_for_user(&UserId("alice".into()))
@@ -314,7 +294,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "alice has no per-server uuid override on is (falls back to global uuid)"
     );
 
-    // Verify visible protocols for subscription
     let alice_de_visible = state
         .inv
         .visible_protocols_for_subscription(&UserId("alice".into()), &ServerId("de".into()))
@@ -337,7 +316,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "only vless+reality visible on is (tuic disabled by override)"
     );
 
-    // Capture pre-snapshot artifact digests
     let (app_cfg_pre, app_digest_pre) =
         fetch_app_artifact_digest(router(state.clone()), ALICE_DEVICE_ID).await;
     assert!(
@@ -353,34 +331,28 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         fetch_sub_v2ray_digest(router(state.clone()), ALICE_SUB_TOKEN).await;
     assert!(!sub_v2ray_pre.is_empty());
 
-    // ── 2. Create snapshot ───────────────────────────────────────────
     snapshot_to(&state.inv, &snap_path).await.unwrap();
     assert!(snap_path.exists());
     assert!(snap_path.metadata().unwrap().len() > 0);
 
-    // ── 3. Mutate live DB (proving post-mutation drifts digests) ───────
-    // a) Mutate Alice grant: revoke on `de`
     state
         .inv
         .revoke(&UserId("alice".into()), &ServerId("de".into()))
         .await
         .unwrap();
 
-    // b) Mutate visibility: unhide tuic-v5 on `de`
     state
         .inv
         .set_server_protocol_hidden(&ServerId("de".into()), &ProtocolId("tuic-v5".into()), false)
         .await
         .unwrap();
 
-    // c) Mutate Alice sub token
     state
         .inv
         .regenerate_sub_token(&UserId("alice".into()))
         .await
         .unwrap();
 
-    // Verify post-mutation digests differ
     let (_app_cfg_post, app_digest_post) =
         fetch_app_artifact_digest(router(state.clone()), ALICE_DEVICE_ID).await;
     assert_ne!(
@@ -388,14 +360,11 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "app artifact digest must change after live mutation"
     );
 
-    // ── 4. Restore snapshot to new DB ────────────────────────────────
     restore_from(&snap_path, &restored_db).await.unwrap();
     assert!(restored_db.exists());
 
-    // ── 5. Open restored DB and verify full state preservation ────────
     let restored_state = open_existing_state(&restored_db).await;
 
-    // Verify user preservation
     let alice_restored = restored_state
         .inv
         .get_user(&UserId("alice".into()))
@@ -433,7 +402,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
     );
     assert!(bob_restored.disabled, "bob disabled flag preserved");
 
-    // Verify grants count & relationships
     let grants_count_restored = restored_state.inv.count_grants().await.unwrap();
     assert_eq!(
         grants_count_restored, grants_count_before,
@@ -451,7 +419,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "alice granted servers preserved"
     );
 
-    // Verify protocol visibility preserved
     let de_tuic_hidden_restored = restored_state
         .inv
         .is_server_protocol_hidden(&ServerId("de".into()), &ProtocolId("tuic-v5".into()))
@@ -472,7 +439,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "server protocol visibility on is preserved"
     );
 
-    // Verify protocol overrides preserved
     let alice_overrides_restored = restored_state
         .inv
         .list_protocol_overrides_for_user(&UserId("alice".into()))
@@ -526,7 +492,6 @@ async fn operator_restore_preserves_user_grant_visibility_override_and_digests()
         "visible protocols for subscription on is preserved"
     );
 
-    // ── 6. Verify App and Sub artifact digests byte-for-byte ─────────
     let (app_cfg_restored, app_digest_restored) =
         fetch_app_artifact_digest(router(restored_state.clone()), ALICE_DEVICE_ID).await;
     assert_eq!(

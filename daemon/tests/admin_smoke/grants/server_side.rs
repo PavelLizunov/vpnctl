@@ -1,5 +1,3 @@
-//! Server-side grant management tests.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tempfile::TempDir;
@@ -57,25 +55,21 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    // Redirect target should be the SERVER page, not the user page.
     let loc = resp
         .headers()
         .get("location")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     assert_eq!(loc, "/admin/servers/sb/grants");
-    // Mutation landed.
     let users_on_server = inv.users_for_server(&ServerId("sb".into())).await.unwrap();
     assert!(users_on_server.iter().any(|u| u.id.0 == "alice"));
 }
 
-/// v2 3d gap-close — the Grants tab renders clickable sort links and the
-/// `?grant_sort=` param drives the row order.
 #[tokio::test]
 async fn v2_server_grants_sort_links_render() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 2, &[(0, 0), (1, 0)]).await; // s0 granted to u0,u1
+    seed(&s.inv, 1, 2, &[(0, 0), (1, 0)]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/grants?grant_sort=traffic").await;
     assert!(
         html.contains("sort:") || html.contains("сортировка:"),
@@ -85,7 +79,6 @@ async fn v2_server_grants_sort_links_render() {
         html.contains("grant_sort=presence") && html.contains("grant_sort=id"),
         "sort links for the other keys must render"
     );
-    // The active key renders as unlinked bold text (no href for traffic).
     assert!(
         !html.contains("grant_sort=traffic\""),
         "the active sort key must not link to itself"

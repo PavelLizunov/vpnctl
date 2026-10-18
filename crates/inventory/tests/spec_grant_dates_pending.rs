@@ -1,7 +1,3 @@
-//! Design v2 3d — spec tests for `grant_dates_for_server` (migration
-//! 0039) and `users_pending_deploy_for_server` (per-user pending-deploy
-//! detection driven by monotonic audit ids).
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use vpnctl_core::{Server, ServerId, User, UserId};
@@ -43,8 +39,6 @@ fn user(id: &str) -> User {
     }
 }
 
-/// A fresh grant is stamped with `granted_at` ≈ now; the date comes
-/// back through `grant_dates_for_server`.
 #[tokio::test]
 async fn new_grant_carries_granted_at_timestamp() {
     let (_d, inv) = inv().await;
@@ -69,8 +63,6 @@ async fn new_grant_carries_granted_at_timestamp() {
     );
 }
 
-/// Rows created before migration 0039 have NULL granted_at — the read
-/// path must surface them as None, not error.
 #[tokio::test]
 async fn pre_migration_grant_reads_as_none() {
     let (_d, inv) = inv().await;
@@ -79,8 +71,6 @@ async fn pre_migration_grant_reads_as_none() {
     inv.grant(&UserId("old".into()), &ServerId("s1".into()))
         .await
         .unwrap();
-    // Simulate a pre-0039 row via a second raw connection to the
-    // same db file (the inventory's own pool is crate-private).
     let raw = sqlx::sqlite::SqlitePool::connect(&format!(
         "sqlite://{}",
         _d.path().join("inv.db").display()
@@ -100,9 +90,6 @@ async fn pre_migration_grant_reads_as_none() {
     assert!(dates[0].1.is_none(), "NULL granted_at must read as None");
 }
 
-/// A `user.grant` audit row NEWER than the last good deploy marks the
-/// user pending; a later successful deploy clears them; a user whose
-/// grant was revoked (row gone from `grants`) never appears.
 #[tokio::test]
 async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
     let (_d, inv) = inv().await;
@@ -116,7 +103,6 @@ async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
         .await
         .unwrap();
 
-    // No deploy at all → every audited grant is pending.
     inv.audit(
         "admin",
         "user.grant",
@@ -135,8 +121,6 @@ async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
         "grant without any deploy must be pending"
     );
 
-    // A successful deploy AFTER the grant clears the pending set. Audit ids
-    // are monotonic, so this is deterministic even inside one timestamp tick.
     inv.audit(
         "admin",
         "server.deploy",
@@ -154,7 +138,6 @@ async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
         "successful deploy after the grant must clear pending, got {pending:?}"
     );
 
-    // A NEW grant after that deploy re-marks only that user.
     inv.audit(
         "admin",
         "user.grant",
@@ -169,7 +152,6 @@ async fn pending_deploy_tracks_grant_vs_deploy_audit_order() {
         .unwrap();
     assert_eq!(pending, vec![UserId("bob".into())]);
 
-    // A FAILED deploy (ssh_errors non-empty) must NOT clear pending.
     inv.audit(
         "admin",
         "server.deploy.failed",

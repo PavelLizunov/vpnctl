@@ -6,9 +6,6 @@ use crate::http_util::path_segment_encode;
 const SHARING_WINDOW_DAYS: u32 = 30;
 const IMPOSSIBLE_TRAVEL_HOURS: f64 = 2.0;
 
-/// Localized chip text for one sharing-risk reason (the carried value +
-/// a short unit). The scorer orders reasons strongest-first, so the lead
-/// chip is the smoking gun (concurrent IPs / impossible travel).
 fn sharing_reason_label(
     r: crate::sharing_score::SharingReason,
     lang: crate::i18n::Locale,
@@ -90,19 +87,11 @@ fn sharing_rows(
     }
 }
 
-/// PR-Dash dash#5 — account-sharing risk summary (redesigned 2026-06-17 to
-/// a composite, explainable score; replaces the bare `distinct_asns >= 3`).
-/// Each row shows the user, a 0-100 risk score (red=High, amber=Medium) and
-/// the reasons that fired (strongest first: simultaneous IPs, impossible
-/// travel, per-day IPs, client-app spread, …). Renders nothing when no user
-/// reaches `FLAG_THRESHOLD` (quiet dashboard).
 pub(in crate::handlers::admin::legacy) fn dashboard_abuse_summary(
     likely_shared: &[(vpnctl_core::UserId, crate::sharing_score::SharingScore)],
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // Defensive: skip any empty id so this render can NEVER emit a nameless
-    // link to `/admin/users/`.
     let rows: Vec<&(vpnctl_core::UserId, crate::sharing_score::SharingScore)> = likely_shared
         .iter()
         .filter(|(uid, _)| !uid.0.is_empty())

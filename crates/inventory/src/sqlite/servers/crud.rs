@@ -48,13 +48,6 @@ impl SqliteInventory {
             .await?;
         }
 
-        // Phase 4a (migration 0021) — when a server is added AFTER
-        // the migration has run, any pre-existing sub_access_log
-        // rows that happened to come from this server's IP (e.g.
-        // logged before vpnctld knew this was an egress) need to
-        // be flagged retroactively. Skipped if the server has no
-        // address at all (defensive — Server.address is required
-        // by the schema so this never happens in practice).
         if !s.address.is_empty() {
             sqlx::query(
                 "UPDATE sub_access_log SET is_vpn_egress = 1
@@ -93,9 +86,6 @@ impl SqliteInventory {
         Ok(servers.into_iter().next())
     }
 
-    /// Batch-fetches fully populated `Server` structs (with protocols and kernels)
-    /// for a slice of server IDs in 3 batched queries, eliminating the 3N+1 roundtrip loop.
-    /// Preserves the order of `server_ids` and silently skips absent IDs.
     pub async fn get_servers_batch(&self, server_ids: &[ServerId]) -> Result<Vec<Server>> {
         if server_ids.is_empty() {
             return Ok(Vec::new());
@@ -212,30 +202,16 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Operator-set display name for a server — the `{Country}` part of
-    /// the subscription URI fragment / sing-box outbound tag. `None`
-    /// when unset (column NULL or blank), in which case the render falls
-    /// back to `vpn_router::country_display_name(id)`. Blank/whitespace
-    /// stored values are normalised to `None` here so a caller never has
-    /// to second-guess them.
     pub async fn server_display_name(&self, sid: &ServerId) -> Result<Option<String>> {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT display_name FROM servers WHERE id = ?1")
                 .bind(&sid.0)
                 .fetch_optional(&self.pool)
                 .await?;
-        // Outer None = no such server; inner None = NULL column. Both → None.
         Ok(row.and_then(|(v,)| v).filter(|s| !s.trim().is_empty()))
     }
 
-    /// Set (or clear, when `name` trims to empty / is `None`) a server's
-    /// display name. Audit-on-actual-mutation: writes exactly one
-    /// `server.display_name.set` row, and only when the stored value
-    /// actually changes (idempotent re-saves are silent). Errors
-    /// `Invalid` if the server doesn't exist (matches `set_reserved_ports`
-    /// — an unknown id is a caller logic bug, not an expected state).
     pub async fn set_server_display_name(&self, sid: &ServerId, name: Option<&str>) -> Result<()> {
-        // Normalise: trim; blank → NULL (clear the override).
         let new_val: Option<String> = name
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -290,7 +266,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Cheap row count. `0` on an empty table.
     pub async fn count_servers(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM servers")
             .fetch_one(&self.pool)
@@ -298,12 +273,6 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
-    /// Fleet search for servers. Substring match against `servers.id`
-    /// and `servers.address`. See [`search_users`] for design notes.
-    /// Delegates to `get_server` for each hit so the returned rows
-    /// have populated `kernels`/`enabled_protocols` lists (the search
-    /// page only renders id+address, but a future audit-row click
-    /// would expect a fully-populated `Server`).
     pub async fn search_servers(&self, q: &str, limit: i64) -> Result<Vec<Server>> {
         if q.is_empty() {
             return Ok(Vec::new());

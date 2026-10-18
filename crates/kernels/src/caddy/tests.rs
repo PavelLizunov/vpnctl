@@ -260,8 +260,6 @@ fn render_no_crlf() {
     assert_eq!(bytes.iter().filter(|&&b| b == b'\r').count(), 0);
 }
 
-// ───────────────────────── vless-ws ──────────────────────────
-
 #[test]
 fn supported_protocols_includes_naive_and_vless_ws() {
     let p = Caddy::new().supported_protocols();
@@ -380,8 +378,6 @@ fn vlessws_and_naive_both_present_is_render_error() {
         other => panic!("expected Render error, got {other:?}"),
     }
 }
-
-// ───────────────────────── Apply Script Structure & Simulations ──────────────────────────
 
 fn strip_comment_lines(script: &str) -> String {
     script
@@ -1290,8 +1286,6 @@ fn caddy_scripts_no_multi_operand_rm_mixing_live_and_backups() {
         }
     }
 }
-
-// ───────────────────────── status, restart & transition ──────────────────────────
 
 #[test]
 fn restart_command_restarts_backend_if_managed_before_caddy() {

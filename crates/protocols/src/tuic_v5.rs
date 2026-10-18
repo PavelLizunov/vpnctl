@@ -4,15 +4,6 @@ use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-/// TUIC v5 на UDP:8443. Self-signed cert — на клиенте `insecure: true`
-/// (UUID+password — настоящая аутентификация, TLS чисто для шифрования).
-///
-/// **Stateless**: пути к сертификатам приходят через [`RenderCtx::secrets`].
-///
-/// Конвенция ключей:
-///
-/// - `tuic.cert_path` (optional, default `/etc/sing-box/cert.pem`)
-/// - `tuic.key_path`  (optional, default `/etc/sing-box/key.pem`)
 #[derive(Debug, Default)]
 pub struct TuicV5;
 
@@ -87,8 +78,6 @@ impl Protocol for TuicV5 {
                 user.id.0
             ))
         })?;
-        // Both UUID and password sit inside the userinfo segment, where `:`,
-        // `@`, `/`, and space would corrupt parsing. Name sits in the fragment.
         let uuid = utf8_percent_encode(&user.uuid, USERINFO);
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);

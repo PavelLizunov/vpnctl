@@ -3,37 +3,6 @@ use maud::{Markup, html};
 
 use crate::handlers::admin::helpers::format_msk_iso;
 
-/// Phase 5e — «Disaster recovery» single-glance summary in Settings.
-///
-/// Consolidates the operator's «what if 236 burns?» story onto one
-/// screen:
-///
-///   1. Where the backups live (3 tiers: local hourly Rust snapshots,
-///      daily encrypted bundle on 207, off-site daily bundle on
-///      Iceland).
-///   2. What's in each bundle (so the operator knows BEFORE the
-///      disaster what they'll get back — chiefly the deploy SSH
-///      key, without which a restored vpnctld is locked out of every
-///      VPN node).
-///   3. Last restore self-test result (from `audit_log` —
-///      `backup.self_test` action) — with a "run again" button.
-///   4. The restore procedure (3 steps).
-///
-/// All text is bilingual (EN/RU). No new persistence — the last-
-/// test status is read from `audit_log` via a 50-row tail filtered
-/// in the caller. If `last_self_test` is `None` the section renders
-/// «not yet run» + the call-to-action.
-///
-/// Operator-policy compliance: this section lists shell commands
-/// (`age -d`, `vpnctl restore`, `systemctl restart vpnctld`) — all
-/// covered by the «daemon literally can't help» exception in
-/// CLAUDE.md. The whole procedure runs on a DIFFERENT HOST than
-/// 236 (because 236 is presumed dead — the entire reason this
-/// section exists). At that point the daemon doesn't exist to be
-/// asked to push buttons; the operator is bootstrapping a new
-/// vpnctld instance from scratch. Every action that COULD be a
-/// Web UI button on the running 236 (push deploy key, etc) is
-/// kept in the procedure as a Web UI step on the NEW host.
 pub(crate) fn settings_disaster_recovery_section(
     lang: crate::i18n::Locale,
     last_self_test: Option<&vpnctl_inventory::AuditEntry>,
@@ -43,19 +12,12 @@ pub(crate) fn settings_disaster_recovery_section(
     let deploy_key_pub = crate::ssh_subprocess::public_key_path(&deploy_key);
     let deploy_key_bundle_label =
         format!("{} · {}", deploy_key.display(), deploy_key_pub.display());
-    // Format the last self-test: status chip + when + duration.
-    // Pulled from audit_log payload, which is JSON; we don't
-    // panic if the shape doesn't match — just show «(missing
-    // field)» so future schema changes don't break the page.
     let last = last_self_test.map(|e| {
         let payload = e.payload.as_ref();
         let overall = payload
             .and_then(|p| p.get("overall").and_then(|v| v.as_str()))
             .unwrap_or("?")
             .to_string();
-        // `Option` so a future audit-payload schema drift renders
-        // «(missing)» rather than a misleading «0 ms» that would
-        // look like a fast successful run in a post-mortem.
         let duration_ms: Option<i64> =
             payload.and_then(|p| p.get("duration_ms").and_then(|v| v.as_i64()));
         (e.ts, overall, duration_ms)
@@ -74,7 +36,6 @@ pub(crate) fn settings_disaster_recovery_section(
             ))
         }
 
-        // ── Where backups live ──────────────────────────────────────────
         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-top: 16px;" {
             (tr(lang, "Where backups live · 3 tiers", "Где живут бэкапы · 3 уровня"))
         }
@@ -130,7 +91,6 @@ pub(crate) fn settings_disaster_recovery_section(
             ))
         }
 
-        // ── What's bundled ──────────────────────────────────────────────
         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-top: 20px;" {
             (tr(lang, "What's in each daily bundle", "Что в ежедневном бандле"))
         }
@@ -172,7 +132,6 @@ pub(crate) fn settings_disaster_recovery_section(
             }
         }
 
-        // ── Last self-test status ───────────────────────────────────────
         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-top: 20px;" {
             (tr(lang, "Last restore self-test", "Последний self-test восстановления"))
         }
@@ -216,18 +175,12 @@ pub(crate) fn settings_disaster_recovery_section(
                     (icon("shield-check")) (tr(lang, "run self-test now", "запустить self-test сейчас"))
                 }
             }
-            // `?action=` is the real filter param (audit 2026-06-10:
-            // `action_prefix` doesn't exist in AuditQuery — the old
-            // link silently showed the unfiltered timeline). Trailing
-            // dot per the prefix-filter convention: matches
-            // backup.snapshot + backup.self_test.
             a href="/admin/audit?action=backup."
               style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
                 (icon("history")) (tr(lang, "self-test history", "история self-test"))
             }
         }
 
-        // ── Restore procedure ───────────────────────────────────────────
         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; margin-top: 16px;" {
             (tr(lang, "Restore procedure · 3 steps", "Процедура восстановления · 3 шага"))
         }
@@ -261,8 +214,6 @@ pub(crate) fn settings_disaster_recovery_section(
                 b { (tr(lang, "Verify + push deploy key", "Проверь + push deploy-ключ")) }
                 " — "
                 (tr(lang, "click ", "кликни "))
-                // POST form, not an anchor (audit 2026-06-10): the
-                // self-test route is POST-only — a GET link 405'd.
                 form method="post" action="/admin/backup/self-test"
                      style="display: inline;" {
                     button type="submit"

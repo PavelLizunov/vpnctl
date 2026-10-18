@@ -13,24 +13,9 @@ use vpnctl_core::shell::single_quote as shell_single_quote;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
-/// Operator-facing remediation for the verify-key phase, rendered into
-/// the browser via the SSE `Error` event. Operator-action-policy
-/// (CLAUDE.md HARD rule): NO `cat … on the node` / shell instruction —
-/// point at the product surfaces (restart the wizard, redeploy from the
-/// server page) instead. Extracted to a const so
-/// `verify_key_fail_copy_has_no_cat_on_node` can pin it without SSH.
 pub(super) const VERIFY_KEY_FAIL_HINT: &str = "The deploy key push didn't take — \
      restart the wizard or re-run deploy from the server page.";
 
-/// Run the full bootstrap as an async stream of events. The caller
-/// (the SSE handler) wraps this into `axum::response::sse::Sse::new`.
-///
-/// Internally: spawn the pipeline as a tokio task that pushes events
-/// into a bounded mpsc channel (capacity 64 — enough for the burst
-/// at startup plus the trickle during the slow apt-get step). The
-/// returned `ReceiverStream` is the consumer end; when the spawned
-/// task ends, the Sender drops and the stream completes naturally
-/// (browser sees a clean EOF).
 pub fn run_bootstrap(
     plan: BootstrapPlan,
     inv: SqliteInventory,
@@ -43,21 +28,12 @@ pub fn run_bootstrap(
     ReceiverStream::new(rx)
 }
 
-/// The 9-phase pipeline itself. Each phase sends one or more `Step`
-/// events; on failure it sends an `Error` and returns early. Helpers
-/// `send_step!` and `fail!` keep the call sites readable; both
-/// macros gracefully ignore channel-send failures (the receiver
-/// closing mid-bootstrap = browser disconnected, nothing to do).
 async fn bootstrap_pipeline(
     plan: BootstrapPlan,
     inv: SqliteInventory,
     registry: Arc<Registry>,
     tx: mpsc::Sender<BootstrapEvent>,
 ) {
-    // Helper macros — these are NOT `yield`-based (would conflict
-    // with async_stream::stream!), they call `tx.send(...).await`
-    // directly. macro_rules expands at the use site so the resulting
-    // code compiles cleanly.
     macro_rules! send_step {
         ($phase:expr, $($arg:tt)*) => {{
             let msg = format!($($arg)*);
@@ -72,7 +48,6 @@ async fn bootstrap_pipeline(
         }};
     }
 
-    // ── 0. Pubkey sanity check ────────────────────────────────────
     send_step!(
         "setup",
         "loading vpnctld deploy pubkey from {}",
@@ -87,7 +62,6 @@ async fn bootstrap_pipeline(
         ),
     };
 
-    // ── 1. SSH probe (password auth) ──────────────────────────────
     send_step!(
         "probe",
         "ssh {}@{}:{} with supplied password…",
@@ -129,15 +103,10 @@ async fn bootstrap_pipeline(
         }
     }
 
-    // ── 2. ssh-keyscan + fingerprint ──────────────────────────────
     send_step!(
         "fingerprint",
         "fetching host key fingerprint via ssh-keyscan…"
     );
-    // Wrap the blocking subprocess in spawn_blocking so a slow
-    // ssh-keyscan (~5–10s default `-T 10`) doesn't pin the tokio
-    // worker thread serving this SSE stream. Per the
-    // `vpnctl-host-fingerprint` doc-comment.
     let addr = plan.address.clone();
     let port = plan.ssh_port;
     let fingerprint = match tokio::task::spawn_blocking(move || {
@@ -148,10 +117,6 @@ async fn bootstrap_pipeline(
         Ok(Ok(fp)) => fp,
         Ok(Err(e)) => fail!("fingerprint", "{e}"),
         Err(join_err) => {
-            // `JoinError` fires on BOTH panic and runtime cancellation
-            // — distinguish them so the SSE operator sees the right
-            // failure cause (a cancelled wizard step is very different
-            // from a panicked subprocess).
             let cause = if join_err.is_panic() {
                 "panicked"
             } else {
@@ -162,7 +127,6 @@ async fn bootstrap_pipeline(
     };
     send_step!("fingerprint", "pinned {}", fingerprint);
 
-    // ── 3. Push deploy pubkey to authorized_keys ──────────────────
     send_step!(
         "push-key",
         "appending deploy pubkey to ~/.ssh/authorized_keys (idempotent)…"
@@ -189,7 +153,6 @@ async fn bootstrap_pipeline(
         Err(e) => fail!("push-key", "{e}"),
     }
 
-    // ── 4. Verify pubkey auth works ───────────────────────────────
     send_step!(
         "verify-key",
         "re-connecting with pubkey auth (BatchMode=yes)…"
@@ -209,16 +172,6 @@ async fn bootstrap_pipeline(
     }
     send_step!("verify-key", "ok — pubkey auth confirmed.");
 
-    // ── 5. Register server in inventory ───────────────────────────
-    // Duplicate-address guard (HANDOFF §6 #2, review-agent important):
-    // this is the wizard's REAL add_server point. `wizard_new_submit`
-    // checks at step 1, but `find_available_server_id` suffixes the id
-    // (`id-2`) around a collision — so an address registered between step 1
-    // and here would still persist a second record for one box (the
-    // `us`/`us1` shape the fix targets). Guard the ADDRESS at the single
-    // write point every wizard bootstrap funnels through. SSH-gated path —
-    // not unit-testable without a node; `server_id_for_address` is
-    // unit-tested and the placement is review-verified.
     match inv.server_id_for_address(&plan.address).await {
         Ok(Some(existing)) => fail!(
             "register",
@@ -275,7 +228,6 @@ async fn bootstrap_pipeline(
         )
         .await
     {
-        // Audit failure is non-fatal — server is already registered.
         tracing::warn!(
             target = "vpnctld::wizard",
             server = %plan.server_id,
@@ -289,18 +241,10 @@ async fn bootstrap_pipeline(
         None => fail!("register", "another deploy started for this server; retry"),
     };
 
-    // ── 6. Bootstrap per-server secrets ───────────────────────────
     send_step!(
         "secrets",
         "minting per-protocol secrets (VLESS REALITY, WireGuard, hy2)…"
     );
-    // Per-protocol secret bootstrapping is centralised in
-    // `bootstrap_server_secrets` (below) so the wizard, the
-    // `server_deploy` handler, and any future re-deploy entry point
-    // mint the same secret-key shapes. When a 4th protocol with a
-    // server-side secret arrives, that helper is the only place to
-    // touch — see the function's own doc-comment for the long-term
-    // plan (`Protocol::mint_server_secrets` trait method).
     match bootstrap_server_secrets(&inv, &server, &registry).await {
         Ok((_, minted)) => {
             for label in minted {
@@ -310,7 +254,6 @@ async fn bootstrap_pipeline(
         Err(e) => fail!("secrets", "{e}"),
     };
 
-    // ── 7-8. Per-kernel install + apply ───────────────────────────
     let deploy_revision = match inv.deploy_input_revision(&server.id).await {
         Ok(revision) => revision,
         Err(e) => fail!("install", "cannot snapshot deploy inputs: {e}"),
@@ -335,7 +278,6 @@ async fn bootstrap_pipeline(
     {
         fail!("install", "inventory changed while preparing deploy; retry");
     }
-    // uuid-uniqueness gate (HANDOFF §4.1) — fail CLOSED before render/apply.
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("install", "{e}");
     }
@@ -384,12 +326,6 @@ async fn bootstrap_pipeline(
             Ok(c) => c,
             Err(e) => fail!("apply", "{}: render_config: {e}", kid.0),
         };
-        // Reserved-ports pre-apply guard (post-2026-05-26). A fresh
-        // wizard bootstrap is unlikely to have a reserved list set
-        // yet (the operator typically reserves AFTER importing the
-        // co-tenant ports), but defending here keeps the contract
-        // honest for any future flow that pre-seeds reservations
-        // before the first bootstrap.
         if kid.0 == "sing-box" {
             match inv.get_reserved_ports(&server.id).await {
                 Ok(reserved) => {
@@ -414,27 +350,11 @@ async fn bootstrap_pipeline(
             fail!("apply", "{}: apply_config: {e}", kid.0);
         }
         send_step!("apply", "{}: ok — service running with new config.", kid.0);
-        // Best-effort firewall open (Kernel::open_firewall) — fresh deploy
-        // reachable without a manual `ufw allow`; non-fatal (config is live).
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             send_step!("apply", "⚠ {}: firewall step skipped: {e}", kid.0);
         }
     }
 
-    // ── 8.5 Deploy-baseline audit (review 2026-06-04) ─────────────
-    // The wizard genuinely rendered + applied config above, but used
-    // to audit only `server.wizard` — so the server's deploy HISTORY
-    // stayed empty until the first manual deploy and the audit
-    // timeline read «server is live» with zero deploys. Write the
-    // canonical `server.deploy` row (via:\"wizard-bootstrap\"). This
-    // also gives the pending-deploy detector a real baseline: a grant
-    // made after the wizard (a per-user `user.grant` row) compares
-    // newer than this ts → the «config not yet deployed» banner fires
-    // exactly when it should. Reaching this point = every kernel
-    // applied successfully (any failure above returned via fail!).
-    //
-    // The revision covers every render input, not only grant membership,
-    // and the compare + audit insert are one SQLite write transaction.
     let payload = serde_json::json!({
         "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
         "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
@@ -462,7 +382,6 @@ async fn bootstrap_pipeline(
         }
     }
 
-    // ── 9. Done ───────────────────────────────────────────────────
     let redirect = format!("/admin/servers/{}", path_segment_encode(&plan.server_id));
     let _ = tx
         .send(BootstrapEvent::Ok {

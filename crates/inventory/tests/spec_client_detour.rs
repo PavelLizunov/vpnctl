@@ -1,7 +1,3 @@
-//! Spec tests for `client_detour_via` and `set_client_detour_via_as`.
-//!
-//! Written strictly from `docs/specs/client-detour.md` and test construction patterns.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -49,7 +45,6 @@ async fn happy_set_get_clear_client_detour() {
     inv.add_server(&srv("s1")).await.unwrap();
     inv.add_server(&srv("s2")).await.unwrap();
 
-    // Initially no client detour set
     let initial = inv.client_detour_via(&s1).await.unwrap();
     assert_eq!(initial, None);
 
@@ -58,7 +53,6 @@ async fn happy_set_get_clear_client_detour() {
         0
     );
 
-    // Set s1 client detour to s2
     inv.set_client_detour_via_as("admin", &s1, Some(&s2))
         .await
         .unwrap();
@@ -79,7 +73,6 @@ async fn happy_set_get_clear_client_detour() {
     assert_eq!(set_audit.actor, "admin");
     assert_eq!(set_audit.target.as_deref(), Some("s1"));
 
-    // Clear s1 client detour
     inv.set_client_detour_via_as("admin", &s1, None)
         .await
         .unwrap();
@@ -104,7 +97,6 @@ async fn no_op_audit_suppression() {
     inv.add_server(&srv("s1")).await.unwrap();
     inv.add_server(&srv("s2")).await.unwrap();
 
-    // 1. Clearing when already None -> no-op (0 audit rows)
     inv.set_client_detour_via_as("admin", &s1, None)
         .await
         .unwrap();
@@ -113,7 +105,6 @@ async fn no_op_audit_suppression() {
         0
     );
 
-    // 2. Setting s1 -> s2 mutates -> 1 audit row
     inv.set_client_detour_via_as("admin", &s1, Some(&s2))
         .await
         .unwrap();
@@ -122,7 +113,6 @@ async fn no_op_audit_suppression() {
         1
     );
 
-    // 3. Setting s1 -> s2 again -> no-op (still 1 audit row)
     inv.set_client_detour_via_as("admin", &s1, Some(&s2))
         .await
         .unwrap();
@@ -131,7 +121,6 @@ async fn no_op_audit_suppression() {
         1
     );
 
-    // 4. Clearing s1 -> None mutates -> 2 audit rows
     inv.set_client_detour_via_as("admin", &s1, None)
         .await
         .unwrap();
@@ -140,7 +129,6 @@ async fn no_op_audit_suppression() {
         2
     );
 
-    // 5. Clearing s1 -> None again -> no-op (still 2 audit rows)
     inv.set_client_detour_via_as("admin", &s1, None)
         .await
         .unwrap();
@@ -160,19 +148,16 @@ async fn unknown_target_or_upstream_rejected() {
 
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Unknown target server
     let res = inv
         .set_client_detour_via_as("admin", &unknown, Some(&s1))
         .await;
     assert!(res.is_err(), "unknown target must be rejected");
 
-    // Unknown upstream server
     let res = inv
         .set_client_detour_via_as("admin", &s1, Some(&unknown))
         .await;
     assert!(res.is_err(), "unknown upstream must be rejected");
 
-    // Querying unknown server
     let got = inv.client_detour_via(&unknown).await.unwrap();
     assert_eq!(got, None);
 }
@@ -188,25 +173,21 @@ async fn workload_only_server_rejected() {
     inv.add_server(&srv("s1")).await.unwrap();
     inv.add_server(&srv("s2")).await.unwrap();
 
-    // Make s2 workload-only
     inv.set_server_role(&s2, ServerRole::WorkloadOnly)
         .await
         .unwrap();
 
-    // Upstream is workload-only -> reject
     let res = inv.set_client_detour_via_as("admin", &s1, Some(&s2)).await;
     assert!(
         res.is_err(),
         "workload-only upstream server must be rejected"
     );
 
-    // Make s1 workload-only and s2 vpn-exit
     inv.set_server_role(&s1, ServerRole::WorkloadOnly)
         .await
         .unwrap();
     inv.set_server_role(&s2, ServerRole::VpnExit).await.unwrap();
 
-    // Target is workload-only -> reject
     let res = inv.set_client_detour_via_as("admin", &s1, Some(&s2)).await;
     assert!(res.is_err(), "workload-only target server must be rejected");
 }
@@ -224,24 +205,19 @@ async fn self_cycle_and_nested_rejections() {
     inv.add_server(&srv("s2")).await.unwrap();
     inv.add_server(&srv("s3")).await.unwrap();
 
-    // 1. Self-reference: s1 -> s1
     let res = inv.set_client_detour_via_as("admin", &s1, Some(&s1)).await;
     assert!(res.is_err(), "self-reference detour must be rejected");
 
-    // Set s1 -> s2
     inv.set_client_detour_via_as("admin", &s1, Some(&s2))
         .await
         .unwrap();
 
-    // 2. Direct cycle: s2 -> s1 (since s1 -> s2)
     let res = inv.set_client_detour_via_as("admin", &s2, Some(&s1)).await;
     assert!(res.is_err(), "cycle detour s2 -> s1 must be rejected");
 
-    // 3. Nested chain (downstream detour): s3 -> s1 when s1 -> s2
     let res = inv.set_client_detour_via_as("admin", &s3, Some(&s1)).await;
     assert!(res.is_err(), "nested chain s3 -> s1 -> s2 must be rejected");
 
-    // 4. Nested chain (upstream detour): s2 -> s3 when s1 -> s2
     let res = inv.set_client_detour_via_as("admin", &s2, Some(&s3)).await;
     assert!(res.is_err(), "nested chain s1 -> s2 -> s3 must be rejected");
 }
@@ -296,10 +272,8 @@ async fn on_delete_set_null() {
         .unwrap();
     assert_eq!(inv.client_detour_via(&s1).await.unwrap(), Some(s2.clone()));
 
-    // Delete s2 (upstream)
     inv.remove_server(&s2).await.unwrap();
 
-    // s1 must survive, but its detour is SET NULL
     let s1_server = inv.get_server(&s1).await.unwrap();
     assert!(s1_server.is_some(), "s1 must survive deletion of s2");
 

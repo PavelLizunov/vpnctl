@@ -6,8 +6,6 @@ use crate::kernel::Kernel;
 use crate::models::Server;
 use crate::protocol::Protocol;
 
-/// Чтобы добавлять ядра и протоколы, не трогая CLI и inventory, делаем централизованный
-/// реестр. CLI ходит сюда: «дай мне Kernel по id».
 #[derive(Debug, Default)]
 pub struct Registry {
     kernels: Vec<Box<dyn Kernel>>,
@@ -22,8 +20,6 @@ impl Registry {
         }
     }
 
-    /// Зарегистрировать ядро. Возвращает ошибку, если ядро с таким `id` уже
-    /// зарегистрировано (предотвращает silent inconsistency).
     pub fn register_kernel(&mut self, k: Box<dyn Kernel>) -> Result<()> {
         let id = k.id();
         if self.kernels.iter().any(|existing| existing.id() == id) {
@@ -33,7 +29,6 @@ impl Registry {
         Ok(())
     }
 
-    /// Зарегистрировать протокол. Возвращает ошибку при дубликате.
     pub fn register_protocol(&mut self, p: Box<dyn Protocol>) -> Result<()> {
         let id = p.id();
         if self.protocols.iter().any(|existing| existing.id() == id) {
@@ -57,28 +52,14 @@ impl Registry {
             .map(|p| p.as_ref())
     }
 
-    /// Every registered protocol id, in registration order. Used by
-    /// the admin UI to render the full set of available protocols
-    /// (e.g. checkbox list on the server-detail page) so the operator
-    /// doesn't have to remember which protocol strings the registry
-    /// accepts. Cheap clone — only ~7 short strings.
     pub fn protocol_ids(&self) -> Vec<ProtocolId> {
         self.protocols.iter().map(|p| p.id()).collect()
     }
 
-    /// Every registered kernel id (analogous to `protocol_ids`).
     pub fn kernel_ids(&self) -> Vec<KernelId> {
         self.kernels.iter().map(|k| k.id()).collect()
     }
 
-    /// Kernel/protocol SUPPORT validation only (no port-conflict gate).
-    /// For server-CREATE paths (`bootstrap`, `server add`) where no
-    /// secrets exist yet: the port-conflict guard is secret-aware
-    /// (`vless.listen_port` etc.), and the operator can't set the secret
-    /// until the server row exists — validating ports here would reject
-    /// exactly the naive+reality topology this guard exists to enable.
-    /// The deploy path runs the full [`Self::validate_server`] with real
-    /// secrets; that is the authoritative gate.
     pub fn validate_server_support(&self, server: &Server) -> Result<()> {
         if server.kernels.is_empty() {
             return Err(CoreError::Render(format!(
@@ -86,7 +67,6 @@ impl Registry {
                 server.id
             )));
         }
-        // Resolve every declared kernel id. Unknown kernel = config error.
         let mut resolved = Vec::with_capacity(server.kernels.len());
         for kid in &server.kernels {
             let k = self
@@ -94,19 +74,9 @@ impl Registry {
                 .ok_or_else(|| CoreError::Render(format!("unknown kernel {kid}")))?;
             resolved.push((kid.clone(), k.supported_protocols()));
         }
-        // Each declared protocol must be supported by AT LEAST ONE of the
-        // server's kernels. Weaker than single-kernel "kernel must support
-        // every protocol" — that one becomes physically impossible for
-        // mixed deployments (sing-box does VLESS, amneziawg does WG;
-        // neither supports the other). The new rule: every protocol has
-        // SOMEONE to render it.
         for proto in &server.enabled_protocols {
             if !resolved.iter().any(|(_, sup)| sup.contains(proto)) {
                 return Err(CoreError::UnsupportedProtocol {
-                    // Attribute the error to the first kernel as the
-                    // canonical "I'm the one who can't run this"
-                    // displayed in the message. For exhaustive
-                    // diagnostics the caller can re-walk `server.kernels`.
                     kernel: server.kernels[0].clone(),
                     protocol: proto.clone(),
                 });
@@ -122,17 +92,6 @@ impl Registry {
     ) -> Result<()> {
         self.validate_server_support(server)?;
 
-        // Cross-protocol port-conflict guard: two enabled protocols that
-        // bind the same (transport, port) on one host collide at runtime
-        // — e.g. naive's Caddy on tcp/443 vs VLESS+REALITY's sing-box on
-        // tcp/443. Catch it here, before any SSH session, instead of
-        // discovering it as a crash-looping second daemon.
-        //
-        // `effective_listen_ports(secrets)` (not the static `listen_ports`)
-        // so a per-server override moves the protocol's declared port in
-        // lockstep — `vless.listen_port=8443` frees tcp/443 for naive on
-        // the same node, and a second protocol squatting 8443 (including
-        // vless-ws's front port) is caught here (cdn incident 2026-08-05).
         let mut bound: HashMap<(&str, u16), &ProtocolId> = HashMap::new();
         for pid in &server.enabled_protocols {
             let Some(proto) = self.protocol(pid) else {
@@ -287,7 +246,6 @@ mod validate_server_port_conflict {
 
     #[test]
     fn same_port_different_transport_ok() {
-        // tcp/443 and udp/443 are distinct sockets — not a conflict.
         let reg = registry(vec![("a", &[("tcp", 443)]), ("b", &[("udp", 443)])]);
         assert!(
             reg.validate_server(&server(&["a", "b"]), &no_secrets())
@@ -304,9 +262,6 @@ mod validate_server_port_conflict {
         );
     }
 
-    /// A protocol whose `effective_listen_ports` honours a secret override
-    /// moves its declared port for the guard too: with the override set the
-    /// naive-on-443 conflict disappears…
     #[test]
     fn secret_override_frees_default_port() {
         #[derive(Debug)]
@@ -350,13 +305,11 @@ mod validate_server_port_conflict {
         }))
         .unwrap();
 
-        // Without the override: naive + vless both claim tcp/443.
         assert!(
             reg.validate_server(&server(&["vless", "naive"]), &no_secrets())
                 .is_err()
         );
 
-        // With vless.listen_port=8443 the conflict is resolved…
         let mut overridden = no_secrets();
         overridden.insert("vless.listen_port".into(), "8443".into());
         assert!(
@@ -364,7 +317,6 @@ mod validate_server_port_conflict {
                 .is_ok()
         );
 
-        // …but a third protocol squatting the override port conflicts.
         reg.register_protocol(Box::new(FakeProto {
             id: "squat",
             ports: &[("tcp", 8443)],
@@ -398,17 +350,8 @@ mod validate_server_port_conflict {
         }
     }
 
-    /// PR #139 review finding 1: a protocol that declares NO static port
-    /// but binds a secret-driven one (the vless-ws shape — caddy front on
-    /// `vlessws.listen_port`, default 8443) must still be visible to the
-    /// guard through `effective_listen_ports`. Its default front port
-    /// EQUALS reality's canonical override port 8443, so the cdn-incident
-    /// remedy (reality → 8443) silently recreated the outage on a
-    /// vless-ws co-resident node unless the guard sees both sides.
     #[test]
     fn secret_driven_front_port_conflicts_with_reality_override() {
-        // vless-ws shape: no static declaration, effective port from a
-        // secret with a non-443 default.
         #[derive(Debug)]
         struct WsLike;
         impl Protocol for WsLike {
@@ -436,7 +379,6 @@ mod validate_server_port_conflict {
                 vec![("tcp", port)]
             }
         }
-        // reality shape: default 443, `vless.listen_port` override.
         #[derive(Debug)]
         struct RealityLike;
         impl Protocol for RealityLike {
@@ -478,8 +420,6 @@ mod validate_server_port_conflict {
             r
         };
 
-        // reality's canonical remedy port == ws's default front port →
-        // the exact outage combination MUST be rejected pre-SSH.
         let mut clash = no_secrets();
         clash.insert("vless.listen_port".into(), "8443".into());
         let err = reg
@@ -490,13 +430,11 @@ mod validate_server_port_conflict {
             other => panic!("expected Render, got {other:?}"),
         }
 
-        // defaults (ws 8443 / reality 443) cohabit fine…
         assert!(
             reg.validate_server(&server(&["ws", "reality"]), &no_secrets())
                 .is_ok()
         );
 
-        // …as does ws moved off the override port.
         let mut apart = no_secrets();
         apart.insert("vless.listen_port".into(), "8443".into());
         apart.insert("front.listen_port".into(), "2087".into());
@@ -506,11 +444,6 @@ mod validate_server_port_conflict {
         );
     }
 
-    /// PR #139 review finding 5: server-CREATE paths have no secrets yet
-    /// (the override secret needs the server row to exist first), so they
-    /// validate support only — a naive+realty create must not abort on a
-    /// port conflict the operator is about to resolve via the secret; the
-    /// deploy-time gate (with real secrets) stays authoritative.
     #[test]
     fn support_only_validation_skips_port_gate() {
         let reg = registry(vec![("vless", &[("tcp", 443)]), ("naive", &[("tcp", 443)])]);
@@ -518,12 +451,10 @@ mod validate_server_port_conflict {
             reg.validate_server_support(&server(&["vless", "naive"]))
                 .is_ok()
         );
-        // …while the full gate still rejects the same combination.
         assert!(
             reg.validate_server(&server(&["vless", "naive"]), &no_secrets())
                 .is_err()
         );
-        // support errors still fire on the support-only path.
         assert!(reg.validate_server_support(&server(&["ghost"])).is_err());
     }
 }

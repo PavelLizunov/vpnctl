@@ -1,5 +1,3 @@
-//! Admin UI smoke tests for /admin/monitoring and probe-all endpoints.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -11,23 +9,11 @@ use vpnctld::router;
 
 use super::common::*;
 
-// ────────────────────────────────────────────────────────────────────────
-//  POST /admin/monitoring/probe-all
-//
-//  Design v2 3a: «probe all now» manual probe sweep button on the
-//  monitoring page. Sequential SSH probe across all servers in inventory,
-//  audits with action "monitoring.probe_all" and payload `{"servers": N}`,
-//  and redirects back to /admin/monitoring via 303 See Other.
-// ────────────────────────────────────────────────────────────────────────
-
-/// POST /admin/monitoring/probe-all without same-origin headers must be
-/// rejected by CSRF middleware with 403 Forbidden.
 #[tokio::test]
 async fn probe_all_csrf_rejection_missing_or_mismatched_origin() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
 
-    // 1. Missing Origin + Host headers entirely
     let req = Request::builder()
         .method("POST")
         .uri("/admin/monitoring/probe-all")
@@ -46,7 +32,6 @@ async fn probe_all_csrf_rejection_missing_or_mismatched_origin() {
         "CSRF rejection body must match contract: {s}"
     );
 
-    // 2. Mismatched Origin vs Host header (cross-site attempt)
     let req = Request::builder()
         .method("POST")
         .uri("/admin/monitoring/probe-all")
@@ -62,8 +47,6 @@ async fn probe_all_csrf_rejection_missing_or_mismatched_origin() {
     );
 }
 
-/// GET /admin/monitoring/probe-all is not a valid method (route is POST-only)
-/// and must return 405 Method Not Allowed.
 #[tokio::test]
 async fn probe_all_rejects_get_method() {
     let dir = TempDir::new().unwrap();
@@ -82,8 +65,6 @@ async fn probe_all_rejects_get_method() {
     );
 }
 
-/// POST /admin/monitoring/probe-all on an empty inventory executes cleanly,
-/// records an audit entry with `servers: 0`, and redirects to /admin/monitoring.
 #[tokio::test]
 async fn probe_all_empty_inventory_no_op() {
     let dir = TempDir::new().unwrap();
@@ -115,7 +96,6 @@ async fn probe_all_empty_inventory_no_op() {
         "Location header must point to /admin/monitoring"
     );
 
-    // Audit verification
     let audits = inv.recent_audit(10).await.unwrap();
     let probe_audits: Vec<_> = audits
         .into_iter()
@@ -132,8 +112,6 @@ async fn probe_all_empty_inventory_no_op() {
     );
 }
 
-/// POST /admin/monitoring/probe-all triggers sweep across all servers in
-/// inventory, records audit row with the count of probed servers, and redirects.
 #[tokio::test]
 async fn probe_all_triggers_sweep_and_audits_server_count() {
     let dir = TempDir::new().unwrap();
@@ -165,7 +143,6 @@ async fn probe_all_triggers_sweep_and_audits_server_count() {
         "/admin/monitoring"
     );
 
-    // Verify audit record
     let audits = inv.recent_audit(10).await.unwrap();
     let probe_audits: Vec<_> = audits
         .into_iter()
@@ -181,7 +158,6 @@ async fn probe_all_triggers_sweep_and_audits_server_count() {
         "audit payload must record 3 servers"
     );
 
-    // Verify monitoring page continues to render 200 OK after the sweep
     let html = fetch_html(app, "/admin/monitoring").await;
     assert!(
         html.contains("Fleet"),
@@ -190,14 +166,11 @@ async fn probe_all_triggers_sweep_and_audits_server_count() {
     assert!(html.contains(r#"action="/admin/monitoring/probe-all""#));
 }
 
-/// POST /admin/monitoring/probe-all handles heterogeneous server configurations
-/// (e.g. sing-box, caddy/naive) without error or panic.
 #[tokio::test]
 async fn probe_all_handles_heterogeneous_server_topologies() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
 
-    // Server 1: standard sing-box server
     s.inv
         .add_server(&Server {
             id: ServerId("s0-singbox".into()),
@@ -214,7 +187,6 @@ async fn probe_all_handles_heterogeneous_server_topologies() {
         .await
         .unwrap();
 
-    // Server 2: naive/caddy server (non-sing-box kernel)
     s.inv
         .add_server(&Server {
             id: ServerId("s1-naive".into()),
@@ -266,8 +238,6 @@ async fn probe_all_handles_heterogeneous_server_topologies() {
     );
 }
 
-/// Multiple invocations of POST /admin/monitoring/probe-all sequentially
-/// record distinct audit entries per invocation.
 #[tokio::test]
 async fn probe_all_sequential_invocations_audit_each_run() {
     let dir = TempDir::new().unwrap();
@@ -275,7 +245,6 @@ async fn probe_all_sequential_invocations_audit_each_run() {
     seed(&s.inv, 1, 0, &[]).await;
     let inv = s.inv.clone();
 
-    // First invocation
     let resp1 = router(s.clone())
         .oneshot(
             add_same_origin(
@@ -290,7 +259,6 @@ async fn probe_all_sequential_invocations_audit_each_run() {
         .unwrap();
     assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
 
-    // Second invocation
     let resp2 = router(s)
         .oneshot(
             add_same_origin(

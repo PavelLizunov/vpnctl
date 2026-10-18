@@ -1,5 +1,3 @@
-//! Common utility functions and formatting helpers for admin UI handlers.
-
 use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -144,7 +142,6 @@ pub(crate) fn set_tweak_cookie(
         .find_map(|kv| kv.strip_prefix("value="))
         .unwrap_or("");
     if !valid.contains(&value) {
-        // Security: truncate reflected input to prevent response inflation, log bloat, or DoS
         let truncated = if value.chars().count() > 64 {
             format!("{}…", value.chars().take(64).collect::<String>())
         } else {
@@ -264,10 +261,10 @@ pub(crate) fn format_local_with_pattern(
 
 pub(crate) fn pct_color(pct: Option<u8>) -> &'static str {
     match pct {
-        Some(p) if p >= 99 => "#2e7d32", // green
-        Some(p) if p >= 95 => "#e6a23c", // amber
-        Some(_) => "#c62828",            // red (incl. Some(0))
-        None => "var(--mute)",           // grey
+        Some(p) if p >= 99 => "#2e7d32",
+        Some(p) if p >= 95 => "#e6a23c",
+        Some(_) => "#c62828",
+        None => "var(--mute)",
     }
 }
 
@@ -400,8 +397,6 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
         return "/admin/".to_string();
     };
     let path_only = path.split(['?', '#']).next().unwrap_or(path);
-    // Security: reject path-traversal (`..`), backslashes (`\`), or double slashes (`//`)
-    // which could escape `/admin/` or trigger protocol-relative open redirects in browsers.
     if path_only.contains("..") || path_only.contains('\\') || path_only.contains("//") {
         return "/admin/".to_string();
     }
@@ -657,49 +652,45 @@ mod tests {
 
     #[test]
     fn valid_user_id_validation() {
-        // Valid user IDs
         assert!(valid_user_id("alice"));
         assert!(valid_user_id("user.123"));
         assert!(valid_user_id("user_name"));
         assert!(valid_user_id("u-1"));
         assert!(valid_user_id("a1"));
 
-        // Invalid user IDs
-        assert!(!valid_user_id("a")); // too short (len < 2)
-        assert!(!valid_user_id("a".repeat(33).as_str())); // too long (len > 32)
-        assert!(!valid_user_id("Alice")); // uppercase disallowed
-        assert!(!valid_user_id(".user")); // leading dot
-        assert!(!valid_user_id("user.")); // trailing dot
-        assert!(!valid_user_id("-user")); // leading dash
-        assert!(!valid_user_id("user-")); // trailing dash
-        assert!(!valid_user_id("_user")); // leading underscore
-        assert!(!valid_user_id("user_")); // trailing underscore
-        assert!(!valid_user_id("user..name")); // consecutive dots / path traversal
-        assert!(!valid_user_id("..")); // path traversal dots
-        assert!(!valid_user_id("user@domain")); // invalid character
-        assert!(!valid_user_id("user/name")); // slash disallowed
+        assert!(!valid_user_id("a"));
+        assert!(!valid_user_id("a".repeat(33).as_str()));
+        assert!(!valid_user_id("Alice"));
+        assert!(!valid_user_id(".user"));
+        assert!(!valid_user_id("user."));
+        assert!(!valid_user_id("-user"));
+        assert!(!valid_user_id("user-"));
+        assert!(!valid_user_id("_user"));
+        assert!(!valid_user_id("user_"));
+        assert!(!valid_user_id("user..name"));
+        assert!(!valid_user_id(".."));
+        assert!(!valid_user_id("user@domain"));
+        assert!(!valid_user_id("user/name"));
     }
 
     #[test]
     fn valid_server_id_validation() {
-        // Valid server IDs
         assert!(valid_server_id("s"));
         assert!(valid_server_id("srv-01"));
         assert!(valid_server_id("Server_Node.1"));
         assert!(valid_server_id("DE-node"));
 
-        // Invalid server IDs
-        assert!(!valid_server_id("")); // empty
-        assert!(!valid_server_id("s".repeat(65).as_str())); // too long
-        assert!(!valid_server_id(".server")); // leading dot
-        assert!(!valid_server_id("server.")); // trailing dot
-        assert!(!valid_server_id("-server")); // leading dash
-        assert!(!valid_server_id("server-")); // trailing dash
-        assert!(!valid_server_id("_server")); // leading underscore
-        assert!(!valid_server_id("server_")); // trailing underscore
-        assert!(!valid_server_id("srv..01")); // consecutive dots / path traversal
-        assert!(!valid_server_id("..")); // path traversal dots
-        assert!(!valid_server_id("srv/01")); // slash disallowed
+        assert!(!valid_server_id(""));
+        assert!(!valid_server_id("s".repeat(65).as_str()));
+        assert!(!valid_server_id(".server"));
+        assert!(!valid_server_id("server."));
+        assert!(!valid_server_id("-server"));
+        assert!(!valid_server_id("server-"));
+        assert!(!valid_server_id("_server"));
+        assert!(!valid_server_id("server_"));
+        assert!(!valid_server_id("srv..01"));
+        assert!(!valid_server_id(".."));
+        assert!(!valid_server_id("srv/01"));
     }
 
     #[tokio::test]

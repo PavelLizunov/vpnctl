@@ -1,14 +1,7 @@
-//! Fleet alert digest formatting for Telegram.
-
 use crate::i18n::{Locale, noun_for};
 
 use super::formatting::{esc, pick};
 
-/// Render a fleet digest as a Telegram HTML message. `open_titles` are
-/// the already-rendered, HTML-safe `{icon} {title}` lines of every open
-/// alert (caller produces them via `render_alert`). Empty → an «all
-/// clear» 🟢 summary; non-empty → a 🔴 list. `servers` is the fleet size
-/// for the headline context.
 pub fn render_digest_html(
     loc: Locale,
     servers: usize,
@@ -55,7 +48,7 @@ pub fn render_digest_html(
         m.push_str("\n\n");
         for line in open_titles {
             m.push_str("• ");
-            m.push_str(line); // already icon + HTML-escaped title
+            m.push_str(line);
             m.push('\n');
         }
         m.push_str(&pick(

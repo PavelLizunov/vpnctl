@@ -113,8 +113,6 @@ pub(super) async fn render_mihomo(
                         map.insert("flow".to_string(), json!(fl));
                     }
                     if let Some(fp) = fingerprint {
-                        // sing-box calls its randomized uTLS mode `randomized`;
-                        // Mihomo's equivalent documented value is `random`.
                         let fp = if fp == "randomized" { "random" } else { fp };
                         map.insert("client-fingerprint".to_string(), json!(fp));
                     }

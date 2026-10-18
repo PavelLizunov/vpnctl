@@ -1,9 +1,3 @@
-//! Fleet-wide search page (`/admin/search`) — substring search across
-//! users / servers / alerts with drill-through links to the canonical
-//! detail pages.
-//!
-//! Extracted from `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::icons::icon;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -16,28 +10,11 @@ use super::users::mask_secret;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// Query string for `/admin/search` — single optional `q` field.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct SearchQuery {
     pub q: Option<String>,
 }
 
-/// `GET /admin/search?q=foo` (A5, audit 2026-05-22, shipped 2026-05-23)
-/// — fleet-wide substring search across users / servers / alerts.
-/// Click any hit to drill into the canonical detail page.
-///
-/// Empty `q` renders a search prompt page; non-empty `q` runs three
-/// independent SQL substring scans in parallel and groups the hits
-/// per type. Per-group cap = 50 rows; pathological `q="a"` won't
-/// drown the page in a 10k-row table.
-///
-/// **Audit deliberately NOT included** — the existing /admin/audit
-/// page already has a filter form on actor + action + free-text via
-/// the URL, and pulling audit substring search into the universal
-/// `/admin/search` would duplicate that surface AND surface large
-/// payload JSON snippets the operator usually doesn't want
-/// mixed with «which users match X». Link to /admin/audit from the
-/// search results footer instead.
 pub(crate) async fn search(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -46,9 +23,6 @@ pub(crate) async fn search(
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let query_raw = q.q.unwrap_or_default();
     let query = query_raw.trim();
-    /// Per-group cap; below the existing /admin/users + /admin/servers
-    /// scroll-friendliness thresholds so the results page never feels
-    /// heavier than the canonical lists.
     const PER_GROUP_LIMIT: i64 = 50;
 
     let (users, servers, alerts) = if query.is_empty() {
@@ -131,19 +105,10 @@ pub(crate) async fn search(
                         "No matches. Audit-log searches still live on the ",
                         "Ничего не найдено. Поиск по audit-логу всё ещё на ",
                     ))
-                    // Percent-encode the operator's q so a query
-                    // like `foo&actor=admin` doesn't smuggle a
-                    // second parameter into the fallback URL —
-                    // `path_segment_encode` over-encodes (encodes
-                    // `:` etc) but URLs still parse correctly.
                     a href=(format!("/admin/audit?action={}", path_segment_encode(query)))
                       style="color: var(--ink);" {
                         "/admin/audit"
                     }
-                    // Honest copy (2026-06-10): the action filter is
-                    // PREFIX-only — the old «accepts substrings» promise
-                    // made this deep link near-useless for typical
-                    // search terms.
                     (crate::i18n::tr(lang, " page (action filter is prefix-match).", " (фильтр action ищет по префиксу)."))
                 }
             }
@@ -159,11 +124,6 @@ pub(crate) async fn search(
                                 b { (u.id.0) }
                             }
                             span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                                // Masked (audit 2026-06-10): the full
-                                // uuid IS the VLESS credential; the
-                                // users list shows a masked preview for
-                                // exactly that reason — search must not
-                                // be the page that leaks it whole.
                                 "uuid=" (mask_secret(&u.uuid))
                                 @if u.disabled {
                                     " · "
@@ -202,11 +162,6 @@ pub(crate) async fn search(
                     @for a in &alerts {
                         @let rendered = localized_alert(a, lang);
                         li style="display: flex; gap: 10px; padding: 2px 0; border-bottom: 1px dotted var(--rule);" {
-                            // Alert detail isn't a route yet; link to
-                            // /admin/alerts where the operator can ack
-                            // / dig in. Show ack-state inline so the
-                            // search results immediately surface
-                            // open-vs-historical context.
                             a href="/admin/alerts"
                               style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
                                 b title=(a.kind) { (icon(match rendered.icon { "🟢" => "check", "🔴" => "circle-x", "🟠" | "🟡" => "triangle-alert", _ => "info" })) " " (crate::alert_text::to_plain(&rendered.title)) }

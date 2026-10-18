@@ -1,4 +1,3 @@
-//! Endpoint listeners must honor the same reservations as ordinary inbounds.
 use vpnctl_kernels::validate_config_excludes_ports;
 
 #[test]

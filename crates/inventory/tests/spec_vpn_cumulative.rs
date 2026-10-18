@@ -1,6 +1,3 @@
-//! Black-box contract tests for cumulative VPN traffic ingestion.
-//! Written from the approved public contract only; implementation not consulted.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -237,7 +234,6 @@ async fn lower_uptime_resets_both_directions_even_when_one_counter_increases() {
     .await
     .unwrap();
 
-    // Create server-ahead pending immediately before the restart.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_200, 5_300, 86_460, 1, vec![counter("alice", 700, 3_100)]),
@@ -296,8 +292,6 @@ async fn attributed_ahead_credit_is_repaid_without_emitting_bytes_twice() {
     .await
     .unwrap();
 
-    // The asynchronous user read is ahead of the server read by 100 upload
-    // bytes and 50 download bytes. The exact user delta must survive.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_100, 1_100, 10_060, 1, vec![counter("alice", 700, 650)]),
@@ -305,8 +299,6 @@ async fn attributed_ahead_credit_is_repaid_without_emitting_bytes_twice() {
     .await
     .unwrap();
 
-    // The server catches up while the user counter is unchanged. Its first
-    // 100/50 bytes repay persisted credit; only 100/150 are new remainder.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 10_120, 1, vec![counter("alice", 700, 650)]),
@@ -314,8 +306,6 @@ async fn attributed_ahead_credit_is_repaid_without_emitting_bytes_twice() {
     .await
     .unwrap();
 
-    // The post-credit server excess is itself pending until one more quiet
-    // observation proves it was not merely the opposite read order.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 10_180, 1, vec![counter("alice", 700, 650)]),
@@ -355,7 +345,6 @@ async fn server_ahead_pending_is_consumed_by_delayed_user_catch_up() {
     .await
     .unwrap();
 
-    // The inbound read is ahead: 300 server bytes versus 100 user bytes.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 20_060, 1, vec![counter("alice", 600, 600)]),
@@ -363,7 +352,6 @@ async fn server_ahead_pending_is_consumed_by_delayed_user_catch_up() {
     .await
     .unwrap();
 
-    // The delayed user read catches up by exactly the 200/200 pending bytes.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 20_120, 1, vec![counter("alice", 800, 800)]),
@@ -396,7 +384,6 @@ async fn mixed_reconciliation_consumes_prior_pending_before_current_server_growt
     .await
     .unwrap();
 
-    // Establish 200/200 of prior pending without user growth.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_200, 1_200, 30_060, 1, vec![counter("alice", 500, 500)]),
@@ -404,8 +391,6 @@ async fn mixed_reconciliation_consumes_prior_pending_before_current_server_growt
     .await
     .unwrap();
 
-    // User growth consumes the prior 200 pending first. The concurrent 100
-    // server bytes therefore become the next pending, not an immediate match.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 30_120, 1, vec![counter("alice", 700, 700)]),
@@ -413,7 +398,6 @@ async fn mixed_reconciliation_consumes_prior_pending_before_current_server_growt
     .await
     .unwrap();
 
-    // A final 100 user bytes consume that newer pending exactly.
     inv.record_vpn_cumulative_stats(
         &server_id,
         &tick(1_300, 1_300, 30_180, 1, vec![counter("alice", 800, 800)]),

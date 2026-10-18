@@ -231,7 +231,6 @@ async fn spawn_stalled_server(
         }
     });
 
-    // Give the listener a moment to bind and accept
     tokio::time::sleep(Duration::from_millis(20)).await;
     port
 }

@@ -77,17 +77,6 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-# ── Strict input validators ─────────────────────────────────────
-#
-# The apply paths below build SQL via f-string interpolation (because
-# `sudo sqlite3 <file>` over SSH has no parameterised-query channel).
-# Every value that lands in the SQL MUST pass through one of these
-# regexes — a stray single-quote in `client_name` would otherwise
-# inject DDL into the inventory DB running as root. The 33 production
-# names in subscription-server today are all `[A-Za-z0-9._-]+`, so
-# this is a tight gate that doesn't reject any real data. New clients
-# in subscription-server inheriting names with quotes / control chars
-# would FAIL LOUDLY here instead of silently corrupting the audit log.
 _RE_USER_NAME = re.compile(r'^[A-Za-z0-9._-]+\Z')
 _RE_SERVER_NAME = re.compile(r'^[A-Za-z0-9._-]+\Z')
 _RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
@@ -102,14 +91,6 @@ def _assert_safe(value: str, pattern: re.Pattern, label: str) -> None:
         )
 
 
-# ── SSH multiplexing (ControlMaster) ────────────────────────────
-#
-# The script makes O(N) SSH calls (one per CHANGE row + a few setup
-# queries). On a flaky network each fresh TCP handshake risks a
-# Connection-Timed-Out failure that aborts the whole run — caught
-# live on 2026-05-19 trying to apply 23 rows from claude-chat to
-# 192.168.0.236. ControlMaster keeps a single TCP+SSH session alive
-# for the script's lifetime; all subsequent calls go through it.
 
 _SSH_CONTROL_DIR: str | None = None
 
@@ -148,7 +129,6 @@ def _teardown_ssh_master() -> None:
         pass
 
 
-# ── Source extraction (subscription-server on 207) ──────────────
 
 SOURCE_EXTRACT_PY = r"""
 import json
@@ -225,7 +205,6 @@ def fetch_source(host: str) -> dict:
     return json.loads(result.stdout)
 
 
-# ── Target inspection (vpnctld on 236) ───────────────────────────
 
 INVENTORY_DB_PATH = '/var/lib/vpnctl/inv.db'
 
@@ -296,7 +275,6 @@ def fetch_target_state(
     return users, servers, grants, device_ids
 
 
-# ── Plan + apply ────────────────────────────────────────────────
 
 
 @dataclass
@@ -305,7 +283,7 @@ class PlanRow:
     server: str
     src_uuid: str
     cur_uuid: str | None
-    action: str  # MATCH / CHANGE / MISSING_USER / MISSING_SERVER / MISSING_GRANT
+    action: str
 
 
 @dataclass
@@ -319,7 +297,7 @@ class DeviceIdPlanRow:
     user: str
     src_device_id: str
     cur_device_id: str | None
-    action: str  # MATCH / SET / DRIFT / MISSING_USER
+    action: str
 
 
 def build_plan(
@@ -368,11 +346,6 @@ def build_device_id_plan(
         elif cur == src:
             plan.append(DeviceIdPlanRow(user, src, cur, 'MATCH'))
         else:
-            # Different device_id pinned. Rare — would happen if the
-            # operator rotated device_id in subscription-server between
-            # two runs of this script. NOT auto-fixed because rotating
-            # device_id breaks every issued share-link URL — needs
-            # explicit operator intent.
             plan.append(DeviceIdPlanRow(user, src, cur, 'DRIFT'))
     return plan
 
@@ -439,11 +412,6 @@ def apply_device_id_changes(host: str, plan: list[DeviceIdPlanRow]) -> int:
             continue
         _assert_safe(row.user, _RE_USER_NAME, 'user')
         _assert_safe(row.src_device_id, _RE_DEVICE_ID, 'device_id')
-        # Key order matches Rust's `set_vpn_router_device_id` audit
-        # payload — alphabetical via `sort_keys=True` (same reasoning
-        # as the grant.set_client_uuid path above: Rust's
-        # `serde_json::json!` uses a BTreeMap, so the wire format is
-        # always alphabetical).
         payload = json.dumps(
             {
                 'old_vpn_router_device_id': row.cur_device_id,
@@ -493,14 +461,6 @@ def apply_changes(host: str, plan: list[PlanRow]) -> int:
         _assert_safe(row.user, _RE_USER_NAME, 'user')
         _assert_safe(row.server, _RE_SERVER_NAME, 'server_id')
         _assert_safe(row.src_uuid, _RE_UUID, 'client_uuid')
-        # Key order matches Rust's `set_grant_client_uuid` audit
-        # payload. The Rust path builds the payload via
-        # `serde_json::json!` whose underlying `serde_json::Map` is a
-        # `BTreeMap` (no `preserve_order` feature) and therefore
-        # emits keys in ALPHABETICAL order. `sort_keys=True` aligns
-        # Python's output, so a /admin/audit reader sees byte-
-        # identical JSON regardless of writer. Verified by
-        # `audit_payload_has_alphabetical_key_order_for_byte_equality_with_python`.
         payload = json.dumps(
             {
                 'server_id': row.server,
@@ -536,7 +496,6 @@ def apply_changes(host: str, plan: list[PlanRow]) -> int:
     return applied
 
 
-# ── CLI ─────────────────────────────────────────────────────────
 
 
 def main() -> int:

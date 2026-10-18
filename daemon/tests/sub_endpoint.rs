@@ -1,7 +1,3 @@
-//! End-to-end tests of the /sub/<token> endpoint against the REAL
-//! `vpnctld::router()` (no shim — addresses critical review-finding
-//! that shim-tests cannot detect regressions in the production handler).
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[path = "sub_endpoint/awg_compatibility.rs"]

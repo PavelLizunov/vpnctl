@@ -1,16 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Independent spec tests for `vpnctl_protocols::AnyTls`.
-//!
-//! Written from the spec only — no peeking at the implementation.
-//! If a test fails, the implementation is wrong — do NOT weaken the test.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 use vpnctl_core::{KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId};
 use vpnctl_protocols::{ANYTLS_PORT, AnyTls};
-
-// ── helpers ─────────────────────────────────────────────────────────────
 
 fn srv() -> Server {
     Server {
@@ -44,8 +38,6 @@ fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> Ren
     RenderCtx::new(server, secrets)
 }
 
-// ── A1: id() + port constant ────────────────────────────────────────────
-
 #[test]
 fn a1_protocol_id_is_anytls() {
     assert_eq!(AnyTls::new().id(), ProtocolId("anytls".to_string()));
@@ -55,8 +47,6 @@ fn a1_protocol_id_is_anytls() {
 fn a1_anytls_port_constant_is_8843() {
     assert_eq!(ANYTLS_PORT, 8843u16);
 }
-
-// ── A2: server_inbound ──────────────────────────────────────────────────
 
 #[test]
 fn a2_server_inbound_top_level_shape() {
@@ -77,7 +67,7 @@ fn a2_server_inbound_top_level_shape() {
 #[test]
 fn a2_server_inbound_uses_default_cert_paths() {
     let s = srv();
-    let secrets = HashMap::new(); // tuic.cert_path / tuic.key_path absent
+    let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let users = [user("alice", Some("pw1"))];
     let v = AnyTls::new().server_inbound(&ctx, &users).unwrap();
@@ -161,8 +151,6 @@ fn a2_server_inbound_skips_users_without_tuic_password() {
     assert!(!names.contains(&"nopw"), "got names: {names:?}");
 }
 
-// ── A3: client_config ───────────────────────────────────────────────────
-
 #[test]
 fn a3_client_config_field_by_field() {
     let s = srv();
@@ -190,10 +178,6 @@ fn a3_client_config_field_by_field() {
 
 #[test]
 fn a3_client_config_missing_password_returns_render_error() {
-    // Post-review: AnyTLS now hard-errors on missing password
-    // (consistent with share_link). Pin the new contract — minting
-    // a config with empty password would just silently auth-fail
-    // on the client.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
@@ -205,8 +189,6 @@ fn a3_client_config_missing_password_returns_render_error() {
         "expected Render error naming user; got {msg}"
     );
 }
-
-// ── A4: share_link ──────────────────────────────────────────────────────
 
 #[test]
 fn a4_share_link_scheme_host_port_query_and_fragment() {
@@ -235,8 +217,6 @@ fn a4_share_link_scheme_host_port_query_and_fragment() {
 
 #[test]
 fn a4_share_link_password_percent_encodes_at_and_slash() {
-    // Password "ab/cd@ef" — `/` and `@` are structural in USERINFO and MUST
-    // be percent-encoded inside the auth segment.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);

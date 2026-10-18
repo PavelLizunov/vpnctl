@@ -1,5 +1,3 @@
-//! Pending deploy detector and auto-deploy dispatch tests for grants/revokes.
-
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -14,40 +12,21 @@ use crate::common::{
     add_same_origin, count_autodeploy_rows, seed, state, wait_for_autodeploy_rows,
 };
 
-/// REGRESSION (review 2026-06-04): a grant made through ANY real
-/// handler must be visible to the pending-deploy detector even after
-/// the server already has a deploy baseline. The handlers used to
-/// write `action="grant", target=<server>` (and bulk only a summary
-/// row) — invisible to `servers_pending_deploy_for_user`, which keys
-/// on `user.grant` + target=<user>. So a grant made AFTER the
-/// server's first deploy never raised the «config not yet deployed»
-/// banner and the node silently missed the user's UUID.
-///
-/// Seeded users carry ZERO audit rows (raw `inv.add_user`), so the
-/// only possible user-mutation timestamp is the one the handler under
-/// test writes — if it regresses to the old shape, the detector sees
-/// no mutations and the assertions fail.
 #[tokio::test]
 async fn grants_via_real_handlers_mark_server_pending_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 3, 3, &[]).await; // s0..s2 + u0..u2, no grants yet
+    seed(&inv, 3, 3, &[]).await;
 
-    // Deploy BASELINE first — the regression only bites once a
-    // `server.deploy` row exists (before that the "no deploy ever"
-    // branch masks the missing user.grant rows).
     for sid in ["s0", "s1", "s2"] {
         inv.audit("admin", "server.deploy", Some(sid), None)
             .await
             .unwrap();
     }
-    // Audit ts has millisecond precision; guarantee the grants below
-    // land strictly AFTER the baseline rows.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let app = router(s);
 
-    // 1. user-detail grant handler.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -71,7 +50,6 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         "user-detail grant must mark s0 pending-deploy"
     );
 
-    // 2. server-detail grant handler.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -95,7 +73,6 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         "server-detail grant must mark s1 pending-deploy"
     );
 
-    // 3. bulk grant-all handler (writes per-user rows for NEW grants).
     app.clone()
         .oneshot(
             add_same_origin(
@@ -119,17 +96,9 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
         "bulk grant-all must mark s2 pending-deploy for each newly-granted user"
     );
 
-    // 4. Idempotency contract (review-agent): RE-running a grant (or
-    // grant-all) must NOT write fresh user.grant rows — a no-op
-    // re-grant would otherwise falsely re-mark the server pending
-    // after the operator's next deploy.
     let count_user_grants = |entries: &[vpnctl_inventory::AuditEntry]| {
         entries.iter().filter(|e| e.action == "user.grant").count()
     };
-    // Auto-deploy tasks from the three real grant handlers run in the
-    // background and also write audit rows. Wait for those tasks before
-    // taking the idempotency baseline so their delayed rows cannot race
-    // this assertion on fast/slow CI runners.
     wait_for_autodeploy_rows(&inv, 3).await;
     let before = count_user_grants(&inv.recent_audit(100).await.unwrap());
     for uri in [
@@ -153,23 +122,11 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     );
 }
 
-/// REGRESSION (audit 2026-06-10, re-scoped 2026-07-10) — a REVOKE
-/// through any real handler must stay visible to the pending-deploy
-/// detectors. The handlers used to write `action="revoke",
-/// target=<server>` (bulk only a summary), invisible to the detectors
-/// — so a revoked UUID stayed live on the node with no warning
-/// anywhere. Post-scoping the contract is: the REVOKED server is
-/// flagged by the SERVER-side detector (`server_pending_deploy`,
-/// membership changed since last deploy), while the user's REMAINING
-/// servers stay quiet — their configs didn't change, and the old
-/// coarse any-mutation-flags-everything reading produced a permanent
-/// phantom banner after every grant/revoke (design review 2026-07-10).
 #[tokio::test]
 async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    // u0 granted s0+s1; u1 granted s1+s2 (raw seed → zero audit rows).
     seed(&inv, 3, 2, &[(0, 0), (0, 1), (1, 1), (1, 2)]).await;
     for sid in ["s0", "s1", "s2"] {
         inv.audit("admin", "server.deploy", Some(sid), None)
@@ -179,9 +136,6 @@ async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let app = router(s);
 
-    // 1. user-detail revoke: u0 loses s0 → the REVOKED server flags on
-    //    the server-side detector; the untouched remaining server (s1)
-    //    stays quiet on the per-user surface.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -209,7 +163,6 @@ async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
         "revoke of s0 must NOT flag the untouched s1 (scoped detector), got {pending:?}"
     );
 
-    // 2. server-detail revoke: same contract from the other handler.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -237,7 +190,6 @@ async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
         "revoke of s1 must NOT flag the untouched s2 (scoped detector), got {pending:?}"
     );
 
-    // 3. Canonical row shape + idempotency: re-revoking writes nothing.
     let count_revokes = |entries: &[vpnctl_inventory::AuditEntry]| {
         entries.iter().filter(|e| e.action == "user.revoke").count()
     };
@@ -267,8 +219,6 @@ async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
         "idempotent re-revokes must not add user.revoke rows"
     );
 
-    // 4. server-detail revoke of an UNKNOWN user must 404 (the grant
-    // twin always had the existence check; revoke silently 303'd).
     let resp = app
         .oneshot(
             add_same_origin(
@@ -289,7 +239,7 @@ async fn grant_from_user_detail_dispatches_auto_deploy_of_that_server_only() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 2, 1, &[]).await; // s0 + s1 + u0, no grants
+    seed(&inv, 2, 1, &[]).await;
     let app = router(s);
 
     app.clone()
@@ -322,7 +272,6 @@ async fn grant_from_user_detail_dispatches_auto_deploy_of_that_server_only() {
          not pretend the node was updated"
     );
 
-    // Idempotent re-grant is a no-op mutation → must NOT restart the node.
     app.oneshot(
         add_same_origin(
             Request::builder()
@@ -347,10 +296,9 @@ async fn revoke_from_user_detail_dispatches_auto_deploy_only_on_actual_revoke() 
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 2, 1, &[(0, 0)]).await; // u0 granted s0; s1 ungranted
+    seed(&inv, 2, 1, &[(0, 0)]).await;
     let app = router(s);
 
-    // Revoking a NOT-granted pair is a no-op → no deploy.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -370,8 +318,6 @@ async fn revoke_from_user_detail_dispatches_auto_deploy_only_on_actual_revoke() 
         "no-op revoke must not dispatch an auto-deploy"
     );
 
-    // A real revoke dispatches a deploy of the revoked server so the
-    // UUID actually leaves the node's users[].
     app.oneshot(
         add_same_origin(
             Request::builder()
@@ -438,7 +384,7 @@ async fn bulk_grant_all_dispatches_one_auto_deploy_for_the_whole_batch() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 1, 3, &[]).await; // 3 users → still ONE deploy of s0
+    seed(&inv, 1, 3, &[]).await;
     let app = router(s);
 
     app.clone()
@@ -469,7 +415,6 @@ async fn bulk_grant_all_dispatches_one_auto_deploy_for_the_whole_batch() {
         "bulk grant of 3 users must dispatch exactly ONE deploy of the server"
     );
 
-    // Fully-granted re-run grants 0 → no deploy.
     app.oneshot(
         add_same_origin(
             Request::builder()
@@ -555,12 +500,6 @@ async fn user_create_grant_all_dispatches_auto_deploy_across_granted_servers() {
     );
 }
 
-/// The payload the auto-deploy pushes: after a grant lands through the
-/// real handler, the node config the redeploy pipeline renders (same
-/// `users_for_server` → `render_config` chain as
-/// `wizard_bootstrap::redeploy_pipeline`) must carry the user's UUID in
-/// `inbounds[*].users[]` — the exact bytes whose absence caused the
-/// «connects but no internet» failure.
 #[tokio::test]
 async fn granted_user_uuid_lands_in_rendered_node_config() {
     let dir = TempDir::new().unwrap();
@@ -596,12 +535,10 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
             .collect()
     };
 
-    // Before the grant: users_for_server is empty → no UUID in users[].
     let users = inv.users_for_server(&sid).await.unwrap();
     assert!(users.is_empty());
     assert!(uuids_in(&render(&users)).is_empty());
 
-    // Grant through the real handler…
     app.oneshot(
         add_same_origin(
             Request::builder()
@@ -614,7 +551,6 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
     .await
     .unwrap();
 
-    // …and the config the auto-deploy would push now carries the UUID.
     let users = inv.users_for_server(&sid).await.unwrap();
     let uuids = uuids_in(&render(&users));
     assert_eq!(

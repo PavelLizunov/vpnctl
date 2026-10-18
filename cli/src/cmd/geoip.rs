@@ -1,42 +1,9 @@
-//! `vpnctl geoip-update` — fetch DB-IP Lite City + ASN MMDB files,
-//! validate them, atomic-install into `$VPNCTLD_GEOIP_DIR` (default
-//! `/var/lib/vpnctl/geoip`).
-//!
-//! Why DB-IP Lite (not MaxMind GeoLite2): CC-BY 4.0, no signup, no
-//! license key, no 30-day EULA-mandated deletion. Native MMDB
-//! format — drops straight into `maxminddb::Reader`. Update cadence
-//! is monthly (URLs are `dbip-{city,asn}-lite-YYYY-MM.mmdb.gz`).
-//!
-//! Pavel 2026-05-21: «начинай это [GeoIP / device fingerprint]».
-//!
-//! Flow per file:
-//!   1. Compute current month (UTC). If GET returns 404, retry
-//!      previous month (the new monthly file usually publishes on
-//!      the 1st-2nd; we don't want the operator's update to fail
-//!      on the 1st morning).
-//!   2. Stream the .mmdb.gz to a `.partial` file in the target dir.
-//!   3. Decompress gz → `.partial.mmdb` (same dir, same FS, so the
-//!      atomic rename in step 5 is real-atomic).
-//!   4. Validate by opening + looking up a known IP (`8.8.8.8`).
-//!   5. `fs::rename(.partial.mmdb, GeoLite2-City.mmdb)` —
-//!      same-FS rename is atomic on POSIX (single inode op).
-//!   6. Drop the .partial.gz file.
-//!
-//! The daemon reader uses the MaxMind-style filenames
-//! (`GeoLite2-City.mmdb` / `GeoLite2-ASN.mmdb`) so this command's
-//! output filenames match — operator can run BOTH the MaxMind
-//! `geoipupdate` tool AND this command into the same dir without
-//! the daemon noticing the difference.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, NaiveDate, Utc};
 use futures_util::StreamExt;
 
-/// Which DB-IP Lite file to fetch. Same URL prefix, different
-/// `kind` segment. The daemon reader supports either one missing
-/// (lookup just returns None for the missing dimension).
 #[derive(Copy, Clone, Debug)]
 enum DbKind {
     City,
@@ -50,9 +17,6 @@ impl DbKind {
             DbKind::Asn => "asn",
         }
     }
-    /// MaxMind-compatible output filename — `GeoLite2-City.mmdb`
-    /// etc. Lets the daemon read either MaxMind or DB-IP output
-    /// from the same path without a config switch.
     fn output_filename(self) -> &'static str {
         match self {
             DbKind::City => "GeoLite2-City.mmdb",
@@ -76,7 +40,6 @@ fn url_for(kind: DbKind, month: NaiveDate) -> String {
     )
 }
 
-/// Entry point: `vpnctl geoip-update [--dir /var/lib/vpnctl/geoip]`.
 pub(crate) async fn run(dir: Option<PathBuf>) -> Result<()> {
     let dir = match dir {
         Some(d) => d,
@@ -96,8 +59,6 @@ pub(crate) async fn run(dir: Option<PathBuf>) -> Result<()> {
     let now = Utc::now().date_naive();
     let this_month = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
         .ok_or_else(|| anyhow!("compute current month"))?;
-    // Compute previous month manually — chrono Months crate would be
-    // overkill for this two-step fallback.
     let prev_month = if this_month.month() == 1 {
         NaiveDate::from_ymd_opt(this_month.year() - 1, 12, 1)
     } else {
@@ -141,9 +102,6 @@ pub(crate) async fn run(dir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Fetch one (kind, month) pair: download .gz → decompress → validate
-/// → atomic rename. Caller decides whether to retry with a different
-/// month on failure.
 async fn fetch_one(
     client: &reqwest::Client,
     kind: DbKind,
@@ -155,14 +113,12 @@ async fn fetch_one(
     let tmp_gz = dir.join(format!("{}.partial.gz", kind.output_filename()));
     let tmp_mmdb = dir.join(format!("{}.partial", kind.output_filename()));
 
-    // 1. Stream the .gz to disk (so we don't buffer 100 MB in RAM).
     let resp = client
         .get(&url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
-        // Bubble the status so the caller can decide on retry.
         return Err(anyhow!("HTTP {} for {url}", resp.status()));
     }
     {
@@ -177,7 +133,6 @@ async fn fetch_one(
         out.sync_all().context("fsync gz")?;
     }
 
-    // 2. Decompress to a sibling .partial file (same FS = atomic rename).
     {
         let gz_in =
             std::fs::File::open(&tmp_gz).with_context(|| format!("open {}", tmp_gz.display()))?;
@@ -188,20 +143,14 @@ async fn fetch_one(
         out.sync_all().context("fsync mmdb")?;
     }
 
-    // 3. Validate by opening + looking up a known IP. Better to
-    //    fail here than silently install a corrupt file.
     validate_mmdb(&tmp_mmdb, kind).with_context(|| format!("validate {}", tmp_mmdb.display()))?;
 
-    // 4. Atomic rename. Drop the .gz; keep .mmdb at the final name.
     std::fs::rename(&tmp_mmdb, &final_path)
         .with_context(|| format!("rename {} → {}", tmp_mmdb.display(), final_path.display()))?;
     let _ = std::fs::remove_file(&tmp_gz);
     Ok(final_path)
 }
 
-/// Open the .mmdb and probe a known public IP — confirms the file
-/// isn't truncated / not-an-mmdb / wrong-schema. Uses 8.8.8.8 (always
-/// in any reasonable GeoIP DB).
 fn validate_mmdb(path: &Path, kind: DbKind) -> Result<()> {
     use maxminddb::geoip2;
     let reader = maxminddb::Reader::open_readfile(path)
@@ -252,10 +201,6 @@ mod tests {
 
     #[test]
     fn output_filenames_match_maxmind_convention() {
-        // Daemon reads `GeoLite2-{City,ASN}.mmdb` from the dir —
-        // either MaxMind's geoipupdate OR this command must drop
-        // files at those exact paths so the daemon is source-
-        // agnostic.
         assert_eq!(DbKind::City.output_filename(), "GeoLite2-City.mmdb");
         assert_eq!(DbKind::Asn.output_filename(), "GeoLite2-ASN.mmdb");
     }

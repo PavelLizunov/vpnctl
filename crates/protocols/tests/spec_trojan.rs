@@ -1,5 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Spec tests for `vpnctl_protocols::Trojan` — independent of impl.
 
 use std::collections::HashMap;
 
@@ -155,8 +154,6 @@ fn tr4_share_link_uses_trojan_scheme_with_allowinsecure_camelcase() {
         .unwrap();
     assert!(link.starts_with("trojan://hunter2@203.0.113.7:8643?"));
     assert!(link.contains("sni=203.0.113.7"));
-    // Trojan uses `allowInsecure` (camelCase), NOT `insecure` — pin
-    // against future drift that would break older Trojan clients.
     assert!(
         link.contains("allowInsecure=1"),
         "trojan link must use camelCase `allowInsecure`, got: {link}"
@@ -172,8 +169,6 @@ fn tr4_share_link_percent_encodes_special_chars_in_password() {
     let link = Trojan::new()
         .share_link(&ctx, &user("alice", Some("p@ss/word")))
         .unwrap();
-    // `@` and `/` must be percent-encoded so the userinfo parser
-    // doesn't split in the wrong place.
     assert!(link.contains("p%40ss%2Fword"));
     assert!(!link.contains("p@ss/word"));
 }

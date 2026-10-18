@@ -1,9 +1,3 @@
-//! Alerts feed (`/admin/alerts`) — the admin_alerts table with the
-//! ack / ack-family / ack-all actions — plus the alert localisation
-//! helper shared with the search page.
-//!
-//! Extracted from `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::icons::{icon, status};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -14,10 +8,6 @@ use super::helpers::{bad_request, humanize_age, internal_error, render_page, the
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-// ────────────────────────────────────────────────────────────────────
-//  Phase G — admin_alerts feed + ack action
-// ────────────────────────────────────────────────────────────────────
-
 pub(crate) async fn alerts(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -25,9 +15,6 @@ pub(crate) async fn alerts(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    /// Generous cap — the feed wants enough history to spot patterns
-    /// without paginating. Older rows are retention-pruned (acked
-    /// >30d ago drops; unacked never).
     const ALERTS_LIMIT: i64 = 200;
     let include_acked = q.show.as_deref() == Some("all");
     let alerts_rows = state
@@ -41,14 +28,9 @@ pub(crate) async fn alerts(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // v2 5a — family split: the sub_access.* spam cluster gets its own
-    // grouped table; node/fleet/user alerts the second. Counts feed the
-    // header meta line.
     let (sub_rows, node_rows): (Vec<_>, Vec<_>) = alerts_rows
         .iter()
         .partition(|a| a.kind.starts_with("sub_access."));
-    // The auto-resolve wording mirrors the health monitor's REAL
-    // hysteresis constants (trigger 95 → recover 90 mem, 90 → 85 disk).
     let auto_resolve_note = |kind: &str| -> &'static str {
         use crate::i18n::tr;
         if kind.starts_with("server.mem.pressure") {
@@ -183,7 +165,6 @@ pub(crate) async fn alerts(
                     )) { (icon("info")) }
                 }
                 @if sub_unacked > 0 {
-                    // v2 5a — ack the whole family in one click.
                     form.ed-headrow__actions method="post" action="/admin/alerts/ack-family/sub_access."
                          data-confirm=(crate::i18n::tr(
                              lang,
@@ -196,14 +177,6 @@ pub(crate) async fn alerts(
                     }
                 }
             }
-            // R3 2026-07-10: the detail column used to repeat the full
-            // localized sentence («User X's subscription was fetched
-            // from a local/proxy IP … the logged client IP will be
-            // wrong») on EVERY row — the subject already names the user
-            // and the ⓘ above explains the rest, so 32 rows read as one
-            // paragraph copy-pasted 32×. Now: source IP + range kind +
-            // UA (the datum that actually varies row-to-row), full
-            // sentence still on hover.
             table.ed-grid style="margin-top: 8px;" {
                 thead {
                     tr {
@@ -289,23 +262,10 @@ pub(crate) async fn alerts(
     Ok(render_page(&state, "alerts", &theme, &accent, lang, body).await)
 }
 
-/// `POST /admin/alerts/{id}/ack` — operator dismisses one alert.
-/// Idempotent: re-acking is a no-op. Always redirects back to
-/// `/admin/alerts` (POST-redirect-GET so refresh-after-submit doesn't
-/// re-submit). Writes an audit row with the alert id + kind so the
-/// timeline shows who acknowledged what.
-///
-/// Path/State ordering: `Path` first, `State` after — matches the
-/// convention used elsewhere in this file (`user_delete`,
-/// `user_grant_server`). Caught by review-agent on the burst diff.
 pub(crate) async fn alert_ack(
     axum::extract::Path(id): axum::extract::Path<i64>,
     State(state): State<AppState>,
 ) -> Response {
-    // Reject negative / zero ids early — autoincrement starts at 1.
-    // Treat as a no-op redirect rather than 400 to keep ack idempotent
-    // (a stale form should not 4xx; the dashboard tile POSTs without
-    // re-fetching the feed first).
     if id <= 0 {
         return Redirect::to("/admin/alerts").into_response();
     }
@@ -324,9 +284,6 @@ pub(crate) async fn alert_ack(
             )
             .await
         {
-            // Audit write failed but the user-visible ack already
-            // committed — surface at warn so the operator can grep
-            // the journal if the audit timeline looks short.
             tracing::warn!(
                 target = "vpnctld::admin::alert_ack",
                 alert_id = id,
@@ -338,10 +295,6 @@ pub(crate) async fn alert_ack(
     Redirect::to("/admin/alerts").into_response()
 }
 
-/// `POST /admin/alerts/ack-family/{prefix}` — v2 5a: ack a whole alert
-/// family (all unacked kinds under `prefix`) in one click. Only two
-/// safe prefixes are accepted so the route can't be abused to ack an
-/// arbitrary kind by crafting a URL: `sub_access.` and `server.`.
 pub(crate) async fn alert_ack_family(
     State(state): State<AppState>,
     Path(prefix): Path<String>,
@@ -368,27 +321,11 @@ pub(crate) async fn alert_ack_family(
     axum::response::Redirect::to("/admin/alerts").into_response()
 }
 
-/// `POST /admin/alerts/ack-all` — operator dismisses every currently-
-/// unacked alert in one go. Companion to per-row `alert_ack` for the
-/// «I've triaged a backlog, clear them» workflow (fire-drill 2026-05-
-/// 22: 33 `sub_access.suspicious_local_ip` alerts had accumulated
-/// from legit LAN testing — clicking 33 ack buttons is a UX bug,
-/// not a feature).
-///
-/// Idempotent — re-POSTing after everything is acked returns 0
-/// rows-affected and writes NO audit row (audit-on-actual-mutation
-/// convention, NM-10 review-agent rule).
-///
-/// Always 303s back to `/admin/alerts` so refresh-after-submit
-/// can't re-submit (POST-redirect-GET).
 pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
     let count = match state.inv.ack_all_unacked_alerts().await {
         Ok(n) => n,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    // Audit ONLY when something actually changed. A no-op POST
-    // shouldn't pollute the timeline (matches NM-10 review-agent
-    // catch on `set_server_protocol_hidden` no-op-audit-spam).
     if count > 0 {
         if let Err(e) = state
             .inv
@@ -413,16 +350,9 @@ pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
 
 #[derive(serde::Deserialize, Debug, Default)]
 pub(crate) struct AlertsQuery {
-    /// `Some("all")` = include acked rows; default = unacked only.
     pub show: Option<String>,
 }
 
-/// R3 2026-07-10 — compact detail for a `sub_access.*` alert row:
-/// `(ip, ip_kind, ua)` pulled from the payload. Returns the raw IP
-/// string (empty → «—»), the range-kind tag (`Some("LAN")` etc.), and
-/// a short client label. The full localized sentence stays on the
-/// row's `title=` hover; this replaces 32× repeated boilerplate with
-/// the datum that actually varies per row (the source IP).
 fn sub_access_detail_fields(a: &vpnctl_inventory::AdminAlert) -> (String, Option<String>, String) {
     let payload: Option<serde_json::Value> = a
         .payload_json
@@ -438,27 +368,16 @@ fn sub_access_detail_fields(a: &vpnctl_inventory::AdminAlert) -> (String, Option
     };
     let ip = get("ip").unwrap_or_else(|| "—".into());
     let ip_kind = get("ip_kind");
-    // device_class (parsed) beats the raw UA; fall back to «—».
     let ua = get("device_class")
         .or_else(|| get("ua"))
         .unwrap_or_else(|| "—".into());
     (ip, ip_kind, ua)
 }
 
-/// Render an `AdminAlert` into its localized `{icon,title,body,action}`
-/// for the admin UI — the SAME `alert_text::render_alert` the Telegram
-/// push uses, so the dashboard + /admin/alerts speak the operator's
-/// language instead of the stored English summary. Subject = the user id
-/// (for `user.*:id` kinds) or the server's country label; payload comes
-/// from the stored `payload_json`.
 pub(crate) fn localized_alert(
     a: &vpnctl_inventory::AdminAlert,
     lang: crate::i18n::Locale,
 ) -> crate::alert_text::RenderedAlert {
-    // server_id wins over a `:`-suffix: server alerts can ALSO carry a
-    // suffix (e.g. `server.fingerprint.drift:de`), where the suffix is
-    // the raw id — we want the country label. The suffix is only the
-    // subject for user-scoped alerts (server_id is None).
     let subject = if let Some(sid) = &a.server_id {
         crate::handlers::vpn_router::server_display_label(&sid.0, None)
     } else if let Some((_, suffix)) = a.kind.split_once(':') {

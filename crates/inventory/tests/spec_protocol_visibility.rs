@@ -1,11 +1,3 @@
-//! Spec for migration `0018_protocol_visibility.sql` — per-(server,
-//! protocol) `hidden` flag + per-(user, server, protocol) deny override.
-//! Two orthogonal axes; deny-by-OR resolution:
-//!   server.hidden=1 OR override.state='disabled' → hidden
-//!   server.hidden=0 AND override absent          → visible
-//! Tests pin the public SqliteInventory API from the Pavel-confirmed
-//! 2026-05-20 spec without depending on impl internals.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -56,9 +48,6 @@ fn u(id: &str) -> UserId {
     UserId(id.into())
 }
 
-// Single-line helpers keep the file inside the spec's 300-line budget
-// (rustfmt would otherwise pivot every `.await.unwrap()` chain onto 3
-// lines apiece).
 async fn setup(dir: &TempDir, protocols: &[&str]) -> SqliteInventory {
     let inv = open(dir).await;
     inv.add_server(&srv("vps-x", protocols)).await.unwrap();
@@ -98,7 +87,6 @@ async fn overrides(inv: &SqliteInventory, who: &str) -> usize {
         .len()
 }
 
-// Rule 1 — fresh row: hidden=false, visible list contains the proto.
 #[tokio::test]
 async fn fresh_protocol_is_visible_and_not_hidden() {
     let dir = TempDir::new().unwrap();
@@ -108,8 +96,6 @@ async fn fresh_protocol_is_visible_and_not_hidden() {
     assert_eq!(visible(&inv, "alice").await, vec!["vless+reality"]);
 }
 
-// Rules 2 + 3 — hide then unhide; flips for EVERY user; row stays in
-// server_protocols (soft-hide, distinct from remove_server_protocol).
 #[tokio::test]
 async fn hide_then_unhide_round_trip_for_every_user() {
     let dir = TempDir::new().unwrap();
@@ -130,7 +116,6 @@ async fn hide_then_unhide_round_trip_for_every_user() {
     }
 }
 
-// Rule 4 — hide on missing (sid, pid) row → Invalid, NOT raw Sqlx.
 #[tokio::test]
 async fn hide_on_missing_row_returns_invalid_not_sqlx() {
     let dir = TempDir::new().unwrap();
@@ -144,8 +129,6 @@ async fn hide_on_missing_row_returns_invalid_not_sqlx() {
     }
 }
 
-// Rule 5 — per-user override INSERT path. disabled=true hides ONLY for
-// that user; list_protocol_overrides_for_user reflects the state.
 #[tokio::test]
 async fn per_user_override_insert_excludes_only_that_user() {
     let dir = TempDir::new().unwrap();
@@ -167,8 +150,6 @@ async fn per_user_override_insert_excludes_only_that_user() {
     assert_eq!(overrides(&inv, "bob").await, 0);
 }
 
-// Rule 6 — DELETE path. disabled=false drops the row; visibility back.
-// disabled=true twice is a no-op (INSERT OR IGNORE semantics).
 #[tokio::test]
 async fn per_user_override_delete_restores_visibility() {
     let dir = TempDir::new().unwrap();
@@ -176,21 +157,18 @@ async fn per_user_override_delete_restores_visibility() {
     add_grant(&inv, "alice").await;
 
     over(&inv, "alice", "vless+reality", true).await;
-    over(&inv, "alice", "vless+reality", true).await; // idempotent
+    over(&inv, "alice", "vless+reality", true).await;
     over(&inv, "alice", "vless+reality", false).await;
 
     assert_eq!(overrides(&inv, "alice").await, 0);
     assert_eq!(visible(&inv, "alice").await, vec!["vless+reality"]);
 }
 
-// Rule 7 — override without a grant → Invalid (NOT Sqlx). Composite FK
-// pre-check turns the raw constraint error into a friendly diagnostic.
 #[tokio::test]
 async fn override_without_grant_returns_invalid_not_sqlx() {
     let dir = TempDir::new().unwrap();
     let inv = setup(&dir, &["vless+reality"]).await;
     inv.add_user(&usr("alice")).await.unwrap();
-    // No grant on purpose.
 
     let res = inv
         .set_grant_protocol_override(&u("alice"), &s("vps-x"), &p("vless+reality"), true)
@@ -201,8 +179,6 @@ async fn override_without_grant_returns_invalid_not_sqlx() {
     }
 }
 
-// Rule 8 — composite FK ON DELETE CASCADE. revoke() drops every
-// protocol override for that (user, server) pair.
 #[tokio::test]
 async fn revoke_cascades_protocol_overrides() {
     let dir = TempDir::new().unwrap();
@@ -222,8 +198,6 @@ async fn revoke_cascades_protocol_overrides() {
     );
 }
 
-// Rule 9 — both axes simultaneously. server.hidden=1 AND override
-// disabled=true → still excluded. Deny-by-OR.
 #[tokio::test]
 async fn both_axes_at_once_exclude() {
     let dir = TempDir::new().unwrap();
@@ -234,9 +208,6 @@ async fn both_axes_at_once_exclude() {
     assert!(visible(&inv, "alice").await.is_empty(), "deny-by-OR");
 }
 
-// Rule 10 — audit trail. Each successful set_server_protocol_hidden +
-// set_grant_protocol_override writes ONE audit_log row with matching
-// action + target + payload contents.
 #[tokio::test]
 async fn writes_audit_rows_with_matching_payloads() {
     let dir = TempDir::new().unwrap();
@@ -269,7 +240,6 @@ async fn writes_audit_rows_with_matching_payloads() {
     assert_eq!(pay["disabled"], serde_json::json!(true));
 }
 
-// Rule 11 — alphabetical ordering, regardless of insertion order.
 #[tokio::test]
 async fn visible_protocols_are_alphabetically_sorted() {
     let dir = TempDir::new().unwrap();
@@ -281,15 +251,11 @@ async fn visible_protocols_are_alphabetically_sorted() {
     );
 }
 
-// Spec hardening — visible_protocols_for_subscription returns the
-// visible-on-server list even WITHOUT a grant for (uid, sid). The query
-// must not silently start requiring a JOIN to grants.
 #[tokio::test]
 async fn visible_protocols_returns_server_list_without_grant() {
     let dir = TempDir::new().unwrap();
     let inv = setup(&dir, &["vless+reality", "tuic-v5"]).await;
     inv.add_user(&usr("alice")).await.unwrap();
-    // No grant on purpose.
     assert_eq!(
         visible(&inv, "alice").await,
         vec!["tuic-v5", "vless+reality"]

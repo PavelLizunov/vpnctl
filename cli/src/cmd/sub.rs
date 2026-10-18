@@ -1,16 +1,3 @@
-//! `vpnctl sub <user>` — собирает share-link'и для всех серверов, на которые
-//! у юзера есть grant. По одной строке на (server, protocol). С `--qr` —
-//! ASCII QR-код под каждым линком, удобно сканировать с телефона.
-//!
-//! Subscription policy parity (2026-06-04): this command applies the SAME
-//! policy the daemon's `/sub/<token>` + `/api/v1/app/config/<device_id>`
-//! handlers apply (`daemon/src/handlers/sub.rs`) — a disabled user has an
-//! empty subscription, auto-suppressed servers are skipped, and hidden /
-//! per-user-denied protocols are filtered. Previously the CLI walked
-//! `server.enabled_protocols` raw and leaked links the live endpoints
-//! would never serve. `--ignore-policy` restores the old raw behaviour for
-//! debugging.
-
 use crate::{OutputFormat, ui};
 use qrcode::QrCode;
 use qrcode::render::unicode;
@@ -53,8 +40,6 @@ pub(crate) async fn run(
     let registry = crate::registry::build()?;
     let entries = collect_links(&inv, &registry, &user, ignore_policy).await?;
 
-    // Captured for the empty-state copy so the operator can tell a
-    // policy-muted subscription apart from a genuinely un-granted user.
     let user_disabled = user.disabled;
 
     ui::print(format, &entries, |entries| {
@@ -62,9 +47,6 @@ pub(crate) async fn run(
             if user_disabled && !ignore_policy {
                 println!("(user '{user_id}' is disabled — subscription is empty)");
             } else {
-                // Could be no grants at all, OR grants whose every server
-                // is auto-suppressed / every protocol hidden — don't claim
-                // "no grants" definitively (operator would chase a ghost).
                 println!(
                     "(no deliverable links for user '{user_id}' — no grants, or every \
                      granted server/protocol is hidden or auto-suppressed)"
@@ -84,31 +66,11 @@ pub(crate) async fn run(
     })
 }
 
-/// Resolve which `(server, protocols)` the user's subscription should
-/// render, applying the SAME policy the daemon's `/sub` +
-/// `/api/v1/app/config` handlers apply (`daemon/src/handlers/sub.rs`):
-///
-///   * a `disabled` user has an EMPTY subscription;
-///   * an auto-suppressed server (health monitor flagged it unreachable,
-///     per-server opt-in; migration 0030) is skipped;
-///   * per-(user, server, protocol) visibility filters out hidden
-///     protocols and per-user deny overrides (migration 0018);
-///   * chained targets are skipped because standalone share links cannot
-///     encode sing-box's outbound `detour` without leaking a direct route.
-///
-/// `ignore_policy` bypasses ALL FOUR — the operator then sees every raw
-/// share-link regardless of subscription policy.
-///
-/// NOTE: this deliberately does NOT apply
-/// [`vpnctl_core::Protocol::appears_in_sing_box_sub`] — the CLI emits raw
-/// share-links, not a sing-box JSON envelope, so non-sing-box protocols
-/// are intentionally still printed (unlike the daemon's JSON `/sub` path).
 async fn resolve_sub_targets(
     inv: &SqliteInventory,
     user: &User,
     ignore_policy: bool,
 ) -> anyhow::Result<Vec<(Server, Vec<ProtocolId>)>> {
-    // Disabled-user soft mute (B1.user, migration 0026) — empty sub.
     if user.disabled && !ignore_policy {
         return Ok(Vec::new());
     }
@@ -117,9 +79,6 @@ async fn resolve_sub_targets(
     let mut out: Vec<(Server, Vec<ProtocolId>)> = Vec::new();
 
     for server in servers {
-        // Auto-suppress (migration 0030): skip a server the health monitor
-        // flagged unreachable. DB error → don't suppress (keep it in the
-        // sub), matching the daemon's `unwrap_or(false)`.
         if !ignore_policy
             && inv
                 .is_server_auto_suppressed(&server.id)
@@ -132,9 +91,6 @@ async fn resolve_sub_targets(
             continue;
         }
 
-        // Visibility filter (migration 0018): hidden protocols +
-        // per-(user, server) deny overrides. `None` under --ignore-policy
-        // means "no filtering".
         let visible: Option<HashSet<ProtocolId>> = if ignore_policy {
             None
         } else {
@@ -146,8 +102,6 @@ async fn resolve_sub_targets(
             )
         };
 
-        // Preserve `server.enabled_protocols` order (matches the daemon's
-        // per-server render loop), filtering through the visibility set.
         let protocols: Vec<ProtocolId> = server
             .enabled_protocols
             .iter()
@@ -159,10 +113,6 @@ async fn resolve_sub_targets(
     Ok(out)
 }
 
-/// Build the printable share-link entries for `user`, after the policy
-/// filter in [`resolve_sub_targets`]. Render failures (e.g. a protocol
-/// whose server secret isn't minted yet) warn to stderr and skip — the
-/// rest of the subscription still prints.
 async fn collect_links(
     inv: &SqliteInventory,
     registry: &Registry,
@@ -177,20 +127,9 @@ async fn collect_links(
             continue;
         }
         let secrets = inv.list_server_secrets(&server.id).await?;
-        // WireGuard's share_link reads `ctx.peers` to assign the right
-        // /32 per user — pass the granted-users list. Other protocols
-        // ignore the field. `users_for_server` already overrides each
-        // peer's `uuid` to the per-server `grants.client_uuid` value
-        // (migration 0016) so this list matches what the server's
-        // sing-box expects.
         let peers = inv.users_for_server(&server.id).await?;
         let ctx = RenderCtx::with_peers(server, &secrets, &peers);
 
-        // Per-server UUID override for the user we're about to mint
-        // share-links for (Phase 1 of the ninitux merge — see migration
-        // `0016_grants_per_server_uuid.sql`). For grants that haven't had
-        // their `client_uuid` overridden the helper returns the user
-        // unchanged — byte-identical rendering to the pre-Phase-1 behaviour.
         let per_server_user = inv.user_with_per_server_uuid(user, &server.id).await?;
 
         for pid in protocols {
@@ -211,16 +150,9 @@ async fn collect_links(
     Ok(entries)
 }
 
-/// Render the link as a Unicode-block QR sized to fit a normal terminal.
-/// Best-effort: oversized URLs (>~2.5 KB) overflow QR capacity — we
-/// warn but don't bail (the link itself is still printed above).
 fn render_qr(link: &str, server: &str, protocol: &str) {
     match QrCode::new(link.as_bytes()) {
         Ok(code) => {
-            // Dense1x2 packs one QR module into half a terminal cell —
-            // good readability without dominating the screen. We invert
-            // dark/light because most terminals are dark-on-light:
-            // contrasting "filled" blocks make the camera scan reliably.
             let image = code
                 .render::<unicode::Dense1x2>()
                 .dark_color(unicode::Dense1x2::Light)
@@ -238,12 +170,6 @@ fn render_qr(link: &str, server: &str, protocol: &str) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    //! Regression net for the subscription-policy drift: `vpnctl sub` must
-    //! apply the SAME disabled-user / auto-suppress / per-protocol
-    //! visibility policy the daemon's `/sub` handler does. The policy
-    //! primitives themselves are pinned at the inventory layer
-    //! (`crates/inventory/tests/spec_protocol_visibility.rs` etc.); these
-    //! tests prove the CLI path actually CALLS them.
 
     use super::*;
     use tempfile::TempDir;
@@ -283,7 +209,6 @@ mod tests {
             .expect("open")
     }
 
-    /// `resolve_sub_targets` → sorted `"server/protocol"` strings.
     fn flatten(targets: &[(Server, Vec<ProtocolId>)]) -> Vec<String> {
         let mut out: Vec<String> = targets
             .iter()
@@ -293,8 +218,6 @@ mod tests {
         out
     }
 
-    /// Standard fixture: one server `de` with two protocols, granted to
-    /// `alice`. Returns the TempDir (keep it alive) + the inventory.
     async fn setup() -> (TempDir, SqliteInventory) {
         let dir = TempDir::new().unwrap();
         let inv = open(&dir).await;
@@ -366,8 +289,6 @@ mod tests {
     #[tokio::test]
     async fn auto_suppressed_server_is_skipped() {
         let (_d, inv) = setup().await;
-        // Opt in to auto-suppress, then mark the server suppressed (the
-        // health-monitor-driven runtime flag).
         inv.set_server_auto_suppress(&ServerId("de".into()), true)
             .await
             .unwrap();
@@ -383,7 +304,6 @@ mod tests {
     #[tokio::test]
     async fn ignore_policy_bypasses_every_filter() {
         let (_d, inv) = setup().await;
-        // Pile every suppression on at once.
         inv.set_user_disabled(&UserId("alice".into()), true)
             .await
             .unwrap();
@@ -396,7 +316,6 @@ mod tests {
         inv.set_server_suppressed(&ServerId("de".into()), true)
             .await
             .unwrap();
-        // --ignore-policy → every raw (server, protocol) pair still emitted.
         assert_eq!(
             targets(&inv, "alice", true).await,
             vec!["de/tuic-v5", "de/vless+reality"]

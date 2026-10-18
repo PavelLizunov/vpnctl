@@ -1,40 +1,23 @@
-# gitleaks 8.x config — uses the default ruleset for Telegram tokens,
-# generic high-entropy strings, AWS, GitHub, etc. Repo-specific
-# allowlist below covers intentional examples + spec fixtures.
 
 [extend]
-# Inherit the bundled default ruleset (Telegram, AWS, GitHub, JWT,
-# generic high-entropy, etc).
 useDefault = true
 
 [allowlist]
 description = "vpnctl test fixtures + intentional placeholders"
 
-# Test fixtures use literal `SECRETTOKEN` / `SECRETtoken12abcd` etc
-# as DELIBERATE placeholders. They look high-entropy but are pinned
-# in the test source — there's no real secret to leak.
 regexes = [
-    # Test placeholders for the Telegram token + chat_id
     '''SECRETTOKEN''',
     '''SECRETtoken12abcd''',
     '''1234567890:ABCDEFghijklmn''',     # admin_smoke + alert_sink tests
     '''123456789''',                     # numeric chat_id placeholder
     '''987654321''',                     # numeric chat_id placeholder
     '''hunter2''',                       # canonical xkcd plain pw test
-    # Test-only WireGuard private-key placeholders. Real WG privkeys
-    # are 44 base64 chars ending `=`; the literal `AAA...NNNn=` is
-    # plainly a sequenced placeholder that's pinned in
-    # `crates/kernels/src/wgturn.rs` tests for the multi-file bundle
-    # contract. (Pavel 2026-05-19 — caught by gitleaks.)
     '''AAABBBCCCDDDEEEFFFGGGHHHIIIJJJKKKLLLMMMNNNn=''',
     '''qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=''',  # WG pubkey shape test fixture
     '''0000000000000000000000000000000000000000000=''',  # all-zero test privkey placeholder
-    # Cargo / Rust crate hashes that look secret-shaped
     '''checksum = "[a-f0-9]{64}"''',
 ]
 
-# Generated/schema/test-only paths. Production source files are never
-# exempted wholesale: their fixtures are covered by exact regexes above.
 paths = [
     '''Cargo\.lock''',                          # crate checksums
     '''docs/BURST_REPORT_.*\.md''',             # operator-facing reports — never carry secrets

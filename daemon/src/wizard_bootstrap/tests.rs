@@ -18,14 +18,9 @@ fn derive_server_id_replaces_ipv6_colons() {
 
 #[test]
 fn derive_server_id_filters_non_alphabet_chars() {
-    // Whitespace and semicolons (shouldn't reach here — the
-    // wizard validates upfront — but defensive) get stripped.
     assert_eq!(derive_server_id("foo bar; rm -rf"), "foobarrm-rf");
 }
 
-/// `BootstrapPlan` is the contract between handler and engine —
-/// the test confirms we can build one without any axum types in
-/// scope (which would couple the engine to the HTTP surface).
 #[test]
 fn bootstrap_plan_constructible_outside_handler() {
     let plan = BootstrapPlan {
@@ -61,9 +56,6 @@ fn redact_password_passthrough_when_password_absent() {
 
 #[test]
 fn redact_password_handles_empty_password_safely() {
-    // Empty password would otherwise match every char position
-    // (`str::replace("", "<redacted>")` would explode). Guard
-    // returns trimmed stderr unchanged.
     let stderr = "  hello world  ";
     assert_eq!(redact_password(stderr, ""), "hello world");
 }
@@ -97,12 +89,6 @@ fn find_available_server_id_walks_through_taken_suffixes() {
     assert_eq!(find_available_server_id(&existing, "a").unwrap(), "a-5");
 }
 
-/// `bootstrap_server_secrets` is the single source of truth for
-/// server-side per-protocol secret minting (shared between the
-/// wizard and `server_deploy`). Spec it against an in-memory
-/// inventory: mint once → 3 vless keys + 1 hy2 password (3 mint
-/// labels: REALITY keypair + short_id + hy2 obfs); mint again → no
-/// churn (idempotent).
 #[tokio::test]
 async fn bootstrap_secrets_mints_then_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
@@ -134,10 +120,8 @@ async fn bootstrap_secrets_mints_then_is_idempotent() {
     assert!(secrets1.contains_key("vless.short_id"));
     assert!(secrets1.contains_key("hysteria2.obfs.password"));
     assert!(!secrets1.contains_key("wireguard.server_public_key"));
-    // REALITY keypair + REALITY short_id + hy2 obfs = 3 spec labels.
     assert_eq!(minted1.len(), 3, "expected 3 mint labels, got {minted1:?}");
 
-    // Second call — nothing new to mint.
     let (secrets2, minted2) = bootstrap_server_secrets(&inv, &server, &registry)
         .await
         .unwrap();
@@ -148,14 +132,6 @@ async fn bootstrap_secrets_mints_then_is_idempotent() {
     );
 }
 
-/// REGRESSION GUARD for the `kg` deploy bug (2026-05-30): a server
-/// enabling EVERY sing-box protocol (the quick-add default set)
-/// must, after `bootstrap_server_secrets`, have minted every secret
-/// each enabled protocol's `server_inbound` requires — i.e. NO
-/// protocol renders `MissingSecret`. Before the
-/// `Protocol::server_secret_specs()` refactor this failed on
-/// `shadowsocks-2022` (`ss2022.psk` was never minted), which broke
-/// the whole node deploy at render time.
 #[tokio::test]
 async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     let dir = tempfile::tempdir().unwrap();
@@ -163,7 +139,6 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
     let registry = crate::app::build_registry().unwrap();
 
-    // Every sing-box-rendered protocol.
     let sing_box = registry.kernel(&KernelId("sing-box".into())).unwrap();
     let enabled = sing_box.supported_protocols();
     let server = Server {
@@ -184,8 +159,6 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         .await
         .unwrap();
 
-    // The contract: every enabled protocol renders its server
-    // inbound WITHOUT a MissingSecret after bootstrap.
     let ctx = RenderCtx::new(&server, &secrets);
     for pid in &enabled {
         let proto = registry.protocol(pid).unwrap();
@@ -196,12 +169,6 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         }
     }
 
-    // Stronger contract, independent of how each protocol READS its
-    // secret: every key a protocol DECLARES via server_secret_specs()
-    // must actually be minted. Catches a future protocol that forgets
-    // its spec even when its server_inbound reads via or_default()
-    // (which never raises MissingSecret, so the render loop above
-    // would pass it vacuously).
     for pid in &enabled {
         let proto = registry.protocol(pid).unwrap();
         for spec in proto.server_secret_specs() {
@@ -228,11 +195,6 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         }
     }
 
-    // Pin the specific regression: ss2022.psk minted AND in the
-    // sing-box-compatible encoding (standard base64 of a 16-byte
-    // aes-128 key = 24 chars, padded, NOT url-safe). A url-safe /
-    // unpadded PSK would be rejected by sing-box's StdEncoding and
-    // crash the node config.
     let psk = secrets
         .get("ss2022.psk")
         .expect("ss2022.psk must be minted for a server with shadowsocks-2022 enabled");
@@ -250,10 +212,6 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
 
 #[test]
 fn find_available_server_id_errors_when_1000_taken() {
-    // Pathological — operator has registered 'a', 'a-2', …,
-    // 'a-1000'. Refusing avoids an infinite loop on a corrupt
-    // inventory. The error message points the operator at the
-    // recovery path.
     let mut existing = std::collections::HashSet::new();
     existing.insert("a".into());
     for n in 2u32..=1000u32 {
@@ -262,10 +220,6 @@ fn find_available_server_id_errors_when_1000_taken() {
     assert!(find_available_server_id(&existing, "a").is_err());
 }
 
-/// JSON shape pinned — the SSE handler serialises events to JSON
-/// in each Event's `data:` payload, and the browser parses them
-/// with a `tag: "kind"` discriminator. If we ever rename `kind`
-/// the front-end breaks silently — this test surfaces the rename.
 #[test]
 fn bootstrap_event_serialises_with_kind_tag() {
     let step = BootstrapEvent::Step {
@@ -312,10 +266,6 @@ fn deploy_audit_action_reserves_baseline_for_applied_success() {
         "server.deploy.stale"
     );
 }
-
-// ─── per-server deploy concurrency gate (DeployGuard) ────────────
-// Each test uses UNIQUE server-ids: the in-flight set is a
-// process-wide static shared across the parallel test runner.
 
 #[test]
 fn deploy_guard_blocks_second_acquire_of_same_server() {
@@ -366,8 +316,6 @@ async fn run_redeploy_reports_already_running_when_locked() {
     inv.add_server_protocol(&server.id, &ProtocolId("amneziawg2".into()))
         .await
         .unwrap();
-    // Hold the permit so run_redeploy must stop before refreshing the stored
-    // server or bootstrapping its newly enabled protocol.
     let _held = DeployGuard::try_acquire("gate-run-redeploy").expect("hold permit");
     let mut stream = Box::pin(run_redeploy(
         server.clone(),
@@ -616,10 +564,6 @@ async fn run_redeploy_fails_for_removed_server_without_bootstrapping_secrets() {
     );
 }
 
-/// Operator-action-policy (CLAUDE.md HARD rule): the verify-key
-/// failure copy that renders into the operator's browser must NOT
-/// instruct them to `cat … on the node` (or any shell-on-node).
-/// Pins the rewritten remediation text.
 #[test]
 fn verify_key_fail_copy_has_no_cat_on_node() {
     let hint = VERIFY_KEY_FAIL_HINT;
@@ -631,14 +575,11 @@ fn verify_key_fail_copy_has_no_cat_on_node() {
         !hint.contains("on the node"),
         "verify-key hint must not reference running things on the node: {hint}"
     );
-    // And it points at the compliant product surfaces.
     assert!(
         hint.contains("server page") || hint.contains("wizard"),
         "verify-key hint must point at the wizard / server page: {hint}"
     );
 }
-
-// ── deploy_all_terminal — fleet SSE terminal event selection ────
 
 #[test]
 fn deploy_all_terminal_ok_when_no_failures() {

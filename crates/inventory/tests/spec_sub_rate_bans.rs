@@ -1,6 +1,3 @@
-//! Spec for Track-2 rate-limit bans on `SqliteInventory`. Public API
-//! + `migrations/0005_sub_rate_bans.sql` schema only — impl NOT read.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -73,8 +70,6 @@ async fn overlapping_bans_report_soonest_expiry() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // Same key, two bans — short ttl second so it's clearly the soonest
-    // even with sub-second clock drift between inserts.
     inv.add_ban("token", "tok-abc", 9000, "long").await.unwrap();
     inv.add_ban("token", "tok-abc", 60, "short").await.unwrap();
 
@@ -95,7 +90,6 @@ async fn zero_ttl_row_is_purged_even_if_is_banned_races() {
     let inv = open(&dir).await;
 
     inv.add_ban("ip", "198.51.100.7", 0, "").await.unwrap();
-    // Rule 5: is_banned for zero-ttl may return None OR Some — accept either.
     let _ = inv.is_banned("ip", "198.51.100.7").await.unwrap();
 
     let removed = inv.purge_expired_bans().await.unwrap();
@@ -135,7 +129,6 @@ async fn active_bans_lists_all_kinds_newest_first() {
     let bans = inv.active_bans().await.unwrap();
     assert_eq!(bans.len(), 3, "rule 7: all 3 must list, got {}", bans.len());
 
-    // Newest-first — last-inserted reason='third' must be index 0.
     assert_eq!(
         bans[0].reason, "third",
         "rule 7: must be created_at DESC; got {:?} first",

@@ -10,12 +10,6 @@ mod registry;
 mod ui;
 
 #[derive(Parser, Debug)]
-// `version` reports build provenance `<semver>+<short-git-sha>` (or
-// `+unknown` outside a Git checkout) so `vpnctl --version` on a node
-// identifies the exact deployed commit — the same stamp the daemon
-// health endpoint and admin footer show. Single source of truth:
-// `vpnctl_core::build_version()` (SemVer from CARGO_PKG_VERSION plus the
-// compile-time VPNCTL_BUILD_SHA the deploy script exports; no runtime git).
 #[command(
     name = "vpnctl",
     version = vpnctl_core::build_version(),
@@ -487,8 +481,6 @@ mod tests {
 
     #[test]
     fn update_kernels_target_neither_is_rejected() {
-        // Clap parses `update-kernels` with no args (both optional); the
-        // run-side validation is what rejects "neither server nor --all".
         let err = resolve_update_target(None, false)
             .expect_err("neither server nor --all must be rejected");
         assert!(err.to_string().contains("--all"), "got: {err}");

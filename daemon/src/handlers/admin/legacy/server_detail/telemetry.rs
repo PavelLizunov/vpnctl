@@ -4,46 +4,6 @@ use maud::{Markup, html};
 use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
 use crate::handlers::admin::legacy::dashboard::{pct_color, pct_label, sparkline_svg_scaled};
 
-/// Phase H+ — rolling uptime SLO section. Three chips (24h / 7d /
-/// 30d) under the live-status hero. Reads `UptimeStat` values
-/// fetched in the handler (uptime_for_server SQL aggregate, one
-/// indexed range scan per window).
-///
-/// Renders NOTHING when all three windows have None — the hero
-/// already shows the «no probes yet» empty state and stacking
-/// another empty block would be UI noise.
-///
-/// Chip colour rules (per chip, independent of the others):
-///   * `Some(100)`          → green «100%» — perfect, no outages
-///   * `Some(>= 99)`        → green
-///   * `Some(>= 95)`        → amber
-///   * `Some(< 95)`         → red
-///   * `Some(0)`            → red «0%» (was DOWN for the entire
-///     window — distinct from None!)
-///   * `None`               → grey «— no data» (no decidable rows)
-///
-/// Display precision is **integer %** (formatted via `{p}%` on `u8`)
-/// — not one-decimal. `Option<u8>` carries enough resolution for the
-/// «pick a colour bucket» purpose without false-precision in the
-/// rendered chip («99%» vs «98.7%» — the latter implies precision
-/// the 10-min poll cadence simply doesn't deliver).
-///
-/// Last-outage display: shows ISO timestamp of the most recent
-/// `sing_box_active=0` row across ALL THREE windows (the widest is
-/// 30d so it captures any). Renders only if found.
-///
-/// Last-probe staleness: if the most recent probe across all three
-/// windows is older than 1200s (= 2× the DEFAULT 600s probe
-/// interval), render an amber «poller may be stale» footer. The
-/// threshold is hardcoded rather than reading
-/// `VPNCTLD_NODE_PROBE_INTERVAL_SECS` from env — the env override
-/// is daemon-startup only and the UI would have to observe its
-/// own process to read it. **Caveat:** if the operator has set
-/// `VPNCTLD_NODE_PROBE_INTERVAL_SECS=1800` or higher, this 1200s
-/// threshold will false-positive the «stale» chip after the first
-/// natural-interval tick. Acceptable today (production runs with
-/// the default 600s) — file a follow-up if Pavel ever raises the
-/// interval persistently.
 pub(crate) fn server_detail_uptime_section(
     u24h: Option<&vpnctl_inventory::UptimeStat>,
     u7d: Option<&vpnctl_inventory::UptimeStat>,
@@ -52,17 +12,6 @@ pub(crate) fn server_detail_uptime_section(
 ) -> Markup {
     use crate::i18n::tr;
 
-    // Don't render the section when there's literally no data:
-    //   * All three queries failed → suppress (DB error path).
-    //   * All three returned `total_rows == 0` → suppress (the
-    //     hero already shows «no probes yet» — stacking another
-    //     empty block would be UI noise).
-    //
-    // Subtlety: `uptime_for_server` returns `Ok(UptimeStat { 0,
-    // 0, 0, ... })` for an empty window — it does NOT return
-    // `Err`. So an `is_none()` check on the Option would always
-    // be false in practice (only Err → None via `.ok()`). The
-    // load-bearing check is on `total_rows`.
     let any_data = u24h.is_some_and(|s| s.total_rows > 0)
         || u7d.is_some_and(|s| s.total_rows > 0)
         || u30d.is_some_and(|s| s.total_rows > 0);
@@ -76,13 +25,6 @@ pub(crate) fn server_detail_uptime_section(
         let pct_text = pct_label(pct, lang);
         let row_count: u64 = stat.map(|s| s.total_rows).unwrap_or(0);
         let down_count: u64 = stat.map(|s| s.down_rows).unwrap_or(0);
-        // `data-uptime-pct` is a stable scrape-target for admin_smoke
-        // tests + a future operator tool that wants to extract SLOs
-        // without parsing the CSS. The value is the raw u8 or the
-        // literal string "none" for the no-data branch. Choosing the
-        // attribute over inline-text means the test can't false-pass
-        // on unrelated `100%` substrings elsewhere on the page (e.g.
-        // disk-pressure tile at 100%).
         let pct_attr = pct.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
         html! {
             tr data-uptime-pct=(pct_attr) {
@@ -98,15 +40,11 @@ pub(crate) fn server_detail_uptime_section(
         }
     };
 
-    // Pick the most recent outage across all three windows (30d is
-    // widest, so if it has one, that's our answer; fall through if
-    // somehow the wider window missed but a narrower didn't).
     let last_outage = u30d
         .and_then(|s| s.last_outage_at)
         .or_else(|| u7d.and_then(|s| s.last_outage_at))
         .or_else(|| u24h.and_then(|s| s.last_outage_at));
 
-    // Most recent probe (any state). For staleness chip.
     let last_probe = u24h
         .and_then(|s| s.last_probe_at)
         .or_else(|| u7d.and_then(|s| s.last_probe_at))
@@ -167,9 +105,6 @@ pub(crate) fn server_detail_uptime_section(
     }
 }
 
-/// Hero block — most-recent probe at-a-glance KPIs, OR an empty state
-/// describing why the box is empty (no probe data yet — either fresh
-/// server, deploy key not pushed, or poller not running).
 pub(super) fn server_detail_hero(
     latest: &Option<vpnctl_inventory::NodeHealthRow>,
     server: &vpnctl_core::Server,
@@ -181,10 +116,6 @@ pub(super) fn server_detail_hero(
             div.ed-rule {}
             div.ed-art-eyebrow { (tr(lang, "Live status", "Живой статус")) }
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                // Honest copy (audit 2026-06-10): the poller is LIVE
-                // (spawn_node_probe_poller, 10-min cadence) and probes
-                // sing-box servers only — blank means «not probed yet»
-                // or «not probeable», not «feature unshipped».
                 (tr(
                     lang,
                     "No probes yet. The node-telemetry poller SSHes ",
@@ -272,7 +203,6 @@ pub(super) fn server_detail_hero(
 }
 
 pub(crate) fn status_tile(label: &str, value: &str, value_color: &str) -> Markup {
-    // No localized warning is emitted on this path.
     status_tile_with_warn(label, value, value_color, false, crate::i18n::Locale::En)
 }
 
@@ -301,20 +231,6 @@ pub(crate) fn status_tile_with_warn(
     }
 }
 
-/// A3 (audit 2026-05-22) — 24h resource-trend sparklines for the
-/// per-server detail page. Three small SVG charts: disk %, mem-used %,
-/// sing-box log MiB. Each uses the existing reusable `sparkline_svg`
-/// helper (so styling stays consistent with the dashboard + monitoring
-/// page; accent-toggle in Tweaks panel recolours everything).
-///
-/// **Renders only when there's at least one node_health row in the
-/// 24h window.** Fresh server (no probes yet) gets nothing — the hero
-/// section already says «no data yet» for that case; we don't need to
-/// repeat it.
-///
-/// Each row in `trend_rows` came from `recent_node_health_for_server`
-/// which sorts DESC (newest first). For the sparkline we reverse so
-/// time flows left-to-right.
 pub(super) fn server_detail_resource_trend_section(
     trend_rows: &[vpnctl_inventory::NodeHealthRow],
     lang: crate::i18n::Locale,
@@ -323,13 +239,9 @@ pub(super) fn server_detail_resource_trend_section(
     if trend_rows.is_empty() {
         return html! {};
     }
-    // Iterate oldest→newest so the sparkline reads chronologically.
     let mut chronological: Vec<&vpnctl_inventory::NodeHealthRow> = trend_rows.iter().collect();
     chronological.reverse();
 
-    // Disk usage % per row. Skip rows missing either side of the
-    // ratio (None → no point added; sparkline tolerates a shorter
-    // series gracefully).
     let disk_pct_series: Vec<f64> = chronological
         .iter()
         .filter_map(|r| {
@@ -342,7 +254,6 @@ pub(super) fn server_detail_resource_trend_section(
         })
         .collect();
 
-    // Memory-used % per row (probe stores AVAILABLE, hence 100 - avail/total).
     let mem_used_pct_series: Vec<f64> = chronological
         .iter()
         .filter_map(|r| {
@@ -355,9 +266,6 @@ pub(super) fn server_detail_resource_trend_section(
         })
         .collect();
 
-    // sing-box log size in MiB. The threshold alert
-    // (server.singbox.log.too_big) fires at 500 MiB; sparkline shows
-    // the climb so operator can predict «when will we hit 500».
     let log_mib_series: Vec<f64> = chronological
         .iter()
         .filter_map(|r| r.sing_box_log_bytes.map(|b| (b as f64) / (1024.0 * 1024.0)))

@@ -6,20 +6,6 @@ use sqlx::Row;
 use std::collections::HashMap;
 use vpnctl_core::{Server, ServerId, User, UserId};
 
-/// Find an EXISTING grant on `server_id` whose **effective** VLESS uuid
-/// (`COALESCE(grants.client_uuid, users.uuid)`) equals `candidate_uuid`,
-/// ignoring grants that belong to `exclude_user`. Returns that other user's
-/// id, or `None` when `candidate_uuid` is free to use on the server.
-///
-/// This is the core of the per-server uuid-uniqueness invariant. Two users
-/// sharing one effective uuid on a node make sing-box dedup them, so one
-/// silently fails to connect (HANDOFF §4.1 — the `main-brat@de` incident).
-/// `users.uuid` is globally UNIQUE, but `grants.client_uuid` has no such
-/// constraint and the effective value spans two tables, so the invariant is
-/// enforced in code (write-time) + a pre-deploy assertion rather than via a
-/// single-column UNIQUE index.\n///
-/// Generic over the executor so callers can run it on the pool (`grant`) or
-/// inside an already-open transaction (`set_grant_client_uuid`).
 pub(super) async fn find_effective_uuid_conflict<'e, E>(
     executor: E,
     server_id: &str,
@@ -43,9 +29,6 @@ where
     .bind(candidate_uuid)
     .fetch_optional(executor)
     .await?;
-    // Returns the conflicting user's id AND whether it is disabled — a disabled
-    // user is invisible in the admin UI but still owns the uuid, so surfacing
-    // that in the error stops the operator from chasing a \"ghost\".
     match row {
         None => Ok(None),
         Some(r) => {
@@ -57,22 +40,6 @@ where
 }
 
 impl SqliteInventory {
-    // ── Grants (user × server) ──────────────────────────────────────────
-
-    /// Grant `user` access to `server`. Idempotent — re-granting an existing
-    /// (user, server) pair is a no-op.
-    ///
-    /// **uuid-uniqueness invariant (HANDOFF §4.1).** A fresh grant's effective
-    /// VLESS uuid is the user's GLOBAL `users.uuid` (the new row's
-    /// `client_uuid` is NULL). If another user already resolves to that same
-    /// effective uuid on this server, sing-box would dedup the two and one of
-    /// them would silently fail to connect — so we reject the grant rather
-    /// than mint a config that bricks a user. This can only happen when some
-    /// *other* grant carries a `client_uuid` override equal to this user's
-    /// global uuid (exactly the `main-brat@de` pathology). The check spans all
-    /// users (incl. disabled) so a later re-enable can't surface a latent
-    /// collision. Re-granting an existing pair skips the check so it never
-    /// trips over pre-existing (legacy) data.
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
@@ -96,8 +63,6 @@ impl SqliteInventory {
             )));
         }
 
-        // Already granted? Idempotent no-op (preserves the prior
-        // `ON CONFLICT DO NOTHING` semantics) — and skip the collision check.
         let already = sqlx::query("SELECT 1 FROM grants WHERE user_id = ?1 AND server_id = ?2")
             .bind(&user.0)
             .bind(&server.0)
@@ -109,7 +74,6 @@ impl SqliteInventory {
             return Ok(());
         }
 
-        // Fresh grant ⇒ effective uuid will be the user's global uuid.
         let user_uuid: String = sqlx::query("SELECT uuid FROM users WHERE id = ?1")
             .bind(&user.0)
             .fetch_optional(&mut *tx)
@@ -148,9 +112,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Design v2 3d — grant timestamps for one server's grants table.
-    /// `granted_at` is NULL for grants created before migration 0039;
-    /// the UI renders those as \"—\".
     pub async fn grant_dates_for_server(
         &self,
         server: &ServerId,
@@ -175,9 +136,6 @@ impl SqliteInventory {
             .collect()
     }
 
-    /// Design v2 4b — the user-side mirror of
-    /// [`Self::grant_dates_for_server`]: when was each of this user's
-    /// grants made. NULL (pre-0039 rows) reads as `None`.
     pub async fn grant_dates_for_user(
         &self,
         user: &UserId,
@@ -211,28 +169,7 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Users granted on `server`, with `uuid` already overridden to the
-    /// per-server `grants.client_uuid` if one is set (Phase 1 of the
-    /// ninitux merge — see migration `0016_grants_per_server_uuid.sql`).
-    ///
-    /// Returned `User.uuid` is the value the SERVER expects to see in
-    /// VLESS Reality handshakes from this user. It MAY differ between
-    /// servers for the same `user.id` once Phase 2 has imported the
-    /// per-(user, server) uuids harvested from subscription-server's
-    /// `client_server_links` table.
-    ///
-    /// All OTHER `User` fields (`tuic_password`, `wireguard_pubkey`,
-    /// `wireguard_private`, `sub_token`) keep their per-user values —
-    /// only `uuid` is per-server. TUIC and WireGuard don't need
-    /// per-server differentiation (TUIC carries password + per-user
-    /// uuid; WG identifies peers by pubkey not name) so leaving them
-    /// global is correct and avoids needless schema bloat.
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
-        // `u.disabled = 0` — a disabled user is EXCLUDED from the rendered
-        // node config (this slice feeds every kernel's inbound users), so a
-        // disable + redeploy REVOKES node access and an enable + redeploy
-        // restores it. `disabled` is no longer a subscription-only soft mute.
-        // `user_set_disabled_inner` kicks the redeploy on toggle.
         let rows = sqlx::query(
             "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id, u.disabled
              FROM users u
@@ -278,7 +215,6 @@ impl SqliteInventory {
         self.get_servers_batch(&sids).await
     }
 
-    /// Cheap row count of (user, server) grant pairs. `0` on empty table.
     pub async fn count_grants(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM grants")
             .fetch_one(&self.pool)
@@ -286,9 +222,6 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
-    /// Map of `server_id → number of users granted access to it`. Servers
-    /// with no grants are absent (callers default to 0). One query, no N+1
-    /// — call this once and look up by ID when rendering a server list.
     pub async fn users_count_per_server(&self) -> Result<HashMap<ServerId, i64>> {
         let rows = sqlx::query("SELECT server_id, COUNT(*) AS n FROM grants GROUP BY server_id")
             .fetch_all(&self.pool)
@@ -302,9 +235,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Map of `user_id → number of servers granted to it`. Users
-    /// with no grants are absent (callers default to 0). Exactly 1 query,
-    /// no N+1 — call this once and look up by user ID when rendering a user list.
     pub async fn servers_count_per_user(&self) -> Result<HashMap<UserId, i64>> {
         let rows = sqlx::query("SELECT user_id, COUNT(*) AS n FROM grants GROUP BY user_id")
             .fetch_all(&self.pool)

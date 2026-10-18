@@ -1,5 +1,3 @@
-//! Shared test fixtures and helpers for admin smoke tests.
-
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -19,13 +17,6 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
         .await
         .unwrap();
     let mut reg = Registry::new();
-    // Mirror the full production registry so tests that introspect
-    // the registry (e.g. server-detail enabled-protocols section)
-    // see the same set the live daemon does. Previously only 2
-    // protocols were registered here, which made admin_smoke
-    // tests for the protocols section fail silently — they'd
-    // pass on assertions involving vless/tuic and skip everything
-    // else without the test owner noticing.
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
     reg.register_kernel(Box::new(vpnctl_kernels::AmneziaWg::new()))
         .unwrap();
@@ -50,34 +41,16 @@ pub(crate) async fn state(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::Naive::new()))
         .unwrap();
-    // Lockstep with `app.rs::build_registry` (PR #139 round-2 review):
-    // xray kernel + vless-ws/vless+xhttp protocols were missing here, so
-    // any future admin-level test touching those protocols (e.g. the
-    // reality↔vless-ws front-port collision) would run against a vacuum.
     reg.register_kernel(Box::new(vpnctl_kernels::Xray::new()))
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::VlessWs::new()))
         .unwrap();
     reg.register_protocol(Box::new(vpnctl_protocols::VlessXhttp::new()))
         .unwrap();
-    // Wire the access-log writer the same way `build()` does. Drop the
-    // JoinHandle — for tests that don't introspect the writer, the
-    // task lives until the AppState clones drop, which happens at end
-    // of test. Tests that DO need to assert writer behavior (e.g.
-    // back-pressure spec) call `vpnctld::make_app_state_for_tests`
-    // directly to keep the handle.
     let (state, _writer) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
     state
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Phase B — dashboard + servers list
-// ────────────────────────────────────────────────────────────────────────
-
-/// Seed the inventory with `n_servers` servers and `n_users` users; if
-/// `grant_pairs` are given, add those user×server grants too. Lives here
-/// instead of in a #[cfg(test)] mod because integration tests can't share
-/// helpers across files via cfg.
 pub(crate) async fn seed(
     inv: &SqliteInventory,
     n_servers: usize,
@@ -138,8 +111,6 @@ pub(crate) async fn fetch_html(app: axum::Router, path: &str) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// Variant of `fetch_html` that ships a Cookie header — used by the
-/// wizard step-2 tests where the page is session-gated.
 pub(crate) async fn fetch_html_with_cookie(app: axum::Router, path: &str, cookie: &str) -> String {
     let resp = app
         .oneshot(
@@ -161,9 +132,6 @@ pub(crate) async fn fetch_html_with_cookie(app: axum::Router, path: &str, cookie
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// Assert the dashboard summary bar (densification pass) shows
-/// `<b>value</b> label` (e.g. `<b>3</b> servers`), anchoring each count to
-/// its own unit label so a reorder of the bar can't pass by coincidence.
 pub(crate) fn assert_summary_stat(html: &str, value: &str, label: &str) {
     let needle = format!("<b>{value}</b> {label}");
     assert!(
@@ -172,34 +140,7 @@ pub(crate) fn assert_summary_stat(html: &str, value: &str, label: &str) {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Phase 3+ ninitux-compat URL rendering (post-Phase-5 cutover, 2026-05-19)
-//
-//  Pinned behaviour:
-//    1. User with `vpn_router_device_id` pinned → admin UI renders
-//       `https://ninitux.com/api/v1/app/config/<device_id>` as the
-//       PRIMARY subscription URL. The QR encodes that exact URL.
-//       The legacy `/sub/<token>` URL is demoted inside a <details>
-//       collapsible labelled "LAN-only fallback".
-//    2. User WITHOUT a device_id → admin UI falls back to the
-//       legacy `/sub/<token>` URL as primary (pre-Phase-3 behaviour
-//       preserved) AND the empty-state copy quotes the literal CLI
-//       command to pin a device_id (per CLAUDE.md "Every empty
-//       state must quote a literal CLI command").
-//    3. Users-list deck mentions the `ninitux.com` host so the
-//       operator sees the production URL shape at-a-glance.
-//
-//  Caught 2026-05-19 by visual review of /admin/users/tester-1: the
-//  QR encoded the LAN URL `http://192.168.0.236:18402/sub/<token>`
-//  which doesn't work for any client outside the LAN — operators
-//  showing the QR to a real user would silently fail.
-// ────────────────────────────────────────────────────────────────────────
-
 pub(crate) const TEST_NINITUX_DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
-
-// ────────────────────────────────────────────────────────────────────────
-//  Boosty subscription bridge (/admin/boosty)
-// ────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn mk_user(id: &str, disabled: bool) -> User {
     User {
@@ -214,22 +155,12 @@ pub(crate) fn mk_user(id: &str, disabled: bool) -> User {
     }
 }
 
-/// Default same-origin host used by every test that POSTs to /admin
-/// without explicitly testing CSRF behaviour. Using a single constant
-/// here means a future schema change (e.g. switching to a vhost-aware
-/// router) only touches one place.
 pub(crate) const SAME_ORIGIN_HOST: &str = "test.example";
 
-/// Inject the Host + Origin headers that the CSRF middleware expects
-/// (`handlers::csrf::require_same_origin` rejects state-mutating requests
-/// whose Origin does not match Host). Tests that explicitly verify the
-/// CSRF rejection path do not call this helper.
 pub(crate) fn add_same_origin(req: axum::http::request::Builder) -> axum::http::request::Builder {
     req.header("host", SAME_ORIGIN_HOST)
         .header("origin", format!("http://{SAME_ORIGIN_HOST}"))
 }
-
-// ── Phase 3: naive (Caddy) per-server config UI ──────────────────────────
 
 pub(crate) fn naive_server(id: &str) -> vpnctl_core::Server {
     vpnctl_core::Server {
@@ -246,10 +177,6 @@ pub(crate) fn naive_server(id: &str) -> vpnctl_core::Server {
     }
 }
 
-/// Helper for the copy-contract tests — exercises the router and
-/// returns the response body as a UTF-8 String. Sets same-origin
-/// headers on every method so the CSRF middleware passes mutating
-/// requests through (GET passes regardless).
 pub(crate) async fn body_of(
     app: axum::Router,
     method: &str,
@@ -271,23 +198,12 @@ pub(crate) async fn body_of(
     String::from_utf8(bytes.to_vec()).expect("response body must be utf-8")
 }
 
-// ─── sub_access.suspicious_local_ip alert spec (Pavel 2026-05-21) ───
-//
-// «если видим 127.0.0.1 или любой из 192.168/10/172.16-31 (метка
-// LAN) и 169.254.* то это инцидент, который требует разбирательства».
-// The writer task fires an admin_alert per (user_id) bucket when a
-// LAN/loopback/link-local IP is paired with a UA that's NOT on the
-// allowlist (only `phase6-monitor (canary)` today).
-
-/// Helper: send one record through the writer + wait for it to drain
-/// + return the inventory handle for assertions.
 pub(crate) async fn enqueue_one_and_drain(
     s: &vpnctld::AppState,
     user_id: &str,
     ip: &str,
     device_class: Option<&str>,
 ) {
-    // Own this writer's sender so channel close is a real drain barrier.
     let (tx, mut writer) = vpnctld::access_log::spawn_writer(s.inv.clone());
     assert!(vpnctld::access_log::try_enqueue(
         &tx,
@@ -317,34 +233,16 @@ pub(crate) async fn enqueue_one_and_drain(
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  PR-Dash — informativeness cards (fleet-at-a-glance, real traffic,
-//  kernel rollup, alerts breakdown, abuse summary, today digest).
-//
-//  The base `seed()` helper deliberately writes ZERO audit rows (several
-//  existing tests pin that contract — see `grants_via_real_handlers_
-//  mark_server_pending_deploy`). So rather than disturb it, the dashboard
-//  cards get their own opt-in signal seeder layered on top: a node_health
-//  row carrying `kernel_versions_json`, an admin_alert of a known
-//  (kind, severity), an audit row dated today, and a high-ASN sub_access
-//  pattern for a user. Each new test calls `seed()` then this.
-// ════════════════════════════════════════════════════════════════════
-
-/// Layer the dashboard-card signals onto an already-seeded inventory.
-/// Assumes `s0`/`u0` exist (call after `seed(.., n>=1, m>=1, ..)`).
 pub(crate) async fn seed_dashboard_signals(inv: &SqliteInventory) {
-    // dash#1 + dash#3 — node_health with on-node kernel versions, disk
-    // + mem so the at-a-glance row has real cells (not all «—»). s0 is
-    // the fleet-max sing-box version (1.13.12 = the floor/target).
     inv.record_node_health(
         &ServerId("s0".into()),
-        Some(true),  // sing_box_active = up
-        Some(true),  // fail2ban_active
-        Some(4096),  // disk_used_mib
-        Some(20480), // disk_total_mib  → 20% used
-        Some(2048),  // mem_available_mib
-        Some(8192),  // mem_total_mib   → 75% used
-        Some(120),   // load_1min_x100
+        Some(true),
+        Some(true),
+        Some(4096),
+        Some(20480),
+        Some(2048),
+        Some(8192),
+        Some(120),
         Some(r#"["tcp/443","udp/8443"]"#),
         Some(1_048_576),
         Some(r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#),
@@ -356,8 +254,6 @@ pub(crate) async fn seed_dashboard_signals(inv: &SqliteInventory) {
     .await
     .unwrap();
 
-    // dash#4 — one admin_alert of a known (kind, severity) so the
-    // breakdown card has something to render.
     inv.insert_alert(
         "disk_pressure",
         Some(&ServerId("s0".into())),
@@ -368,16 +264,10 @@ pub(crate) async fn seed_dashboard_signals(inv: &SqliteInventory) {
     .await
     .unwrap();
 
-    // dash#6 — an audit row dated today (the `audit()` helper stamps
-    // `ts` with `now`, which is >= today's local-midnight UTC). A
-    // `user.create` action buckets into `users_added`.
     inv.audit("admin", "user.create", Some("u0"), None)
         .await
         .unwrap();
 
-    // dash#5 — high-ASN sub_access pattern: u0's subscription fetched
-    // from 3 distinct ASNs (≥ LIKELY_SHARED_MIN_ASNS=3) → "likely
-    // shared". `is_vpn_egress` defaults to 0 so these are real fetches.
     for (ip, asn, cc) in [
         ("203.0.113.10", "AS1111", "US"),
         ("198.51.100.20", "AS2222", "DE"),
@@ -401,22 +291,11 @@ pub(crate) async fn seed_dashboard_signals(inv: &SqliteInventory) {
         .unwrap();
     }
 
-    // sharing v2 — flag u0 via the DOMINANT signal: typical peak of 3
-    // concurrent networks (`TypicalConcurrentNets(3)` = 45 pts ≥ 35). The old
-    // 3-ASN fetch-diversity above no longer scores (dropped in v2), so the
-    // abuse-summary card only renders once a real-simultaneity signal lands.
     inv.record_user_ip_concurrency(&[(UserId("u0".into()), 3)])
         .await
         .unwrap();
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  PR-User — informativeness cards on the user-detail page.
-//  DOM + empty-state per card + copy-contract (EN + RU).
-// ════════════════════════════════════════════════════════════════════
-
-/// Build a clash-api connection with a controllable source IP/port —
-/// the attribution key the online badge reads.
 pub(crate) fn pr_user_conn(src_ip: &str, src_port: &str) -> vpnctld::clash_api::Connection {
     vpnctld::clash_api::Connection {
         id: format!("c-{src_ip}-{src_port}"),
@@ -435,26 +314,6 @@ pub(crate) fn pr_user_conn(src_ip: &str, src_port: &str) -> vpnctld::clash_api::
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Auto-deploy on grant / revoke (HANDOFF 2026-07-08 §4.1 / §6.2)
-//
-//  A grant only used to write inv.db: the sub URI appeared instantly but
-//  the UUID never reached the node's vless users[] — REALITY handshake
-//  succeeds, VLESS-auth rejects, the client is forwarded to the cover
-//  dest → «connects but no internet». Every grant/revoke handler must now
-//  dispatch the same background redeploy delete/disable already use.
-//
-//  In the test environment the deploy key is absent, so the spawn skips
-//  the SSH pipeline and records a FAILED `user.autodeploy` audit row
-//  (ok=false) instead of stamping a fake `server.deploy` baseline. That
-//  row — its trigger + servers payload — is the observable contract that
-//  the redeploy was dispatched for exactly the affected server set.
-// ────────────────────────────────────────────────────────────────────────
-
-/// Poll the audit log until at least `n` autodeploy rows exist
-/// (`user.autodeploy` for user-scoped triggers, `server.autodeploy`
-/// for server-side bulk — the spawn is a background task racing the
-/// test). Returns newest-first per `recent_audit` ordering.
 pub(crate) async fn wait_for_autodeploy_rows(
     inv: &SqliteInventory,
     n: usize,
@@ -475,7 +334,6 @@ pub(crate) async fn wait_for_autodeploy_rows(
     panic!("timed out waiting for {n} autodeploy audit row(s)");
 }
 
-/// Count autodeploy rows right now (for no-op negative checks).
 pub(crate) async fn count_autodeploy_rows(inv: &SqliteInventory) -> usize {
     inv.recent_audit(200)
         .await
@@ -485,16 +343,7 @@ pub(crate) async fn count_autodeploy_rows(inv: &SqliteInventory) -> usize {
         .count()
 }
 
-// ── reality-config: per-server VLESS+REALITY listen port (PR #139) ──────
-//
-// The cdn topology (naive/caddy on 443 + reality moved off it via
-// `vless.listen_port`) made the port load-bearing for firewall, guard
-// and drift — so the admin form gets the same save-time gate the naive
-// and vless-ws forms have, pinned here end-to-end.
-
 pub(crate) fn reality_naive_server(id: &str) -> vpnctl_core::Server {
-    // naive (caddy, tcp/443) + vless+reality (sing-box) on ONE node —
-    // exactly the combination the save-time guard exists for.
     vpnctl_core::Server {
         id: vpnctl_core::ServerId(id.into()),
         address: "203.0.113.9".into(),

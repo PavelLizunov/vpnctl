@@ -6,11 +6,6 @@ use sqlx::Row;
 use vpnctl_core::{ServerId, User, UserId};
 
 impl SqliteInventory {
-    /// Design v2 3d — which granted users' key material is NOT yet in
-    /// the node's deployed config: their `user.grant` audit row for
-    /// this server has a greater monotonic audit id than the last
-    /// successful `server.deploy`. Per-user so the banner can NAME
-    /// who's affected without relying on timestamp precision.
     pub async fn users_pending_deploy_for_server(
         &self,
         server_id: &ServerId,
@@ -36,7 +31,6 @@ impl SqliteInventory {
             .collect()
     }
 
-    /// Cheap row count. `0` on an empty table.
     pub async fn count_users(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM users")
             .fetch_one(&self.pool)
@@ -44,16 +38,6 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
-    /// **Fleet search** (audit A5, shipped 2026-05-23). Substring
-    /// match against `users.id`, `users.uuid`, `users.sub_token`,
-    /// `users.vpn_router_device_id`. Case-insensitive via
-    /// `LOWER(...)`; returns full `User` rows for the hits so the
-    /// search results page can render `id` + secondary identifiers
-    /// without a second roundtrip. Capped at `limit` so a pathological
-    /// `q="a"` doesn't paginate the entire fleet.
-    ///
-    /// Empty `q` returns empty — search is opt-in, the index page
-    /// shouldn't accidentally dump everything.
     pub async fn search_users(&self, q: &str, limit: i64) -> Result<Vec<User>> {
         if q.is_empty() {
             return Ok(Vec::new());
@@ -76,12 +60,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_user).collect()
     }
 
-    /// Count of users with `disabled = 1` (B1.user, migration 0026).
-    /// Cheap — backed by the partial `idx_users_disabled_partial`
-    /// index which only contains the disabled rows, so this is O(N
-    /// disabled), not O(N total). Used by the dashboard's «N paused»
-    /// sub-line so disabled users don't fall off the operator's
-    /// radar.
     pub async fn count_disabled_users(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM users WHERE disabled = 1")
             .fetch_one(&self.pool)
@@ -89,36 +67,12 @@ impl SqliteInventory {
         Ok(row.try_get("n")?)
     }
 
-    /// **Idle users** — list `(user_id, last_seen)` for users whose
-    /// most recent `sub_access_log` row is older than `days` days, OR
-    /// who have never appeared in the access log at all (last_seen
-    /// is `None`).
-    ///
-    /// Backs the dashboard «Idle users — revoke candidates» panel
-    /// (audit A2). Cheap single LEFT-JOIN with one MAX aggregate;
-    /// rows are sorted oldest-first (`last_seen ASC NULLS FIRST`)
-    /// so the worst offenders appear at the top. Limit caps the
-    /// result set so the panel doesn't grow unbounded.
-    ///
-    /// **`days = 30` is the canonical threshold for the dashboard**
-    /// — a roughly-monthly cycle catches «forgotten phone in a
-    /// drawer» without being so aggressive it surfaces normal-
-    /// vacation users. Operator can pick a different number; the
-    /// query is parameterised.
-    ///
-    /// Pinned by `idle_users_returns_users_with_old_or_no_last_seen`.
     pub async fn idle_users(
         &self,
         days: u32,
         limit: i64,
     ) -> Result<Vec<(UserId, Option<DateTime<Utc>>)>> {
         let cutoff = format!("-{days} days");
-        // LEFT JOIN against an aggregate subquery: every user appears
-        // exactly once; users with no sub_access_log row get
-        // `last_seen = NULL`. WHERE filter keeps only `last_seen IS
-        // NULL` (never seen) OR `last_seen < cutoff` (seen but old).
-        // Sort `last_seen ASC NULLS FIRST` so never-seen users float
-        // to the top alongside the longest-idle ones.
         let rows = sqlx::query(
             "SELECT u.id AS user_id, la.last_seen AS last_seen
              FROM users u
@@ -159,10 +113,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// **Q-4d** — user lifecycle facts. `users.created_at` exists
-    /// (migration 0001) so this reads it directly + the most recent
-    /// real `/sub` fetch, and derives `age_days`. Backs the
-    /// user-detail header.
     pub async fn user_lifecycle(&self, user: &UserId) -> Result<UserLifecycle> {
         let row = sqlx::query(
             "SELECT u.created_at AS created_at,
@@ -190,8 +140,6 @@ impl SqliteInventory {
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
         });
-        // Floored whole days since creation; never negative (a clock
-        // skew that put created_at slightly in the future yields 0).
         let age_days = (Utc::now() - created_at).num_days().max(0) as u64;
         Ok(UserLifecycle {
             created_at,
@@ -200,12 +148,6 @@ impl SqliteInventory {
         })
     }
 
-    /// True last-seen activity timestamp across all user activity sources:
-    /// - `sub_access_log.ts` (subscription config pulls)
-    /// - `vpn_connection_stats.ts` (attributed VPN traffic or active connections)
-    /// - `vpn_user_sessions.last_seen` (VPN session windows)
-    ///
-    /// Returns `None` if the user has never fetched a subscription or connected to the VPN.
     pub async fn user_last_seen(&self, user: &UserId) -> Result<Option<DateTime<Utc>>> {
         let row = sqlx::query(
             "SELECT MAX(latest_ts) AS last_seen FROM (

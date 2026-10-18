@@ -1,5 +1,3 @@
-//! Server list handler and table row renderer.
-
 use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -10,9 +8,6 @@ use super::helpers::{internal_error, kernel_versions_inline, render_page, theme_
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// Truncate an `SHA256:<base64>` host-fingerprint to `SHA256:head4…tail4`
-/// for a dense table cell; the full value rides in the cell's `title=`.
-/// Non-SHA256 strings (e.g. `(unverified)`) pass through unchanged.
 pub(crate) fn fp_short(fp: &str) -> String {
     if let Some(hash) = fp.strip_prefix("SHA256:") {
         let chars: Vec<char> = hash.chars().collect();
@@ -25,10 +20,6 @@ pub(crate) fn fp_short(fp: &str) -> String {
     fp.to_string()
 }
 
-/// One inventory row in the dense `.ed-grid` servers table (densify 2a).
-/// Same visible/hidden protocol split as the old card via the pre-loaded
-/// hidden matrix (NM-10: defaults to visible when the matrix doesn't know
-/// a pid — in-memory cache vs on-disk table diverge only via raw SQL).
 fn server_row(
     idx: usize,
     s: &vpnctl_core::Server,

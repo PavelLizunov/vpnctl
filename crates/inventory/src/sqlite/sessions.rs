@@ -79,25 +79,6 @@ fn row_to_user_source_ip(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserSourceIpRo
 }
 
 impl SqliteInventory {
-    // ──────────────────────────────────────────────────────────────────
-    // Phase 5c — per-user session windows.
-    //
-    // Session model: a tick observation of (user, server) either
-    // EXTENDS the most-recent OPEN session for that pair (if the
-    // gap since its `last_seen` is ≤ SESSION_GAP_MINUTES = 15),
-    // or OPENS a new session row. Sessions are never explicitly
-    // closed — they just stop being extended; old ones get
-    // displayed with `last_seen < now - 15min`.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Either extend the currently-open session for (user, server)
-    /// or open a new one, based on the time-since-last_seen vs
-    /// the `gap_minutes` budget. Returns the session id touched
-    /// for testability.
-    ///
-    /// `now` is passed in so tests can stub time; production code
-    /// passes `Utc::now()`. `bytes_delta` and `conn_count` are
-    /// added/maxed into the session's running totals.
     pub async fn session_observe(
         &self,
         user_id: &UserId,
@@ -107,7 +88,6 @@ impl SqliteInventory {
         bytes_delta: u64,
         conn_count: u32,
     ) -> Result<i64> {
-        // Look up the most-recent session for this (user, server).
         let cutoff = now - chrono::Duration::minutes(gap_minutes);
         let cutoff_s = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let now_s = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -148,17 +128,6 @@ impl SqliteInventory {
             .await?;
             Ok(existing_id)
         } else {
-            // Gate the INSERT on user existence, SQL-side (mirrors the
-            // #32 fix in `record_user_destinations`). `user_id` comes from
-            // the log-scrape attribution map (a raw username), NOT
-            // validated against `users`. `vpn_user_sessions.user_id` is
-            // NOT NULL REFERENCES users(id); with `foreign_keys=ON` an
-            // INSERT for a since-deleted user raises FK error 787. The
-            // caller loops per-user and logs+continues, so it's currently
-            // non-fatal, but it spams the warn-log every tick until the
-            // stale user ages out of the scrape. `INSERT … SELECT …
-            // WHERE EXISTS (… users …)` skips the unknown user cleanly:
-            // 0 rows inserted, no FK error, no log noise.
             let res = sqlx::query(
                 "INSERT INTO vpn_user_sessions
                     (user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
@@ -172,9 +141,6 @@ impl SqliteInventory {
             .bind(i64::try_from(bytes_delta).unwrap_or(i64::MAX))
             .execute(&self.pool)
             .await?;
-            // 0 rows ⇒ unknown user, nothing inserted. Return 0 rather
-            // than `last_insert_rowid()`, which would otherwise echo a
-            // stale rowid from an earlier insert on this connection.
             if res.rows_affected() == 0 {
                 Ok(0)
             } else {
@@ -183,18 +149,11 @@ impl SqliteInventory {
         }
     }
 
-    /// Recent sessions for one user, newest-first. Used by the
-    /// user-detail «sessions timeline» on /admin/users/<id>.
     pub async fn recent_sessions_for_user(
         &self,
         user_id: &UserId,
         limit: i64,
     ) -> Result<Vec<VpnUserSessionRow>> {
-        // TT-4: ORDER BY last_seen (not started_at) so a currently-open
-        // or long-running session — which may have STARTED before newer
-        // short ones — can never be buried past the LIMIT. The render
-        // tags rows whose last_seen is within one poll interval of now
-        // as «live».
         let rows = sqlx::query(
             "SELECT id, user_id, server_id, started_at, last_seen,
                     conn_count_peak, total_bytes
@@ -210,8 +169,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_user_session).collect()
     }
 
-    /// Purge sessions older than `days`. Wired into the hourly
-    /// retention task at the standard 30-day default.
     pub async fn purge_user_sessions_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM vpn_user_sessions
@@ -223,50 +180,13 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // Phase 5b — per-user × destination tracking.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Bulk-record (user, destination_label) pairs observed in
-    /// the current clash-poll tick. Each call atomically UPSERTs
-    /// per-pair rows for TODAY's UTC date — hit_count += 1,
-    /// last_seen = now. Pairs are de-duplicated by the caller
-    /// before passing in (one tick contributes ONE hit per pair,
-    /// regardless of how many connections share the (user, dest)).
     pub async fn record_user_destinations(&self, pairs: &[(UserId, String)]) -> Result<()> {
         if pairs.is_empty() {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
         for (user_id, dest) in pairs {
-            // Bound destination label to 200 chars (pathological
-            // hostnames don't blow up the row). Truncate on a CHAR
-            // boundary — `&dest[..200]` panics if byte 200 lands
-            // mid-codepoint (Cyrillic / emoji / IDN-as-UTF-8 SNI/Host
-            // labels), and that panic propagates uncaught all the way
-            // up `clash_poller::poll_one_server`, permanently aborting
-            // the whole poll task. `.chars().take(200)` is the repo
-            // idiom (cf. `daemon/src/handlers/sub.rs` accept_language)
-            // and is byte-identical to the old slice for ASCII.
             let dest_truncated: String = dest.chars().take(200).collect();
-            // Pre-filter to existing users, SQL-side. The `user_id`
-            // comes from the log-scrape attribution map (a raw
-            // username), NOT validated against `users`. With
-            // `foreign_keys=ON` and the NOT NULL REFERENCES users(id)
-            // FK, an insert for a since-deleted user raises an FK error
-            // (code 787) that, under `?`, rolls back the WHOLE tx —
-            // losing EVERY user's destinations for this tick (one stale
-            // user poisons all, every tick, until it ages out of the
-            // logs). `INSERT OR IGNORE` does NOT help here: the IGNORE
-            // conflict algorithm does not suppress FK violations
-            // (verified empirically against sqlx). So we gate the
-            // insert on `WHERE EXISTS (… users …)` — the row for an
-            // unknown user is simply not inserted, the statement
-            // succeeds (0 rows affected), and the batch continues. The
-            // `INSERT … SELECT … WHERE EXISTS` form still drives the
-            // upsert: the SELECT yields the row only when the user
-            // exists, and the ON CONFLICT clause then handles the
-            // (user, dest, date) UNIQUE collision exactly as before.
             sqlx::query(
                 "INSERT INTO vpn_user_destinations
                     (user_id, destination_label, date, hit_count, last_seen)
@@ -286,9 +206,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Top destinations for one user across the last `days`
-    /// days, sorted by total hits DESC. Used by the user-detail
-    /// «куда ходит этот юзер» section.
     pub async fn top_destinations_for_user(
         &self,
         user_id: &UserId,
@@ -319,8 +236,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_user_destination).collect()
     }
 
-    /// Purge destination rows older than `days`. Wired into the
-    /// hourly retention task at the standard 30-day default.
     pub async fn purge_user_destinations_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM vpn_user_destinations
@@ -332,33 +247,15 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    /// Bulk-record (user, source_ip) pairs observed in the current
-    /// clash-poll tick. The source-IP counterpart to
-    /// [`record_user_destinations`](Self::record_user_destinations):
-    /// each call atomically UPSERTs per-pair rows for TODAY's UTC date
-    /// — `hit_count += 1`, `last_seen = now`. Pairs are de-duplicated
-    /// by the caller (one tick = one hit per pair, regardless of how
-    /// many connections share the (user, source_ip)). Empty IPs must
-    /// be filtered by the caller — they're meaningless to classify.
-    ///
-    /// Uses the same `INSERT … SELECT … WHERE EXISTS (users)` guard as
-    /// the destinations writer: a since-deleted user (the user_id comes
-    /// from the unvalidated log-scrape attribution map) is silently
-    /// skipped instead of raising an FK error that would roll back the
-    /// whole tick's batch (#32-class bug).
     pub async fn record_user_source_ips(&self, pairs: &[(UserId, String)]) -> Result<()> {
         if pairs.is_empty() {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
         for (user_id, ip) in pairs {
-            // Defensive: skip empty IPs even if the caller didn't.
             if ip.is_empty() {
                 continue;
             }
-            // Bound to 45 chars — the max textual IPv6 length
-            // (incl. an IPv4-mapped tail). `.chars().take()` avoids a
-            // mid-codepoint slice panic (defensive; IPs are ASCII).
             let canonical_ip = canonical_ip_text(ip);
             sqlx::query(
                 "INSERT INTO vpn_user_source_ips
@@ -379,13 +276,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Record, per user, the number of DISTINCT ISP-scale networks seen in
-    /// ONE clash snapshot (the per-tick concurrent-network count). UPSERTs
-    /// `peak_concurrent_ips = MAX(existing, n)` for TODAY's UTC date, so the
-    /// stored value is the day's high-water mark of simultaneous networks.
-    /// Same `WHERE EXISTS (users)` deleted-user guard as the source-IP
-    /// writer. The caller passes one (user, distinct_network_count) pair per user
-    /// present in this snapshot; `n == 0` rows are skipped.
     pub async fn record_user_ip_concurrency(&self, peaks: &[(UserId, u32)]) -> Result<()> {
         if peaks.is_empty() {
             return Ok(());
@@ -415,10 +305,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Peak concurrent distinct source IPs for one user over the last
-    /// `days` days (the day-level high-water marks, MAX'd across the
-    /// window). `0` if the user never had a recorded snapshot. Kept for the
-    /// per-user diagnostic API; the fleet scorer uses the robust P75 query.
     pub async fn ip_concurrency_peak_for_user(&self, user_id: &UserId, days: u32) -> Result<u32> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT COALESCE(MAX(peak_concurrent_ips), 0)
@@ -433,8 +319,6 @@ impl SqliteInventory {
         Ok(row.map(|(m,)| m.max(0) as u32).unwrap_or(0))
     }
 
-    /// Purge IP-concurrency rows older than `days`. Wired into the hourly
-    /// retention task alongside `purge_user_source_ips_older_than`.
     pub async fn purge_user_ip_concurrency_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM vpn_user_ip_concurrency
@@ -446,10 +330,6 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    /// Top source IPs for one user across the last `days` days, sorted
-    /// by total hits DESC. Used by the user-detail «Source IPs»
-    /// section. Mirrors
-    /// [`top_destinations_for_user`](Self::top_destinations_for_user).
     pub async fn top_source_ips_for_user(
         &self,
         user_id: &UserId,
@@ -457,10 +337,6 @@ impl SqliteInventory {
         limit: u32,
     ) -> Result<Vec<VpnUserSourceIpRow>> {
         let cutoff = format!("-{days} days");
-        // Show only REAL client source IPs — drop OUR infra (VPN server
-        // addresses when a user hops nodes, + the homelab LAN/control
-        // egress) via the shared `real_client_ip_predicate`. Single source
-        // of truth with the sub_access-origins views.
         let sql = format!(
             "SELECT user_id, source_ip, date, hit_count, last_seen
              FROM (
@@ -487,8 +363,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_user_source_ip).collect()
     }
 
-    /// Purge source-IP rows older than `days`. Wired into the hourly
-    /// retention task at the standard 30-day default.
     pub async fn purge_user_source_ips_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM vpn_user_source_ips
@@ -500,18 +374,6 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    /// Best-effort GeoIP label lookup for a set of IPs, drawn from the
-    /// most-recent `sub_access_log` row that carried geo for each IP.
-    /// Geo is an attribute of the IP itself (operator-independent), so
-    /// this deliberately does NOT filter by user — a source IP seen in
-    /// VPN traffic is enriched from ANY user's /sub fetch that resolved
-    /// it. Returns `ip -> (country_opt, asn_opt)`; an IP absent from
-    /// the map (or mapping to (None, None)) simply has no GeoIP record
-    /// and the caller falls back to the reserved-range classifier.
-    ///
-    /// Mirrors the dynamic-IN-clause shape of
-    /// [`users_for_source_ips`](Self::users_for_source_ips) (sqlx has
-    /// no array binding). Bounded by the caller's IP-list length.
     pub async fn geo_labels_for_ips(
         &self,
         ips: &[String],
@@ -523,11 +385,6 @@ impl SqliteInventory {
         let placeholders = std::iter::repeat_n("?", ips.len())
             .collect::<Vec<_>>()
             .join(",");
-        // For each IP, take the geo from its newest row that actually
-        // carried a country or ASN (older rows may predate the GeoIP
-        // enrichment migration and have NULLs). `MAX(ts)` over the
-        // non-NULL-geo subset via a correlated pick: group by IP and
-        // take the geo associated with the latest qualifying ts.
         let sql = format!(
             "SELECT s.ip AS ip, s.geo_country AS country, s.geo_asn AS asn
              FROM sub_access_log s
@@ -555,34 +412,11 @@ impl SqliteInventory {
             let ip: String = r.try_get("ip")?;
             let country: Option<String> = r.try_get("country")?;
             let asn: Option<String> = r.try_get("asn")?;
-            // A later duplicate (same ip, same mts tie) just overwrites
-            // with equivalent geo — harmless; the join already pinned
-            // the newest qualifying ts.
             out.insert(ip, (country, asn));
         }
         Ok(out)
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // Phase 5a-2 — reverse-DNS (PTR) cache for destination IPs.
-    //
-    // Pattern: the DNS resolver task in daemon/src/dns_resolver.rs
-    // calls `lookup_dns_ptr_bulk(ips)` to fetch what's cached, then
-    // shells out to `getent hosts <ip>` for each missing IP (in
-    // parallel via spawn_blocking), then writes back via
-    // `upsert_dns_ptr`. The admin UI's render path only ever calls
-    // `lookup_dns_ptr_bulk` — never the resolver itself.
-    //
-    // TTL: 7 days, pruned by the existing hourly retention scheduler.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Bulk-fetch cached PTR results for a list of IPs. Returns a
-    /// map from IP to (hostname_opt, resolved_at). hostname None =
-    /// we tried and got no answer; that's a CACHED negative answer
-    /// — distinct from the IP not being in the map at all (= never
-    /// looked up). The render path uses this distinction to know
-    /// whether to fall back to `IP:port` (negative cached) or show
-    /// the resolved hostname.
     pub async fn lookup_dns_ptr_bulk(
         &self,
         ips: &[String],
@@ -609,9 +443,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Insert-or-update a PTR cache entry. NULL hostname is a
-    /// VALID value — caches "we asked, got no PTR" so the
-    /// resolver doesn't re-query for the TTL window.
     pub async fn upsert_dns_ptr(&self, ip: &str, hostname: Option<&str>) -> Result<()> {
         sqlx::query(
             "INSERT INTO dns_ptr_cache (ip, hostname, resolved_at)
@@ -627,8 +458,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Purge cache entries older than `days`. Aligned with the
-    /// hourly retention scheduler. Default TTL: 7 days.
     pub async fn purge_dns_ptr_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM dns_ptr_cache

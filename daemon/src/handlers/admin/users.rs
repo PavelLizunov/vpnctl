@@ -1,9 +1,3 @@
-//! Users admin handlers: read-only list page.
-//!
-//! Add / regenerate / delete go in Phase C-2 once the inventory write
-//! paths gain audit-logging (CLAUDE.md invariant). Extracted from
-//! `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -14,20 +8,9 @@ use super::helpers::{internal_error, render_page, theme_accent_lang};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// Mask all but the first/last 4 chars of a long opaque token. Used for
-/// sub_token, tuic_password etc. — the operator should be able to spot
-/// the right user by the prefix without exposing the full secret in
-/// shoulder-surf range.
-///
-/// Counts in **chars**, not bytes. The token contract for vpnctl is
-/// url-safe base64 (`sub_token`, 43 ASCII chars) or other opaque ASCII
-/// secrets, so chars and bytes coincide. If a multibyte secret ever
-/// shows up here the visible head/tail still come out correctly thanks
-/// to `chars()`-based slicing.
 pub(crate) fn mask_secret(s: &str) -> String {
     let n = s.chars().count();
     if n <= 8 {
-        // Too short to mask meaningfully — show in full.
         return s.to_string();
     }
     let head: String = s.chars().take(4).collect();
@@ -35,18 +18,6 @@ pub(crate) fn mask_secret(s: &str) -> String {
     format!("{head}…{tail} ({n} chars)")
 }
 
-// `path_segment_encode` moved to `crate::http_util::path_segment_encode`
-// (2026-05-18, post-host-fingerprint consolidation pass) — same
-// implementation was byte-identical in `daemon/src/wizard_bootstrap.rs`
-// (the wizard's doc-comment explicitly admitted the duplication).
-// Both surfaces now route through the shared helper.
-
-/// Per-user row in the dense users table (densify 2c).
-///
-/// `grants_count` is `usize` (the natural count from `Vec::len()`); maud
-/// renders any `Display` integer so we don't need to pre-narrow into
-/// `i64` and risk an overflow fallback that would silently mislead the
-/// operator.
 fn user_row(
     idx: usize,
     u: &vpnctl_core::User,
@@ -94,14 +65,6 @@ fn user_row(
     }
 }
 
-/// Query params for the user list: search + sort. Both optional;
-/// defaults preserve the historic alphabetic-by-id ordering.
-/// Sort kinds: "id" (default), "id-desc", "servers" (fewest grants
-/// first, ascending), "servers-desc" (most grants first, descending).
-/// The bare name is ascending and `-desc` is descending, matching the
-/// id / id-desc convention. Search `q` is a case-
-/// insensitive substring match on user.id.0 — no fancy fuzzy
-/// matching, just enough to cut a 30+ user list down.
 #[derive(serde::Deserialize, Default, Debug)]
 pub(crate) struct UsersQuery {
     pub q: Option<String>,
@@ -115,8 +78,6 @@ pub(crate) async fn users(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    // list_users + servers_for_user-per-user would be N+1; instead use
-    // the inventory's grants-count map (one query) and look up by user.
     let (users_list, servers_list, grants_map) = tokio::try_join!(
         state.inv.list_users(),
         state.inv.list_servers(),
@@ -124,15 +85,9 @@ pub(crate) async fn users(
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Presence is an in-memory fold over the already-polled clash-api
-    // snapshots. Patched nodes put the authenticated user directly on
-    // each connection; unresolved legacy connections stay uncounted on
-    // this fleet overview (the user detail keeps the heavier IP fallback).
     let mut live_conns_per_user: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     for server in &servers_list {
-        // `get_live`: a stale snapshot (polling stopped) must not keep
-        // painting users as connected on this fleet overview.
         if let Some(snap) = state.snapshot_cache.get_live(&server.id) {
             for connection in &snap.snapshot.connections {
                 if let Some(user_id) = connection.metadata.user.as_deref() {
@@ -147,9 +102,6 @@ pub(crate) async fn users(
         .map(|u| usize::try_from(grants_map.get(&u.id).copied().unwrap_or(0)).unwrap_or(0))
         .collect();
 
-    // Apply Pavel iter C2: search filter + sort. We build a sortable
-    // (user, grants_count, original_index) tuple list so the row
-    // numbering stays stable for the visible subset.
     let q_lower = query
         .q
         .as_deref()
@@ -169,9 +121,8 @@ pub(crate) async fn users(
         "id-desc" => pairs.sort_by(|a, b| b.1.id.0.cmp(&a.1.id.0)),
         "servers" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
         "servers-desc" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
-        _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)), // "id" default
+        _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)),
     }
-    // Helper to build a sort link that preserves the search.
     let make_sort_href = |kind: &str| -> String {
         if q_lower.is_empty() {
             format!("/admin/users?sort={kind}")
@@ -210,10 +161,6 @@ pub(crate) async fn users(
             @if !users_list.is_empty() {
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
-                    // One direction per metric — matches the grants-tab
-                    // sort vocabulary (`id ↑ · online ↓ · traffic ↓`).
-                    // `?sort=id-desc` still parses for old bookmarks;
-                    // it just isn't offered.
                     (sort_link("id", "id"))
                     (sort_link("servers-desc", crate::i18n::tr(lang, "servers", "серверы")))
                     (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
@@ -221,8 +168,6 @@ pub(crate) async fn users(
             }
         }
 
-        // Search stays first in DOM: autofocus + Enter must remain a
-        // safe GET, never the create POST (Pavel's 2026-05-19 bug).
         div.ed-inbar {
             @if !users_list.is_empty() {
                 form method="get" action="/admin/users"
@@ -251,10 +196,6 @@ pub(crate) async fn users(
             form method="post" action="/admin/users"
                  style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--accent);" {
                 span.ed-inbar__label { (crate::i18n::tr(lang, "new user", "новый пользователь")) }
-                // Live-lowercase/sanitize moved to admin.js
-                // (`data-lowercase-id`) — the old inline `oninput` was
-                // CSP-refused and never ran in a real browser; the
-                // `pattern=` + server-side gate were the only guards.
                 input type="text" name="id" required="required"
                       placeholder="alice"
                       pattern="(?!.*\\.\\.)[a-z0-9][a-z0-9._-]{0,30}[a-z0-9]"

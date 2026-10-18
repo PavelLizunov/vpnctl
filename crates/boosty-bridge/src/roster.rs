@@ -1,5 +1,3 @@
-//! Roster snapshot conversion, timeline event derivation, and eligibility helpers.
-
 use std::collections::BTreeMap;
 
 use crate::types::{SubscriberSnapshot, SyncReport};
@@ -8,9 +6,6 @@ const TOMBSTONE_RETENTION_SECS: i64 = 90 * 86_400;
 
 pub(crate) type AuditEvent = (String, Option<String>, serde_json::Value);
 
-/// Merge live observations with missing tombstones and derive one durable
-/// audit event per changed subscriber. The first enriched report establishes
-/// a baseline instead of pretending every existing subscriber joined today.
 pub(crate) fn subscriber_events(
     previous: Option<&SyncReport>,
     report: &mut SyncReport,
@@ -145,10 +140,6 @@ fn snapshot_changes(
     (!changes.is_empty()).then_some(changes)
 }
 
-/// Whether a Boosty subscriber should have VPN access: actively subscribed
-/// to a PAID level. The free "Follower" pseudo-level reports `price == 0`
-/// and is excluded (operator policy 2026-07-10). `NaN` price → excluded
-/// (`NaN > 0.0` is false), the safe default.
 pub(crate) fn is_vpn_eligible(s: &boosty_api::model::Subscriber) -> bool {
     s.is_active() && s.level.price > 0.0
 }

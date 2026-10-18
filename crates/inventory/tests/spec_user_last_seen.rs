@@ -1,14 +1,3 @@
-//! Spec for `SqliteInventory::user_last_seen`.
-//!
-//! Contract: returns `Option<DateTime<Utc>>` representing the latest observed
-//! activity for a user across all telemetry sources:
-//! 1. `sub_access_log` (subscription config pulls)
-//! 2. `vpn_connection_stats` (attributed traffic ticks with bytes or active conns)
-//! 3. `vpn_user_sessions` (active VPN session windows)
-//!
-//! When a user pulled their subscription 8 days ago, but transferred VPN traffic
-//! today, `user_last_seen` must return today's timestamp, NOT the 8-day-old sub fetch.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -110,7 +99,6 @@ async fn user_last_seen_picks_fresher_vpn_traffic_over_older_sub_fetch() {
     inv.add_server(&server("srv-1")).await.unwrap();
     inv.grant(&uid, &ServerId("srv-1".into())).await.unwrap();
 
-    // 1. User fetched sub 8 days ago:
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
          VALUES ('2026-08-27T11:18:13.452Z', 'gelios', '1.1.1.1', 200, 1024)",
@@ -119,7 +107,6 @@ async fn user_last_seen_picks_fresher_vpn_traffic_over_older_sub_fetch() {
     .await
     .unwrap();
 
-    // 2. User generated VPN traffic today:
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-09-04T13:08:02.427Z', 'srv-1', 'gelios', 1000, 5000, 0)",
@@ -187,7 +174,6 @@ async fn user_last_seen_ignores_zero_traffic_and_zero_conns_ticks() {
     .await
     .unwrap();
 
-    // A quiet tick with 0 bytes and 0 active connections:
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-09-04T12:00:00.000Z', 'srv-1', 'charlie', 0, 0, 0)",
@@ -214,7 +200,6 @@ async fn user_last_seen_picks_active_connection_even_with_zero_bytes() {
     inv.add_server(&server("srv-1")).await.unwrap();
     inv.grant(&uid, &ServerId("srv-1".into())).await.unwrap();
 
-    // 1. Sub access 5 days ago:
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
          VALUES ('2026-08-30T10:00:00.000Z', 'dave', '1.1.1.1', 200, 1024)",
@@ -223,7 +208,6 @@ async fn user_last_seen_picks_active_connection_even_with_zero_bytes() {
     .await
     .unwrap();
 
-    // 2. An idle active connection tick today (0 bytes, but active_connections = 2):
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-09-04T15:00:00.000Z', 'srv-1', 'dave', 0, 0, 2)",
@@ -250,7 +234,6 @@ async fn user_last_seen_picks_fresher_sub_access_when_newer_than_old_vpn_traffic
     inv.add_server(&server("srv-1")).await.unwrap();
     inv.grant(&uid, &ServerId("srv-1".into())).await.unwrap();
 
-    // 1. Old VPN traffic:
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-08-20T12:00:00.000Z', 'srv-1', 'eve', 10000, 20000, 0)",
@@ -259,7 +242,6 @@ async fn user_last_seen_picks_fresher_sub_access_when_newer_than_old_vpn_traffic
     .await
     .unwrap();
 
-    // 2. Newer sub pull:
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
          VALUES ('2026-09-01T08:00:00.000Z', 'eve', '1.1.1.1', 200, 1024)",
@@ -291,7 +273,6 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
         .unwrap();
     inv.grant(&u_bob, &ServerId("srv-1".into())).await.unwrap();
 
-    // Alice has recent traffic:
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-09-04T12:00:00.000Z', 'srv-1', 'alice', 500, 1000, 1)",
@@ -300,7 +281,6 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
     .await
     .unwrap();
 
-    // Server-wide remainder row (user_id = NULL) has even newer traffic:
     sqlx::query(
         "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
          VALUES ('2026-09-04T14:00:00.000Z', 'srv-1', NULL, 5000, 10000, 5)",
@@ -309,7 +289,6 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
     .await
     .unwrap();
 
-    // Bob only has an old sub pull:
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
          VALUES ('2026-08-20T10:00:00.000Z', 'bob', '1.1.1.1', 200, 1024)",

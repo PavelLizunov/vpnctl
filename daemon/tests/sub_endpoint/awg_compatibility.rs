@@ -1,7 +1,3 @@
-//! Mixed-server compatibility through the real HTTP router, not renderer fragments.
-//! Only enabled-protocol rows change between captures: keys, grants, user, token,
-//! device ID, registry and secret map are shared. Never normalize response bytes.
-
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -33,7 +29,6 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
         .unwrap();
-    // Local extension only: common::seed and other suites keep their registry.
     let mut registry = Registry::new();
     registry.register_kernel(Box::new(SingBox::new())).unwrap();
     registry
@@ -98,8 +93,6 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
         .sub_token
         .unwrap();
 
-    // Bootstrap every protocol BEFORE the baseline, without enabling AWG in DB.
-    // This generates valid synthetic server keypairs and version parameters once.
     server.enabled_protocols.extend([
         ProtocolId("amneziawg2".into()),
         ProtocolId("amneziawg3".into()),
@@ -110,10 +103,6 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
     let peers = [user];
     let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
     for id in ["amneziawg2", "amneziawg3"] {
-        // Check fixture material using the grant-aware download context.
-        // This does not establish renderability in /sub's peerless context;
-        // raw-byte tests below verify observable compatibility, not which
-        // exclusion mechanism was responsible.
         assert!(
             registry
                 .protocol(&ProtocolId(id.into()))
@@ -124,8 +113,6 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
         );
     }
 
-    // Ten HTTP captures share this fixture. Keep the real limiter active with
-    // a bounded test budget instead of exhausting its production burst limit.
     let limiter = Arc::new(vpnctld::rate_limit::RateLimiter::new(
         100.0,
         0.0,
@@ -133,8 +120,6 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
     ));
     let (state, writer) =
         vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(registry), limiter);
-    // Existing Mihomo fixture does the same: avoid access-log writes racing the
-    // intentional inventory mutation between requests. No rendering is mocked.
     writer.abort();
     let _ = writer.await;
     (state, token, device_id)
@@ -149,8 +134,6 @@ async fn body(state: &AppState, uri: &str, ua: Option<&str>, content_type: &str)
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
-    // Fixed endpoint names only: never put bearer paths or response secrets in
-    // helper diagnostics. Collect the raw body unchanged even on HTTP failure.
     let endpoint = if uri.starts_with("/api/v1/app/config/") {
         "app-config"
     } else {
@@ -187,9 +170,6 @@ async fn assert_legacy_bytes_unchanged(added: &[&str]) {
         ),
         (format!("/sub/{token}"), Some("v2rayN/6.62"), "text/plain"),
         (format!("/sub/{token}?format=mihomo"), None, "text/yaml"),
-        // The existing supported device route has a raw-base64 UA branch.
-        // Its browser JSON wrapper contains a live timestamp; deliberately do
-        // not extract/normalize that wrapper or claim whole-wrapper coverage.
         (
             format!("/api/v1/app/config/{device_id}"),
             Some("v2rayN/6.62"),
@@ -201,9 +181,6 @@ async fn assert_legacy_bytes_unchanged(added: &[&str]) {
         before.push(body(&state, uri, *ua, content_type).await);
     }
 
-    // Non-empty, format-specific baseline guards. Parsing is ONLY a guard;
-    // equality below always compares the original body bytes, without sorting,
-    // decoding/re-encoding, filtering dates, replacing tokens, or reserialization.
     for (index, has_xhttp) in [(0, true), (1, false)] {
         let config: Value = serde_json::from_slice(&before[index]).unwrap();
         let outbounds = config["outbounds"].as_array().unwrap();

@@ -3,13 +3,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use vpnctl_inventory::{CurrencyRate, SqliteInventory};
 
-/// Primary public exchange rate API (open source, no key, 205 currencies including RUB).
 const PRIMARY_RATES_URL: &str = "https://api.frankfurter.dev/v2/rates?base=EUR";
 
-/// Secondary fallback exchange rate API (open, no key, 161 currencies).
 const FALLBACK_RATES_URL: &str = "https://open.er-api.com/v6/latest/EUR";
 
-/// Default periodic refresh interval: 12 hours.
 const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 12 * 3600;
 
 #[derive(Debug, Deserialize)]
@@ -23,12 +20,10 @@ struct OpenErApiResponse {
     rates: Option<std::collections::HashMap<String, f64>>,
 }
 
-/// Fetch exchange rates from the primary or fallback public provider and store them in SQLite.
 pub async fn refresh_exchange_rates(inv: &SqliteInventory) -> anyhow::Result<usize> {
     refresh_exchange_rates_from_urls(inv, PRIMARY_RATES_URL, FALLBACK_RATES_URL).await
 }
 
-/// Ingest exchange rates using explicit URLs.
 pub async fn refresh_exchange_rates_from_urls(
     inv: &SqliteInventory,
     primary_url: &str,
@@ -38,17 +33,13 @@ pub async fn refresh_exchange_rates_from_urls(
         .timeout(Duration::from_secs(20))
         .build()?;
 
-    // 1. Try Primary
     let (rates, provider) = match fetch_frankfurter_from_url(&client, primary_url).await {
         Ok(r) if !r.is_empty() => (r, "frankfurter"),
-        Ok(_) | Err(_) => {
-            // 2. Try Fallback
-            match fetch_open_er_api_from_url(&client, fallback_url).await {
-                Ok(r) if !r.is_empty() => (r, "open-er-api"),
-                Ok(_) => anyhow::bail!("both exchange rate providers returned empty rates"),
-                Err(e) => anyhow::bail!("failed to fetch exchange rates from both providers: {e}"),
-            }
-        }
+        Ok(_) | Err(_) => match fetch_open_er_api_from_url(&client, fallback_url).await {
+            Ok(r) if !r.is_empty() => (r, "open-er-api"),
+            Ok(_) => anyhow::bail!("both exchange rate providers returned empty rates"),
+            Err(e) => anyhow::bail!("failed to fetch exchange rates from both providers: {e}"),
+        },
     };
 
     let now_utc = chrono::Utc::now().to_rfc3339();
@@ -121,14 +112,12 @@ async fn fetch_open_er_api_from_url(
     Ok(rates_map.into_iter().collect())
 }
 
-/// Spawn the background currency exchange rates poller.
 pub fn spawn_exchange_rate_poller(inv: SqliteInventory) -> tokio::task::JoinHandle<()> {
     use tokio::time::{MissedTickBehavior, interval};
 
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        // Consume immediate first tick so interval doesn't double-fire
         tick.tick().await;
 
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -196,7 +185,6 @@ mod tests {
             .await
             .expect("open");
 
-        // Use invalid URL for primary to trigger fallback
         let invalid_primary = "http://127.0.0.1:9/invalid-primary";
         let invalid_fallback = "http://127.0.0.1:9/invalid-fallback";
 
@@ -204,7 +192,6 @@ mod tests {
             refresh_exchange_rates_from_urls(&inv, invalid_primary, invalid_fallback).await;
         assert!(result.is_err(), "both failing URLs must yield an error");
 
-        // Existing rates remain intact (empty or existing)
         let rates = inv.list_currency_rates().await.unwrap();
         assert!(rates.is_empty());
     }

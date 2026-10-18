@@ -1,6 +1,3 @@
-//! Contract tests for the Boosty-bridge inventory methods
-//! (migration 0040): user↔subscriber links + singleton settings.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -84,7 +81,6 @@ async fn link_then_list_and_unlink() {
     assert!(changed, "unlink of a linked user is a mutation");
     assert!(inv.list_boosty_links().await.unwrap().is_empty());
 
-    // Second unlink is a no-op — callers must not audit it.
     let changed = inv
         .unlink_boosty_subscriber(&UserId("alice".into()))
         .await
@@ -94,10 +90,6 @@ async fn link_then_list_and_unlink() {
 
 #[tokio::test]
 async fn one_subscriber_can_link_many_users() {
-    // BB-4 (migration 0041): one paying person's several devices
-    // (demonnot-1..5) are separate vpnctl users gated by ONE Boosty
-    // subscription. Linking a second user to the same subscriber must
-    // SUCCEED (was rejected pre-0041).
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("alice")).await.unwrap();
@@ -113,22 +105,18 @@ async fn one_subscriber_can_link_many_users() {
         .unwrap();
     assert!(a && b, "both users link to the same subscriber");
 
-    // Both appear in the link set, sharing subscriber 999.
     let links = inv.list_boosty_links().await.unwrap();
     assert_eq!(
         links,
         vec![(UserId("alice".into()), 999), (UserId("bob".into()), 999),]
     );
 
-    // Re-linking a user to the SAME subscriber is a no-op success —
-    // callers must not audit it.
     let changed = inv
         .link_boosty_subscriber(&UserId("alice".into()), 999)
         .await
         .unwrap();
     assert!(!changed, "same-pair re-link is a no-op");
 
-    // Unlinking one leaves the other linked.
     inv.unlink_boosty_subscriber(&UserId("alice".into()))
         .await
         .unwrap();
@@ -143,7 +131,6 @@ async fn last_report_round_trip() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // Nothing stored yet.
     assert!(inv.boosty_last_report().await.unwrap().is_none());
 
     inv.set_boosty_last_report(r#"{"total_subscribers":3}"#)
@@ -170,7 +157,6 @@ async fn settings_round_trip_and_refresh_rotation() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // Seeded default row: disabled, no creds.
     let d = inv.get_boosty_settings().await.unwrap();
     assert!(!d.enabled);
     assert_eq!(d.blog_url, None);
@@ -197,7 +183,6 @@ async fn settings_round_trip_and_refresh_rotation() {
     assert_eq!(got.grace_days, 21);
     assert!(got.auto_create_users);
 
-    // Rotation persists only the refresh token.
     inv.set_boosty_refresh_token("ref2").await.unwrap();
     assert!(
         !inv.rotate_boosty_refresh_token("ref1", "stale")
@@ -277,13 +262,11 @@ async fn clear_boosty_access_token_cas_guard() {
     };
     inv.set_boosty_settings(&settings).await.unwrap();
 
-    // Mismatched expected token -> no-op, returns false, keeps current token
     let cleared = inv.clear_boosty_access_token("wrong-token").await.unwrap();
     assert!(!cleared);
     let after_failed = inv.get_boosty_settings().await.unwrap();
     assert_eq!(after_failed.access_token.as_deref(), Some("current-token"));
 
-    // Matching expected token -> clears token, returns true
     let cleared_ok = inv
         .clear_boosty_access_token("current-token")
         .await

@@ -26,10 +26,6 @@ fn dummy_server() -> Server {
     }
 }
 
-/// Track-3 prep: render_config must include the
-/// `experimental.clash_api.external_controller` block bound to
-/// loopback so a future daemon-side poller can talk to sing-box's
-/// JSON API for active connections + traffic counters.
 #[test]
 fn render_config_includes_clash_api_on_loopback() {
     let s = dummy_server();
@@ -182,12 +178,6 @@ fn managed_upload_paths_are_unique_and_shell_safe() {
     }
 }
 
-/// `ensure_installed` must provision the shared self-signed TLS cert
-/// that every TLS-bearing inbound (tuic-v5, hysteria2, trojan, anytls)
-/// references at `/etc/sing-box/{cert,key}.pem`. It runs in BOTH the
-/// CLI and web/SSE deploy paths, so doing it here closes the gap where
-/// a hy2/trojan/anytls-only node (or any web-deployed node) crash-
-/// looped sing-box on the missing files.
 #[test]
 fn setup_script_provisions_shared_tls_cert() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
@@ -197,7 +187,6 @@ fn setup_script_provisions_shared_tls_cert() {
         s.contains("openssl req -x509"),
         "self-signed cert generation missing"
     );
-    // Idempotent: never regenerate (→ never rotate a live cert out).
     assert!(
         s.contains("[ ! -f /etc/sing-box/cert.pem ]"),
         "cert generation must be guarded on absence (idempotent)"
@@ -223,23 +212,16 @@ fn setup_script_installs_and_configures_fail2ban() {
         s.contains("/etc/fail2ban/jail.local"),
         "jail.local provisioning missing"
     );
-    // Debian 12+ ships journald only (no /var/log/auth.log) — the
-    // default `auto` backend would silently never ban. systemd
-    // backend is mandatory.
     assert!(
         s.contains("backend  = systemd"),
         "fail2ban must use the systemd backend on Debian 12+"
     );
     assert!(s.contains("[sshd]"), "sshd jail missing");
     assert!(s.contains("enabled  = true"), "sshd jail must be enabled");
-    // Pin the jail PORT LINE itself (a nearby comment also carries the
-    // bareword `${F2B_SSH_PORT}`, so assert the full line — deleting it
-    // must fail the test).
     assert!(
         s.contains("port     = ${F2B_SSH_PORT}"),
         "jail must bind the detected sshd port"
     );
-    // The crash-loop guard must not be silently dropped.
     assert!(
         s.contains("systemctl is-active fail2ban") && s.contains("exit 1"),
         "must fail the deploy on a fail2ban crash-loop"
@@ -250,14 +232,9 @@ fn setup_script_installs_and_configures_fail2ban() {
     );
 }
 
-/// Package detection must check exact status 'install ok installed' via
-/// `dpkg-query -W -f='${Status}'` for BOTH fail2ban and python3-systemd.
-/// If EITHER package is missing, half-installed, or not exact 'install ok installed',
-/// apt-get must be triggered to install/repair the node.
 #[test]
 fn setup_script_package_detection_uses_exact_dpkg_query_status() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
-    // The gate MUST check fail2ban and python3-systemd status via exact dpkg-query.
     assert!(
         s.contains(r#"dpkg-query -W -f='${Status}' fail2ban"#),
         "fail2ban gate must check fail2ban status via dpkg-query: {s}"
@@ -270,7 +247,6 @@ fn setup_script_package_detection_uses_exact_dpkg_query_status() {
         s.contains("\"install ok installed\""),
         "gate must require exact 'install ok installed' status: {s}"
     );
-    // The old bare-presence / dpkg -s checks must NOT be present.
     assert!(
         !s.contains("command -v fail2ban-client >/dev/null 2>&1 ||"),
         "bare command -v fail2ban-client gate must be gone: {s}"
@@ -279,14 +255,12 @@ fn setup_script_package_detection_uses_exact_dpkg_query_status() {
         !s.contains("dpkg -s python3-systemd"),
         "bare dpkg -s python3-systemd check must be gone: {s}"
     );
-    // Disjunction: enters install block if EITHER status is not 'install ok installed'.
     assert!(
             s.contains(r#"[ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ]"#)
                 && s.contains(r#"[ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]"#),
             "gate must check both fail2ban and python3-systemd status against 'install ok installed': {s}"
         );
 
-    // Test shell evaluation of the gate against various installation states:
     let gate_block = s
         .lines()
         .skip_while(|line| !line.contains("dpkg-query -W -f='${Status}' fail2ban"))
@@ -321,43 +295,36 @@ fn setup_script_package_detection_uses_exact_dpkg_query_status() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // Fully installed: SKIPPED (idempotent / minimal)
     assert_eq!(
         run_gate("install ok installed", "install ok installed"),
         "SKIPPED",
         "both installed ok must skip apt"
     );
-    // Partial install (fail2ban installed, python3-systemd missing): MUST trigger install/repair
     assert_eq!(
         run_gate("install ok installed", ""),
         "TRIGGERED",
         "partial-installed state (fail2ban installed, python3-systemd missing) must trigger install"
     );
-    // Fresh install (both missing): MUST trigger install
     assert_eq!(
         run_gate("", ""),
         "TRIGGERED",
         "fresh state (both missing) must trigger install"
     );
-    // Stale package state (fail2ban missing, python3-systemd installed): MUST trigger install
     assert_eq!(
         run_gate("", "install ok installed"),
         "TRIGGERED",
         "fail2ban missing state must trigger install"
     );
-    // Half-installed fail2ban: MUST trigger install
     assert_eq!(
         run_gate("install ok half-installed", "install ok installed"),
         "TRIGGERED",
         "half-installed fail2ban must trigger install"
     );
-    // Deinstall config-files state: MUST trigger install
     assert_eq!(
         run_gate("deinstall ok config-files", "install ok installed"),
         "TRIGGERED",
         "config-files fail2ban must trigger install"
     );
-    // Half-configured python3-systemd: MUST trigger install
     assert_eq!(
         run_gate("install ok installed", "install ok half-configured"),
         "TRIGGERED",
@@ -365,14 +332,8 @@ fn setup_script_package_detection_uses_exact_dpkg_query_status() {
     );
 }
 
-/// Planted reversal test: proves that modifying package detection conditions
-/// (e.g. conjunction `&&` instead of disjunction `||`, equality `=` instead of `!=`)
-/// alters the branch behavior and fails the contract.
 #[test]
 fn planted_reversal_package_detection_gate() {
-    // Planted reversal 1: Conjunction instead of disjunction (&& instead of ||)
-    // If gate used &&, a node with fail2ban installed but python3-systemd missing
-    // would be SKIPPED instead of repaired.
     let conjunctive_gate = r#"
             if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" != "install ok installed" ] \
                 && [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" != "install ok installed" ]; then
@@ -403,8 +364,6 @@ fn planted_reversal_package_detection_gate() {
         "planted conjunction must produce SKIPPED on partial install (reversal proof)"
     );
 
-    // Planted reversal 2: Equality `=` instead of `!=`
-    // If gate checked =, a fully installed node would be TRIGGERED forever (loss of idempotency).
     let equality_gate = r#"
             if [ "$(dpkg-query -W -f='${Status}' fail2ban 2>/dev/null || true)" = "install ok installed" ] \
                 || [ "$(dpkg-query -W -f='${Status}' python3-systemd 2>/dev/null || true)" = "install ok installed" ]; then
@@ -433,36 +392,25 @@ fn planted_reversal_package_detection_gate() {
     );
 }
 
-/// Atomic GPG keyring provisioning test:
-/// 1. Downloads / dearmors to a temporary file in the same directory `/usr/share/keyrings`.
-/// 2. Sets an EXIT cleanup trap to remove the temporary file on error.
-/// 3. Validates that the dearmored key is non-empty (`test -s`) and parses as a valid keyring (`gpg --no-default-keyring --keyring ... --list-keys`).
-/// 4. Sets mode 0644 on the temporary file.
-/// 5. Atomically renames (`mv`) the temporary file over `/usr/share/keyrings/sagernet.gpg`.
-/// 6. Cleans up the trap (`trap - EXIT`).
 #[test]
 fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
 
-    // Must create keyrings directory first.
     assert!(
         s.contains("install -d -m 0755 /usr/share/keyrings"),
         "keyrings dir creation missing: {s}"
     );
 
-    // Temp file definition under the same directory.
     assert!(
         s.contains(r#"KEYRING_TMP="/usr/share/keyrings/sagernet.gpg.tmp"#),
         "temp file must be under /usr/share/keyrings: {s}"
     );
 
-    // Cleanup trap registered.
     assert!(
         s.contains(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#),
         "cleanup trap for KEYRING_TMP missing: {s}"
     );
 
-    // Download & dearmor into temp file (not directly into live file).
     assert!(
         s.contains(r#"curl -fsSL https://sing-box.app/gpg.key"#)
             && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#),
@@ -473,13 +421,11 @@ fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() 
         "must not directly dearmor into live keyring: {s}"
     );
 
-    // Validation: non-empty check.
     assert!(
         s.contains(r#"test -s "$KEYRING_TMP""#),
         "must validate KEYRING_TMP is non-empty: {s}"
     );
 
-    // Validation: keyring parse check via gpg.
     assert!(
         s.contains(
             r#"gpg --no-default-keyring --keyring "$KEYRING_TMP" --list-keys >/dev/null 2>&1"#
@@ -487,25 +433,21 @@ fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() 
         "must validate KEYRING_TMP parses as a valid keyring: {s}"
     );
 
-    // Permissions: chmod 0644 before mv.
     assert!(
         s.contains(r#"chmod 0644 "$KEYRING_TMP""#),
         "must chmod 0644 KEYRING_TMP: {s}"
     );
 
-    // Atomic move to live keyring.
     assert!(
         s.contains(r#"mv "$KEYRING_TMP" /usr/share/keyrings/sagernet.gpg"#),
         "must atomically move KEYRING_TMP over live keyring: {s}"
     );
 
-    // Trap disarmed after successful move.
     assert!(
         s.contains("trap - EXIT"),
         "must disarm trap after successful atomic move: {s}"
     );
 
-    // Order assertions:
     let trap_pos = s
         .find(r#"trap 'rm -f "$KEYRING_TMP"' EXIT"#)
         .expect("trap pos");
@@ -539,10 +481,6 @@ fn setup_script_provisions_gpg_keyring_atomically_with_validation_and_cleanup() 
     assert!(mv_pos < untrap_pos, "atomic mv must come before untrap");
 }
 
-/// Planted reversal test for GPG keyring atomic provisioning:
-/// Proves that failure at each step (download failure, empty file, corrupt keyring parse)
-/// causes the script to abort under `set -e`, triggers the trap cleanup, and leaves no
-/// half-written/invalid keyring in place.
 #[test]
 fn planted_reversal_gpg_keyring_transactional_failure_modes() {
     let temp_dir = std::env::temp_dir().join(format!("vpnctl-test-keyring-{}", std::process::id()));
@@ -550,10 +488,8 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let live_keyring = temp_dir.join("sagernet.gpg");
-    // Pre-create an existing live keyring with dummy content to verify it is NOT corrupted on failure.
     std::fs::write(&live_keyring, b"original-valid-keyring").unwrap();
 
-    // 1. Planted reversal: empty download output fails validation, trap cleans up tmp, live keyring unchanged.
     let script_empty = format!(
         r#"
             set -eu
@@ -583,7 +519,6 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
         "live keyring must remain untouched on empty download failure"
     );
 
-    // Verify tmp file was cleaned up by the trap.
     let leftover_tmp = std::fs::read_dir(&temp_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -593,7 +528,6 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
         "cleanup trap must remove temporary file on failure"
     );
 
-    // 2. Planted reversal: corrupt non-keyring data fails gpg keyring parse check, trap cleans up.
     let script_corrupt = format!(
         r#"
             set -eu
@@ -640,11 +574,8 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
 
 #[test]
 fn firewall_open_script_opens_each_port_idempotently_guarded() {
-    // vless tcp/443 + tuic udp/8443 + hysteria2 udp/8444, with a dup to
-    // prove de-duplication.
     let script = firewall_open_script(&[("tcp", 443), ("udp", 8443), ("udp", 8444), ("udp", 8444)])
         .expect("non-empty ports yield a script");
-    // ufw-guarded → clean no-op on a host with no ufw (cloud-firewall).
     assert!(
         script.contains("command -v ufw"),
         "must guard on ufw presence: {script}"
@@ -656,13 +587,11 @@ fn firewall_open_script_opens_each_port_idempotently_guarded() {
     ] {
         assert!(script.contains(line), "missing `{line}` in: {script}");
     }
-    // De-dup: 8444/udp appears exactly once despite being passed twice.
     assert_eq!(
         script.matches("ufw allow 8444/udp").count(),
         1,
         "duplicate ports must collapse: {script}"
     );
-    // Idempotent + non-fatal on an already-present rule.
     assert!(
         script.contains("|| true"),
         "must not fail on an existing rule: {script}"
@@ -677,9 +606,6 @@ fn firewall_open_script_empty_ports_is_none() {
     );
 }
 
-/// The setup script keeps doing its prior jobs (sing-box install +
-/// log-file ownership + logrotate) — the cert addition must not have
-/// dropped any of them.
 #[test]
 fn setup_script_retains_install_log_and_logrotate_steps() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
@@ -702,17 +628,9 @@ fn setup_script_retains_install_log_and_logrotate_steps() {
     assert!(s.contains("set -eu"), "fail-fast shell flags");
 }
 
-/// The sing-box install must be gated on canonical package state AND MINIMUM VERSION,
-/// not on bare presence or arbitrary PATH. Before this gate, `if ! command -v sing-box` wrapped
-/// the apt install directly, so once ANY sing-box was on PATH `deploy`
-/// never upgraded it (fleet skew: de/is 1.13.7 vs cdn/nl 1.13.12).
-/// Now, BOTH `dpkg-query sing-box == install ok installed` AND `/usr/bin/sing-box >= MIN`
-/// are required; a manual /usr/local/bin binary must not skip apt.
-/// Companion to `setup_script_retains_install_log_and_logrotate_steps`.
 #[test]
 fn sing_box_setup_script_gates_install_on_min_version() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
-    // Canonical dpkg package status check + /usr/bin/sing-box executable check:
     assert!(
             s.contains(r#"[ "$(dpkg-query -W -f='${Status}' sing-box 2>/dev/null || true)" != "install ok installed" ]"#),
             "gate must require exact dpkg-query status 'install ok installed' for sing-box: {s}"
@@ -727,32 +645,22 @@ fn sing_box_setup_script_gates_install_on_min_version() {
         ),
         "version read must explicitly target /usr/bin/sing-box: {s}"
     );
-    // The version comparison is present and uses the node's dpkg.
     assert!(
         s.contains("dpkg --compare-versions"),
         "install must be gated on a dpkg version comparison, not bare presence: {s}"
     );
-    // The declared floor is injected literally (no hard-coded copy).
     assert!(
         s.contains(SING_BOX_MIN_VERSION),
         "the SING_BOX_MIN_VERSION floor ({SING_BOX_MIN_VERSION}) must appear in the rendered script: {s}"
     );
-    // …and it is the right-hand side of the `ge` comparison.
     assert!(
         s.contains(&format!("ge \"{SING_BOX_MIN_VERSION}\"")),
         "the floor must be the `ge` operand of the version compare: {s}"
     );
-    // The bare-presence-only gate is GONE: the old wording wrapped the
-    // apt install directly in `if ! command -v sing-box …; then`. Its
-    // absence proves the apt path is no longer skipped whenever any
-    // sing-box is on PATH.
     assert!(
         !s.contains("if ! command -v sing-box"),
         "the bare-presence-only install gate must be gone: {s}"
     );
-    // The apt install is reached via the version-aware NEED gate, and a
-    // package that claims installed while /usr/bin is missing is repaired
-    // with an explicit reinstall rather than an apt no-op.
     assert!(
         s.contains(r#"if [ "$NEED" = 1 ]; then"#),
         "apt install must be reached via the version-aware NEED gate: {s}"
@@ -761,7 +669,6 @@ fn sing_box_setup_script_gates_install_on_min_version() {
         s.contains("REINSTALL=1") && s.contains("apt-get install -y --reinstall sing-box"),
         "missing canonical binary must force package reinstall: {s}"
     );
-    // The SagerNet repo/key setup and the final assertion are retained.
     assert!(
         s.contains("https://sing-box.app/gpg.key")
             && s.contains(r#"gpg --dearmor --yes -o "$KEYRING_TMP""#)
@@ -775,12 +682,6 @@ fn sing_box_setup_script_gates_install_on_min_version() {
     );
 }
 
-/// Comprehensive evaluation of the SingBox setup gate shell logic:
-/// 1. Package installed + /usr/bin/sing-box >= floor -> SKIPPED (NEED=0)
-/// 2. Manual /usr/local/bin present on PATH but package missing -> TRIGGERED (NEED=1, apt NOT skipped)
-/// 3. Package installed but /usr/bin/sing-box missing -> TRIGGERED (NEED=1)
-/// 4. Package installed but /usr/bin/sing-box below floor -> TRIGGERED (NEED=1)
-/// 5. Package half-installed / broken status -> TRIGGERED (NEED=1)
 #[test]
 fn sing_box_setup_script_gate_evaluation() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
@@ -869,41 +770,35 @@ fn sing_box_setup_script_gate_evaluation() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // 1. Both package installed ok and /usr/bin/sing-box at floor -> SKIPPED (idempotent)
     assert_eq!(
         run_gate("install ok installed", true, SING_BOX_MIN_VERSION),
         "SKIPPED",
         "installed package at min version must skip apt"
     );
-    // Above floor -> SKIPPED
     assert_eq!(
         run_gate("install ok installed", true, "1.15.0"),
         "SKIPPED",
         "installed package above min version must skip apt"
     );
 
-    // 2. Manual /usr/local/bin scenario (package not installed in dpkg) -> TRIGGERED
     assert_eq!(
         run_gate("", true, "1.15.0"),
         "TRIGGERED",
         "unregistered package state must trigger apt even if executable exists"
     );
 
-    // 3. Package registered but /usr/bin/sing-box missing -> TRIGGERED
     assert_eq!(
         run_gate("install ok installed", false, ""),
         "TRIGGERED",
         "missing /usr/bin/sing-box must trigger apt"
     );
 
-    // 4. Package registered but /usr/bin/sing-box below floor -> TRIGGERED
     assert_eq!(
         run_gate("install ok installed", true, "1.13.7"),
         "TRIGGERED",
         "installed package below floor version must trigger apt upgrade"
     );
 
-    // 5. Half-installed / config-files package state -> TRIGGERED
     assert_eq!(
         run_gate("install ok half-installed", true, "1.15.0"),
         "TRIGGERED",
@@ -916,25 +811,17 @@ fn sing_box_setup_script_gate_evaluation() {
     );
 }
 
-/// After the apt install, the script must RE-VERIFY that /usr/bin/sing-box
-/// satisfies the floor — failing loud (`exit 1`) when it's still below MIN.
-/// Companion to `sing_box_setup_script_gates_install_on_min_version`.
 #[test]
 fn sing_box_setup_script_verifies_floor_after_install() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
-    // The post-install re-check is a SECOND `dpkg --compare-versions`
-    // (the gate has one before apt; verification adds one after).
     assert!(
         s.matches("dpkg --compare-versions").count() >= 2,
         "must re-compare the installed version against the floor AFTER apt install: {s}"
     );
-    // The re-check uses the same `ge MIN` floor operand.
     assert!(
         s.matches(&format!("ge \"{SING_BOX_MIN_VERSION}\"")).count() >= 2,
         "the post-install re-check must compare against the same floor: {s}"
     );
-    // The re-check lives AFTER the apt install line (verification, not
-    // the pre-install gate) and aborts loud on a miss.
     let apt_at = s
         .find("apt-get install -y sing-box")
         .expect("apt install of sing-box must be present");
@@ -957,18 +844,8 @@ fn sing_box_setup_script_verifies_floor_after_install() {
     );
 }
 
-/// The rendered logrotate fragment must use `copytruncate`
-/// (truncate-in-place keeps sing-box's open fd valid) and MUST
-/// NOT carry a `create` directive — `create` triggers the
-/// rename+create path that orphans sing-box's fd (sing-box never
-/// reopens its log on SIGHUP), which silently zeroes the live log
-/// and breaks per-user attribution.
 #[test]
 fn logrotate_fragment_uses_copytruncate_without_create() {
-    // Isolate the `/etc/logrotate.d/sing-box` heredoc body so the
-    // assertion is scoped to the fragment, not unrelated `create`
-    // mentions elsewhere in the setup script (e.g. the "Pre-create
-    // log file" comment).
     let s = SING_BOX_SETUP_SCRIPT.as_str();
     let start = s
         .find("/var/log/sing-box.log {")
@@ -992,18 +869,9 @@ fn logrotate_fragment_uses_copytruncate_without_create() {
     );
 }
 
-/// The logrotate fragment must run explicitly as root: Ubuntu's
-/// group-writable `/var/log` requires a `su` directive, while the
-/// unprivileged sing-box user cannot create the rotated copy there.
-///
-/// Additionally: the validation step must NOT suppress stderr
-/// (a parse failure must surface in the deploy log), and stale
-/// backup files must be cleaned from `/etc/logrotate.d/` so
-/// logrotate's `include` doesn't parse them as duplicate configs.
 #[test]
 fn logrotate_fragment_uses_root_su_and_visible_errors() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
-    // Isolate the heredoc body.
     let start = s
         .find("/var/log/sing-box.log {")
         .expect("logrotate heredoc opening brace not found");
@@ -1016,8 +884,6 @@ fn logrotate_fragment_uses_root_su_and_visible_errors() {
         fragment.contains("su root root") && !fragment.contains("su sing-box"),
         "logrotate must satisfy group-writable /var/log without dropping privileges: {fragment}"
     );
-    // Validation targets the GLOBAL include graph, not just the
-    // single fragment, so duplicates cannot remain hidden.
     assert!(
         s.contains("logrotate -d /etc/logrotate.conf >/dev/null\n"),
         "must validate the global logrotate.conf include graph: {s}"
@@ -1030,7 +896,6 @@ fn logrotate_fragment_uses_root_su_and_visible_errors() {
         !s.contains("logrotate -d /etc/logrotate.conf >/dev/null 2>&1"),
         "validation must NOT suppress stderr: {s}"
     );
-    // Stale backup cleanup — exact .bak AND the dateext family.
     assert!(
         s.contains("rm -f /etc/logrotate.d/sing-box.bak"),
         "must clean stale .bak backups from the parsed logrotate dir: {s}"
@@ -1045,8 +910,6 @@ fn logrotate_fragment_uses_root_su_and_visible_errors() {
     );
 }
 
-/// Pre-existing keys (log, inbounds, outbounds) must still render
-/// — adding `experimental` shouldn't accidentally drop them.
 #[test]
 fn render_config_keeps_existing_top_level_keys() {
     let s = dummy_server();
@@ -1061,16 +924,6 @@ fn render_config_keeps_existing_top_level_keys() {
     assert_eq!(out[0]["type"], "direct");
     assert_eq!(out[1]["type"], "block");
 }
-
-// ── Pre-apply diff guard (post-2026-05-19 vps-de-01 incident) ──
-//
-// Pavel reported: «Все Anthropic API запросы из claude-chat
-// падали тихо». Root cause: a sing-box deploy on vps-de-01
-// dropped the `claude-chat-proxy` service user UUID
-// (b25684c3-…) from `inbounds[0].users[]` because it wasn't in
-// vpnctld's inventory. The pre-apply diff guard refuses any
-// apply that would REMOVE a live UUID (unless the operator
-// explicitly opts in via VPNCTLD_ALLOW_USER_REMOVAL=1).
 
 fn make_config(uuids: &[&str]) -> Vec<u8> {
     let users: Vec<Value> = uuids
@@ -1125,8 +978,6 @@ fn extract_user_uuids_returns_err_on_invalid_json() {
     assert!(extract_user_uuids(&bytes).is_err());
 }
 
-// ─── PR-Q — public drift-detail read helper ────────────────────
-
 #[test]
 fn live_config_user_uuids_returns_sorted_set() {
     let cfg = serde_json::json!({
@@ -1140,15 +991,12 @@ fn live_config_user_uuids_returns_sorted_set() {
     });
     let bytes = serde_json::to_vec(&cfg).unwrap();
     let got = live_config_user_uuids(&bytes);
-    // BTreeSet iterates in sorted order.
     let order: Vec<&String> = got.iter().collect();
     assert_eq!(order, vec!["aaa", "bbb", "ccc"]);
 }
 
 #[test]
 fn live_config_user_uuids_empty_on_unparseable_bytes() {
-    // Truncated SSH read / non-JSON blob collapses to empty set,
-    // NOT a panic or error — the drift card degrades gracefully.
     assert!(live_config_user_uuids(b"not json").is_empty());
     assert!(live_config_user_uuids(b"{}").is_empty());
 }
@@ -1171,12 +1019,9 @@ fn user_uuid_diff_lists_only_removed_uuids() {
 
 #[test]
 fn user_uuid_diff_lists_the_pavel_2026_05_19_case() {
-    // The exact incident: live config has claude-chat-proxy's
-    // UUID; new rendered config (built from inventory that didn't
-    // include the service user) lacks it.
     let live = make_config(&[
         "af6f36aa-2a51-45c7-82dd-5cd362ed970b",
-        "b25684c3-90d6-454a-a911-4e0abba568b0", // claude-chat-proxy
+        "b25684c3-90d6-454a-a911-4e0abba568b0",
     ]);
     let rendered = make_config(&["af6f36aa-2a51-45c7-82dd-5cd362ed970b"]);
     let lost = user_uuid_diff(&live, &rendered).unwrap();
@@ -1186,16 +1031,10 @@ fn user_uuid_diff_lists_the_pavel_2026_05_19_case() {
 
 #[test]
 fn user_uuid_diff_empty_when_old_has_no_users() {
-    // Fresh node: no /etc/sing-box/config.json yet → empty old set
-    // → cannot lose anyone. (In production this path is the
-    // ssh.read_file `Err` branch which skips the guard entirely;
-    // this test pins the empty-set semantics.)
     let old = b"{\"inbounds\":[]}".to_vec();
     let new = make_config(&["a", "b"]);
     assert!(user_uuid_diff(&old, &new).unwrap().is_empty());
 }
-
-// ── reserved-ports guard (migration 0028, 2026-05-26) ───────────
 
 fn cfg_with_inbound_ports(ports: &[u16]) -> Vec<u8> {
     let inbounds: Vec<serde_json::Value> = ports
@@ -1207,24 +1046,18 @@ fn cfg_with_inbound_ports(ports: &[u16]) -> Vec<u8> {
 
 #[test]
 fn reserved_ports_empty_list_is_noop() {
-    // Most servers in the fleet have no reserved ports — the
-    // guard must short-circuit, never parse, never allocate.
     let cfg = cfg_with_inbound_ports(&[443, 8443]);
     assert!(validate_config_excludes_ports(&cfg, &[]).is_ok());
 }
 
 #[test]
 fn reserved_ports_disjoint_passes() {
-    // Reserved [443], rendered uses [8443] — no collision.
     let cfg = cfg_with_inbound_ports(&[8443, 2083]);
     assert!(validate_config_excludes_ports(&cfg, &[443]).is_ok());
 }
 
 #[test]
 fn reserved_ports_intersection_blocks() {
-    // The 3x-ui scenario: 443 is reserved, the renderer (mistake
-    // or accident) wants to bind 443. Guard must refuse, the
-    // error must name the offending port.
     let cfg = cfg_with_inbound_ports(&[443, 8443]);
     let err = validate_config_excludes_ports(&cfg, &[443])
         .expect_err("reserved-port collision must error");
@@ -1234,25 +1067,15 @@ fn reserved_ports_intersection_blocks() {
 
 #[test]
 fn reserved_ports_multiple_collisions_listed() {
-    // Renderer somehow tries TWO reserved ports — error must list
-    // both so operator doesn't have to retry to discover the
-    // second one. Order is sorted-ascending; dedup applied.
     let cfg = cfg_with_inbound_ports(&[443, 2053, 2096, 8443]);
     let err = validate_config_excludes_ports(&cfg, &[443, 2053, 2096])
         .expect_err("multi-port collision must error");
     let msg = err.to_string();
-    // The error renders the offending list as `{:?}` — sorted +
-    // dedup'd by the validator.
     assert!(msg.contains("[443, 2053, 2096]"), "msg = {msg}");
 }
 
 #[test]
 fn reserved_ports_malformed_config_fails_closed() {
-    // FAIL-CLOSED policy: the NEW config is what *we* render, so
-    // bad JSON means our renderer is broken; refusing to upload
-    // is the safest move. (Contrast with user_uuid_diff which
-    // fail-OPENs on the OLD config because that may be hand-
-    // edited.)
     let err = validate_config_excludes_ports(b"not-json", &[443])
         .expect_err("malformed config with non-empty reserved list must fail closed");
     let msg = err.to_string();
@@ -1261,18 +1084,12 @@ fn reserved_ports_malformed_config_fails_closed() {
 
 #[test]
 fn reserved_ports_no_inbounds_array_is_safe() {
-    // Future renderer might produce a config with only outbounds
-    // (some route-only role). Treat as vacuously safe — no
-    // listen_port to collide.
     let cfg = serde_json::to_vec(&serde_json::json!({"outbounds": []})).unwrap();
     assert!(validate_config_excludes_ports(&cfg, &[443]).is_ok());
 }
 
 #[test]
 fn reserved_ports_listen_port_missing_is_safe() {
-    // Inbound without listen_port (e.g. a transport-only inbound
-    // sharing a parent inbound's port) is skipped — only explicit
-    // listen_port matches are checked.
     let cfg = serde_json::to_vec(&serde_json::json!({
         "inbounds": [{"type": "vless"}, {"type": "tuic", "listen_port": 8443}]
     }))
@@ -1282,23 +1099,16 @@ fn reserved_ports_listen_port_missing_is_safe() {
 
 #[test]
 fn reserved_ports_listen_port_non_u16_skipped() {
-    // Defensive: a JSON value like `99999` or a float that doesn't
-    // fit u16 must NOT crash the guard. Skip silently — the
-    // sing-box `check -c` step downstream rejects bad ports anyway.
     let cfg = serde_json::to_vec(&serde_json::json!({
         "inbounds": [{"listen_port": 999_999}, {"listen_port": 443}]
     }))
     .unwrap();
-    // 443 still flagged; 999_999 silently skipped.
     let err = validate_config_excludes_ports(&cfg, &[443]).expect_err("443 collides");
     assert!(err.to_string().contains("443"));
 }
 
 #[test]
 fn apply_script_snapshots_live_config_before_swap() {
-    // BEFORE the `mv .new → live`, the live config must be copied to
-    // a `.bak` (guarded on its existence — first deploy has none) so a
-    // runtime-failed restart can roll back. `cp -a` must precede the mv.
     let s = sing_box_apply_script();
     let cp = s
         .find("cp -a /etc/sing-box/config.json /etc/sing-box/config.json.bak")
@@ -1307,7 +1117,6 @@ fn apply_script_snapshots_live_config_before_swap() {
         .find("mv /etc/sing-box/config.json.new /etc/sing-box/config.json")
         .expect("atomic swap mv missing");
     assert!(cp < mv, "snapshot must come BEFORE the atomic swap");
-    // Snapshot guarded on the live config existing (fresh node = none).
     assert!(
         s.contains("if [ -f /etc/sing-box/config.json ]; then"),
         "snapshot must be guarded on the live config existing: {s}"
@@ -1316,9 +1125,6 @@ fn apply_script_snapshots_live_config_before_swap() {
 
 #[test]
 fn apply_script_restores_bak_on_is_active_failure() {
-    // On the is-active-failed branch (after the diagnostics dump,
-    // before `exit 1`) the script must restore the `.bak` back to the
-    // live path and reload-or-restart so the node returns to last-good.
     let s = sing_box_apply_script();
     let journal = s
         .find("journalctl -u sing-box")
@@ -1331,7 +1137,6 @@ fn apply_script_restores_bak_on_is_active_failure() {
         journal < restore && restore < exit1,
         "restore must run on the failure branch, after diagnostics, before exit 1"
     );
-    // The restore must reload-or-restart so the good config takes effect.
     let restart_after_restore = s[restore..exit1].contains("systemctl reload-or-restart sing-box");
     assert!(
         restart_after_restore,
@@ -1344,9 +1149,6 @@ fn apply_script_restores_bak_on_is_active_failure() {
             && s[restore..exit1].contains("singbox-stats-helper.rollback-new"),
         "a Stats health failure must atomically restore the previous managed pair"
     );
-    // The restore must run even though an earlier command "failed":
-    // it's reached by falling through the poll loop, and each restore
-    // step is `|| true`-guarded so it can't short-circuit before exit 1.
     assert!(
         s[restore..exit1].contains("|| true"),
         "restore steps must be `|| true`-guarded so the branch always reaches exit 1"
@@ -1355,8 +1157,6 @@ fn apply_script_restores_bak_on_is_active_failure() {
 
 #[test]
 fn apply_script_cleans_up_bak_on_success() {
-    // On the active branch the transient `.bak` must be removed so it
-    // doesn't accumulate across deploys.
     let s = sing_box_apply_script();
     assert!(
         s.contains("rm -f /etc/sing-box/config.json.bak"),
@@ -1368,13 +1168,6 @@ fn apply_script_cleans_up_bak_on_success() {
     );
 }
 
-/// cdn-incident junction regression (PR #139 review): `open_firewall`
-/// must feed `firewall_open_script` the EFFECTIVE ports. Reverting the
-/// flat_map to the static `listen_ports()` — the exact regression that
-/// caused the incident — used to leave the whole workspace green
-/// because the script builder and the port declaration were tested
-/// separately. With `vless.listen_port=8443` the emitted script must
-/// open 8443/tcp and MUST NOT open the default 443/tcp.
 #[tokio::test]
 async fn open_firewall_uses_effective_listen_ports() {
     #[derive(Debug, Default)]
@@ -1418,8 +1211,6 @@ async fn open_firewall_uses_effective_listen_ports() {
         script.contains("ufw allow 8443/tcp"),
         "override port must be opened: {script}"
     );
-    // " 443/tcp" (leading space) so the 8443 line doesn't substring-
-    // match the default-port rule.
     assert!(
         !script.contains(" 443/tcp"),
         "static default must NOT be opened once overridden: {script}"
@@ -1433,7 +1224,6 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
     let sb = "5f98eacc95b9ed9c1d53592605d812d9d2cb8c496fa95723cfb7c5f9447fe46e";
     let sh = "adfcc59728309f6e5bda548d402b3284fe97bdd9216b04933d1b97b4a2531ddc";
 
-    // 1. Happy path: both checksums match and service is active
     let valid_output = format!(
         "{sb}  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
     );
@@ -1442,7 +1232,6 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
         "must be up to date when both checksums match and service is active"
     );
 
-    // 2. Binary mismatch (e.g. sing-box upgraded)
     let mismatched_sb = format!(
         "different_sha  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
     );
@@ -1451,7 +1240,6 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
         "must not be up to date when sing-box binary sha differs"
     );
 
-    // 3. Stats helper mismatch
     let mismatched_sh = format!(
         "{sb}  /usr/bin/sing-box\ndifferent_sh  /usr/local/libexec/vpnctl/singbox-stats-helper\nactive\n"
     );
@@ -1460,7 +1248,6 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
         "must not be up to date when stats-helper sha differs"
     );
 
-    // 4. Inactive service
     let inactive_service = format!(
         "{sb}  /usr/bin/sing-box\n{sh}  /usr/local/libexec/vpnctl/singbox-stats-helper\ninactive\n"
     );
@@ -1469,7 +1256,6 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
         "must not be up to date when service is inactive"
     );
 
-    // 5. Truncated or failed remote execution output
     assert!(
         !is_artifact_up_to_date("", sb, sh),
         "empty output must fail safely"

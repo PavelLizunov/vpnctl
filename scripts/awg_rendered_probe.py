@@ -166,13 +166,13 @@ def services(h, cleanup, address):
     class HTTP(h.HTTPHandler):
         def handle(self):
             with lock:
-                counter["tcp"] += 1  # Conservative: any accepted connection counts.
+                counter["tcp"] += 1
             super().handle()
 
     class UDP(h.UDPHandler):
         def handle(self):
             with lock:
-                counter["udp"] += 1  # Count even malformed application requests.
+                counter["udp"] += 1
             super().handle()
 
     class TCP6(h.TCPServer):
@@ -214,16 +214,12 @@ def scenario(args, h, network, version, mutation_control=False):
             "server_address")
     require(set(endpoint["peers"][0]["allowed_ips"]) == {addresses[4] + "/32", addresses[6] + "/128"},
             "server_peer_address")
-    # Refuse fixtures missing the actual public renderer's guards; never synthesize them.
     tags = [f"awg{version}-in"]
     require(config.get("route") == {"rules": [
         {"inbound": tags, "ip_is_private": True, "action": "reject"},
         {"inbound": tags, "ip_cidr": ["198.18.0.1/32"], "action": "reject"}], "final": "direct"},
         "server_guards")
     require(endpoint.get("tag") == tags[0], "server_tag")
-    # Guarded run changes only logging to avoid host filesystem writes. The
-    # separate mutation control removes ONLY the validated route rules in this
-    # private in-memory copy; the original fixture is reloaded for every run.
     config["log"] = {"disabled": True}
     if mutation_control:
         config["route"]["rules"] = []
@@ -246,7 +242,6 @@ def scenario(args, h, network, version, mutation_control=False):
         stripped_path = Path(directory) / "native.conf"
         private_write(stripped_path, native)
         run([str(args.awg_tool), "setconf", interface, str(stripped_path)], "official_conf_import")
-        # Capture actual native state after the OFFICIAL parser, not an INI prediction.
         state = h.uapi(socket_path, "get=1\n\n")
         require({line.split("=", 1)[1] for line in state if line.startswith("allowed_ip=")}
                 == {"0.0.0.0/0", "::/0"}, "uapi_allowed_ips")
@@ -257,9 +252,6 @@ def scenario(args, h, network, version, mutation_control=False):
                            address + ("/32" if family == 4 else "/128"), "dev", interface,
                            *(["nodad"] if family == 6 else []))
         network.change("link", "set", "dev", interface, "mtu", "1280", "up")
-        # Synthetic external addresses are local aliases: allow their decrypted
-        # replies on this TUN, without changing host/all/default sysctls. These
-        # per-device settings disappear with the owned device/NET namespace.
         network.guard()
         for setting, value in (("accept_local", "1"), ("rp_filter", "0")):
             Path(f"/proc/sys/net/ipv4/conf/{interface}/{setting}").write_text(value)
@@ -268,10 +260,7 @@ def scenario(args, h, network, version, mutation_control=False):
         run([str(args.sing_box), "check", "-c", str(server_path)], "server_config_check")
         sing = h.launch(cleanup, [str(args.sing_box), "run", "-c", str(server_path)], env)
         processes = [native_process, sing]
-        # Existing renderer API, not an injected inbound/health route. Start
-        # before ephemeral echo listeners so none can claim the fixed AWG port.
         h.wait_ready(lambda: h.listener_ready(9090), processes)
-        # Loopback public/external/private aliases were installed before this case.
         targets = {"external_v4": services(h, cleanup, "198.18.0.2"),
                    "external_v6": services(h, cleanup, "2001:db8::2"),
                    "node_public": services(h, cleanup, "198.18.0.1"),
@@ -282,8 +271,6 @@ def scenario(args, h, network, version, mutation_control=False):
             require(all(value == "ok" for value in direct.values()), "direct_service_control")
             with service["lock"]:
                 service["counter"].update(tcp=0, udp=0)
-        # Local routes normally win before policy routing. Keep the local lookup,
-        # but move it after our source-only table (never add/replace a default).
         targets["tunnel_own"]["target"] = f"10.{70 + version}.0.1"
         for family, source in addresses.items():
             flag, prefix, table = ("-4", "/32", "472") if family == 4 else ("-6", "/128", "473")
@@ -325,7 +312,6 @@ def scenario(args, h, network, version, mutation_control=False):
             target = service.get("target", service["address"])
             outcome = pair_probe(h, service, target, addresses[4], args.timeout)
             h.alive(processes)
-            # A dead/disconnected server may not turn a timeout into a guard pass.
             public_control()
             with service["lock"]:
                 counters = dict(service["counter"])
@@ -356,7 +342,7 @@ def self_test():
     expected = "".join(line for line in text.splitlines(keepends=True)
                        if not line.startswith(("Address =", "DNS =", "MTU =")))
     require(stripped == expected.encode() and set(addresses) == {4, 6}, "self_test_strip")
-    hp = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="  # Public RFC vector.
+    hp = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
     text3 = text.replace("51821", "51822").replace(
         "Jc = 4", f"HeaderProtectionKey = {hp}\nRandomTrailers = on\nDisableCookies = on")
     stripped3, _ = strip_native(text3, 3)
@@ -398,7 +384,6 @@ def main():
     h = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(h)
     network = h.Network(args.isolated_netns)
-    # No PID namespace: helper compares /proc/self/ns/net to /proc/1/ns/net.
     require(os.stat("/proc/self/ns/pid").st_ino == os.stat("/proc/1/ns/pid").st_ino, "pid_namespace")
     hashes = {}
     for name in ("sing_box", "official", "awg_tool"):
@@ -414,15 +399,12 @@ def main():
         network.change("-4", "address", "add", address, "dev", "lo")
     network.change("-6", "address", "add", "2001:db8::2/128", "dev", "lo", "nodad")
     for family in ("-4", "-6"):
-        # Move, do not remove local delivery; own namespace is discarded by caller.
         rules = network.inspect(family, "rule", "show")
         require(all(rule.get("priority") in (0, 32766, 32767) for rule in rules), "namespace_rules")
         network.change(family, "rule", "add", "pref", "100", "lookup", "local")
         network.change(family, "rule", "del", "pref", "0", "lookup", "local")
     outcomes = []
     for version in ([args.version] if args.version else [2, 3]):
-        # Fresh processes/services/TUN for each run. The same target IPs must
-        # succeed without guards, then be rejected by the original guarded copy.
         for mutation_control in (True, False):
             try:
                 outcomes.append(scenario(args, h, network, version, mutation_control))
@@ -432,7 +414,6 @@ def main():
                       "mutation_control": mutation_control, "negative_ipv4_only": True,
                       "failure": str(error)})
             except Exception:
-                # Includes helper errors: don't forward external exception text.
                 outcomes.append(False)
                 emit({"kind": "case", "version": version, "pass": False,
                       "mutation_control": mutation_control, "negative_ipv4_only": True,

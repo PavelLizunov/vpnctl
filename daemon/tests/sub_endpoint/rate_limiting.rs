@@ -19,20 +19,8 @@ use vpnctld::router;
 
 use super::common::seed_with_limiter;
 
-// ────────────────────────────────────────────────────────────────────────
-//  Phase Track-2 — rate limit on /sub/<token>
-//
-//  Pin the throttle contract end-to-end through the public router:
-//  given a tight bucket (capacity=2, no refill), the 3rd request
-//  inside the burst window must come back 429 with `Retry-After`.
-//  The 1st and 2nd must succeed normally.
-// ────────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn sub_rate_limit_returns_429_after_burst() {
-    // Build the same inventory shape as `seed()` but with a custom
-    // rate limiter (capacity=2, refill=0/sec → no recovery during
-    // the test window). Also need a deterministic token.
     let dir = TempDir::new().unwrap();
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
@@ -85,15 +73,10 @@ async fn sub_rate_limit_returns_429_after_burst() {
         .sub_token
         .unwrap();
 
-    // Tight limiter: capacity=2, refill=0/sec → 3rd request in the
-    // burst window MUST be denied. Idle TTL doesn't matter for the
-    // test (we don't wait that long).
     let limiter = Arc::new(RateLimiter::new(2.0, 0.0, Duration::from_secs(60)));
     let (state, _writer) = vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(reg), limiter);
     let app = router(state);
 
-    // First two requests succeed (200) — they fill the per-IP and
-    // per-token buckets each from cap=2 to 0.
     for n in 1..=2 {
         let resp = app
             .clone()
@@ -112,8 +95,6 @@ async fn sub_rate_limit_returns_429_after_burst() {
         );
     }
 
-    // Third request: per-IP bucket is empty → 429 + Retry-After.
-    // (Per-token bucket is also empty, but per-IP is checked first.)
     let resp = app
         .oneshot(
             Request::builder()
@@ -145,15 +126,6 @@ async fn sub_rate_limit_returns_429_after_burst() {
         "429 body must say 'rate limited', got {body_str:?}"
     );
 }
-
-// ────────────────────────────────────────────────────────────────────────
-//  Phase Track-2 chunk 2 — persistent auto-ban after K consecutive 429s
-//
-//  E2E pin: with capacity=1, refill=0/sec, K=10, the 1st request
-//  succeeds, the next 10 are 429 (filling the denial counter to 10),
-//  and AT THAT POINT a row lands in `sub_rate_bans` for the source IP.
-//  Subsequent requests now get ip-ban responses, not bucket-ip 429.
-// ────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
@@ -206,18 +178,11 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         .sub_token
         .unwrap();
 
-    // Tight limiter: capacity=1, refill=0 → 1 burst, then every
-    // subsequent request 429s. `oneshot()` rigs do NOT install
-    // ConnectInfo, so the per-IP gate is skipped (handler's
-    // `if let Some(addr) = peer_ip` branch is false); the per-TOKEN
-    // gate runs and is what we actually exercise here. The ban
-    // therefore lands as kind="token", key=<token>.
     let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
     let inv_clone = inv.clone();
     let (state, _writer) = vpnctld::make_app_state_with_rate_limiter(inv, Arc::new(reg), limiter);
     let app = router(state);
 
-    // 1st request: 200 (cap=1).
     let resp = app
         .clone()
         .oneshot(
@@ -230,8 +195,6 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "first request must succeed");
 
-    // Drive the next K_DENIALS_TO_BAN requests — all should 429. The
-    // K-th 429 is what triggers the ban write inside the handler.
     for n in 1..=K_DENIALS_TO_BAN {
         let resp = app
             .clone()
@@ -250,8 +213,6 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         );
     }
 
-    // After K consecutive 429s the ban table MUST contain a row for
-    // this token with kind=token and a 24h-ish TTL.
     let bans = inv_clone.active_bans().await.unwrap();
     let tok_ban = bans
         .iter()
@@ -268,10 +229,6 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         tok_ban.reason
     );
 
-    // Subsequent request now hits the ban check (BEFORE the bucket).
-    // The body should identify the gate as "token-ban", not "token" —
-    // a different gate name lets the operator distinguish bucket-
-    // throttle from persistent-ban during incident response.
     let resp = app
         .oneshot(
             Request::builder()
@@ -290,30 +247,12 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Abuse-control hardening (fix/sub-gate-hardening)
-//
-//  Fix #1: the V2Ray-family render branch used to short-circuit to 200
-//  BEFORE the per-token ban check and the per-token rate-limit gate
-//  (those lived only in the sing-box arm). Since V2rayTun / v2rayNG /
-//  Shadowrocket are the dominant production clients, a token ban and the
-//  URL-sharing throttle were effectively no-ops for most traffic. The
-//  gates now run on the resolved user/token BEFORE dispatching on UA.
-// ────────────────────────────────────────────────────────────────────────
-
-/// Fix #1 — a TOKEN ban must be enforced even when the request carries a
-/// V2Ray-family UA. Before the fix, the v2ray branch returned a 200
-/// base64 subscription, completely bypassing `is_banned("token")`. Now a
-/// banned token + v2rayNG UA must come back 429 `token-ban`, NOT 200.
 #[tokio::test]
 async fn v2ray_branch_enforces_token_ban() {
     let dir = TempDir::new().unwrap();
-    // Generous limiter so the bucket can NEVER be the thing that denies —
-    // we want to prove the BAN is what blocks the v2ray request.
     let limiter = Arc::new(RateLimiter::new(100.0, 1.0, Duration::from_secs(60)));
     let (inv, state, token) = seed_with_limiter(&dir, limiter).await;
 
-    // Pre-install a persistent token ban (as the escalation path would).
     inv.add_ban(
         "token",
         &token,
@@ -346,26 +285,19 @@ async fn v2ray_branch_enforces_token_ban() {
         s.contains("token-ban"),
         "v2ray-UA banned-token response must say 'token-ban', got {s:?}"
     );
-    // And it must NOT have leaked a base64 subscription.
     assert!(
         !s.contains("vless://") && BASE64_STANDARD.decode(s.trim()).is_err(),
         "v2ray-UA banned-token response must not be a base64 subscription, got {s:?}"
     );
 }
 
-/// Fix #1 — the per-TOKEN rate-limit gate must also apply on the v2ray
-/// branch. With a 1-token bucket and no refill, the first v2ray-UA
-/// request succeeds (200) and the second must be throttled (429 `token`),
-/// rather than the bucket being ignored entirely on the v2ray path.
 #[tokio::test]
 async fn v2ray_branch_enforces_token_rate_limit() {
     let dir = TempDir::new().unwrap();
-    // capacity=1, refill=0 → exactly one v2ray request gets through.
     let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
     let (_inv, state, token) = seed_with_limiter(&dir, limiter).await;
     let app = router(state);
 
-    // First v2ray-UA request: burns the single per-token token → 200.
     let resp = app
         .clone()
         .oneshot(
@@ -383,7 +315,6 @@ async fn v2ray_branch_enforces_token_rate_limit() {
         "first v2ray request must succeed within the burst"
     );
 
-    // Second v2ray-UA request: per-token bucket empty → 429 `token`.
     let resp = app
         .oneshot(
             Request::builder()
@@ -418,9 +349,6 @@ async fn v2ray_branch_enforces_token_rate_limit() {
     );
 }
 
-/// Fix #1 regression — the un-banned, under-limit v2ray happy path MUST
-/// still return a 200 base64 subscription after the restructure. This is
-/// the dominant production case; the gate move must not break it.
 #[tokio::test]
 async fn v2ray_branch_happy_path_still_returns_base64_subscription() {
     let dir = TempDir::new().unwrap();
@@ -449,10 +377,6 @@ async fn v2ray_branch_happy_path_still_returns_base64_subscription() {
     );
 }
 
-/// Fix #1 — the existing sing-box token-ban behaviour must stay green:
-/// a banned token with a sing-box / default (no) UA still returns 429
-/// `token-ban`. This is the non-v2ray sibling of
-/// `v2ray_branch_enforces_token_ban`.
 #[tokio::test]
 async fn singbox_branch_still_enforces_token_ban() {
     let dir = TempDir::new().unwrap();
@@ -468,7 +392,6 @@ async fn singbox_branch_still_enforces_token_ban() {
     .unwrap();
 
     let app = router(state);
-    // No UA → falls through to the sing-box JSON path.
     let resp = app
         .oneshot(
             Request::builder()
@@ -487,38 +410,14 @@ async fn singbox_branch_still_enforces_token_ban() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Egress exemption for the legacy `/sub` per-IP axis
-//
-//  A VPN-connected client's `/sub` refresh EGRESSES its node, so vpnctld
-//  sees the SERVER's IP. Before this fix the legacy handler applied the
-//  shared per-IP bucket + 24h persistent ban to that egress IP — N users
-//  on one node collapsed into one bucket, and one user's retry-storm could
-//  ban the whole node's egress IP for 24h. Known server addresses must be
-//  exempt from the per-IP axis (parity with the prod `/api/v1/app/config`
-//  endpoint) while staying protected by the per-token axis.
-// ────────────────────────────────────────────────────────────────────────
-
-/// A source IP that IS one of our registered server addresses (VPN egress)
-/// must neither consume the shared per-IP bucket nor trip the per-IP ban,
-/// no matter how hard it hammers — but the per-token gate still throttles
-/// it. ConnectInfo carries the egress IP directly (no forwarding headers),
-/// so `sec_peer_ip` resolves to it and `is_known_server_address` exempts it.
 #[tokio::test]
 async fn sub_egress_ip_exempt_from_per_ip_ban() {
     let dir = TempDir::new().unwrap();
-    // Tight limiter: capacity=1, no refill → 1 burst then every request
-    // 429s on whichever axis applies.
     let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
     let (inv, state, token) = seed_with_limiter(&dir, limiter).await;
-    // The seeded server's address IS 10.0.0.1 → a request whose source is
-    // 10.0.0.1 comes from a known server address (VPN egress).
     let egress: SocketAddr = "10.0.0.1:40000".parse().unwrap();
     let app = router(state);
 
-    // Hammer well past the volume that bans an untrusted IP (capacity 1 +
-    // K_DENIALS_TO_BAN). For an egress source the per-IP axis is skipped
-    // entirely, so the only 429s that can appear are per-TOKEN.
     let mut saw_ip_gate = false;
     let mut saw_token_gate = false;
     for _ in 0..(K_DENIALS_TO_BAN + 5) {
@@ -554,7 +453,6 @@ async fn sub_egress_ip_exempt_from_per_ip_ban() {
         "egress source must still be protected by the per-token gate"
     );
 
-    // The shared per-IP ban table must hold NO row for the egress IP.
     let bans = inv.active_bans().await.unwrap();
     assert!(
         !bans.iter().any(|b| b.kind == "ip" && b.key == "10.0.0.1"),
@@ -562,18 +460,11 @@ async fn sub_egress_ip_exempt_from_per_ip_ban() {
     );
 }
 
-/// Sibling guard: an UNTRUSTED source IP (not a registered server) keeps
-/// the full pre-existing per-IP behaviour — it consumes the per-IP bucket
-/// and escalates to the persistent per-IP ban after K consecutive 429s.
-/// Proves the egress exemption didn't weaken the anti-flood defense for
-/// ordinary clients. Uses an unknown token so ONLY the per-IP axis runs
-/// (the per-token gate is never reached for an unresolved token).
 #[tokio::test]
 async fn sub_untrusted_ip_still_escalates_to_per_ip_ban() {
     let dir = TempDir::new().unwrap();
     let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
     let (inv, state, _token) = seed_with_limiter(&dir, limiter).await;
-    // NOT a registered server address → ordinary untrusted client IP.
     let client: SocketAddr = "203.0.113.9:40000".parse().unwrap();
     let app = router(state);
 

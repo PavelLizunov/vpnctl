@@ -1,31 +1,16 @@
-//! Bridge types, error definitions, and report structures.
-
-/// How aggressively [`sync_once`](crate::sync_once) applies the reconciliation plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyMode {
-    /// Change nothing; the report describes what WOULD happen.
     DryRun,
-    /// Apply re-enables automatically; surface lapses as `lapsed_pending`
-    /// for the operator to confirm (the "auto-provision, disable on a
-    /// button" policy). This is the safe default for the poller.
     EnableOnly,
-    /// Apply both re-enables and disables automatically.
     Full,
 }
 
-/// An active subscriber with no linked vpnctl user, surfaced for the
-/// operator to link or provision.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSubscriberInfo {
-    /// Boosty numeric subscriber id.
     pub subscriber_id: i64,
-    /// Display name (for the admin UI / CLI output).
     pub name: String,
 }
 
-/// Privacy-bounded snapshot of the Boosty roster. It deliberately excludes
-/// email, avatar URLs and unstructured level data; the operator gets the
-/// subscription/payment facts needed for support without retaining extra PII.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SubscriberSnapshot {
@@ -38,8 +23,6 @@ pub struct SubscriberSnapshot {
     pub on_time: i64,
     pub off_time: Option<i64>,
     pub next_pay_time: Option<i64>,
-    /// Boosty exposes floating-point totals without a transaction currency;
-    /// strings preserve the observed value without inventing accounting math.
     pub price: String,
     pub payments: String,
     pub is_fee_paid: bool,
@@ -74,65 +57,33 @@ impl Default for SubscriberSnapshot {
     }
 }
 
-/// Outcome of one [`sync_once`](crate::sync_once) pass.
-///
-/// Serializable: the daemon persists the last APPLIED report so the admin
-/// page can render it without a live (state-mutating) sync on GET.
-/// `#[serde(default)]` keeps old stored rows readable when fields grow.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SyncReport {
-    /// Unix timestamp at which Boosty returned this roster.
     pub observed_at: i64,
-    /// Total subscribers fetched from Boosty.
     pub total_subscribers: usize,
-    /// How many of those are VPN-eligible (active AND on a paid level).
     pub active_subscribers: usize,
-    /// Active subscribers on the free "Follower" level, excluded from VPN
-    /// by the paid-only gate (transparency, not an error).
     pub excluded_unpaid: usize,
-    /// How many vpnctl users are linked to a Boosty subscriber.
     pub linked: usize,
-    /// User ids re-enabled (or, in dry-run, that would be).
     pub enabled: Vec<String>,
-    /// User ids disabled (only in `Full`, or would-be in dry-run).
     pub disabled: Vec<String>,
-    /// Linked users whose subscription lapsed but were left enabled
-    /// (mode `EnableOnly`) — the operator disables these via a button.
     pub lapsed_pending: Vec<String>,
-    /// Linked users still inside the configured auto-disable grace period.
     pub grace_pending: Vec<String>,
-    /// Active subscribers with no linked user.
     pub new_subscribers: Vec<NewSubscriberInfo>,
-    /// Complete vpnctl users automatically created during this pass.
     pub provisioned: Vec<String>,
-    /// Non-fatal per-action errors (one failed write doesn't abort the run).
     pub errors: Vec<String>,
-    /// Disables suppressed by the zero-eligible fail-safe: the roster was
-    /// EMPTY, or non-empty with active subscribers but NONE paid-eligible
-    /// (a wrong `blog_url` / expired token / Boosty price-serialization
-    /// quirk) — far more likely than every payer lapsing at once, so
-    /// nothing was touched. A genuine single lapse/downgrade still flows
-    /// through to disable.
     pub suppressed_disables: Vec<String>,
-    /// Current roster plus retained missing tombstones, used to derive the
-    /// append-only event timeline on the next applied pass.
     pub subscribers: Vec<SubscriberSnapshot>,
 }
 
-/// Financial revenue summary computed from a [`SyncReport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BoostyIncomeSummary {
-    /// Number of active paying subscribers (present, active status, price > 0).
     pub active_payers: usize,
-    /// Monthly Recurring Revenue (MRR) in RUB minor units (kopecks, 1 RUB = 100 kopecks).
     pub mrr_rub_cents: i64,
-    /// Cumulative historical revenue paid by all observed subscribers in RUB minor units (kopecks).
     pub total_revenue_rub_cents: i64,
 }
 
 impl SyncReport {
-    /// Record an applied (or dry-run) flip into the right bucket.
     pub(crate) fn record(&mut self, disabled: bool, user_id: &str) {
         if disabled {
             self.disabled.push(user_id.to_string());
@@ -141,14 +92,12 @@ impl SyncReport {
         }
     }
 
-    /// Calculate income and revenue summary from the roster.
     pub fn income_summary(&self) -> BoostyIncomeSummary {
         let mut active_payers = 0usize;
         let mut mrr_rub_cents: i64 = 0;
         let mut total_revenue_rub_cents: i64 = 0;
 
         for sub in &self.subscribers {
-            // Parse payments (cumulative historical spend) for all observed subscribers
             if let Ok(payments_f) = sub.payments.trim().parse::<f64>() {
                 if payments_f > 0.0 && payments_f.is_finite() {
                     let kopecks = (payments_f * 100.0).round() as i64;
@@ -156,7 +105,6 @@ impl SyncReport {
                 }
             }
 
-            // MRR: only present, active subscribers with non-zero price
             if sub.present && sub.status.eq_ignore_ascii_case("active") {
                 if let Ok(price_f) = sub.price.trim().parse::<f64>() {
                     if price_f > 0.0 && price_f.is_finite() {
@@ -176,8 +124,6 @@ impl SyncReport {
     }
 }
 
-/// Errors that abort a whole sync pass (as opposed to a single-action
-/// error, which is collected into [`SyncReport::errors`]).
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
     #[error("Boosty API error: {0}")]
@@ -193,9 +139,6 @@ pub enum BridgeError {
 }
 
 impl BridgeError {
-    /// Token refresh failures arrive either directly or wrapped by an
-    /// API call. Credential/client errors need operator action; network,
-    /// parse, rate-limit and server errors can recover on a later tick.
     pub fn is_auth_failure(&self) -> bool {
         use boosty_api::error::{ApiError, AuthError};
         use reqwest::StatusCode;
@@ -223,13 +166,6 @@ impl BridgeError {
     }
 }
 
-/// Operator-facing one-liner for a failed sync pass (alert summaries).
-///
-/// An auth failure means the stored credentials are DEAD — Boosty rotates
-/// the refresh token one-shot, so the bridge cannot self-heal and the fix
-/// is to paste fresh credentials on /admin/boosty (never an SSH
-/// instruction — operator-action policy). Everything else (network, 5xx,
-/// model drift) is flagged transient.
 pub fn sync_failure_summary(err: &BridgeError) -> String {
     if err.is_auth_failure() {
         format!(
@@ -284,7 +220,6 @@ mod tests {
     fn income_summary_computes_mrr_and_total_revenue() {
         let report = SyncReport {
             subscribers: vec![
-                // Active subscriber with 300 RUB price and 900 RUB payments
                 SubscriberSnapshot {
                     subscriber_id: 1,
                     status: "active".into(),
@@ -293,7 +228,6 @@ mod tests {
                     payments: "900".into(),
                     ..Default::default()
                 },
-                // Active subscriber with decimal price and payments
                 SubscriberSnapshot {
                     subscriber_id: 2,
                     status: "ACTIVE".into(),
@@ -302,7 +236,6 @@ mod tests {
                     payments: "451.50".into(),
                     ..Default::default()
                 },
-                // Free subscriber (0 price) — active, but not a payer
                 SubscriberSnapshot {
                     subscriber_id: 3,
                     status: "active".into(),
@@ -311,7 +244,6 @@ mod tests {
                     payments: "0".into(),
                     ..Default::default()
                 },
-                // Inactive / lapsed subscriber — excluded from MRR, but past payments counted
                 SubscriberSnapshot {
                     subscriber_id: 4,
                     status: "inactive".into(),
@@ -320,7 +252,6 @@ mod tests {
                     payments: "1500".into(),
                     ..Default::default()
                 },
-                // Missing tombstone subscriber — excluded from MRR, past payments counted
                 SubscriberSnapshot {
                     subscriber_id: 5,
                     status: "active".into(),
@@ -329,7 +260,6 @@ mod tests {
                     payments: "600".into(),
                     ..Default::default()
                 },
-                // Malformed price / payment entry — doesn't panic, skipped safely
                 SubscriberSnapshot {
                     subscriber_id: 6,
                     status: "active".into(),
@@ -343,11 +273,8 @@ mod tests {
         };
 
         let summary = report.income_summary();
-        // Active payers: sub 1 (300) and sub 2 (150.50) = 2 payers
         assert_eq!(summary.active_payers, 2);
-        // MRR: 300.00 + 150.50 = 450.50 RUB = 45050 kopecks
         assert_eq!(summary.mrr_rub_cents, 45_050);
-        // Total payments: 900 + 451.50 + 1500 + 600 = 3451.50 RUB = 345150 kopecks
         assert_eq!(summary.total_revenue_rub_cents, 345_150);
     }
 }

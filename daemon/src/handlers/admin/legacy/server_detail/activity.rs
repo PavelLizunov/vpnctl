@@ -12,16 +12,6 @@ use crate::snapshot_cache::{
     ServerSnapshot, aggregate_by_destination, aggregate_by_source, network_breakdown,
 };
 
-/// Phase 4b — server-wide live activity tile (active conns now +\n/// 24h bytes up/down + last poll ts + attributed-users counter).
-/// Companion to the per-user «Live VPN stats» section on
-/// /admin/users/<id>; that one shows ONE user across all servers,
-/// this one shows ALL traffic on ONE server.
-///
-/// NM-11 caveat surfaced in the empty-state copy: per-user
-/// attribution from clash-api is blocked by a sing-box upstream
-/// bug (TrackerMetadata.MarshalJSON omits the User field). Server-
-/// wide totals work, per-user counts always read 0 until upstream
-/// PR lands or operator adopts a forked sing-box build.
 pub(super) fn server_detail_live_activity_section(
     activity: &vpnctl_inventory::ServerLiveActivity,
     lang: crate::i18n::Locale,
@@ -60,8 +50,6 @@ pub(super) fn server_detail_live_activity_section(
                 (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(activity.bytes_dn_window), "var(--ink)"))
             }
         }
-        // Last-sample line + NM-11 attribution badge — making the
-        // upstream limit explicit instead of silently absent.
         p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 4px 0 14px;" {
             (tr(lang, "last poll: ", "последний поллинг: "))
             b style="color: var(--ink);" { (last_seen_str) }
@@ -72,11 +60,6 @@ pub(super) fn server_detail_live_activity_section(
     }
 }
 
-/// Traffic accounting — NIC ground-truth vs clash-attributed vs the GAP.
-/// The NIC total catches ALL protocols (the operator's reconciliation
-/// with the hoster's billing); the gap is the slice vpnctl can't yet
-/// break down per-user (non-sing-box protocols + protocol overhead).
-/// Empty-state until ≥2 NIC probe samples exist (a delta needs two).
 pub(super) fn server_detail_gap_section(
     t: &vpnctl_inventory::TrafficBreakdown,
     lang: crate::i18n::Locale,
@@ -95,14 +78,12 @@ pub(super) fn server_detail_gap_section(
             }
         };
     }
-    // Gap as a share of real traffic — how much vpnctl can't attribute.
     let gap_pct = t
         .gap_bytes
         .saturating_mul(100)
         .checked_div(t.nic_total_bytes)
         .unwrap_or(0)
         .min(100);
-    // A big gap (≥50%) is a real blind spot → accent it.
     let gap_colour = if gap_pct >= 50 {
         "var(--acc)"
     } else {
@@ -143,16 +124,6 @@ pub(super) fn server_detail_gap_section(
     }
 }
 
-/// Phase 4c — per-connection drill-down for the server-detail page.
-/// Renders three views from the last clash-api snapshot:
-///   1. Top destinations by bytes (host or IP:port)
-///   2. Top source IPs (= per-device proxy) with user_id
-///      correlation from sub_access_log
-///   3. TCP / UDP / other network split
-///
-/// Empty-state (no snapshot yet) explains that the poller fires
-/// every 5 minutes and tells the operator to come back. No
-/// «restart vpnctld» / SSH instructions per operator-action policy.
 pub(super) fn server_detail_live_connections_section(
     server_snap: Option<&ServerSnapshot>,
     source_user_map: &HashMap<String, Vec<(vpnctl_core::UserId, u64)>>,
@@ -182,11 +153,6 @@ pub(super) fn server_detail_live_connections_section(
     let top_sources = aggregate_by_source(snap, TOP_N);
     let total_conns = snap.connections.len();
 
-    // For each top-source aggregate, surface the user_id behind that
-    // source IP, taken from the connections' `metadata.user` (emitted by
-    // our patched sing-box clash-api). If several users share one IP (NAT
-    // collision), pick the one with the most connections — the
-    // most-active device behind the NAT.
     let mut ip_to_log_user: HashMap<&str, HashMap<&str, u32>> = HashMap::new();
     for c in &snap.connections {
         if let Some(user) = c.metadata.user.as_deref() {
@@ -199,7 +165,6 @@ pub(super) fn server_detail_live_connections_section(
             }
         }
     }
-    // Resolve each IP → top user_id (highest port count).
     let log_ip_winner: HashMap<&str, &str> = ip_to_log_user
         .iter()
         .filter_map(|(ip, users)| {
@@ -226,7 +191,6 @@ pub(super) fn server_detail_live_connections_section(
                 "Деталь per-connection из clash-api. NM-11 (sing-box upstream) убирает поле `user` из wire-формата, поэтому атрибуция идёт через корреляцию source IP ↔ IP запроса подписки (последние 7 дней). Best-effort — точность падает при коллизии NAT.",
             ))
         }
-        // Network breakdown row.
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
             (status_tile(
                 tr(lang, "tcp", "tcp"),
@@ -245,7 +209,6 @@ pub(super) fn server_detail_live_connections_section(
             ))
         }
 
-        // Top destinations table.
         h4 style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin: 16px 0 6px;" {
             (tr(lang, "top destinations · this snapshot", "топ destinations · этот снимок"))
         }
@@ -288,7 +251,6 @@ pub(super) fn server_detail_live_connections_section(
             }
         }
 
-        // Top source IPs table — with user correlation.
         h4 style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); margin: 16px 0 6px;" {
             (tr(lang, "top sources · this snapshot · likely user", "топ source IP · этот снимок · вероятный юзер"))
         }
@@ -326,11 +288,6 @@ pub(super) fn server_detail_live_connections_section(
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="padding: 4px 8px;" { (s.label) }
                             td style="padding: 4px 8px;" {
-                                // Phase 4d — log-derived attribution
-                                // wins (exact match from sing-box
-                                // accept logs). Phase 4c sub_access
-                                // correlation is the fallback for
-                                // connections older than the log tail.
                                 @if let Some(log_user) = log_ip_winner.get(s.label.as_str()) {
                                     a href=(format!("/admin/users/{}", path_segment_encode(log_user)))
                                       style="color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--ink);"
@@ -397,11 +354,6 @@ pub(super) fn server_detail_live_connections_section(
     }
 }
 
-/// server#3 — top users by 24h traffic on THIS server. Reuses
-/// humanize_bytes + links each user to /admin/users/{id}. Carries the
-/// NM-11 empty-state (prod per-user attribution is NULL upstream —
-/// clash-api drops the user field), so an empty `rows` renders an
-/// explainer instead of a blank card.
 pub(super) fn server_detail_top_users_section(
     rows: &[(vpnctl_core::UserId, u64)],
     lang: crate::i18n::Locale,
@@ -451,12 +403,6 @@ pub(super) fn server_detail_top_users_section(
     }
 }
 
-/// server#4 — per-server traffic sparkline (24h / 7d / 30d / all).
-/// Reuses sparkline_svg + a window_picker_section scoped to
-/// /admin/servers/{id}. The rows are server-wide
-/// (recent_vpn_stats_for_server); we bucket them into the window's
-/// cells and feed the per-cell up+down totals to the sparkline. The
-/// ↑↓ summary tiles show the window totals.
 pub(super) fn server_detail_traffic_section(
     rows: &[vpnctl_inventory::VpnStatsRow],
     window: VpnSparklineWindow,
@@ -464,8 +410,6 @@ pub(super) fn server_detail_traffic_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // This section lives on the `activity` tab — the `?vpn_window=`
-    // switcher links must keep the operator there, not bounce to status.
     let base_url = format!(
         "/admin/servers/{}/activity",
         path_segment_encode(&server_id.0)
@@ -475,7 +419,6 @@ pub(super) fn server_detail_traffic_section(
         crate::i18n::Locale::Ru => window.label_ru,
     };
 
-    // Window totals for the ↑↓ tiles.
     let mut total_up: u64 = 0;
     let mut total_dn: u64 = 0;
     for r in rows {
@@ -483,23 +426,14 @@ pub(super) fn server_detail_traffic_section(
         total_dn = total_dn.saturating_add(r.download_bytes);
     }
 
-    // Bucket into the window's cells (newest cell rightmost). Each row
-    // carries a ts; index = how many bucket-widths back from now. Out-
-    // of-range rows are clamped into the oldest cell.
     let now = chrono::Utc::now();
     let bucket_secs = i64::from(window.bucket_hours) * 3600;
     let cells = window.cells as usize;
     let mut series: Vec<f64> = vec![0.0; cells];
-    // Guard against a degenerate window (cells == 0): `cells - 1` would
-    // underflow a usize and the indexed write would panic. Every window
-    // in VPN_SPARKLINE_WINDOWS has cells > 0 today, but this keeps the
-    // card best-effort if that ever changes.
     if bucket_secs > 0 && cells > 0 {
         for r in rows {
             let age_secs = (now - r.ts).num_seconds().max(0);
             let back = (age_secs / bucket_secs) as usize;
-            // back==0 → newest cell (last index); clamp old rows into
-            // the oldest cell (index 0).
             let idx = (cells - 1).saturating_sub(back.min(cells - 1));
             let bytes = r.upload_bytes.saturating_add(r.download_bytes);
             series[idx] += bytes as f64;
@@ -525,8 +459,6 @@ pub(super) fn server_detail_traffic_section(
                 (status_tile(tr(lang, "↓ download", "↓ принято"), &humanize_bytes(total_dn), "var(--ink)"))
             }
             @if has_data {
-                // R2: in-SVG label off — it printed raw bytes; the
-                // humanized caption below carries the peak.
                 @let series_max = series.iter().copied().fold(0.0_f64, f64::max);
                 (sparkline_svg_scaled(&series, 1160, 90, None, false))
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
@@ -546,11 +478,6 @@ pub(super) fn server_detail_traffic_section(
     }
 }
 
-/// server#5 — TCP/UDP split from the live clash-api snapshot. Reuses
-/// status_tile + humanize_bytes + the shared `network_breakdown`. The
-/// caption is explicit that clash-api carries no per-protocol tag,
-/// only the network kind — this card is re-scoped from the original
-/// «per-protocol» idea for exactly that reason. Cheap (no DB).
 pub(super) fn server_detail_network_split_section(
     server_snap: Option<&ServerSnapshot>,
     lang: crate::i18n::Locale,
@@ -601,10 +528,6 @@ pub(super) fn server_detail_network_split_section(
     }
 }
 
-/// server#7 — server-scoped audit timeline (last 20). Reuses
-/// `summarize_audit_payload` + `action_kind` + the `.ed-time` editorial
-/// component — byte-identical row shape to the dashboard + global audit
-/// timeline, just filtered to rows that reference THIS server.
 pub(super) fn server_detail_audit_section(
     rows: &[vpnctl_inventory::AuditEntry],
     lang: crate::i18n::Locale,
@@ -622,9 +545,6 @@ pub(super) fn server_detail_audit_section(
                     ))
                 }
             } @else {
-                // `--compact` drops the target column — on a
-                // server-scoped stream it repeated this server's id on
-                // every row (zero information, stolen width; R2).
                 div.ed-time.ed-time--compact {
                     @for e in rows {
                         div.ed-time-row {

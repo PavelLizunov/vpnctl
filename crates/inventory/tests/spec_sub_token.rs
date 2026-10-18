@@ -1,7 +1,3 @@
-//! Integration spec for the v0.4.0 subscription token feature of
-//! `SqliteInventory`. Tests numbered after rules S1-S8 in the brief.
-//! Written from the spec only — no implementation source consulted.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashSet;
@@ -46,15 +42,12 @@ fn user_with_token(id: &str, token: Option<&str>) -> User {
     }
 }
 
-/// Returns true iff every char of `s` is in `[A-Za-z0-9_-]`.
 fn is_url_safe(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Direct sqlx connection to the SAME on-disk DB while inventory is
-/// closed. Used by S1 (NULL-backfill) and S8 (UNIQUE constraint).
 async fn raw_pool(path: &Path) -> sqlx::SqlitePool {
     let url = format!("sqlite://{}", path.display());
     sqlx::sqlite::SqlitePoolOptions::new()
@@ -64,22 +57,15 @@ async fn raw_pool(path: &Path) -> sqlx::SqlitePool {
         .expect("raw pool connect")
 }
 
-// ── S1 ──────────────────────────────────────────────────────────────────
-// After open(), every user row has a non-null sub_token, even rows
-// inserted with NULL while the inventory was closed.
 #[tokio::test]
 async fn s1_open_backfills_null_sub_tokens() {
     let dir = TempDir::new().unwrap();
     let path = db_path(&dir);
 
-    // First open creates the schema; add a user the normal way so we
-    // know columns exist.
     let inv = SqliteInventory::open(&path).await.expect("first open");
     inv.add_user(&user("seed")).await.unwrap();
     inv.close().await;
 
-    // Manually NULL-out one user and add another with NULL token via
-    // raw SQL.
     let pool = raw_pool(&path).await;
     sqlx::query("UPDATE users SET sub_token = NULL WHERE id = ?")
         .bind("seed")
@@ -97,7 +83,6 @@ async fn s1_open_backfills_null_sub_tokens() {
     .expect("insert NULL-token row");
     pool.close().await;
 
-    // Re-open should backfill.
     let inv2 = SqliteInventory::open(&path).await.expect("reopen");
     let users = inv2.list_users().await.expect("list_users");
     assert_eq!(users.len(), 2, "expected exactly two users, got {users:?}");
@@ -105,7 +90,6 @@ async fn s1_open_backfills_null_sub_tokens() {
         users.iter().all(|u| u.sub_token.is_some()),
         "open() must backfill NULL sub_tokens, got {users:?}"
     );
-    // And the backfilled tokens must themselves be URL-safe / non-empty.
     for u in &users {
         let t = u.sub_token.as_deref().unwrap();
         assert!(
@@ -116,9 +100,6 @@ async fn s1_open_backfills_null_sub_tokens() {
     inv2.close().await;
 }
 
-// ── S2 ──────────────────────────────────────────────────────────────────
-// add_user with sub_token == None must persist a non-null, URL-safe,
-// >= 32-char token observable through get_user.
 #[tokio::test]
 async fn s2_add_user_generates_url_safe_token() {
     let dir = TempDir::new().unwrap();
@@ -147,10 +128,6 @@ async fn s2_add_user_generates_url_safe_token() {
     inv.close().await;
 }
 
-// ── S3 ──────────────────────────────────────────────────────────────────
-// add_user with sub_token == Some("custom-explicit") keeps it verbatim.
-// Empty string is treated as unset and must be replaced with a generated
-// token.
 #[tokio::test]
 async fn s3_add_user_preserves_explicit_token_and_treats_empty_as_unset() {
     let dir = TempDir::new().unwrap();
@@ -171,7 +148,6 @@ async fn s3_add_user_preserves_explicit_token_and_treats_empty_as_unset() {
         "explicit caller-provided token must be kept verbatim"
     );
 
-    // Empty string → treated as unset, generated.
     inv.add_user(&user_with_token("empty", Some("")))
         .await
         .unwrap();
@@ -193,8 +169,6 @@ async fn s3_add_user_preserves_explicit_token_and_treats_empty_as_unset() {
     inv.close().await;
 }
 
-// ── S4 ──────────────────────────────────────────────────────────────────
-// 10 distinct users get 10 distinct tokens.
 #[tokio::test]
 async fn s4_generated_tokens_are_unique_across_users() {
     let dir = TempDir::new().unwrap();
@@ -218,9 +192,6 @@ async fn s4_generated_tokens_are_unique_across_users() {
     inv.close().await;
 }
 
-// ── S5 ──────────────────────────────────────────────────────────────────
-// find_user_by_sub_token: hit returns Some(user); miss returns Ok(None);
-// looking up a removed user's old token returns Ok(None).
 #[tokio::test]
 async fn s5_find_user_by_sub_token_hit_miss_and_after_remove() {
     let dir = TempDir::new().unwrap();
@@ -234,12 +205,10 @@ async fn s5_find_user_by_sub_token_hit_miss_and_after_remove() {
         .expect("findme exists");
     let token = stored.sub_token.clone().expect("token");
 
-    // Hit.
     let hit = inv.find_user_by_sub_token(&token).await.expect("lookup ok");
     let hit = hit.expect("token must resolve");
     assert_eq!(hit.id, UserId("findme".into()));
 
-    // Miss — random unrelated token.
     let miss = inv
         .find_user_by_sub_token("definitely-not-a-real-token-xxxxxxxxxxxxxxxx")
         .await
@@ -249,7 +218,6 @@ async fn s5_find_user_by_sub_token_hit_miss_and_after_remove() {
         "unknown token must yield None, got {miss:?}"
     );
 
-    // Remove user, then the formerly-valid token must miss too.
     inv.remove_user(&UserId("findme".into())).await.unwrap();
     let after = inv
         .find_user_by_sub_token(&token)
@@ -262,9 +230,6 @@ async fn s5_find_user_by_sub_token_hit_miss_and_after_remove() {
     inv.close().await;
 }
 
-// ── S6 ──────────────────────────────────────────────────────────────────
-// regenerate_sub_token: returns new token; new ≠ old; old stops
-// resolving; new resolves to the same user.
 #[tokio::test]
 async fn s6_regenerate_sub_token_swaps_token_correctly() {
     let dir = TempDir::new().unwrap();
@@ -320,9 +285,6 @@ async fn s6_regenerate_sub_token_swaps_token_correctly() {
     inv.close().await;
 }
 
-// ── S7 ──────────────────────────────────────────────────────────────────
-// regenerate_sub_token(unknown_id) returns Err — must NOT silently
-// succeed on rows_affected == 0.
 #[tokio::test]
 async fn s7_regenerate_sub_token_unknown_user_errors() {
     let dir = TempDir::new().unwrap();
@@ -337,11 +299,6 @@ async fn s7_regenerate_sub_token_unknown_user_errors() {
     inv.close().await;
 }
 
-// ── S8 ──────────────────────────────────────────────────────────────────
-// UNIQUE constraint on sub_token is enforced. Two add_user calls with
-// the same explicit Some(custom_token) must surface AlreadyExists (or
-// at minimum an Err — the partial UNIQUE index from migration 0002
-// guarantees the underlying constraint).
 #[tokio::test]
 async fn s8_unique_constraint_on_sub_token_is_enforced() {
     let dir = TempDir::new().unwrap();
@@ -358,21 +315,14 @@ async fn s8_unique_constraint_on_sub_token_is_enforced() {
         "duplicate sub_token must be rejected, got Ok(()): \
          the partial UNIQUE index from migration 0002 was bypassed"
     );
-    // Prefer AlreadyExists, but accept any Err: the contract says
-    // "expect AlreadyExists" but the truly load-bearing invariant is
-    // that the second insert is rejected. If the impl maps it to a
-    // generic sqlx error, that's a quality nit, not a correctness bug.
     if let Err(SqliteInventoryError::AlreadyExists(_)) = &res {
-        // good
     } else {
-        // Still acceptable as long as it errored — print for diagnostics.
         eprintln!(
             "note: collision rejected but not as AlreadyExists: {:?}",
             res.as_ref().err()
         );
     }
 
-    // And the first user is still findable by the original token.
     let by_token = inv
         .find_user_by_sub_token(shared)
         .await

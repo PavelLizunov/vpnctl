@@ -1,10 +1,3 @@
-//! Implementation-blind acceptance tests for the supplied AWG 2.0 / 3.1 contract.
-//! Synthetic keys are canonical base64, not cryptographically related keypairs:
-//! checking the private/public relation is explicitly outside this contract.
-//! AWG JSON options use exact flat endpoint keys. Interface addresses use /32
-//! and /128 within version-specific IPv4 /16 and IPv6 /64 allocation pools.
-//! These are renderer contract checks, not runtime import or leak validation.
-
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod spec {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -190,7 +183,6 @@ mod spec {
                 !diagnostic.contains(value),
                 "error leaked supplied key material"
             );
-            // A newline must not permit logging the same key with whitespace stripped.
             let trimmed = value.trim();
             if trimmed.len() >= 16 {
                 assert!(
@@ -209,7 +201,7 @@ mod spec {
             .iter()
             .position(|c| *c == noncanonical[42])
             .unwrap();
-        noncanonical[42] = alphabet[index + 1]; // Set nonzero unused padding bits.
+        noncanonical[42] = alphabet[index + 1];
         vec![
             "not-a-base64-key-secret-marker".into(),
             STANDARD.encode([5; 31]),
@@ -416,7 +408,6 @@ mod spec {
             let text = render_amnezia_conf(version, &ctx, &peers[0]).unwrap();
             let conf = ini(&text);
             if version == 3 {
-                // Native INI uses base64 key bytes and `on`; JSON uses hex and true.
                 let encoded = option(&conf, "Interface", "HeaderProtectionKey");
                 let decoded = STANDARD
                     .decode(encoded)
@@ -574,7 +565,7 @@ mod spec {
 
     #[test]
     fn full_tunnel_rendering_includes_ipv6_even_with_ipv4_transport() {
-        let server = server(); // IPv4 transport must not imply IPv4-only inner traffic.
+        let server = server();
         let peers = [user("alice", 258, 1)];
         for (version, server_addresses, client_addresses) in [
             (
@@ -609,7 +600,6 @@ mod spec {
                 client_addresses.join(", ")
             );
             assert_eq!(option(&conf, "Peer", "AllowedIPs"), "0.0.0.0/0, ::/0");
-            // No generated route-removal hooks or policy table override may bypass ::/0.
             for name in ["PreUp", "PostUp", "PreDown", "PostDown", "Table"] {
                 assert!(!conf.contains_key(&("Interface".into(), name.into())));
             }
@@ -659,7 +649,7 @@ mod spec {
             for peers in [
                 vec![keyless.clone(), alice.clone()],
                 vec![alice.clone(), keyless.clone()],
-                vec![bob.clone(), alice.clone()], // Key provisioning must not renumber Alice.
+                vec![bob.clone(), alice.clone()],
             ] {
                 let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
                 let inbound = protocol.server_inbound(&ctx, &peers).unwrap();

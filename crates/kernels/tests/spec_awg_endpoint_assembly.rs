@@ -1,4 +1,3 @@
-//! Native endpoint assembly and unchanged legacy serialization contract.
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use vpnctl_core::{Kernel, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User};

@@ -1,16 +1,3 @@
-//! Spec tests for migration 0053 server role (`vpn-exit` vs `workload-only`).
-//!
-//! Pins the following invariants:
-//!   1. Default role for any newly added server is `ServerRole::VpnExit`.
-//!   2. `get_server_role` / `get_role` returns the stored `ServerRole`.
-//!   3. `set_server_role` / `set_role` updates the role and writes an audit row
-//!      (`server.role.set`) only on actual value change (no-op audit suppression).
-//!   4. `list_fleet_servers` returns only servers with role `vpn-exit`.
-//!   5. `subscription_servers_for_user` returns only `vpn-exit` servers granted to user.
-//!   6. `grant` rejects `workload-only` servers with `SqliteInventoryError::Invalid`.
-//!   7. `set_server_role` rejects transition to `workload-only` if the server has existing grants.
-//!   8. Core `Server` struct has NO `role` field (role is an inventory-only concept).
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -93,7 +80,6 @@ async fn set_role_updates_value_and_writes_audit_log() {
     );
     assert_eq!(audit_count(&inv, "server.role.set").await, 1);
 
-    // Verify audit payload content
     let entries = inv.recent_audit(10).await.unwrap();
     let audit_entry = entries
         .iter()
@@ -113,15 +99,12 @@ async fn set_role_no_op_audit_suppression() {
     let s = srv("node-suppress");
     inv.add_server(&s).await.unwrap();
 
-    // Setting same role (vpn-exit -> vpn-exit) is a no-op
     inv.set_role(&s.id, ServerRole::VpnExit).await.unwrap();
     assert_eq!(audit_count(&inv, "server.role.set").await, 0);
 
-    // Set to workload-only
     inv.set_role(&s.id, ServerRole::WorkloadOnly).await.unwrap();
     assert_eq!(audit_count(&inv, "server.role.set").await, 1);
 
-    // Setting workload-only -> workload-only is again a no-op
     inv.set_role(&s.id, ServerRole::WorkloadOnly).await.unwrap();
     assert_eq!(audit_count(&inv, "server.role.set").await, 1);
 }
@@ -188,10 +171,8 @@ async fn role_transition_rejects_existing_grants() {
     inv.add_user(&u).await.unwrap();
     inv.add_server(&s).await.unwrap();
 
-    // Grant user access
     inv.grant(&u.id, &s.id).await.unwrap();
 
-    // Attempt role transition to workload-only -> must fail
     let err = inv
         .set_role(&s.id, ServerRole::WorkloadOnly)
         .await
@@ -206,10 +187,8 @@ async fn role_transition_rejects_existing_grants() {
         other => panic!("expected SqliteInventoryError::Invalid, got: {other:?}"),
     }
 
-    // Server role must remain vpn-exit
     assert_eq!(inv.get_role(&s.id).await.unwrap(), ServerRole::VpnExit);
 
-    // Revoke grant and re-try transition -> must succeed
     inv.revoke(&u.id, &s.id).await.unwrap();
     inv.set_role(&s.id, ServerRole::WorkloadOnly).await.unwrap();
     assert_eq!(inv.get_role(&s.id).await.unwrap(), ServerRole::WorkloadOnly);

@@ -1,7 +1,3 @@
-//! Client detour capability tests for `GET /api/v1/app/config/{device_id}`.
-//!
-//! Spec: `docs/specs/vpnrouter-chain-app-config.md`
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;

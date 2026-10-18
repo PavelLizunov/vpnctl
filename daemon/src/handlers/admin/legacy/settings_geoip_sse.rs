@@ -3,19 +3,6 @@ use crate::handlers::admin::helpers::error_resp;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-/// `/usr/local/bin/vpnctl geoip-update` stdout/stderr line-by-line
-/// to the browser. Each Step event carries a `stream:"stdout"` or
-/// `"stderr"` field so the front-end can colour stderr lines for
-/// the operator. Final Ok/Error event closes the stream.
-///
-/// CSRF defense: the endpoint is GET (EventSource only does GET),
-/// state-changing (spawns a subprocess + writes an audit row).
-/// We gate on `Sec-Fetch-Site` — modern browsers stamp it on every
-/// fetch; an attacker's `<img src=…>` from a cross-site page would
-/// set it to `cross-site` and get rejected here BEFORE the audit
-/// or spawn. Absence (CLI / curl / very old browser) is allowed —
-/// those aren't the realistic attack surface for a LAN-only
-/// homelab admin.
 pub(crate) async fn settings_geoip_update_now_sse(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -26,10 +13,6 @@ pub(crate) async fn settings_geoip_update_now_sse(
     use tokio_stream::StreamExt;
 
     if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        // "same-origin" = EventSource from /admin/settings page,
-        // "none" = direct address-bar navigation. Anything else is
-        // a cross-context attach — refuse without spawning or
-        // logging. (Returns the unified prefix via error_resp.)
         if sfs != "same-origin" && sfs != "none" {
             return error_resp(
                 StatusCode::FORBIDDEN,
@@ -38,11 +21,6 @@ pub(crate) async fn settings_geoip_update_now_sse(
         }
     }
 
-    // One audit row per fire — provenance only. The actual download
-    // log goes to journalctl (subprocess stderr). If the audit
-    // write fails the fire still proceeds (we don't want the button
-    // to mysteriously do nothing because of an unrelated audit
-    // problem).
     if let Err(e) = state
         .inv
         .audit("admin", "settings.geoip.update_now.fired", None, None)

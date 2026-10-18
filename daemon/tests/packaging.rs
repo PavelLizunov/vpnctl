@@ -1,17 +1,3 @@
-//! Static + functional regression net for the operational packaging
-//! artifacts under `scripts/`. These run in the ordinary `cargo test`
-//! CI job on every platform (the static checks just read files); the
-//! functional `deploy.sh` exercise runs only where a `bash` is available
-//! (Linux CI, macOS, Git-Bash) and is skipped elsewhere.
-//!
-//! Invariants guarded here:
-//!   * `vpnctl-backup.service` keeps `ProtectSystem=strict` but grants
-//!     write access to the exact durable dir `/var/lib/vpnctl/backups`
-//!     (where the script writes the final encrypted bundle) while the
-//!     rest of `/var/lib/vpnctl` stays read-only.
-//!   * `deploy.sh` installs daemon, CLI, and both managed node artifacts from
-//!     the same revision, atomically per path (temp file + rename).
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -26,7 +12,6 @@ fn read_script(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
-/// The value of a systemd `Key=val1 val2 …` line, split on whitespace.
 fn systemd_list(unit: &str, key: &str) -> Vec<String> {
     unit.lines()
         .filter_map(|line| {
@@ -45,13 +30,11 @@ fn systemd_list(unit: &str, key: &str) -> Vec<String> {
 fn backup_unit_stays_strict_but_can_write_backups_dir() {
     let unit = read_script("vpnctl-backup.service");
 
-    // The hardening must remain in force …
     assert!(
         unit.lines().any(|l| l.trim() == "ProtectSystem=strict"),
         "vpnctl-backup.service must keep ProtectSystem=strict"
     );
 
-    // … while the exact durable deliverable dir is writable …
     let rw = systemd_list(&unit, "ReadWritePaths");
     assert!(
         rw.iter().any(|p| p == "/var/lib/vpnctl/backups"),
@@ -59,10 +42,6 @@ fn backup_unit_stays_strict_but_can_write_backups_dir() {
          the final encrypted bundle there); got {rw:?}"
     );
 
-    // … and the rest of the state tree stays read-only. The inv.db lives
-    // directly under /var/lib/vpnctl, which must remain in ReadOnlyPaths;
-    // systemd resolves the overlap by most-specific-path, so only the
-    // backups subdir is writable.
     let ro = systemd_list(&unit, "ReadOnlyPaths");
     assert!(
         ro.iter().any(|p| p == "/var/lib/vpnctl"),
@@ -74,7 +53,6 @@ fn backup_unit_stays_strict_but_can_write_backups_dir() {
 fn deploy_script_installs_revision_coupled_artifacts_atomically() {
     let script = read_script("deploy.sh");
 
-    // Daemon and CLI destinations are both the live production paths …
     assert!(
         script.contains("/opt/vpnctl/vpnctld"),
         "deploy.sh must target the daemon path /opt/vpnctl/vpnctld"
@@ -90,8 +68,6 @@ fn deploy_script_installs_revision_coupled_artifacts_atomically() {
         "deploy.sh must install both managed node artifacts"
     );
 
-    // … installed via a temp-file + atomic rename, never an in-place copy
-    // that could be caught half-written.
     assert!(
         script.contains("mktemp"),
         "deploy.sh must stage each binary in a temp file first"
@@ -101,7 +77,6 @@ fn deploy_script_installs_revision_coupled_artifacts_atomically() {
         "deploy.sh must rename the staged binary into place atomically"
     );
 
-    // Every source is validated before the first install.
     let checks = [
         script.find("daemon binary not found"),
         script.find("cli binary not found"),
@@ -134,10 +109,6 @@ fn deploy_script_installs_revision_coupled_artifacts_atomically() {
         "deploy.sh must rollback interrupted multi-artifact swaps"
     );
 
-    // Build mode: with no arguments the script builds daemon + CLI from the
-    // SAME checkout, exporting the provenance SHA BEFORE cargo build so the
-    // binaries embed it (vpnctl_core::build_version reads VPNCTL_BUILD_SHA
-    // at compile time; no git at application runtime).
     let sha_export = script.find("export VPNCTL_BUILD_SHA");
     let cargo_build = script.find("cargo build --release");
     assert!(
@@ -150,7 +121,6 @@ fn deploy_script_installs_revision_coupled_artifacts_atomically() {
          baked into the binaries"
     );
 
-    // … and both product binaries come from that one build (same revision).
     let build_line = script[cargo_build.unwrap()..]
         .lines()
         .next()
@@ -166,7 +136,6 @@ fn deploy_script_installs_revision_coupled_artifacts_atomically() {
     );
 }
 
-/// True when a usable `bash` is on PATH.
 fn bash_available() -> bool {
     Command::new("bash")
         .arg("--version")
@@ -175,8 +144,6 @@ fn bash_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Forward-slash form of a path, so a Windows manifest dir works under
-/// Git-Bash too.
 fn bash_path(p: &Path) -> String {
     p.display().to_string().replace('\\', "/")
 }
@@ -284,7 +251,6 @@ fn deploy_script_missing_cli_never_half_upgrades() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
 
-    // Pre-existing "old" binaries at both live paths.
     let daemon_dst = root.join("opt").join("vpnctld");
     let cli_dst = root.join("bin").join("vpnctl");
     std::fs::create_dir_all(daemon_dst.parent().unwrap()).unwrap();
@@ -292,7 +258,6 @@ fn deploy_script_missing_cli_never_half_upgrades() {
     std::fs::write(&daemon_dst, b"OLD_DAEMON").unwrap();
     std::fs::write(&cli_dst, b"OLD_CLI").unwrap();
 
-    // Valid daemon source, but the CLI source is missing.
     let daemon_src = root.join("vpnctld.src");
     std::fs::write(&daemon_src, b"NEW_DAEMON").unwrap();
     let cli_src = root.join("does-not-exist");
@@ -318,8 +283,6 @@ fn deploy_script_missing_cli_never_half_upgrades() {
         "deploy.sh must fail on a missing CLI source"
     );
 
-    // The exact regression: the daemon must NOT have been swapped when the
-    // CLI source is absent — no half-upgraded host, no stale-CLI window.
     assert_eq!(
         std::fs::read(&daemon_dst).unwrap(),
         b"OLD_DAEMON",

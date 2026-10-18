@@ -169,17 +169,12 @@ pub(crate) async fn run(
             trusted_fingerprint,
             usage_coefficient,
         } => {
-            // Validate against the registry before writing — catches
-            // unsupported kernel × protocol combos.
             let reg = crate::registry::build()?;
             let server = Server {
                 id: ServerId(id.clone()),
                 address,
                 ssh_port,
                 ssh_user,
-                // `server add` keeps the single `--kernel` flag for
-                // backward compat; multi-kernel additions go through
-                // `vpnctl server kernel-add` (queued) or the admin UI.
                 kernels: vec![KernelId(kernel)],
                 enabled_protocols: protocols.into_iter().map(ProtocolId).collect(),
                 trusted_host_fingerprint: trusted_fingerprint,
@@ -187,10 +182,6 @@ pub(crate) async fn run(
                 jump_via: jump_via.map(ServerId),
                 usage_coefficient,
             };
-            // Support-only validation: a freshly-added server has no
-            // secrets yet (`vpnctl server secret` needs the existing id),
-            // so the secret-aware port-conflict gate runs at deploy time,
-            // where real secrets are available.
             reg.validate_server_support(&server)?;
             if let Some(existing) = inv.server_id_for_address(&server.address).await? {
                 anyhow::bail!(
@@ -199,9 +190,6 @@ pub(crate) async fn run(
                 );
             }
             inv.add_server(&server).await?;
-            // Whitelist what goes into audit_log — if Server ever gains a
-            // sensitive field (api token, jump credentials), serializing
-            // the whole struct would silently leak it. Be explicit.
             let audit_payload = json!({
                 "id": server.id.0,
                 "address": server.address,
@@ -333,8 +321,6 @@ pub(crate) async fn run(
 
         ServerCmd::Secret { server, key, value } => {
             let sid = ServerId(server.clone());
-            // Make sure the server exists (FK would have caught it on insert,
-            // but this gives a clearer error).
             if inv.get_server(&sid).await?.is_none() {
                 return Err(anyhow::anyhow!("no such server: {server}"));
             }
@@ -380,18 +366,8 @@ pub(crate) async fn run(
                      output of `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -` (the 2nd column)"
                 );
             }
-            // Capture previous fingerprint BEFORE overwriting — a TOFU-pin
-            // rotation has very different forensic implications depending on
-            // whether the operator rebuilt the node (legit) or someone is
-            // MITM-rotating the key (attack). Audit row keeps both halves
-            // so future review can distinguish without grepping snapshots.
             let previous = server.trusted_host_fingerprint.clone();
             inv.update_trusted_fingerprint(&sid, &fp).await?;
-            // Dot-convention name + NM-10 no-op gate, in lockstep with
-            // the daemon handler (renamed there 2026-06-10): a same-
-            // value re-pin writes nothing; a real change writes
-            // `server.fingerprint.set` so `server.fingerprint.`-prefix
-            // filtering sees BOTH entry points.
             if previous.as_deref() != Some(fp.as_str()) {
                 inv.audit(
                     "cli",
@@ -411,9 +387,6 @@ pub(crate) async fn run(
 
         ServerCmd::SetReservedPorts { id, ports } => {
             let sid = ServerId(id.clone());
-            // Confirm the server exists — clearer error than the
-            // inventory's "no such server" which only fires inside
-            // set_reserved_ports.
             inv.get_server(&sid)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("no such server: {id}"))?;
@@ -520,13 +493,6 @@ fn parse_reserved_ports(raw: &str) -> anyhow::Result<Vec<u16>> {
     out.dedup();
     Ok(out)
 }
-
-// SHA256 shape validation + ssh-keyscan/-keygen fingerprint fetching live
-// in `vpnctl-host-fingerprint`. Three call-sites used to inline near-
-// duplicates of those routines — the wizard's copy was missing the `--`
-// flag-injection defense and the validators had drifted on URL-safe
-// base64 acceptance. The crate is the single source of truth; spec
-// tests for both functions live there.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -693,7 +659,6 @@ mod tests {
         let db_path = dir.path().join("inv.db");
         let inv = setup_test_server(&db_path).await;
 
-        // Hide first time -> 1 audit row
         run(
             ServerCmd::ProtocolHide {
                 server: "s1".into(),
@@ -712,7 +677,6 @@ mod tests {
             .count();
         assert_eq!(count1, 1, "first hide must produce 1 audit row");
 
-        // Hide second time (no-op) -> still 1 audit row
         run(
             ServerCmd::ProtocolHide {
                 server: "s1".into(),
@@ -731,7 +695,6 @@ mod tests {
             .count();
         assert_eq!(count2, 1, "no-op hide must not duplicate audit log");
 
-        // Unhide first time -> 2 audit rows
         run(
             ServerCmd::ProtocolUnhide {
                 server: "s1".into(),
@@ -750,7 +713,6 @@ mod tests {
             .count();
         assert_eq!(count3, 2, "first unhide must produce 2nd audit row");
 
-        // Unhide second time (no-op) -> still 2 audit rows
         run(
             ServerCmd::ProtocolUnhide {
                 server: "s1".into(),
@@ -776,7 +738,6 @@ mod tests {
         let db_path = dir.path().join("inv.db");
         let inv = setup_test_server(&db_path).await;
 
-        // Missing protocol on existing server
         let err_hide_proto = run(
             ServerCmd::ProtocolHide {
                 server: "s1".into(),
@@ -811,7 +772,6 @@ mod tests {
             "unexpected error: {err_unhide_proto}"
         );
 
-        // Missing server
         let err_hide_srv = run(
             ServerCmd::ProtocolHide {
                 server: "nonexistent".into(),
@@ -846,7 +806,6 @@ mod tests {
             "unexpected error: {err_unhide_srv}"
         );
 
-        // Verify no audit log was created for failed calls
         let audit = inv.recent_audit(10).await.unwrap();
         assert!(
             audit

@@ -1,7 +1,3 @@
-//! Spec for `insert_alert_if_no_unacked` and `ack_open_alerts` on
-//! `SqliteInventory`. Written from spec only — impl NOT consulted.
-//! `insert_alert`/`ack_alert` have their own coverage; not tested here.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -33,8 +29,6 @@ fn sid(s: &str) -> ServerId {
     ServerId(s.into())
 }
 
-/// Shorthand for the dedup-aware insert. severity/summary are stable
-/// junk — they don't participate in the (kind, server_id) dedup key.
 async fn fire(inv: &SqliteInventory, kind: &str, server: Option<&ServerId>) -> Option<i64> {
     inv.insert_alert_if_no_unacked(kind, server, "warning", "x", None)
         .await
@@ -69,9 +63,6 @@ async fn protocol_assurance_alerts_dedupe_per_protocol_kind() {
     );
 }
 
-// ─── insert_alert_if_no_unacked ──────────────────────────────────────
-
-// 1. Happy path: first call with a fresh (kind, server_id) → Some(id).
 #[tokio::test]
 async fn insert_if_no_unacked_first_call_returns_some_id() {
     let dir = TempDir::new().unwrap();
@@ -85,7 +76,6 @@ async fn insert_if_no_unacked_first_call_returns_some_id() {
     );
 }
 
-// 2. Dedup: second call before ack returns Ok(None) — NOT an Err.
 #[tokio::test]
 async fn insert_if_no_unacked_second_call_before_ack_returns_none() {
     let dir = TempDir::new().unwrap();
@@ -95,7 +85,6 @@ async fn insert_if_no_unacked_second_call_before_ack_returns_none() {
     let first = fire(&inv, "server.singbox.down", Some(&sid("s1"))).await;
     assert!(first.is_some(), "sanity: first call inserted");
 
-    // Full form to assert Ok(None), not just None-via-helper.
     let second = inv
         .insert_alert_if_no_unacked(
             "server.singbox.down",
@@ -111,7 +100,6 @@ async fn insert_if_no_unacked_second_call_before_ack_returns_none() {
     );
 }
 
-// 3. Ack-then-refire: after acking, next call inserts a NEW row.
 #[tokio::test]
 async fn insert_if_no_unacked_refires_after_ack() {
     let dir = TempDir::new().unwrap();
@@ -134,7 +122,6 @@ async fn insert_if_no_unacked_refires_after_ack() {
     assert_ne!(second_id, first_id, "re-fire id must differ from acked row");
 }
 
-// 4. Two callers of (A, X) dedupe: first returns Some, second None.
 #[tokio::test]
 async fn two_callers_same_kind_same_server_dedupe() {
     let dir = TempDir::new().unwrap();
@@ -146,7 +133,6 @@ async fn two_callers_same_kind_same_server_dedupe() {
     assert!(b.is_none(), "second call must dedupe: {b:?}");
 }
 
-// 5. (A, X) and (A, Y) are distinct scopes and do NOT dedupe.
 #[tokio::test]
 async fn different_server_id_does_not_dedupe() {
     let dir = TempDir::new().unwrap();
@@ -162,7 +148,6 @@ async fn different_server_id_does_not_dedupe() {
     assert_ne!(on_s1, on_s2, "different server_id ⇒ different rows");
 }
 
-// 6. (A, X) and (B, X) are distinct scopes and do NOT dedupe.
 #[tokio::test]
 async fn different_kind_does_not_dedupe() {
     let dir = TempDir::new().unwrap();
@@ -177,7 +162,6 @@ async fn different_kind_does_not_dedupe() {
     assert_ne!(disk, singbox, "different kinds ⇒ separate identities");
 }
 
-// 7. (A, None) and (A, Some(x)) are distinct identities; no dedupe.
 #[tokio::test]
 async fn none_and_some_server_id_do_not_dedupe() {
     let dir = TempDir::new().unwrap();
@@ -192,7 +176,6 @@ async fn none_and_some_server_id_do_not_dedupe() {
     assert_ne!(global, per_server, "NULL is distinct from Some(x)");
 }
 
-// 8. Two (A, None) global callers DO dedupe — NULL-equals-NULL here.
 #[tokio::test]
 async fn two_none_callers_dedupe_against_each_other() {
     let dir = TempDir::new().unwrap();
@@ -203,9 +186,6 @@ async fn two_none_callers_dedupe_against_each_other() {
     assert!(b.is_none(), "second global call must dedupe: {b:?}");
 }
 
-// ─── ack_open_alerts ─────────────────────────────────────────────────
-
-// 9. ack_open_alerts on an empty table is idempotent: returns Ok(0).
 #[tokio::test]
 async fn ack_open_on_empty_table_returns_zero() {
     let dir = TempDir::new().unwrap();
@@ -218,7 +198,6 @@ async fn ack_open_on_empty_table_returns_zero() {
     assert_eq!(n, 0, "nothing to ack on empty table");
 }
 
-// 10. After firing: ack returns Ok(1) then Ok(0) (idempotent).
 #[tokio::test]
 async fn ack_open_after_fire_returns_one_then_zero() {
     let dir = TempDir::new().unwrap();
@@ -239,8 +218,6 @@ async fn ack_open_after_fire_returns_one_then_zero() {
     assert_eq!(second, 0, "second ack must be a no-op");
 }
 
-// 11. Strict scope: ack_open_alerts(A, X) does NOT touch (B, X),
-//     (A, Y) or (A, None).
 #[tokio::test]
 async fn ack_open_scope_isolation_kind_server_and_null() {
     let dir = TempDir::new().unwrap();
@@ -248,7 +225,6 @@ async fn ack_open_scope_isolation_kind_server_and_null() {
     inv.add_server(&srv("s1")).await.unwrap();
     inv.add_server(&srv("s2")).await.unwrap();
 
-    // Target row + three decoys that must remain unacked.
     fire(&inv, "server.singbox.down", Some(&sid("s1")))
         .await
         .expect("target");
@@ -278,8 +254,6 @@ async fn ack_open_scope_isolation_kind_server_and_null() {
         "exactly three decoys must remain unacked"
     );
 
-    // Acking each decoy must still report 1 (proving previous ack did
-    // NOT collateral-sweep them).
     let ack = |kind: &'static str, srv: Option<ServerId>| {
         let inv = inv.clone();
         async move { inv.ack_open_alerts(kind, srv.as_ref()).await.unwrap() }
@@ -301,21 +275,12 @@ async fn ack_open_scope_isolation_kind_server_and_null() {
     );
 }
 
-// 12b. Regression for «predicate flipped to acked_at IS NOT NULL»:
-//      seed an ALREADY-ACKED row of the target (kind, server_id),
-//      then verify insert_alert_if_no_unacked still fires (returns
-//      Some(_)) — proving the dedup gate only counts UNACKED rows,
-//      not the full history. Without this test, flipping `acked_at
-//      IS NULL` to `acked_at IS NOT NULL` (or dropping the clause
-//      entirely) would silently change semantics without test
-//      failure on the default-NULL-column happy path.
 #[tokio::test]
 async fn insert_if_no_unacked_ignores_already_acked_history() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Seed-and-ack: one historical row that was raised and dismissed.
     let prev = fire(&inv, "server.singbox.down", Some(&sid("s1")))
         .await
         .expect("seed insert");
@@ -324,8 +289,6 @@ async fn insert_if_no_unacked_ignores_already_acked_history() {
         "seed row must have been ackable"
     );
 
-    // Now fire again. The PARTIAL-UNIQUE / NOT-EXISTS gate must
-    // ignore the acked history row.
     let next = fire(&inv, "server.singbox.down", Some(&sid("s1"))).await;
     assert!(
         next.is_some(),
@@ -338,8 +301,6 @@ async fn insert_if_no_unacked_ignores_already_acked_history() {
     );
 }
 
-// 12. After ack_open_alerts, the acked row is hidden from
-//     recent_alerts(_, false) but visible in recent_alerts(_, true).
 #[tokio::test]
 async fn ack_open_hides_from_unacked_feed_but_keeps_history() {
     let dir = TempDir::new().unwrap();
@@ -370,11 +331,6 @@ async fn ack_open_hides_from_unacked_feed_but_keeps_history() {
     );
 }
 
-// ─── telegram_message_id (edit-on-recover) ───────────────────────────
-
-// 13. set_alert_telegram_message_id round-trips; latest_alert_message_id
-//     finds the most-recent matching (kind, server) message id and is
-//     scoped strictly by kind + server.
 #[tokio::test]
 async fn telegram_message_id_round_trip_and_recovery_lookup() {
     let dir = TempDir::new().unwrap();
@@ -385,8 +341,6 @@ async fn telegram_message_id_round_trip_and_recovery_lookup() {
     let id = fire(&inv, "server.unreachable", Some(&de))
         .await
         .expect("fresh insert");
-    // Before recording a message id, the recovery lookup finds nothing
-    // (the column is NULL) → caller would send a fresh recovery message.
     assert_eq!(
         inv.latest_alert_message_id("server.unreachable", Some(&de))
             .await
@@ -394,7 +348,6 @@ async fn telegram_message_id_round_trip_and_recovery_lookup() {
         None
     );
     inv.set_alert_telegram_message_id(id, "4242").await.unwrap();
-    // Now the original 🔴 message can be located for the 🟢 edit.
     assert_eq!(
         inv.latest_alert_message_id("server.unreachable", Some(&de))
             .await
@@ -402,7 +355,6 @@ async fn telegram_message_id_round_trip_and_recovery_lookup() {
             .as_deref(),
         Some("4242")
     );
-    // Strict scope: wrong kind / wrong server → None.
     assert_eq!(
         inv.latest_alert_message_id("server.singbox.down", Some(&de))
             .await
@@ -417,9 +369,6 @@ async fn telegram_message_id_round_trip_and_recovery_lookup() {
     );
 }
 
-// 14. Global vs server-scoped latest_alert_message_id isolation:
-//     server_id = None must match ONLY global (server_id IS NULL) alerts,
-//     and server_id = Some(id) must match ONLY that specific server.
 #[tokio::test]
 async fn latest_alert_message_id_global_vs_server_scoped_isolation() {
     let dir = TempDir::new().unwrap();
@@ -429,8 +378,6 @@ async fn latest_alert_message_id_global_vs_server_scoped_isolation() {
     let de = sid("de");
     let fi = sid("fi");
 
-    // Case 1: Only server-scoped alert exists with a message id.
-    // A query for a global alert (server_id = None) must NOT match the server alert.
     let srv_id = fire(&inv, "disk.pressure", Some(&de))
         .await
         .expect("server alert insert");
@@ -459,8 +406,6 @@ async fn latest_alert_message_id_global_vs_server_scoped_isolation() {
         None
     );
 
-    // Case 2: Global alert added afterwards with a newer message id.
-    // Global lookup matches global alert; server lookup matches server alert.
     let global_id = fire(&inv, "disk.pressure", None)
         .await
         .expect("global alert insert");
@@ -492,8 +437,6 @@ async fn latest_alert_message_id_global_vs_server_scoped_isolation() {
     );
 }
 
-// 15. _source_event string payload historical dedupe across ack:
-//     A string _source_event deduplicates historically even after the alert is acked.
 #[tokio::test]
 async fn source_event_string_dedupes_historically_across_ack() {
     let dir = TempDir::new().unwrap();
@@ -515,7 +458,6 @@ async fn source_event_string_dedupes_historically_across_ack() {
         .expect("first insert with string _source_event");
     assert!(id1 > 0);
 
-    // Unacked duplicate is suppressed.
     let dup = inv
         .insert_alert_if_no_unacked(
             "health.down",
@@ -528,10 +470,8 @@ async fn source_event_string_dedupes_historically_across_ack() {
         .unwrap();
     assert_eq!(dup, None);
 
-    // Ack the first alert.
     assert!(inv.ack_alert(id1).await.unwrap());
 
-    // Rescan / resubmit of SAME source event after ack is STILL suppressed across history.
     let rescan = inv
         .insert_alert_if_no_unacked(
             "health.down",
@@ -547,7 +487,6 @@ async fn source_event_string_dedupes_historically_across_ack() {
         "identical string _source_event must not reopen after ack"
     );
 
-    // New string source event reopens and inserts.
     let payload_ev2 = serde_json::json!({"_source_event": "evt-beta"}).to_string();
     let id2 = inv
         .insert_alert_if_no_unacked(
@@ -563,8 +502,6 @@ async fn source_event_string_dedupes_historically_across_ack() {
     assert_ne!(id1, id2);
 }
 
-// 16. Non-string _source_event (numeric / boolean) uses ordinary unacked-only semantics:
-//     Numeric and boolean payloads dedupe while unacked, but refire legitimately after ack.
 #[tokio::test]
 async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
     let dir = TempDir::new().unwrap();
@@ -572,7 +509,6 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
     inv.add_server(&srv("s1")).await.unwrap();
     let s1 = sid("s1");
 
-    // --- Numeric payload ---
     let num_payload = serde_json::json!({"_source_event": 42}).to_string();
     let num_id1 = inv
         .insert_alert_if_no_unacked(
@@ -586,7 +522,6 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .unwrap()
         .expect("first numeric payload insert");
 
-    // Unacked duplicate is suppressed.
     let num_dup = inv
         .insert_alert_if_no_unacked(
             "numeric.event",
@@ -599,10 +534,8 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .unwrap();
     assert_eq!(num_dup, None);
 
-    // Ack numeric alert.
     assert!(inv.ack_alert(num_id1).await.unwrap());
 
-    // After ack, re-firing with the SAME numeric payload succeeds (ordinary unacked semantics).
     let num_id2 = inv
         .insert_alert_if_no_unacked(
             "numeric.event",
@@ -616,7 +549,6 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .expect("numeric payload must refire after ack");
     assert_ne!(num_id1, num_id2);
 
-    // --- Boolean payload ---
     let bool_payload = serde_json::json!({"_source_event": true}).to_string();
     let bool_id1 = inv
         .insert_alert_if_no_unacked(
@@ -630,7 +562,6 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .unwrap()
         .expect("first bool payload insert");
 
-    // Unacked duplicate is suppressed.
     let bool_dup = inv
         .insert_alert_if_no_unacked(
             "bool.event",
@@ -643,10 +574,8 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
         .unwrap();
     assert_eq!(bool_dup, None);
 
-    // Ack boolean alert.
     assert!(inv.ack_alert(bool_id1).await.unwrap());
 
-    // After ack, re-firing with the SAME boolean payload succeeds (ordinary unacked semantics).
     let bool_id2 = inv
         .insert_alert_if_no_unacked(
             "bool.event",
@@ -661,8 +590,6 @@ async fn source_event_numeric_and_boolean_use_ordinary_unacked_semantics() {
     assert_ne!(bool_id1, bool_id2);
 }
 
-// ─── has_unacked_alert ────────────────────────────────────────────────
-
 #[tokio::test]
 async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
     let dir = TempDir::new().unwrap();
@@ -672,7 +599,6 @@ async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
     let s1 = sid("s1");
     let s2 = sid("s2");
 
-    // Empty DB: no unacked alerts
     assert!(
         !inv.has_unacked_alert("server.quality.degraded", Some(&s1))
             .await
@@ -684,7 +610,6 @@ async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
             .unwrap()
     );
 
-    // Insert alert for s1
     let id1 = inv
         .insert_alert_if_no_unacked(
             "server.quality.degraded",
@@ -718,7 +643,6 @@ async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
             .unwrap()
     );
 
-    // Ack s1 alert
     assert!(inv.ack_alert(id1).await.unwrap());
     assert!(
         !inv.has_unacked_alert("server.quality.degraded", Some(&s1))
@@ -726,7 +650,6 @@ async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
             .unwrap()
     );
 
-    // Global alert (server_id = None)
     let id_global = inv
         .insert_alert_if_no_unacked("backup.failed", None, "critical", "backup err", None)
         .await
@@ -740,7 +663,6 @@ async fn has_unacked_alert_tracks_open_alerts_and_respects_scope() {
             .unwrap()
     );
 
-    // Ack global alert
     assert!(inv.ack_alert(id_global).await.unwrap());
     assert!(!inv.has_unacked_alert("backup.failed", None).await.unwrap());
 }

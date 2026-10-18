@@ -1,10 +1,3 @@
-//! Cross-process per-server lock for node-changing operations.
-//!
-//! The daemon's in-memory deploy guard prevents two browser actions from
-//! touching one node concurrently, but cannot see the systemd-driven CLI
-//! updater. This advisory file lock is shared by daemon deploys, CLI deploys,
-//! and `update-kernels` so only one of those operations can own a server.
-
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +12,6 @@ pub struct NodeOperationLock {
 }
 
 impl NodeOperationLock {
-    /// Try to acquire the shared lock for `server_id` without waiting.
-    /// `Ok(None)` means another deploy/update process owns it.
     pub fn try_acquire(server_id: &str) -> io::Result<Option<Self>> {
         Self::try_acquire_in(default_lock_dir(), server_id)
     }

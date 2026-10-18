@@ -11,8 +11,6 @@ use super::super::helpers::{
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
-/// `POST /admin/servers/{id}/routing-policy` — set the durable server role
-/// and optional one-hop management route without raw SQL.
 pub(crate) async fn server_set_routing_policy(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -54,8 +52,6 @@ pub(crate) async fn server_set_routing_policy(
     .into_response()
 }
 
-/// `POST /admin/servers/{id}/client-detour` — set or clear the client detour
-/// (entry server) policy for 2-hop VPN chains.
 pub(crate) async fn server_set_client_detour_via(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -90,30 +86,11 @@ pub(crate) async fn server_set_client_detour_via(
     .into_response()
 }
 
-/// `POST /admin/servers/quick-add` — register a SERVER YOU ALREADY HAVE
-/// in inventory with minimal input: id + address (+ optional ssh_port).
-/// Default kernel = sing-box; default protocols = every protocol
-/// sing-box supports. Operator tweaks on the detail page right after.
-///
-/// This is the inline path on `/admin/servers`. The fancy Phase-E
-/// SSE-streamed bootstrap wizard at `/admin/servers/new` is a
-/// DIFFERENT flow (it ssh-pushes our key and installs the kernel from
-/// scratch — only useful for fresh nodes).
 pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String) -> Response {
-    // Tiny form parser via the shared `form_field` helper. Note:
-    // `form_field` decodes BEFORE trim (whereas the legacy inline
-    // pattern trimmed BEFORE decode); strictly stricter — `%20`-
-    // encoded whitespace at the edges is now normalised the same as
-    // literal whitespace, so a paste like `\"  vps-de1  \"` and
-    // `\"%20vps-de1%20\"` both produce `\"vps-de1\"`.
     let id: String = form_field(&body, "id")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if !valid_server_id(&id) {
-        // Dedicated server-id validator (review 2026-06-04): the user-id
-        // validator (2..=32 lowercase) used to gate this while the error
-        // text promised 1-64 mixed-case — now the message matches the
-        // enforced policy exactly.
         return bad_request(&format!(
             "invalid server id '{id}' (allowed: 1-64 chars of A-Z a-z 0-9 . _ -; must start and end with alphanumeric; no consecutive dots)"
         ));
@@ -122,12 +99,6 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
     let address_raw: String = form_field(&body, "address")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    // Route through the wizard's strict validator (charset
-    // `[A-Za-z0-9.:_-]`, length ≤ 255). The old quick-add gate
-    // only rejected ASCII space + length > 253, letting `\n`, `\r`,
-    // `\t`, and most control bytes through into `Server.address`
-    // (where they could later land in log lines / audit payloads as
-    // broken multi-line records). Security audit 2026-05-18 finding.
     let address = match crate::wizard::validate_address(&address_raw) {
         Ok(s) => s.to_string(),
         Err(why) => {
@@ -135,11 +106,6 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         }
     };
 
-    // Duplicate-address guard (HANDOFF §6 #2): refuse a second inventory
-    // record for a box that's already registered. Two records for one node
-    // fight over its `users[]`; the second deploy trips the DG-1
-    // user-removal guard (the `us` / `us1` incident, 2026-07-08). Report the
-    // clashing id so the operator edits that server instead of duplicating.
     match state.inv.server_id_for_address(&address).await {
         Ok(Some(existing)) => {
             return bad_request(&format!(
@@ -154,10 +120,6 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         .and_then(|s| s.parse().ok())
         .unwrap_or(22);
 
-    // Default kernel = sing-box; protocols = ALL it supports. This
-    // mirrors the "users are low-tech" one-action ceiling for the
-    // operator: register the server, then enable/disable on the
-    // detail page (a single click each).
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
     let kernel_id = KernelId("sing-box".into());
     let default_protocols: Vec<ProtocolId> = state
@@ -192,11 +154,6 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         .inv
         .audit(
             "admin",
-            // dot+underscore per naming convention (was the hyphenated
-            // `server.quick-add`). Convention-only: the action_kind
-            // chip maps the last dot-segment and `quick_add` still
-            // lands on «other» — the win is consistent `server.`-prefix
-            // filtering and one fewer odd-man-out name.
             "server.quick_add",
             Some(&id),
             Some(&serde_json::json!({
@@ -219,10 +176,6 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
     Redirect::to(&format!("/admin/servers/{}", path_segment_encode(&id))).into_response()
 }
 
-/// `GET /admin/servers/{id}/delete-confirm` — retype-to-confirm page
-/// for removing a server from the inventory (mirrors user delete). Shows
-/// the cascade scope (grants / secrets / protocols) before the operator
-/// commits.
 pub(crate) async fn server_delete_confirm(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -235,8 +188,6 @@ pub(crate) async fn server_delete_confirm(
         Ok(None) => return Err(not_found(&format!("no such server '{server_id_str}'"))),
         Err(e) => return Err(internal_error(anyhow::Error::new(e))),
     };
-    // `Option` so a DB error renders as «unknown», not a reassuring
-    // fake «0 grant(s)» (audit 2026-06-10).
     let grant_count = match state.inv.users_for_server(&sid).await {
         Ok(v) => Some(v.len()),
         Err(e) => {
@@ -249,18 +200,11 @@ pub(crate) async fn server_delete_confirm(
             None
         }
     };
-    // Telegram alert relay: deleting the proxy server is allowed (the
-    // FK is a deliberate non-cascade dangle, migration 0015) but every
-    // subsequent alert send will fail at SSH-spawn time — warn the
-    // operator BEFORE the delete, not in the logs after.
     let is_telegram_proxy = match state.inv.get_telegram_config().await {
         Ok(cfg) => cfg
             .and_then(|c| c.proxy_via_server_id)
             .is_some_and(|p| p == server_id_str),
         Err(e) => {
-            // Don't silently drop the relay warning on a DB error —
-            // log it; the page still renders (warning-less, like the
-            // pre-fix behavior, but now visibly in the daemon log).
             tracing::warn!(
                 target = "vpnctld::admin",
                 server = %server_id_str,
@@ -326,10 +270,6 @@ pub(crate) async fn server_delete_confirm(
     Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
 }
 
-/// `POST /admin/servers/{id}/delete` — actually delete. Body must be
-/// `confirm=<exact-server-id>`; mismatch → 400. Captures the cascade
-/// scope (grant count) for the audit payload BEFORE the FK cascade wipes
-/// it, then removes the server and audits `server.remove`.
 pub(crate) async fn server_delete(
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
@@ -347,13 +287,6 @@ pub(crate) async fn server_delete(
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    // Deploy-concurrency gate (audit 2026-06-10): deleting a server
-    // while its deploy pipeline is in flight let the pipeline keep
-    // SSH-pushing to the node, fail FK-wise on secret upserts mid-
-    // stream, and then write a server.deploy audit row for a server
-    // that no longer exists. Hold the same per-server permit a deploy
-    // takes; 409 if one is running. The guard drops at handler return
-    // (RAII), covering every early-return below.
     let _deploy_guard = match crate::wizard_bootstrap::DeployGuard::try_acquire(&server_id_str) {
         Some(g) => g,
         None => {
@@ -365,7 +298,6 @@ pub(crate) async fn server_delete(
             );
         }
     };
-    // Capture cascade scope BEFORE the delete (FK CASCADE wipes grants).
     let grants_removed = state
         .inv
         .users_for_server(&sid)

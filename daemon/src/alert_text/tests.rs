@@ -3,8 +3,6 @@ use serde_json::json;
 use super::{is_silent, render_alert, render_digest_html, to_telegram_html};
 use crate::i18n::Locale;
 
-/// Every kind the daemon actually fires. Keep in lockstep with the
-/// `kind=` literals in health_monitor.rs + node_probe_poller.rs.
 const SHIPPED_KINDS: &[(&str, &str)] = &[
     ("server.singbox.down", "critical"),
     ("server.singbox.up", "info"),
@@ -30,8 +28,6 @@ const SHIPPED_KINDS: &[(&str, &str)] = &[
 
 #[test]
 fn every_known_kind_has_a_dedicated_arm() {
-    // The fallback arm produces a title starting with "Событие"/"Alert".
-    // A shipped kind must NOT hit it → its title differs.
     for (kind, sev) in SHIPPED_KINDS {
         for loc in [Locale::En, Locale::Ru] {
             let r = render_alert(kind, sev, "де", &json!({}), loc);
@@ -105,7 +101,6 @@ fn unreachable_ru_is_pretty_and_actionable() {
     assert!(r.title.contains("Нода недоступна") && r.title.contains("Нидерланды"));
     assert!(r.body.contains("194.87.222.111") && r.body.contains("3 проверок"));
     assert!(r.action.as_ref().unwrap().contains("хостер"));
-    // No shell instructions in the action (operator-action policy).
     assert!(!r.action.as_ref().unwrap().to_lowercase().contains("ssh "));
 }
 
@@ -203,7 +198,6 @@ fn suspicious_local_ip_text_does_not_assume_proxy_misconfiguration() {
 
 #[test]
 fn kind_with_user_suffix_is_stripped() {
-    // `user.traffic_limit:alice` must match the base arm.
     let r = render_alert(
         "user.traffic_limit:alice",
         "warning",
@@ -221,7 +215,6 @@ fn kind_with_user_suffix_is_stripped() {
 
 #[test]
 fn html_escape_prevents_injection_in_subject() {
-    // A subject carrying `<b>` must be escaped, not rendered as markup.
     let r = render_alert(
         "server.unreachable",
         "warning",
@@ -239,8 +232,6 @@ fn html_escape_prevents_injection_in_subject() {
 
 #[test]
 fn action_has_no_shell_instructions() {
-    // operator-action policy: no `ssh root@`, `journalctl`, `systemctl`
-    // in any localized action line.
     for (kind, sev) in SHIPPED_KINDS {
         for loc in [Locale::En, Locale::Ru] {
             let r = render_alert(kind, sev, "x", &json!({}), loc);
@@ -271,15 +262,12 @@ fn telegram_html_layout() {
     assert!(html.contains("<code>91%</code>"));
     assert!(html.contains("🕐 26 июня, 17:40 MSK · 🔁 повтор"));
     assert!(html.contains("⚙️ "));
-    // No raw `<` outside the tags we emit (sanity: balanced <b>/<code>).
     assert_eq!(html.matches("<b>").count(), 1);
     assert_eq!(html.matches("</b>").count(), 1);
 }
 
 #[test]
 fn unreachable_info_severity_renders_recovery_not_down() {
-    // Edit-on-recover uses severity=info on the same kind to signal
-    // the 🟢 recovery variant (unreachable has no `.up` kind).
     let up = render_alert(
         "server.unreachable",
         "info",
@@ -291,7 +279,6 @@ fn unreachable_info_severity_renders_recovery_not_down() {
     assert!(up.title.contains("снова доступна"), "got: {}", up.title);
     assert!(up.action.is_none(), "recovery has no what-to-do line");
     assert!(is_silent("info"), "recovery push is silent");
-    // The warning variant is still the 🟠 down message — same kind.
     let down = render_alert(
         "server.unreachable",
         "warning",
@@ -301,7 +288,6 @@ fn unreachable_info_severity_renders_recovery_not_down() {
     );
     assert_eq!(down.icon, "🟠");
     assert!(down.title.contains("недоступна"), "got: {}", down.title);
-    // EN side too.
     let up_en = render_alert("server.unreachable", "info", "NL", &json!({}), Locale::En);
     assert!(
         up_en.title.contains("reachable again"),
@@ -312,10 +298,6 @@ fn unreachable_info_severity_renders_recovery_not_down() {
 
 #[test]
 fn user_body_keeps_inline_bold_and_escapes_subject() {
-    // user.* bodies wrap the (escaped) subject in literal <b>…</b>.
-    // A `<` in the user id must be escaped INSIDE the bold, and the
-    // title's own <b> must stay balanced — guards against a
-    // double-escape or a stray-tag regression in the user arms.
     let r = render_alert(
         "user.traffic_limit:weird",
         "warning",
@@ -324,10 +306,8 @@ fn user_body_keeps_inline_bold_and_escapes_subject() {
         Locale::Ru,
     );
     let html = to_telegram_html(&r, Locale::Ru, "26.06 17:40 MSK", false);
-    // The dangerous `<b>` from the subject is escaped everywhere.
     assert!(html.contains("a&lt;b&gt;c"));
     assert!(!html.contains("a<b>c"));
-    // Title bold + the body's inline bold around the subject → two pairs.
     assert_eq!(html.matches("<b>").count(), 2);
     assert_eq!(html.matches("</b>").count(), 2);
     assert!(html.contains("82%"));
@@ -335,7 +315,6 @@ fn user_body_keeps_inline_bold_and_escapes_subject() {
 
 #[test]
 fn unknown_kind_escapes_the_raw_kind() {
-    // Fallback arm must escape the kind too (parse_mode=HTML safety).
     let r = render_alert("weird.<kind>", "warning", "x", &json!({}), Locale::En);
     assert!(r.body.contains("weird.&lt;kind&gt;"));
     assert!(!r.body.contains("weird.<kind>"));
@@ -343,13 +322,11 @@ fn unknown_kind_escapes_the_raw_kind() {
 
 #[test]
 fn digest_all_clear_vs_problems() {
-    // All-clear: 🟢 + the fleet size, no bullet list.
     let clear = render_digest_html(Locale::Ru, 4, &[], "27.06 10:00 MSK");
     assert!(clear.starts_with("🟢 <b>Дайджест vpnctl — всё спокойно</b>"));
     assert!(clear.contains("4 сервера под наблюдением"));
     assert!(!clear.contains("• "));
     assert!(clear.contains("🕐 27.06 10:00 MSK"));
-    // Problems: 🔴 + count + one bullet per title.
     let probs = render_digest_html(
         Locale::Ru,
         4,
@@ -362,7 +339,6 @@ fn digest_all_clear_vs_problems() {
     assert!(probs.contains("2 открытые проблемы"));
     assert!(probs.contains("• 🔴 <b>sing-box упал — de</b>"));
     assert_eq!(probs.matches("• ").count(), 2);
-    // EN side.
     let en = render_digest_html(Locale::En, 3, &[], "27.06 10:00 MSK");
     assert!(en.contains("all clear") && en.contains("3 servers"));
 }

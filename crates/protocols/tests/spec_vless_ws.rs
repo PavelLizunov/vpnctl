@@ -1,8 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Spec tests for `vpnctl_protocols::VlessWs` (vless + websocket over a
-//! fronting TLS domain). Written from the spec only — envelope schema,
-//! client outbound shape, share-link byte format. If a test fails, the
-//! impl is wrong — DO NOT weaken the test.
 
 use std::collections::HashMap;
 
@@ -43,16 +39,12 @@ fn user(name: &str) -> User {
     }
 }
 
-/// Secrets map with everything present (happy path). Callers mutate /
-/// remove entries to exercise the failure + boundary branches.
 fn secrets() -> HashMap<String, String> {
     let mut s = HashMap::new();
     s.insert("vlessws.domain".into(), DOMAIN.into());
     s.insert("vlessws.path".into(), PATH_SECRET.into());
     s
 }
-
-// ── trait-surface constants ─────────────────────────────────────────
 
 #[test]
 fn id_is_vless_ws() {
@@ -61,7 +53,6 @@ fn id_is_vless_ws() {
 
 #[test]
 fn listen_ports_is_empty() {
-    // No static port — must coexist with REALITY on :443.
     assert!(VlessWs::new().listen_ports().is_empty());
 }
 
@@ -87,8 +78,6 @@ fn server_secret_specs_is_exactly_vlessws_path_password() {
     );
 }
 
-// ── server_inbound (envelope) ───────────────────────────────────────
-
 #[test]
 fn server_inbound_envelope_has_all_keys_and_values() {
     let s = srv();
@@ -102,7 +91,6 @@ fn server_inbound_envelope_has_all_keys_and_values() {
     assert_eq!(v["domain"].as_str(), Some(DOMAIN));
     assert_eq!(v["acme_email"].as_str(), Some("ops@example.com"));
     assert_eq!(v["front_port"].as_u64(), Some(8443));
-    // path = "/" + secret
     assert_eq!(v["path"].as_str(), Some("/Ab3xKp"));
 
     let users = v["users"].as_array().expect("users must be an array");
@@ -116,7 +104,7 @@ fn server_inbound_envelope_has_all_keys_and_values() {
 #[test]
 fn server_inbound_acme_email_defaults_to_empty_string() {
     let s = srv();
-    let sec = secrets(); // no acme_email
+    let sec = secrets();
     let ctx = RenderCtx::new(&s, &sec);
     let v = VlessWs::new().server_inbound(&ctx, &[]).unwrap();
     assert_eq!(v["acme_email"].as_str(), Some(""));
@@ -134,7 +122,6 @@ fn server_inbound_front_port_overridden_by_secret() {
 
 #[test]
 fn server_inbound_front_port_zero_or_garbage_falls_back_to_default() {
-    // zero and unparsable both round-trip to the 8443 default.
     for bad in ["0", "not-a-number"] {
         let s = srv();
         let mut sec = secrets();
@@ -147,7 +134,6 @@ fn server_inbound_front_port_zero_or_garbage_falls_back_to_default() {
 
 #[test]
 fn server_inbound_missing_or_empty_domain_is_err() {
-    // Missing entirely, and present-but-empty, both reject.
     for set_empty in [false, true] {
         let s = srv();
         let mut sec = secrets();
@@ -166,7 +152,6 @@ fn server_inbound_missing_or_empty_domain_is_err() {
 
 #[test]
 fn server_inbound_domain_with_forbidden_char_is_err() {
-    // Any of newline/CR/tab/space//?#@\{} in the domain rejects.
     for bad in [
         "evil.com/path",
         "evil .com",
@@ -188,7 +173,6 @@ fn server_inbound_domain_with_forbidden_char_is_err() {
 
 #[test]
 fn server_inbound_missing_or_malformed_path_secret_is_err() {
-    // Missing, and present-but-containing a slash (not [A-Za-z0-9_-]+).
     let cases: [Option<&str>; 3] = [None, Some("foo/bar"), Some("")];
     for case in cases {
         let s = srv();
@@ -209,8 +193,6 @@ fn server_inbound_missing_or_malformed_path_secret_is_err() {
     }
 }
 
-// ── client_config (sing-box outbound) ───────────────────────────────
-
 #[test]
 fn client_config_has_expected_outbound_shape() {
     let s = srv();
@@ -219,15 +201,12 @@ fn client_config_has_expected_outbound_shape() {
     let v = VlessWs::new().client_config(&ctx, &user("alice")).unwrap();
 
     assert_eq!(v["type"].as_str(), Some("vless"));
-    // server is the fronting DOMAIN — never the raw server IP.
     assert_eq!(v["server"].as_str(), Some(DOMAIN));
     assert_ne!(v["server"].as_str(), Some("203.0.113.9"));
     assert_eq!(v["server_port"].as_u64(), Some(8443));
     assert_eq!(v["uuid"].as_str(), Some("uuid-alice"));
-    // No flow key on the ws path.
     assert!(v.get("flow").is_none(), "ws outbound must not carry flow");
 
-    // tls object: enabled + server_name=domain + utls chrome + NO reality.
     assert_eq!(v["tls"]["enabled"].as_bool(), Some(true));
     assert_eq!(v["tls"]["server_name"].as_str(), Some(DOMAIN));
     assert_eq!(v["tls"]["utls"]["fingerprint"].as_str(), Some("chrome"));
@@ -236,7 +215,6 @@ fn client_config_has_expected_outbound_shape() {
         "ws path must not carry a reality block"
     );
 
-    // transport object: ws + path + Host header = domain.
     assert_eq!(v["transport"]["type"].as_str(), Some("ws"));
     assert_eq!(v["transport"]["path"].as_str(), Some("/Ab3xKp"));
     assert_eq!(v["transport"]["headers"]["Host"].as_str(), Some(DOMAIN));
@@ -265,8 +243,6 @@ fn client_config_missing_domain_or_path_is_err() {
         );
     }
 }
-
-// ── share_link (byte-exact) ─────────────────────────────────────────
 
 #[test]
 fn share_link_is_byte_exact() {
@@ -330,8 +306,6 @@ fn share_link_missing_domain_or_path_is_err() {
         );
     }
 }
-
-// ── cross-method agreement: the SAME path secret feeds all three ────
 
 #[test]
 fn envelope_client_and_link_reference_the_same_path_secret() {

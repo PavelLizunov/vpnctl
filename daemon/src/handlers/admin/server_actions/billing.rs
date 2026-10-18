@@ -7,7 +7,6 @@ use super::super::helpers::{bad_request, internal_error, not_found};
 use crate::AppState;
 use crate::http_util::form_field;
 
-/// `POST /admin/servers/{id}/billing` — save/update rental billing info for a server.
 pub(crate) async fn server_set_billing(
     Path(server_id): Path<String>,
     State(state): State<AppState>,
@@ -88,7 +87,6 @@ pub(crate) async fn server_set_billing(
     Redirect::to(&return_to).into_response()
 }
 
-/// `POST /admin/servers/{id}/billing/advance` — one-click mark paid / advance by 1 cycle.
 pub(crate) async fn server_advance_billing(
     Path(server_id): Path<String>,
     State(state): State<AppState>,
@@ -110,7 +108,6 @@ pub(crate) async fn server_advance_billing(
     Redirect::to(&return_to).into_response()
 }
 
-/// `POST /admin/servers/billing/settings` — update display currency, markup coefficient, or auto-refresh.
 pub(crate) async fn billing_update_settings(
     State(state): State<AppState>,
     body: String,
@@ -146,7 +143,6 @@ pub(crate) async fn billing_update_settings(
     Redirect::to(&return_to).into_response()
 }
 
-/// `POST /admin/servers/billing/refresh-rates` — manual on-demand trigger to fetch exchange rates.
 pub(crate) async fn billing_refresh_rates(State(state): State<AppState>, body: String) -> Response {
     if let Err(e) = crate::exchange_rate_poller::refresh_exchange_rates(&state.inv).await {
         tracing::warn!(target = "vpnctld::currency", error = %e, "manual refresh_exchange_rates failed");
@@ -229,7 +225,6 @@ mod tests {
 
     #[test]
     fn safe_return_to_validation() {
-        // Valid return_to targets
         assert_eq!(
             safe_return_to(Some("/admin/servers".into())),
             "/admin/servers"
@@ -251,7 +246,6 @@ mod tests {
             "/admin/servers#details"
         );
 
-        // Invalid return_to targets (prefix confusion / path traversal / open redirect / CRLF)
         assert_eq!(
             safe_return_to(Some("/admin/servers_evil".into())),
             "/admin/servers/billing"

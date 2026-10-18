@@ -4,7 +4,6 @@ use vpnctl_core::ServerId;
 
 pub const QUALITY_MIN_SAMPLES: u64 = 12;
 
-/// One low-load service-path poll tick from one measurement point.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceQualitySample {
     pub ts: DateTime<Utc>,
@@ -15,20 +14,14 @@ pub struct ServiceQualitySample {
     pub attempts: u32,
     pub successes: u32,
     pub tcp_rtt_ms: Vec<u32>,
-    /// SSH-port reachability from the same vantage, kept out of the
-    /// service score so a healthy control channel cannot inflate VPN quality.
     pub control_attempts: u32,
     pub control_successes: u32,
     pub control_rtt_ms: Vec<u32>,
-    /// Secondary signal only. `None` means ICMP was disabled or unavailable.
     pub icmp_attempts: Option<u32>,
     pub icmp_successes: Option<u32>,
     pub icmp_rtt_ms: Option<Vec<u32>>,
 }
 
-/// Readiness and the start of the latest contiguous, identified TCP population.
-/// Missing provisioning is not a failure; legacy unpartitioned history is not
-/// evidence for the current population. The identity is opaque to UI callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceQualityMeasurement {
     pub provisioned_at: Option<DateTime<Utc>>,
@@ -36,8 +29,6 @@ pub struct ServiceQualityMeasurement {
     pub target_identity: Option<String>,
 }
 
-/// Rolling-window service-path score. `score=None` until `min_samples`
-/// batches exist; the component metrics may still be shown as provisional.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceQualityScore {
     pub window_hours: u32,
@@ -74,8 +65,6 @@ fn descending_quality(value: f64, full_at: f64, zero_at: f64) -> f64 {
     }
 }
 
-/// Pure score function used by inventory queries and boundary tests.
-/// Weights: availability 40%, loss 30%, p95 latency 20%, jitter 10%.
 pub fn score_samples(
     samples: &[ServiceQualitySample],
     window_hours: u32,
@@ -136,10 +125,6 @@ pub fn score_samples(
         total as f64 / (sample_medians.len() - 1) as f64
     });
 
-    // A UDP-only/no-ingress batch is still useful for the separately
-    // measured SSH control path, but it must not satisfy the service
-    // score's minimum sample count. Likewise, only real control attempts
-    // count toward control-path confidence.
     let sample_count = ordered
         .iter()
         .filter(|sample| sample.target_count > 0 && sample.attempts > 0)
@@ -153,8 +138,6 @@ pub fn score_samples(
     } else {
         let availability = availability_pct.unwrap_or(0.0) / 100.0;
         let loss = 1.0 - packet_loss_pct.unwrap_or(100.0) / 100.0;
-        // A fully unreachable service has no RTT. Once enough samples
-        // exist that is a real zero-quality observation, not "unknown".
         let latency = p95_rtt_ms
             .map(|v| descending_quality(f64::from(v), 100.0, 500.0))
             .unwrap_or(0.0);
@@ -280,8 +263,6 @@ mod tests {
         let slow: Vec<_> = (0..12)
             .map(|n| sample(n, 1, 1, 1, 1, &[500 + (n % 2) as u32 * 100]))
             .collect();
-        // Availability + loss remain perfect (70 points); latency and
-        // jitter are both at their zero-quality boundaries.
         assert_eq!(score_samples(&slow, 24, 12).score, Some(70));
     }
 

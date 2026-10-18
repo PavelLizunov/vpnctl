@@ -1,8 +1,3 @@
-//! Backup admin handlers: immediate snapshot trigger, snapshot download,
-//! and the restore self-test fire-drill.
-//!
-//! Extracted from `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::audit::sanitize_header_filename;
 use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
@@ -15,24 +10,6 @@ use super::helpers::{
 };
 use crate::AppState;
 
-// ────────────────────────────────────────────────────────────────────────
-// Phase C-4 — inventory snapshot endpoints (web-side).
-//
-// The scheduler in `crate::app::spawn_backup_scheduler` produces hourly
-// snapshots; these two handlers give the operator the same controls
-// from the Settings page WITHOUT having to wait an hour.
-//
-//   * `POST /admin/backup/snapshot` — trigger an immediate snapshot,
-//     audit the result, redirect back to /admin/settings.
-//   * `GET  /admin/backup/download/{name}` — stream a specific
-//     snapshot file from DEFAULT_BACKUP_DIR with
-//     `Content-Disposition: attachment` so the browser saves it
-//     instead of trying to render the binary inline.
-// ────────────────────────────────────────────────────────────────────────
-
-/// `POST /admin/backup/snapshot` — manual snapshot trigger. Same
-/// underlying call as the hourly scheduler; audited with
-/// `trigger: "manual"` so the timeline can distinguish.
 pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Response {
     let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
     let snapshot_result = vpnctl_inventory::snapshot_now(&state.inv, &backup_dir).await;
@@ -65,22 +42,10 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
     if let Err(e) = snapshot_result {
         return internal_error(anyhow::Error::new(e));
     }
-    // Fragment anchor → browser scrolls back to the Backups
-    // section (where the operator pressed «snapshot now») instead
-    // of jumping to the top of /admin/settings.
     Redirect::to("/admin/settings/backups#backups-section").into_response()
 }
 
-/// `GET /admin/backup/download/{name}` — stream a snapshot file with
-/// `Content-Disposition: attachment`. The operator-supplied `name`
-/// is validated strictly (the snapshot prefix + safe-charset filename)
-/// so a "../" or absolute path can never escape `DEFAULT_BACKUP_DIR`.
 pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
-    // Filename validation — accept ONLY files matching the snapshot
-    // naming convention. Rejects `../`, absolute paths, NUL bytes,
-    // anything with a slash. Belt-and-braces vs the
-    // `std::path::Path::join` semantics, which would otherwise let
-    // an absolute path override the parent prefix.
     if !is_safe_snapshot_name(&name) {
         return bad_request(&format!(
             "invalid snapshot name '{name}' — expected '{prefix}<timestamp>{suffix}'",
@@ -90,12 +55,6 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     }
     let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
     let path = backup_dir.join(&name);
-    // Defence in depth: ensure the resolved path is still inside the
-    // backup dir even after `join`. `canonicalize` reads through
-    // symlinks — the operator could in principle create a symlink in
-    // the backup dir pointing at `/etc/passwd`, but the snapshot dir
-    // is daemon-owned 0700 so they'd need a root-level compromise
-    // already.
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -127,21 +86,6 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
     resp
 }
 
-/// `POST /admin/backup/self-test` — restore fire-drill.
-///
-/// Picks the most recent local snapshot in `DEFAULT_BACKUP_DIR`,
-/// runs [`vpnctl_inventory::verify_snapshot`] on it (which copies
-/// it into a per-call tmpfile + replays migrations + queries data
-/// presence metrics) and renders the report inline as HTML.
-///
-/// This is the «is our DR insurance actually valid?» button —
-/// converts the periodic-bit-rot risk from «catches it the day 236
-/// burns» to «catches it the next time the operator clicks the
-/// button». Future work (cron-scheduled run + Telegram alert on
-/// Fail) layers on top of this same primitive.
-///
-/// Audit row written every invocation with the report status; one
-/// place an operator (or post-mortem) can see the history.
 pub(crate) async fn backup_self_test(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -158,11 +102,6 @@ pub(crate) async fn backup_self_test(
              or wait for the hourly scheduler to fire",
         );
     };
-    // Run + audit on EVERY attempt (incl. Err) so post-mortem replay
-    // sees the operator's click even when verify itself broke. TOCTOU
-    // friendliness: the snapshot can be pruned between `list_snapshots`
-    // and `verify_snapshot` — return 409 in that narrow case rather
-    // than a misleading 500.
     let verify_result = vpnctl_inventory::verify_snapshot(&latest.path).await;
     match &verify_result {
         Ok(report) => {
@@ -235,9 +174,6 @@ pub(crate) async fn backup_self_test(
         .into_response()
 }
 
-/// Render the HTML body for the self-test result page. Pulled out
-/// so a future «show last result on /admin/settings» pass can reuse
-/// it without re-fetching the report.
 fn render_self_test_report(
     report: &vpnctl_inventory::SelfTestReport,
     lang: crate::i18n::Locale,
@@ -245,10 +181,6 @@ fn render_self_test_report(
     use crate::i18n::tr;
     use vpnctl_inventory::CheckStatus;
     let overall_color = match report.overall {
-        // Inline hex (not CSS vars): `--ok` and `--warn` aren't in
-        // admin.css today and inlining keeps the self-test page's
-        // colour palette self-contained. `--red` IS defined but we
-        // keep the literal here for symmetry with the other two.
         CheckStatus::Ok => "#2e7d32",
         CheckStatus::Warn => "#e6a23c",
         CheckStatus::Fail => "#c62828",
@@ -339,16 +271,7 @@ fn render_self_test_report(
     }
 }
 
-/// Strict accept for snapshot filename — only the EXACT pattern the
-/// scheduler emits passes. Delegates to
-/// `vpnctl_inventory::parse_snapshot_filename` so the validator stays
-/// in lock-step with the emitter (a future change to the filename
-/// shape only touches the inventory crate).
 fn is_safe_snapshot_name(name: &str) -> bool {
-    // Length / charset gate runs BEFORE the parser so a 10MB
-    // filename can't OOM the daemon and `/` / NUL / control bytes
-    // never reach the filesystem layer even if the parser ever
-    // accidentally accepts them.
     if name.is_empty() || name.len() > 128 {
         return false;
     }
@@ -358,7 +281,5 @@ fn is_safe_snapshot_name(name: &str) -> bool {
     {
         return false;
     }
-    // Parser is the source of truth for the precise shape
-    // (`inv.db.<RFC3339-ish>.bak`).
     vpnctl_inventory::parse_snapshot_filename(name).is_some()
 }

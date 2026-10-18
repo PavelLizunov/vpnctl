@@ -4,7 +4,6 @@ use vpnctl_core::{ServerId, UserId};
 
 use crate::common::{open, server, server_coeff, ud, user};
 
-// 1. record_vpn_stats with empty deltas inserts ZERO rows (no-op).
 #[tokio::test]
 async fn record_vpn_stats_empty_deltas_is_noop() {
     let dir = TempDir::new().unwrap();
@@ -25,9 +24,6 @@ async fn record_vpn_stats_empty_deltas_is_noop() {
     );
 }
 
-// 2. record_vpn_stats sets `ts` from the daemon's wall clock at INSERT
-//    time — the caller does NOT supply it. Read back the row and
-//    confirm ts is "approximately now" (±5s).
 #[tokio::test]
 async fn record_vpn_stats_sets_ts_to_now_on_insert() {
     let dir = TempDir::new().unwrap();
@@ -59,7 +55,6 @@ async fn record_vpn_stats_sets_ts_to_now_on_insert() {
     assert_eq!(rows[0].active_connections, 1);
 }
 
-// 3. recent_vpn_stats_for_user EXCLUDES server-wide rows (user_id IS NULL).
 #[tokio::test]
 async fn recent_for_user_excludes_server_wide_rows() {
     let dir = TempDir::new().unwrap();
@@ -69,10 +64,7 @@ async fn recent_for_user_excludes_server_wide_rows() {
 
     inv.record_vpn_stats(
         &ServerId("s1".into()),
-        &[
-            ud(Some("u1"), 10, 20, 1),
-            ud(None, 999, 888, 7), // server-wide row
-        ],
+        &[ud(Some("u1"), 10, 20, 1), ud(None, 999, 888, 7)],
     )
     .await
     .unwrap();
@@ -93,7 +85,6 @@ async fn recent_for_user_excludes_server_wide_rows() {
     );
 }
 
-// 4. recent_vpn_stats_for_server INCLUDES both per-user and server-wide rows.
 #[tokio::test]
 async fn recent_for_server_includes_both_user_and_server_wide_rows() {
     let dir = TempDir::new().unwrap();
@@ -122,7 +113,6 @@ async fn recent_for_server_includes_both_user_and_server_wide_rows() {
     assert_eq!(server_wide_count, 1, "the NULL-user row must be present");
 }
 
-// 5. since_hours = 0 excludes everything (strict ts > now-0).
 #[tokio::test]
 async fn since_hours_zero_excludes_everything() {
     let dir = TempDir::new().unwrap();
@@ -156,7 +146,6 @@ async fn since_hours_zero_excludes_everything() {
     );
 }
 
-// 6. Both recent_* methods sort newest-first.
 #[tokio::test]
 async fn recent_methods_sort_newest_first() {
     let dir = TempDir::new().unwrap();
@@ -164,8 +153,6 @@ async fn recent_methods_sort_newest_first() {
     inv.add_server(&server("s1")).await.unwrap();
     inv.add_user(&user("u1")).await.unwrap();
 
-    // Three separate ticks, separated by enough wall-clock to make
-    // the ordering deterministic in TEXT-sorted ISO-8601.
     for i in 0u64..3 {
         inv.record_vpn_stats(&ServerId("s1".into()), &[ud(Some("u1"), i + 1, 0, 0)])
             .await
@@ -202,15 +189,11 @@ async fn recent_methods_sort_newest_first() {
     }
 }
 
-// 7. user_id has NO foreign key — recording a row for a user that
-//    doesn't exist in `users` table must SUCCEED (forensics survive
-//    rename/delete).
 #[tokio::test]
 async fn record_vpn_stats_for_unknown_user_succeeds_no_fk_on_user_id() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("s1")).await.unwrap();
-    // Note: NOT adding "ghost" to users.
 
     inv.record_vpn_stats(&ServerId("s1".into()), &[ud(Some("ghost"), 7, 8, 1)])
         .await
@@ -224,13 +207,10 @@ async fn record_vpn_stats_for_unknown_user_succeeds_no_fk_on_user_id() {
     assert_eq!(rows[0].user_id, Some(UserId("ghost".into())));
 }
 
-// 8. Expected-failure path: server_id has FK — recording for a server
-//    that does NOT exist must fail.
 #[tokio::test]
 async fn record_vpn_stats_for_unknown_server_fails() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // Deliberately do not add "ghost-server".
 
     let res = inv
         .record_vpn_stats(&ServerId("ghost-server".into()), &[ud(None, 1, 2, 1)])
@@ -241,7 +221,6 @@ async fn record_vpn_stats_for_unknown_server_fails() {
     );
 }
 
-// 9. CASCADE: removing a server drops its vpn_connection_stats rows.
 #[tokio::test]
 async fn remove_server_cascades_vpn_connection_stats() {
     let dir = TempDir::new().unwrap();
@@ -260,7 +239,6 @@ async fn remove_server_cascades_vpn_connection_stats() {
         .await
         .unwrap();
 
-    // Sanity: u1 has rows from BOTH servers.
     let pre = inv
         .recent_vpn_stats_for_user(&UserId("u1".into()), 24)
         .await
@@ -289,8 +267,6 @@ async fn remove_server_cascades_vpn_connection_stats() {
     assert_eq!(post_user[0].server_id, ServerId("s2".into()));
 }
 
-// 10. purge_vpn_stats_older_than removes only old rows; returns the
-//     correct count; recent rows survive (boundary).
 #[tokio::test]
 async fn purge_vpn_stats_older_than_boundary() {
     let dir = TempDir::new().unwrap();
@@ -298,13 +274,10 @@ async fn purge_vpn_stats_older_than_boundary() {
     inv.add_server(&server("s1")).await.unwrap();
     inv.add_user(&user("u1")).await.unwrap();
 
-    // A "recent" row written by record_vpn_stats (ts = now).
     inv.record_vpn_stats(&ServerId("s1".into()), &[ud(Some("u1"), 1, 2, 1)])
         .await
         .unwrap();
 
-    // Purging anything older than 30 days must remove ZERO rows since
-    // our only row is brand new.
     let removed = inv.purge_vpn_stats_older_than(30).await.unwrap();
     assert_eq!(
         removed, 0,
@@ -320,10 +293,6 @@ async fn purge_vpn_stats_older_than_boundary() {
         "recent row must survive purge_vpn_stats_older_than(30)"
     );
 
-    // Purging "older than 0 days" must remove the recent row (ts < now-0
-    // only false in the limit; spec says strictly older — check for ALL
-    // existing rows). The conservative interpretation: days=0 sweeps
-    // every row whose ts < now, which is all of them after a tiny sleep.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let removed_all = inv.purge_vpn_stats_older_than(0).await.unwrap();
     assert_eq!(
@@ -340,10 +309,6 @@ async fn purge_vpn_stats_older_than_boundary() {
     );
 }
 
-// 11. record_vpn_stats is atomic: when it succeeds, EVERY delta is
-//     visible. (We can't easily force a mid-tx failure without injecting
-//     impl details, so we assert all-or-nothing on the happy path: a
-//     batch of N deltas yields exactly N rows readable post-call.)
 #[tokio::test]
 async fn record_vpn_stats_atomicity_all_deltas_visible() {
     let dir = TempDir::new().unwrap();
@@ -376,15 +341,8 @@ async fn record_vpn_stats_atomicity_all_deltas_visible() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// Phase 4b — server_live_activity + all_servers_live_activity.
-// ────────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn phase4b_server_live_activity_returns_zeros_for_unknown_server() {
-    // The server-detail handler may render before the poller has
-    // ever sampled this server (fresh-deploy, NM-11 blocked, etc).
-    // Activity must be the zero-default — no DB errors.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("s1")).await.unwrap();
@@ -402,10 +360,6 @@ async fn phase4b_server_live_activity_returns_zeros_for_unknown_server() {
 
 #[tokio::test]
 async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() {
-    // Three ticks for one server: two server-wide rows (user_id IS
-    // NULL) with growing active_connections + per-user deltas.
-    // `active_now` must be the FRESHEST server-wide value (8), NOT
-    // the sum / max / first; bytes are summed across all rows.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("s1")).await.unwrap();
@@ -413,7 +367,6 @@ async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() 
         inv.add_user(&user(u)).await.unwrap();
     }
 
-    // Tick 1: server-wide 100 up / 50 dn / 4 active + u1 50/25.
     inv.record_vpn_stats(
         &ServerId("s1".into()),
         &[ud(None, 100, 50, 4), ud(Some("u1"), 50, 25, 2)],
@@ -421,7 +374,6 @@ async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() 
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-    // Tick 2: server-wide 200/100/8 + u2 50/25.
     inv.record_vpn_stats(
         &ServerId("s1".into()),
         &[ud(None, 200, 100, 8), ud(Some("u2"), 50, 25, 3)],
@@ -434,12 +386,10 @@ async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() 
         .await
         .unwrap();
 
-    // active_now = freshest server-wide row's active_connections.
     assert_eq!(
         activity.active_now, 8,
         "active_now must equal newest server-wide tick"
     );
-    // Bytes sum across ALL rows (server-wide + per-user).
     assert_eq!(activity.bytes_up_window, 100 + 50 + 200 + 50);
     assert_eq!(activity.bytes_dn_window, 50 + 25 + 100 + 25);
     assert_eq!(
@@ -451,9 +401,6 @@ async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() 
 
 #[tokio::test]
 async fn phase4b_all_servers_live_activity_returns_default_entry_for_unobserved_server() {
-    // Dashboard rollup: returns one entry per `servers.id` row,
-    // even for servers the poller has never reached. Caller can
-    // sum without filtering.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("active-srv")).await.unwrap();
@@ -484,11 +431,6 @@ async fn phase4b_all_servers_live_activity_returns_default_entry_for_unobserved_
 
 #[tokio::test]
 async fn phase4b_server_live_activity_window_excludes_older_than_since_hours() {
-    // The `since_hours` bound must filter older rows. We can't fake
-    // older `ts` via the API (server-side strftime), so verify the
-    // boundary by asking for a near-zero window — the just-inserted
-    // row's ts SHOULD still be within it (the window is hours, not
-    // seconds, so even 1h catches a row inserted just now).
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("s1")).await.unwrap();
@@ -506,14 +448,6 @@ async fn phase4b_server_live_activity_window_excludes_older_than_since_hours() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// Round-4 — usage_coefficient (Marzban traffic multiplier) is APPLIED to
-// traffic accounting. Previously stored/displayed but inert (×1 always).
-// ────────────────────────────────────────────────────────────────────────
-
-// user_traffic_this_month weights raw-tick bytes by the server's
-// usage_coefficient: N bytes on a ×2 node → 2N reported; ×1 node → N
-// (identity, no change for existing deployments).
 #[tokio::test]
 async fn user_traffic_this_month_applies_usage_coefficient() {
     let dir = TempDir::new().unwrap();
@@ -523,14 +457,12 @@ async fn user_traffic_this_month_applies_usage_coefficient() {
     inv.add_user(&user("alice")).await.unwrap();
     inv.add_user(&user("bob")).await.unwrap();
 
-    // alice: 1_000_000 raw bytes on the ×2 node → 2_000_000 weighted.
     inv.record_vpn_stats(
         &ServerId("double".into()),
         &[ud(Some("alice"), 600_000, 400_000, 1)],
     )
     .await
     .unwrap();
-    // bob: 1_000_000 raw bytes on the ×1 node → 1_000_000 (identity).
     inv.record_vpn_stats(
         &ServerId("single".into()),
         &[ud(Some("bob"), 600_000, 400_000, 1)],
@@ -550,9 +482,6 @@ async fn user_traffic_this_month_applies_usage_coefficient() {
     assert_eq!(bob, 1_000_000, "×1 node is the identity — unchanged");
 }
 
-// users_traffic_vs_limit weights month-to-date usage by coefficient: a
-// user UNDER their raw-byte limit but OVER it once weighted is reported
-// at the weighted (over-limit) figure.
 #[tokio::test]
 async fn users_traffic_vs_limit_weights_by_coefficient() {
     let dir = TempDir::new().unwrap();
@@ -560,14 +489,12 @@ async fn users_traffic_vs_limit_weights_by_coefficient() {
     inv.add_server(&server_coeff("double", 2.0)).await.unwrap();
     inv.add_user(&user("alice")).await.unwrap();
 
-    // 1_500_000 raw bytes on a ×2 node → 3_000_000 weighted.
     inv.record_vpn_stats(
         &ServerId("double".into()),
         &[ud(Some("alice"), 1_000_000, 500_000, 1)],
     )
     .await
     .unwrap();
-    // Limit = 2_000_000: raw usage (1.5M) is UNDER it, weighted (3M) is OVER.
     inv.set_user_traffic_limit(&UserId("alice".into()), Some(2_000_000), Some(80))
         .await
         .unwrap();
@@ -586,8 +513,6 @@ async fn users_traffic_vs_limit_weights_by_coefficient() {
     );
 }
 
-// top_users_by_traffic ranks by COEFFICIENT-WEIGHTED bytes: a ×2 user
-// outranks an equal-raw-bytes ×1 user.
 #[tokio::test]
 async fn top_users_by_traffic_ranks_by_weighted_bytes() {
     let dir = TempDir::new().unwrap();
@@ -597,7 +522,6 @@ async fn top_users_by_traffic_ranks_by_weighted_bytes() {
     inv.add_user(&user("alice")).await.unwrap();
     inv.add_user(&user("bob")).await.unwrap();
 
-    // Equal RAW bytes (1_000_000 each), but alice is on the ×2 node.
     inv.record_vpn_stats(
         &ServerId("double".into()),
         &[ud(Some("alice"), 500_000, 500_000, 1)],
@@ -618,8 +542,6 @@ async fn top_users_by_traffic_ranks_by_weighted_bytes() {
         "alice (×2 → 2M weighted) must outrank bob (×1 → 1M) despite equal raw bytes"
     );
     assert_eq!(top[0].total_bytes, 2_000_000, "alice weighted total");
-    // 2026-06-16 — upload / download are now summed separately for the
-    // three-column dashboard tile, each weighted, and total == up + down.
     assert_eq!(top[0].upload_bytes, 1_000_000, "alice weighted upload (×2)");
     assert_eq!(
         top[0].download_bytes, 1_000_000,
@@ -636,10 +558,6 @@ async fn top_users_by_traffic_ranks_by_weighted_bytes() {
     assert_eq!(top[1].download_bytes, 500_000, "bob ×1 download");
 }
 
-// attribution_stall_servers: a server is "stalled" iff, within the
-// window, its MAX(active_connections) >= min_active AND it attributed
-// ZERO distinct users (every stats row had a NULL user_id). Servers with
-// at least one attributed user, or below the active floor, are excluded.
 #[tokio::test]
 async fn attribution_stall_servers_flags_only_active_unattributed_nodes() {
     let dir = TempDir::new().unwrap();
@@ -649,20 +567,15 @@ async fn attribution_stall_servers_flags_only_active_unattributed_nodes() {
     }
     inv.add_user(&user("alice")).await.unwrap();
 
-    // "stall": 10 active conns, only a server-wide (NULL-user) row → 0
-    // attributed users. This is the silent-break signature.
     inv.record_vpn_stats(&ServerId("stall".into()), &[ud(None, 1000, 2000, 10)])
         .await
         .unwrap();
-    // "ok": same 10 active conns, but a real user IS attributed → healthy.
     inv.record_vpn_stats(
         &ServerId("ok".into()),
         &[ud(None, 1000, 2000, 10), ud(Some("alice"), 5, 5, 3)],
     )
     .await
     .unwrap();
-    // "idle": 0 attributed users, but only 2 active conns (< floor of 5)
-    // → a near-idle node must NOT be flagged.
     inv.record_vpn_stats(&ServerId("idle".into()), &[ud(None, 10, 10, 2)])
         .await
         .unwrap();
@@ -676,9 +589,6 @@ async fn attribution_stall_servers_flags_only_active_unattributed_nodes() {
     );
 }
 
-// attribution_stall_servers honours the time window: rows older than the
-// window are ignored entirely, so a node whose only (unattributed) rows
-// fall outside the window is NOT flagged.
 #[tokio::test]
 async fn attribution_stall_servers_ignores_rows_outside_window() {
     let dir = TempDir::new().unwrap();
@@ -688,8 +598,6 @@ async fn attribution_stall_servers_ignores_rows_outside_window() {
         .await
         .unwrap();
 
-    // A 0-minute window excludes the just-written row (ts <= now), so the
-    // node falls out of the candidate set.
     let stalled = inv.attribution_stall_servers(0, 5).await.unwrap();
     assert!(
         stalled.is_empty(),

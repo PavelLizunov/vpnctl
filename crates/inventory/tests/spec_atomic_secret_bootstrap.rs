@@ -1,6 +1,3 @@
-//! Approved stable-secret contract, exercised through real SQLite inventory
-//! and generic protocol declarations, with no dependency on AWG renderers.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashMap;
@@ -54,9 +51,6 @@ impl Protocol for DeclaredSecrets {
 
     fn server_secret_specs(&self) -> Vec<ServerSecretSpec> {
         if let Some(barrier) = &self.snapshot_barrier {
-            // Bootstrap reads its initial map before asking for declarations.
-            // Force both concurrent callers to hold an empty snapshot, rather
-            // than depending on a scheduler race to exercise winner rereads.
             barrier.wait();
         }
         self.specs.clone()
@@ -146,8 +140,6 @@ async fn assert_secret_audits(inv: &SqliteInventory, server: &Server, expected_k
     for row in rows {
         assert_eq!(row.actor, "system");
         assert_eq!(row.target.as_deref(), Some(server.id.0.as_str()));
-        // The exact one-field payload checks above exclude secret values,
-        // including public keys, rather than relying on a redaction heuristic.
     }
 }
 
@@ -225,9 +217,6 @@ async fn concurrent_empty_snapshots_across_pools_return_one_coherent_winner() {
     let mut second = tokio::spawn(async move {
         bootstrap_server_secrets(&other, &second_server, &second_registry).await
     });
-    // Bound BOTH handles together, including when one fails before reaching
-    // the synchronous rendezvous. Its own timeout releases blocked workers;
-    // an outer async timeout alone cannot interrupt a synchronous wait.
     let joined = tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(&mut first, &mut second)
     })
@@ -315,8 +304,6 @@ async fn audit_failure_rolls_back_the_entire_pair_or_seed() {
             .connect_with(SqliteConnectOptions::new().filename(dir.path().join("inv.db")))
             .await
             .unwrap();
-        // For pairs, reject the SECOND audit: the first key and its audit have
-        // already been inserted inside the transaction and must roll back too.
         sqlx::query(&format!(
             "CREATE TRIGGER reject_secret_audit BEFORE INSERT ON audit_log
              WHEN NEW.action = 'server.secret.set'

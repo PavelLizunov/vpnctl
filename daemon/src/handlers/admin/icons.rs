@@ -1,7 +1,5 @@
-//! Local editorial icons. Names are repository-owned Lucide symbol IDs.
 use maud::{Markup, html};
 
-/// Decorative icon; the caller keeps its visible text label.
 pub(crate) fn icon(name: &str) -> Markup {
     html! {
         svg.ed-icon width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -12,7 +10,6 @@ pub(crate) fn icon(name: &str) -> Markup {
     }
 }
 
-/// Standalone status with a localized accessible name, not color alone.
 pub(crate) fn status(
     name: &str,
     lang: crate::i18n::Locale,

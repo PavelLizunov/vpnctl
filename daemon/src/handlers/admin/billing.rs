@@ -1,5 +1,3 @@
-//! Server rental billing overview and payment tracking page.
-
 use std::collections::BTreeMap;
 
 use axum::extract::State;
@@ -32,7 +30,6 @@ pub(crate) async fn servers_billing(
     let today = Utc::now().date_naive();
     let display_cur = &settings.display_currency;
 
-    // Active markup multiplier
     let markup_bps = settings
         .markup_overrides
         .get(display_cur)
@@ -40,7 +37,6 @@ pub(crate) async fn servers_billing(
         .unwrap_or(settings.default_markup_bps);
     let markup_coeff_f64 = markup_bps as f64 / 10_000.0;
 
-    // Collect per-server data
     let mut monthly_totals_raw: BTreeMap<String, i64> = BTreeMap::new();
     let mut due_soon_count = 0usize;
     let mut overdue_count = 0usize;
@@ -180,7 +176,6 @@ pub(crate) async fn servers_billing(
             )) { (icon("info")) }
         }
 
-        // Currency Settings Toolbar
         div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0 16px; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px;" {
             form method="post" action="/admin/servers/billing/settings" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0;" {
                 input type="hidden" name="return_to" value="/admin/servers/billing" {}
@@ -225,7 +220,6 @@ pub(crate) async fn servers_billing(
             }
         }
 
-        // Rates banner indicator
         @if !rates.is_empty() {
             div style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: -10px 0 16px 4px;" {
                 (crate::i18n::tr(lang, "Active rates (EUR base): ", "Действующие курсы (база EUR): "))
@@ -239,7 +233,6 @@ pub(crate) async fn servers_billing(
             }
         }
 
-        // Financial Overview & P&L (Boosty Income vs Server Fleet Expenses)
         @if let Some(inc) = boosty_income {
             div.ed-rule style="margin: 12px 0 16px;" {}
             div.ed-headrow {
@@ -254,7 +247,6 @@ pub(crate) async fn servers_billing(
             }
 
             div.ed-fact-grid style="margin: 10px 0 20px; grid-template-columns: repeat(3, minmax(0, 1fr));" {
-                // Card 1: Boosty Income (MRR & Total Revenue)
                 div.ed-fact {
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                         (crate::i18n::tr(lang, "Boosty Income (MRR)", "Доход Boosty (MRR)"))
@@ -286,7 +278,6 @@ pub(crate) async fn servers_billing(
                     }
                 }
 
-                // Card 2: Server Expenses (Monthly & Total Spend)
                 div.ed-fact {
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                         (crate::i18n::tr(lang, "Server Expenses", "Расходы на серверы"))
@@ -312,7 +303,6 @@ pub(crate) async fn servers_billing(
                     }
                 }
 
-                // Card 3: Net Margin / Monthly Run-rate
                 div.ed-fact {
                     div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                         (crate::i18n::tr(lang, "Net Margin (P&L)", "Чистая прибыль (P&L)"))
@@ -396,9 +386,7 @@ pub(crate) async fn servers_billing(
 
         div.ed-rule style="margin: 12px 0 16px;" {}
 
-        // Summary KPI Fact Grid
         div.ed-fact-grid style="margin: 14px 0 20px;" {
-            // Card 1: Next due
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "Next payment", "Ближайший платёж"))
@@ -425,7 +413,6 @@ pub(crate) async fn servers_billing(
                 }
             }
 
-            // Card 2: Estimated monthly / annual budget in display currency
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "Budget (Month / Year)", "Бюджет (месяц / год)"))
@@ -473,7 +460,6 @@ pub(crate) async fn servers_billing(
                 }
             }
 
-            // Card 3: Total spend to date (cumulative historical payments)
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "Total Spend (To Date)", "Всего выплачено (Total Spend)"))
@@ -496,7 +482,6 @@ pub(crate) async fn servers_billing(
                 }
             }
 
-            // Card 4: Actionable attention
             div.ed-fact {
                 div style="font-family: var(--mono); font-size: 10px; color: var(--mute); letter-spacing: 0.08em; text-transform: uppercase;" {
                     (crate::i18n::tr(lang, "Attention status", "Требуют внимания"))
@@ -524,7 +509,6 @@ pub(crate) async fn servers_billing(
             }
         }
 
-        // Table
         div.ed-grid-wrap {
             table.ed-grid {
                 thead {
@@ -657,7 +641,6 @@ pub(crate) async fn servers_billing(
             }
         }
 
-        // Section: Edit / configure server billing
         section style="margin-top: 32px; border-top: 1px solid var(--rule); padding-top: 20px;" {
             div.ed-art-eyebrow {
                 (crate::i18n::tr(lang, "Configure server rental parameters", "Настройка параметров аренды сервера"))

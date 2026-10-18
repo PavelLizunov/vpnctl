@@ -1,5 +1,3 @@
-//! Process-local scheduling only. Applied/pending truth remains in inventory's
-//! revision-checked deploy audit, including after a daemon restart.
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -24,25 +22,18 @@ pub enum AutodeployPhase {
     Failed,
 }
 
-/// A sanitized operation hint, NOT deployment/readiness evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutodeployStatus {
     pub phase: AutodeployPhase,
     pub message: &'static str,
 }
 
-/// Read a transient automatic-operation hint. `None` means unobserved, never
-/// "applied": use the canonical inventory audit/pending query for that claim.
-/// Successes disappear immediately; failures expire after 15 minutes and the
-/// oldest are evicted above 256. Active workers are never evicted.
 pub fn autodeploy_status(inv: &SqliteInventory, server_id: &str) -> Option<AutodeployStatus> {
     coordinator().status(&coordination_key(inv, server_id))
 }
 
 fn coordination_key(inv: &SqliteInventory, server_id: &str) -> String {
     let identity = inv.coordination_identity();
-    // Length prefix makes (inventory, server) unambiguous even with colons or
-    // arbitrary path characters. Never expose this internal key in UI/logs.
     format!("{}:{identity}{server_id}", identity.len())
 }
 
@@ -109,8 +100,6 @@ impl Coordinator {
                 .finished
                 .is_none_or(|at| now.duration_since(at) < FAILURE_TTL)
         });
-        // ponytail: a tiny capped terminal cache; active entries scale only with
-        // requested servers, never with the number of mutation requests.
         while entries
             .values()
             .filter(|entry| entry.finished.is_some())
@@ -136,8 +125,6 @@ impl Coordinator {
         entries.get(id).map(|entry| entry.status.clone())
     }
 
-    /// Registration and retirement share this mutex: a racing request either
-    /// dirties the existing worker or installs its successor, never disappears.
     fn request(self: &Arc<Self>, id: String) -> (Completion, Option<Worker>) {
         let mut entries = self.entries();
         Self::cleanup(&mut entries, Instant::now());
@@ -191,8 +178,6 @@ impl Worker {
         }
     }
 
-    /// Returns true only for a bounded followup. Completion is published under
-    /// the same mutex as removal, so waiters cannot observe a lost retirement.
     fn finish(&self, result: Outcome, pass: usize) -> bool {
         let mut entries = self.coordinator.entries();
         let Some(entry) = entries.get_mut(&self.id) else {
@@ -330,8 +315,6 @@ mod tests;
 #[path = "autodeploy_pipeline_tests.rs"]
 mod pipeline_tests;
 
-/// Register all requests NOW, before returning the completion future. Dropping
-/// the future does not cancel deployment; concurrent batches share workers.
 pub fn queue_servers_redeploy(
     servers: Vec<Server>,
     inv: &SqliteInventory,

@@ -9,18 +9,12 @@ use vpnctld::router;
 
 use crate::common::*;
 
-/// User-detail page on a populated inventory: renders the QR (inline
-/// SVG), shows the masked sub-token, lists granted servers, and renders
-/// per-protocol share links — NEVER echoing the full sub_token.
 #[tokio::test]
 async fn admin_user_detail_renders_qr_grants_and_share_links() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
 
-    // We need protocol secrets for a share-link to render. Seed VLESS
-    // secrets on s0 only; s1 stays unconfigured to exercise the
-    // skip-on-missing-secrets path.
     s.inv
         .set_server_secret(
             &ServerId("s0".into()),
@@ -65,29 +59,21 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&bytes).unwrap();
 
-    // The QR is an inline <svg>.
     assert!(html.contains("<svg "), "QR svg missing");
-    // The QR is wrapped in a paper card (border-rule), not naked.
     assert!(
         html.contains("border: 1px solid var(--rule)"),
         "QR card border styling missing"
     );
-    // The sub URL uses the Host header verbatim.
     let expected_url = format!("http://192.168.0.236:18402/sub/{token}");
     assert!(
         html.contains(&expected_url),
         "sub URL should use the Host header (expected {expected_url})"
     );
-    // BUT the masked sub-token preview is also rendered separately, and
-    // the FULL token must not appear outside the URL form.
     let occurrences = html.matches(token.as_str()).count();
     assert_eq!(
         occurrences, 1,
         "sub_token should appear exactly once (inside the sub URL), got {occurrences}"
     );
-    // ui-audit §4 — the granted-server grid lives on the access tab
-    // (lists EVERY granted server, incl. s1 which has no secrets); the
-    // rendered share-links live on the delivery tab (only s0 renders).
     let fetch_tab = |uri: &'static str| {
         let app = app.clone();
         async move {
@@ -106,12 +92,9 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
         }
     };
     let html_access = fetch_tab("/admin/users/u0/access").await;
-    // Both granted servers appear in the access grid.
     for id in ["s0", "s1"] {
         assert!(html_access.contains(id), "granted server {id} missing");
     }
-    // At least one share-link rendered (s0 has VLESS secrets); s1 should
-    // be skipped silently (its share_link will fail on missing secrets).
     let html_delivery = fetch_tab("/admin/users/u0/delivery").await;
     assert!(
         html_delivery.contains("vless://") || html_delivery.contains("Per-protocol share links"),
@@ -119,13 +102,6 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
         &html_delivery[..html_delivery.len().min(800)]
     );
 
-    // Regression for the 2026-05-19 QR-jump bug Pavel screenshotted:
-    // the inline <style> that forces all QR SVGs to a uniform 220×220
-    // display size MUST be present AND its selector must NOT be
-    // HTML-escaped. Pre-fix the selector was `.vpnctl-qr-frame > svg`
-    // and Maud escaped `>` to `&gt;` → invalid selector → CSS never
-    // applied → QR cards stayed at native SVG dimensions (short URL
-    // → 225 px, long wireguard:// → 300+ px, visible jumps).
     assert!(
         html.contains("vpnctl-qr-frame"),
         "QR frame wrapper class must be present so the inline style can target it"
@@ -142,18 +118,12 @@ async fn admin_user_detail_renders_qr_grants_and_share_links() {
     );
 }
 
-/// Phase C-2 (writes) will add a `clear_sub_token` / `regenerate_sub_token`
-/// pair that lets us write a real assertion here. For now this test
-/// just confirms the present-token branch keeps working — see also the
-/// handler-side comment marking the dead branch as defensive.
 #[tokio::test]
 async fn admin_user_detail_handles_missing_sub_token() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
 
-    // Confirm the precondition: open() backfilled a token, so the
-    // None branch can't be reached without bypassing the public API.
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
     assert!(
         u0.sub_token.is_some(),
@@ -176,7 +146,6 @@ async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned(
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    // Pin a ninitux device_id on the user.
     s.inv
         .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
         .await
@@ -191,13 +160,10 @@ async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned(
         "ninitux production URL must be rendered as the primary subscription URL — \
          expected substring: {expected_ninitux}"
     );
-    // device_id is shown verbatim (it's not a secret — it's a device fingerprint).
     assert!(
         html.contains(TEST_NINITUX_DEVICE_ID),
         "vpn_router_device_id must be displayed in the Subscription section"
     );
-    // The LAN URL must still appear (operator might need it for debug),
-    // but inside a <details> collapsible — not as the primary block.
     assert!(
         html.contains("legacy /sub/&lt;token&gt; fallback")
             || html.contains("legacy /sub/<token> fallback"),
@@ -217,13 +183,6 @@ async fn admin_user_detail_qr_encodes_ninitux_url_not_lan_url_when_device_id_pin
 
     let html = fetch_html(router(s), "/admin/users/u0/overview").await;
 
-    // QR SVG embeds the URL via the qrcode crate. The textContent isn't
-    // in the SVG, but the URL appears in the <details> form action OR
-    // as an `aria-label` / `title` if rendered. The reliable invariant
-    // we can pin: the primary QR card appears BEFORE the <details>
-    // legacy fallback, AND the bytes of the ninitux URL appear BEFORE
-    // the bytes of the LAN URL in the HTML stream. That ordering proves
-    // the ninitux URL is the primary (QR-encoded) one, not the LAN URL.
     let n_pos = html
         .find("https://ninitux.com/api/v1/app/config/")
         .expect("ninitux URL must appear");
@@ -242,50 +201,27 @@ async fn admin_user_detail_falls_back_to_lan_url_when_no_device_id() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
-    // u0 has NO vpn_router_device_id pinned — confirm fallback.
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
     assert!(u0.vpn_router_device_id.is_none());
 
     let html = fetch_html(router(s), "/admin/users/u0/overview").await;
-    // Ninitux URL MUST NOT appear at all — no device_id → no production URL.
     assert!(
         !html.contains("https://ninitux.com/api/v1/app/config/"),
         "no device_id pinned → ninitux URL must NOT render"
     );
-    // The empty-state copy must quote the CLI command operator runs to fix this,
-    // per CLAUDE.md \"Every empty state must quote a literal CLI command\".
     assert!(
         html.contains("scripts/import_from_subscription_server.py"),
         "empty-state must point operator at the import script to pin a device_id"
     );
-    // Subscription section heading present.
     assert!(html.contains("Subscription"));
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Phase C-3 — write handlers (Users) — first chunk: regenerate sub-token
-//
-//  These tests exercise the full mutation contract from §\"Phase C-3 write
-//  handlers\" in `daemon/src/handlers/admin.rs`:
-//   1. validate target exists → 404 if not
-//   2. perform mutation
-//   3. write audit row (best-effort; warn-log on failure)
-//   4. redirect 303 to the relevant page
-//
-//  The detail page button is also pinned: it must POST to the right URL
-//  so the form keeps wiring together as separate edits land.
-// ────────────────────────────────────────────────────────────────────────
-
-/// Happy path: POST regenerate → 303 to /admin/users/{id}; the user's
-/// sub_token in the inventory is different from before; an audit row
-/// `user.sub_token.regen` lands with target=user-id, actor=admin.
 #[tokio::test]
 async fn admin_user_regen_sub_token_mutates_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
 
-    // Snapshot the original token so we can assert it changed.
     let before = s
         .inv
         .get_user(&UserId("u0".into()))
@@ -320,7 +256,6 @@ async fn admin_user_regen_sub_token_mutates_and_audits() {
         "redirect target must be the user-detail page"
     );
 
-    // The mutation actually happened.
     let after = s
         .inv
         .get_user(&UserId("u0".into()))
@@ -334,7 +269,6 @@ async fn admin_user_regen_sub_token_mutates_and_audits() {
         "sub_token must be different after regenerate"
     );
 
-    // The audit row landed.
     let entries = s.inv.recent_audit(10).await.unwrap();
     let regen = entries
         .iter()
@@ -348,10 +282,6 @@ async fn admin_user_regen_sub_token_mutates_and_audits() {
     );
 }
 
-/// Unknown user path: POST regenerate against an id that doesn't exist
-/// must return the canonical 404 + `vpnctl admin: no such user '<id>'`
-/// body. Without the explicit existence-check this would surface as a
-/// generic 500 from the inventory's `rows_affected == 0` path.
 #[tokio::test]
 async fn admin_user_regen_sub_token_404_for_unknown_user() {
     let dir = TempDir::new().unwrap();
@@ -371,9 +301,6 @@ async fn admin_user_regen_sub_token_404_for_unknown_user() {
     );
 }
 
-/// On the user-detail page, the rotate-button form must POST to the
-/// canonical regenerate URL — keeps the markup in sync with the route
-/// after either side is touched independently.
 #[tokio::test]
 async fn admin_user_detail_renders_rotate_button() {
     let dir = TempDir::new().unwrap();
@@ -386,19 +313,12 @@ async fn admin_user_detail_renders_rotate_button() {
         html.contains(r#"action="/admin/users/u0/sub-token/regenerate""#),
         "rotate-button form must POST to /admin/users/u0/sub-token/regenerate"
     );
-    // Wording contract: the button text is \"rotate sub-token\" — short,
-    // mono, fits the editorial voice. Pinned so a casual UI-rewrite
-    // can't accidentally rename it to \"Refresh\" or \"New token\".
     assert!(
         html.contains(">rotate sub-token<"),
         "rotate-button label drifted from 'rotate sub-token'"
     );
 }
 
-/// After a successful regenerate, GET on /admin/users/u0 renders the
-/// NEW token (full token appears EXACTLY ONCE — only inside the
-/// canonical sub URL), not the previous one. Validates the
-/// \"redirect-to-canonical-page\" pattern end-to-end.
 #[tokio::test]
 async fn admin_user_detail_after_regen_shows_new_token() {
     let dir = TempDir::new().unwrap();
@@ -413,7 +333,6 @@ async fn admin_user_detail_after_regen_shows_new_token() {
         .sub_token
         .unwrap();
 
-    // Trigger regenerate.
     let app = router(s.clone());
     app.clone()
         .oneshot(
@@ -451,13 +370,10 @@ async fn admin_user_detail_after_regen_shows_new_token() {
 
 #[tokio::test]
 async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea() {
-    // Need: a user with a sub_token AND wireguard keypair so the
-    // distribution panel renders (Flow A + Flow B both visible).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
 
-    // Seed a WG-capable server so Flow B is populated too.
     inv.add_server(&Server {
         id: ServerId("wg1".into()),
         address: "203.0.113.7".into(),
@@ -472,7 +388,6 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
     })
     .await
     .unwrap();
-    // Server-side WG keypair so the share_link can render.
     inv.set_server_secret(
         &ServerId("wg1".into()),
         "wireguard.server_public_key",
@@ -506,9 +421,6 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
     let app = router(s);
     let html = fetch_html(app, "/admin/users/flowtest/delivery").await;
 
-    // Flow A card MUST carry the click-to-select marker that admin.js
-    // wires up (the old inline `onclick` was CSP-dead — polish pass
-    // 2026-07-10 moved it to a data-attribute + delegated listener).
     assert!(
         html.contains("data-select-on-click"),
         "share_link_card textarea must carry data-select-on-click for the admin.js wiring"
@@ -517,33 +429,16 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
         !html.contains("onclick="),
         "no inline event handlers — the CSP refuses them silently"
     );
-    // The sub URL goes inside a <textarea readonly>. The user-detail
-    // page renders the sub-token TWICE: once in the Subscription
-    // block at the top (as plain text), once inside the Flow A
-    // card's textarea below. We want to assert the SECOND occurrence
-    // is the one wrapped in a textarea — use `rfind` to walk back
-    // from the last occurrence.
-    //
-    // This catches a regression where Flow A loses its textarea
-    // but Flow B still has 2+ (operator with multiple WG grants
-    // would push the count() ≥ 2 assertion through even with Flow
-    // A broken).
     let token_substr = "/sub/subtok-flowtest-abc123";
     let token_at = html
         .rfind(token_substr)
         .unwrap_or_else(|| panic!("sub-token substring missing from page: {token_substr}"));
-    // Walk back up to 800 chars and confirm a `<textarea` tag
-    // opens before the token — proves the LAST occurrence (i.e.
-    // the Flow A card) lives INSIDE a textarea. The window is
-    // wide enough to clear the textarea's inline style string
-    // (~500 chars).
     let window_start = token_at.saturating_sub(800);
     let before = &html[window_start..token_at];
     assert!(
         before.contains("<textarea readonly"),
         "Flow A sub-token must appear inside a `<textarea readonly>` block — got window before token: {before:?}"
     );
-    // Flow A footnote stays.
     assert!(
         html.contains("Sing-box / Hiddify pulls the full config"),
         "Flow A footnote regressed"
@@ -552,9 +447,6 @@ async fn admin_user_detail_flow_a_card_uses_share_link_card_with_copy_textarea()
 
 #[tokio::test]
 async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea() {
-    // Same seeding as the previous test — we want the FULL
-    // wireguard:// link to appear inside a readonly textarea, not
-    // just the masked preview.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -605,30 +497,15 @@ async fn admin_user_detail_flow_b_card_includes_full_wireguard_link_in_textarea(
     let app = router(s);
     let html = fetch_html(app, "/admin/users/flowtest2/delivery").await;
 
-    // The wireguard:// link must appear in full inside the page —
-    // this is the operator's only way to copy the conf to AmneziaVPN.
-    // Don't check the exact URL (build-host dependent) — assert that
-    // the scheme prefix shows up inside a textarea tag.
     assert!(
         html.contains("wireguard://"),
         "Flow B must include the wireguard:// link verbatim somewhere on the page"
     );
-    // The new copy-hint text in the Flow B footnote.
     assert!(
         html.contains("Click the box above to select-all + copy"),
         "Flow B footnote must teach the click-to-copy interaction"
     );
 }
-
-// ────────────────────────────────────────────────────────────────────────
-// 2026-05-17 — AmneziaVPN-native Flow C + universal .conf download.
-//
-// Pre-2026-05-17 the user-detail page claimed `wireguard://?conf=...`
-// worked in AmneziaVPN. Pavel hit ErrorCode 900 («нет контейнеров»):
-// AmneziaVPN actually wants `vpn://<base64url(qCompress(json))>`,
-// a different URI scheme entirely. Fix is a NEW Flow C card that
-// emits that link, plus a `.conf` download as a universal fallback.
-// ────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
@@ -682,8 +559,6 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
     let app = router(s);
     let html = fetch_html(app, "/admin/users/amztest/delivery").await;
 
-    // Flow C label is present even when empty; with a granted WG
-    // server + secrets it now has a real vpn:// link.
     assert!(
         html.contains("Flow C — AmneziaVPN"),
         "Flow C label missing on user-detail"
@@ -692,7 +567,6 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
         html.contains("vpn://"),
         "Flow C card must include a `vpn://<...>` link for AmneziaVPN"
     );
-    // The Flow C link must be inside a textarea like Flow B.
     let vpn_at = html.find("vpn://").expect("vpn:// substring missing");
     let window_start = vpn_at.saturating_sub(800);
     let before = &html[window_start..vpn_at];
@@ -702,10 +576,6 @@ async fn admin_user_detail_flow_c_card_emits_vpn_scheme_link() {
     );
 }
 
-/// Flow F — AmneziaWG `awg://` card for the operator's sing-box-lx app.
-/// Renders only for a granted server running the `amneziawg` kernel
-/// (obfs minted), and the link carries the per-server obfs (with s3=s4=0
-/// since vpnctl serves AWG 1.x) + the server-generated client key.
 #[tokio::test]
 async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
     let dir = TempDir::new().unwrap();
@@ -766,8 +636,6 @@ async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
 
     let app = router(s);
     let html = fetch_html(app, "/admin/users/awgtest/delivery").await;
-    // Dash-agnostic label match (the card eyebrow is \"Flow F — AmneziaWG
-    // (awg://)\" with an em-dash).
     assert!(
         html.contains("AmneziaWG (awg://)"),
         "Flow F AmneziaWG card label missing"
@@ -776,10 +644,6 @@ async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
         html.contains("awg://"),
         "Flow F card must include an awg:// link"
     );
-    // The link carries the per-server obfs (substrings survive maud's
-    // `&` → `&amp;` query escaping) + the always-zero s3/s4 (1.x server).
-    // Use rfind: the FIRST \"awg://\" is the label «(awg://)»; the actual
-    // link is in the textarea after the QR.
     let at = html.rfind("awg://").expect("awg:// link missing");
     let win = &html[at..(at + 700).min(html.len())];
     assert!(
@@ -792,8 +656,6 @@ async fn admin_user_detail_flow_f_card_emits_awg_scheme_link() {
     );
 }
 
-/// A WG server on the sing-box kernel (no amneziawg obfs minted) must
-/// NOT show Flow F — the awg:// link is meaningless without obfs.
 #[tokio::test]
 async fn admin_user_detail_no_flow_f_without_amneziawg_obfs() {
     let dir = TempDir::new().unwrap();
@@ -813,7 +675,6 @@ async fn admin_user_detail_no_flow_f_without_amneziawg_obfs() {
     })
     .await
     .unwrap();
-    // server keys but NO amneziawg.* obfs.
     inv.set_server_secret(
         &ServerId("sbwg".into()),
         "wireguard.server_public_key",
@@ -847,10 +708,6 @@ async fn admin_user_detail_no_flow_f_without_amneziawg_obfs() {
 
 #[tokio::test]
 async fn admin_user_detail_flow_b_links_to_conf_download() {
-    // Operator should see a `.conf` link next to each Flow B server
-    // (universal fallback that imports into AmneziaVPN via its
-    // \"File with settings\" picker even if the user can't paste
-    // the vpn:// link directly).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -910,8 +767,6 @@ async fn admin_user_detail_flow_b_links_to_conf_download() {
     );
 }
 
-/// Design v2 4a — Delivery opens with the compact subscription recap
-/// (URL + Overview QR link + legacy /sub fallback note).
 #[tokio::test]
 async fn v2_user_delivery_renders_subscription_recap() {
     let dir = TempDir::new().unwrap();
@@ -978,7 +833,6 @@ async fn admin_delivery_share_links_empty_when_user_disabled() {
         .await
         .unwrap();
 
-    // Disable the user.
     s.inv
         .set_user_disabled(&UserId("u0".into()), true)
         .await
@@ -1028,7 +882,6 @@ async fn admin_delivery_share_links_skip_auto_suppressed_server() {
             .unwrap();
     }
 
-    // Auto-suppress s0: enable opt-in AND set suppressed_at.
     s.inv
         .set_server_auto_suppress(&ServerId("s0".into()), true)
         .await
@@ -1060,13 +913,11 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
 
     s.inv.mint_tuic_password_if_absent(&uid).await.unwrap();
 
-    // Add tuic-v5 protocol to s0.
     s.inv
         .add_server_protocol(&sid, &ProtocolId("tuic-v5".into()))
         .await
         .unwrap();
 
-    // Set vless secrets
     s.inv
         .set_server_secret(&sid, "vless.private_key", "QGZ8K-private-key-base64==")
         .await
@@ -1084,12 +935,10 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
         .await
         .unwrap();
 
-    // Before hiding: both vless+reality and tuic-v5 render.
     let html_before = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
     assert!(html_before.contains("s0 · vless+reality"));
     assert!(html_before.contains("s0 · tuic-v5"));
 
-    // Case 1: Hide vless+reality on s0 for everyone.
     s.inv
         .set_server_protocol_hidden(&sid, &ProtocolId("vless+reality".into()), true)
         .await
@@ -1105,7 +954,6 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
         "unhidden protocol tuic-v5 must render"
     );
 
-    // Case 2: Disable tuic-v5 for user u0 on s0 via grant protocol override.
     s.inv
         .set_grant_protocol_override(&uid, &sid, &ProtocolId("tuic-v5".into()), true)
         .await
@@ -1185,12 +1033,10 @@ async fn admin_delivery_amnezia_and_awg_respect_auto_suppress_hidden_and_user_di
 
     inv.grant(&uid, &sid).await.unwrap();
 
-    // Initially: AmneziaVPN (vpn://) and AmneziaWG (awg://) render.
     let html_init = fetch_html(router(s.clone()), "/admin/users/awguser/delivery").await;
     assert!(html_init.contains("vpn://"));
     assert!(html_init.contains("awg://"));
 
-    // Case 1: Hide wireguard protocol on the server.
     inv.set_server_protocol_hidden(&sid, &ProtocolId("wireguard".into()), true)
         .await
         .unwrap();
@@ -1204,7 +1050,6 @@ async fn admin_delivery_amnezia_and_awg_respect_auto_suppress_hidden_and_user_di
         "hidden wireguard must not emit AmneziaWG awg:// link"
     );
 
-    // Case 2: Unhide, but set per-user-disabled override on wireguard.
     inv.set_server_protocol_hidden(&sid, &ProtocolId("wireguard".into()), false)
         .await
         .unwrap();
@@ -1221,7 +1066,6 @@ async fn admin_delivery_amnezia_and_awg_respect_auto_suppress_hidden_and_user_di
         "user-disabled wireguard must not emit AmneziaWG awg:// link"
     );
 
-    // Case 3: Re-enable user override, but auto-suppress server.
     inv.set_grant_protocol_override(&uid, &sid, &ProtocolId("wireguard".into()), false)
         .await
         .unwrap();

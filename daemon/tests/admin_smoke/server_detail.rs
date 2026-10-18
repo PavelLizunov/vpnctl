@@ -1,5 +1,3 @@
-//! Admin UI server detail integration smoke tests partitioned by domain.
-
 #[path = "server_detail/drift_traffic.rs"]
 mod drift_traffic;
 #[path = "server_detail/kernels.rs"]

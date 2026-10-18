@@ -2,10 +2,6 @@ use serde_json::Value;
 
 use super::types::{BashInventoryEnv, BashSingboxData, BashTuicUser, BashVlessUser};
 
-/// Parse a bash `inventory/<IP>.env` file. Format is a tiny K=V dialect
-/// — `KEY=value`, `# comments`, blank lines. Only the 5 keys vpnctl
-/// migration needs are recognised; unknown keys are tolerated (operator
-/// might have added their own annotations).
 pub fn parse_bash_inventory_env(s: &str) -> Result<BashInventoryEnv, String> {
     let mut server_ip: Option<String> = None;
     let mut ssh_port: u16 = 22;
@@ -49,14 +45,6 @@ pub fn parse_bash_inventory_env(s: &str) -> Result<BashInventoryEnv, String> {
     })
 }
 
-/// Extract VLESS + TUIC users from a parsed sing-box `config.json` +
-/// the REALITY private key from `keys.env` text. The TWO files are
-/// read together because the migration plan needs both to make
-/// decisions (e.g. emit `vless.private_key` only if we know the
-/// public half came from this server).
-///
-/// `keys_env_text` is the raw `keys.env` file (KEY=VALUE lines, same
-/// dialect as `inventory/<IP>.env`).
 pub fn parse_bash_singbox(
     config_json: &str,
     keys_env_text: &str,
@@ -68,9 +56,6 @@ pub fn parse_bash_singbox(
         .and_then(Value::as_array)
         .ok_or("config.json has no `inbounds` array")?;
 
-    // Find FIRST `vless-reality-*` inbound (modern bash adds a
-    // secondary `vless-reality-2083` for NAT-edge clients — we
-    // ignore it; the planner emits a warning if it sees one).
     let primary_vless = inbounds
         .iter()
         .filter(|i| {
@@ -107,7 +92,6 @@ pub fn parse_bash_singbox(
         }
     }
 
-    // TUIC inbound. The tag is `tuic-in` in every modern deploy.
     let tuic_inbound = inbounds
         .iter()
         .find(|i| i.get("type").and_then(Value::as_str) == Some("tuic"));
@@ -136,8 +120,6 @@ pub fn parse_bash_singbox(
         }
     }
 
-    // Pull REALITY_PRIVATE out of keys.env. Same dialect as the
-    // inventory env file — KEY=VAL lines with comments.
     let mut reality_private: Option<String> = None;
     for raw in keys_env_text.lines() {
         let l = raw.trim();

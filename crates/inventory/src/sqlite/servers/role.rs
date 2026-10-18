@@ -3,7 +3,6 @@ use sqlx::Row;
 use vpnctl_core::{Server, ServerId};
 
 impl SqliteInventory {
-    /// Get the role of a server (`vpn-exit` vs `workload-only`).
     pub async fn get_server_role(&self, sid: &ServerId) -> Result<ServerRole> {
         let row: Option<(String,)> = sqlx::query_as("SELECT role FROM servers WHERE id = ?1")
             .bind(&sid.0)
@@ -19,18 +18,10 @@ impl SqliteInventory {
         }
     }
 
-    /// Alias for [`get_server_role`].
     pub async fn get_role(&self, sid: &ServerId) -> Result<ServerRole> {
         self.get_server_role(sid).await
     }
 
-    /// Set a server's role.
-    ///
-    /// Audit-on-actual-mutation: writes an audit row (`server.role.set`)
-    /// only when the stored role value changes (idempotent re-saves are silent).
-    ///
-    /// Invariant: Role transition to `workload-only` rejects servers with
-    /// existing user grants or active client detour relationships.
     pub async fn set_server_role(&self, sid: &ServerId, role: ServerRole) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
@@ -109,13 +100,10 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Alias for [`set_server_role`].
     pub async fn set_role(&self, sid: &ServerId, role: ServerRole) -> Result<()> {
         self.set_server_role(sid, role).await
     }
 
-    /// Set or clear a server's one-hop management route.
-    /// Validation is fail-closed and the audit row is written only on change.
     pub async fn set_server_jump_via(
         &self,
         sid: &ServerId,
@@ -157,7 +145,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Atomically update role and one-hop route for the Web form.
     pub async fn set_server_routing_policy_as(
         &self,
         actor: &str,
@@ -230,7 +217,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// List all fleet servers (servers with role `vpn-exit`).
     pub async fn list_fleet_servers(&self) -> Result<Vec<Server>> {
         let rows = sqlx::query("SELECT id FROM servers WHERE role = 'vpn-exit' ORDER BY id")
             .fetch_all(&self.pool)
@@ -243,7 +229,6 @@ impl SqliteInventory {
         self.get_servers_batch(&sids).await
     }
 
-    /// Get the client detour entry server for a target server, if set.
     pub async fn client_detour_via(&self, server: &ServerId) -> Result<Option<ServerId>> {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT client_detour_via FROM servers WHERE id = ?1")
@@ -257,10 +242,6 @@ impl SqliteInventory {
         }
     }
 
-    /// Set or clear a server's client detour entry server.
-    ///
-    /// Audit-on-actual-mutation: writes an audit row (`server.client_detour.set`)
-    /// only when the stored detour value changes.
     pub async fn set_client_detour_via_as(
         &self,
         actor: &str,

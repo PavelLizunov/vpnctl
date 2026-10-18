@@ -1,17 +1,3 @@
-//! Spec for `SqliteInventory::servers_pending_deploy_for_user` —
-//! backs the «⚠ Config not yet deployed to: X, Y» banner on
-//! /admin/users/<id>. Written from spec only — impl NOT consulted.
-//!
-//! Contract: returns the subset of `granted_server_ids` whose latest
-//! `server.deploy` audit row is OLDER than the user's latest
-//! mutation row (user.add / user.grant / user.set_vpn_router_device_id
-//! / user.disable / user.enable). If a server has NO deploy row at all
-//! but the user has any mutation, the server is pending.
-//!
-//! 2026-07-10 refinement: grant/revoke rows carrying a
-//! `payload.server` count only against that server; payload-less rows
-//! and server-agnostic mutations count against every granted server.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -85,9 +71,6 @@ async fn back_to_back_mutation_after_deploy_is_pending_without_clock_delay() {
 
 #[tokio::test]
 async fn user_with_zero_audit_rows_returns_empty() {
-    // Legacy import: user exists in `users` but no audit_log entry.
-    // We refuse to flag — operator never «changed» the user via the
-    // tracked actions, so we can't compare against a deploy ts.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("legacy", 1)).await.unwrap();
@@ -95,10 +78,6 @@ async fn user_with_zero_audit_rows_returns_empty() {
     inv.grant(&UserId("legacy".into()), &ServerId("alpha".into()))
         .await
         .unwrap();
-    // `add_user` and `grant` are inventory mutations but don't write
-    // audit rows on their own — the audit row is the CALLER's
-    // responsibility (CLI / web handler). Here we skip writing one,
-    // simulating a legacy user.
     let got = inv
         .servers_pending_deploy_for_user(&UserId("legacy".into()), &[ServerId("alpha".into())])
         .await
@@ -133,11 +112,9 @@ async fn server_deployed_after_user_mutation_is_not_pending() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("bob", 3)).await.unwrap();
-    // 1. user mutation first
     inv.audit("admin", "user.add", Some("bob"), None)
         .await
         .unwrap();
-    // 2. deploy second — closes the gap.
     inv.audit("admin", "server.deploy", Some("beta"), None)
         .await
         .unwrap();
@@ -156,13 +133,10 @@ async fn server_deployed_before_user_mutation_is_pending() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("carol", 4)).await.unwrap();
-    // 1. deploy first (server-init time).
     inv.audit("admin", "server.deploy", Some("gamma"), None)
         .await
         .unwrap();
-    // tiny delay so the next ts is strictly greater
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // 2. user mutation later — server out-of-date now.
     inv.audit("admin", "user.add", Some("carol"), None)
         .await
         .unwrap();
@@ -209,8 +183,6 @@ async fn mixed_servers_returns_only_the_pending_ones() {
 
 #[tokio::test]
 async fn enable_disable_count_as_user_mutations() {
-    // `user.enable` / `user.disable` flip the sub-render filter
-    // (B1.user). They must invalidate the deployed config too.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("eve", 6)).await.unwrap();
@@ -237,21 +209,15 @@ async fn enable_disable_count_as_user_mutations() {
 
 #[tokio::test]
 async fn server_side_detector_tracks_membership_vs_deploy() {
-    // Server-side counterpart (audit 2026-06-10): after a REVOKE the
-    // per-user detector can't flag the revoked server (it left the
-    // user's granted list) — `server_pending_deploy` keys on the
-    // canonical rows' `payload.server` field instead.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // No membership rows at all → not pending (quiet server).
     assert!(
         !inv.server_pending_deploy(&ServerId("srv".into()))
             .await
             .unwrap()
     );
 
-    // Grant row, no deploy ever → pending.
     inv.audit(
         "admin",
         "user.grant",
@@ -266,7 +232,6 @@ async fn server_side_detector_tracks_membership_vs_deploy() {
             .unwrap()
     );
 
-    // Deploy after the grant → cleared.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit("admin", "server.deploy", Some("srv"), None)
         .await
@@ -277,8 +242,6 @@ async fn server_side_detector_tracks_membership_vs_deploy() {
             .unwrap()
     );
 
-    // REVOKE after the deploy → pending again (the dangerous case:
-    // the node still accepts the revoked UUID).
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit(
         "admin",
@@ -294,19 +257,12 @@ async fn server_side_detector_tracks_membership_vs_deploy() {
             .unwrap()
     );
 
-    // Mutations addressed at a DIFFERENT server must not leak in.
     assert!(
         !inv.server_pending_deploy(&ServerId("other".into()))
             .await
             .unwrap()
     );
 }
-
-// ── Only SUCCESSFUL deploys count as a baseline (review 2026-07-08) ────
-//
-// Failed and skipped attempts use distinct audit actions. Only canonical
-// `server.deploy` is an applied-state baseline; attempts that never updated
-// the node must not clear the pending banner.
 
 #[tokio::test]
 async fn failed_deploy_row_does_not_clear_user_side_pending() {
@@ -317,7 +273,6 @@ async fn failed_deploy_row_does_not_clear_user_side_pending() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // Deploy attempt AFTER the grant, but it failed (ssh_errors set).
     inv.audit(
         "admin",
         "server.deploy.failed",
@@ -339,7 +294,6 @@ async fn failed_deploy_row_does_not_clear_user_side_pending() {
         "a FAILED deploy must not count as a baseline — server stays pending"
     );
 
-    // A later SUCCESSFUL deploy (empty ssh_errors, no skip) clears it.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit(
         "admin",
@@ -368,8 +322,6 @@ async fn skipped_deploy_row_does_not_clear_user_side_pending() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // Skip-reason deploy (e.g. deploy key absent) — nothing reached
-    // the node.
     inv.audit(
         "admin",
         "server.deploy.skipped",
@@ -405,8 +357,6 @@ async fn failed_deploy_row_does_not_clear_server_side_pending() {
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // Auto-deploy after the revoke got refused (e.g. DG-1 guard) —
-    // the revoked UUID is still live on the node.
     inv.audit(
         "admin",
         "server.deploy.failed",
@@ -425,7 +375,6 @@ async fn failed_deploy_row_does_not_clear_server_side_pending() {
         "failed deploy must leave the server-side pending flag up"
     );
 
-    // Successful deploy clears it.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit(
         "admin",
@@ -444,9 +393,6 @@ async fn failed_deploy_row_does_not_clear_server_side_pending() {
 
 #[tokio::test]
 async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
-    // wizard-bootstrap success rows + pre-2026-07 baselines carry no
-    // ssh_errors/ssh_skip_reason fields (or no payload at all) — they
-    // were only ever written on success and must keep clearing pending.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("henry", 9)).await.unwrap();
@@ -454,7 +400,6 @@ async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // Payload-less row (test/CLI baseline).
     inv.audit("admin", "server.deploy", Some("srv"), None)
         .await
         .unwrap();
@@ -467,7 +412,6 @@ async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
         "payload-less baseline must count as success"
     );
 
-    // Wizard-bootstrap-shaped row (payload without the ssh_* fields).
     inv.add_user(&user("iris", 10)).await.unwrap();
     inv.audit("admin", "user.grant", Some("iris"), None)
         .await
@@ -491,13 +435,6 @@ async fn legacy_baseline_rows_without_payload_fields_still_count_as_success() {
     );
 }
 
-/// 2026-07-10 scoping: a `user.grant` row that NAMES a server via
-/// `payload.server` counts only against THAT server. Granting on a new
-/// node must not raise a phantom «not deployed» banner on every other
-/// node the user already has (post-#92 the affected node auto-deploys;
-/// the others didn't change). Payload-less legacy rows keep the old
-/// coarse all-servers reading (pinned by the earlier tests, which
-/// write no payload).
 #[tokio::test]
 async fn grant_scoped_by_payload_server_does_not_flag_other_servers() {
     let dir = TempDir::new().unwrap();
@@ -509,7 +446,6 @@ async fn grant_scoped_by_payload_server_does_not_flag_other_servers() {
             .await
             .unwrap();
     }
-    // Both nodes deployed successfully…
     for sid in ["old-node", "new-node"] {
         inv.audit(
             "admin",
@@ -520,9 +456,7 @@ async fn grant_scoped_by_payload_server_does_not_flag_other_servers() {
         .await
         .unwrap();
     }
-    // tiny delay so the grant ts is strictly greater than the deploys
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // …then a grant lands that names ONLY new-node.
     inv.audit(
         "admin",
         "user.grant",
@@ -545,9 +479,6 @@ async fn grant_scoped_by_payload_server_does_not_flag_other_servers() {
     );
 }
 
-/// Server-agnostic mutations (disable) still flag every granted server
-/// — a disabled user must be excluded from EVERY node's config, so the
-/// broad reading is the correct one there.
 #[tokio::test]
 async fn server_agnostic_mutation_still_flags_all_servers() {
     let dir = TempDir::new().unwrap();
@@ -567,7 +498,6 @@ async fn server_agnostic_mutation_still_flags_all_servers() {
         .await
         .unwrap();
     }
-    // tiny delay so the disable ts is strictly greater than the deploys
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit("admin", "user.disable", Some("pausa"), None)
         .await
@@ -582,12 +512,6 @@ async fn server_agnostic_mutation_still_flags_all_servers() {
     assert_eq!(got.len(), 2, "disable must flag every granted server");
 }
 
-/// Boosty-bridge flips (`boosty.disable` / `boosty.enable`, actor
-/// `boosty-bridge`) are user mutations exactly like `user.disable` — the
-/// bridge auto-deploys after a flip, but when that deploy fails (or a
-/// CLI-applied flip is never deployed) the banner must catch the gap.
-/// Without these actions in the detector's list a bridge flip was
-/// INVISIBLE to the pending-deploy safety net.
 #[tokio::test]
 async fn boosty_bridge_flips_count_as_user_mutations() {
     let dir = TempDir::new().unwrap();
@@ -607,7 +531,6 @@ async fn boosty_bridge_flips_count_as_user_mutations() {
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    // Bridge re-enables the user (re-subscribed) → node config is stale.
     inv.audit("boosty-bridge", "boosty.enable", Some("sub"), None)
         .await
         .unwrap();
@@ -617,7 +540,6 @@ async fn boosty_bridge_flips_count_as_user_mutations() {
         .unwrap();
     assert_eq!(got.len(), 1, "boosty.enable after deploy → pending");
 
-    // Deploy catches up → cleared.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit(
         "admin",
@@ -633,7 +555,6 @@ async fn boosty_bridge_flips_count_as_user_mutations() {
         .unwrap();
     assert!(got.is_empty(), "deploy after the flip clears pending");
 
-    // Bridge disables the user (lapsed) → stale again.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit("boosty-bridge", "boosty.disable", Some("sub"), None)
         .await
@@ -645,10 +566,6 @@ async fn boosty_bridge_flips_count_as_user_mutations() {
     assert_eq!(got.len(), 1, "boosty.disable after deploy → pending");
 }
 
-// ── WireGuard regen + TUIC mint count as user mutations ────────────
-
-/// `user.wireguard.regen` changes the pubkey on every granted server;
-/// the pending-deploy detector must flag them until a deploy lands.
 #[tokio::test]
 async fn wireguard_regen_counts_as_user_mutation() {
     let dir = TempDir::new().unwrap();
@@ -677,7 +594,6 @@ async fn wireguard_regen_counts_as_user_mutation() {
         .unwrap();
     assert_eq!(got.len(), 1, "wireguard.regen after deploy → pending");
 
-    // Deploy catches up → cleared.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     inv.audit(
         "admin",
@@ -694,8 +610,6 @@ async fn wireguard_regen_counts_as_user_mutation() {
     assert!(got.is_empty(), "deploy after regen clears pending");
 }
 
-/// `user.mint_tuic_password` changes the password protocols use on
-/// every granted server; the detector must flag them.
 #[tokio::test]
 async fn tuic_mint_counts_as_user_mutation() {
     let dir = TempDir::new().unwrap();
@@ -725,10 +639,6 @@ async fn tuic_mint_counts_as_user_mutation() {
     assert_eq!(got.len(), 1, "mint_tuic_password after deploy → pending");
 }
 
-// ── Protocol/kernel mutations count for server_pending_deploy ──────
-
-/// The four protocol/kernel audit actions must raise the server-side
-/// pending-deploy flag until a fresh deploy lands.
 #[tokio::test]
 async fn protocol_kernel_mutations_raise_server_pending_deploy() {
     let actions = [
@@ -741,7 +651,6 @@ async fn protocol_kernel_mutations_raise_server_pending_deploy() {
         let dir = TempDir::new().unwrap();
         let inv = open(&dir).await;
         inv.add_server(&srv("srv")).await.unwrap();
-        // Baseline deploy → not pending.
         inv.audit(
             "admin",
             "server.deploy",
@@ -758,7 +667,6 @@ async fn protocol_kernel_mutations_raise_server_pending_deploy() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-        // Mutation → pending.
         inv.audit("admin", action, Some("srv"), None).await.unwrap();
         assert!(
             inv.server_pending_deploy(&ServerId("srv".into()))
@@ -767,7 +675,6 @@ async fn protocol_kernel_mutations_raise_server_pending_deploy() {
             "{action}: mutation after deploy → pending"
         );
 
-        // Deploy catches up → cleared.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         inv.audit(
             "admin",
