@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2 of the ninitux subscription-server absorption — see
-docs/COMPREHENSIVE_AUDIT_2026-05-19.md.
+"""Phase 2 of the ninitux subscription-server absorption.
 
 WHAT THIS DOES
 ==============

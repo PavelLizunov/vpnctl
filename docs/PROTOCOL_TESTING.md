@@ -58,7 +58,7 @@ This is where the "lessons from the first real staging deploy"
 **Hard rules:**
 
 1. **Never touch** non-staging VPN servers from autonomous mode
-   (safety rail #5 in `docs/AUTONOMOUS_PLAN.md`). Production VPN
+   Production VPN
    migration is Pavel-present-only.
 2. Every config edit is wrapped in **upload-to-tmp + sing-box check + atomic mv + systemctl reload-or-restart + 8s is-active poll**. Sketch:
    ```bash
