@@ -489,6 +489,13 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
 
     let live_keyring = temp_dir.join("sagernet.gpg");
     std::fs::write(&live_keyring, b"original-valid-keyring").unwrap();
+    let gnupg_home = temp_dir.join("gnupg");
+    std::fs::create_dir_all(&gnupg_home).unwrap();
+    std::fs::set_permissions(
+        &gnupg_home,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
 
     let script_empty = format!(
         r#"
@@ -507,6 +514,7 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
     );
 
     let out = std::process::Command::new("sh")
+        .env("GNUPGHOME", &gnupg_home)
         .arg("-c")
         .arg(&script_empty)
         .output()
@@ -545,6 +553,7 @@ fn planted_reversal_gpg_keyring_transactional_failure_modes() {
     );
 
     let out = std::process::Command::new("sh")
+        .env("GNUPGHOME", &gnupg_home)
         .arg("-c")
         .arg(&script_corrupt)
         .output()
