@@ -21,21 +21,21 @@ pub(crate) async fn server_set_billing(
     }
 
     let Some(due_date) = form_field(&body, "due_date") else {
-        return bad_request("vpnctl admin: due_date is required");
+        return bad_request("due_date is required");
     };
     if vpnctl_inventory::validate_due_date(&due_date).is_err() {
-        return bad_request("vpnctl admin: due_date must be in YYYY-MM-DD format");
+        return bad_request("due_date must be in YYYY-MM-DD format");
     }
 
     let cycle_str = form_field(&body, "billing_cycle").unwrap_or_else(|| "monthly".into());
     let Ok(cycle) = cycle_str.parse::<BillingCycle>() else {
-        return bad_request("vpnctl admin: invalid billing_cycle");
+        return bad_request("invalid billing_cycle");
     };
 
     let amount_str = form_field(&body, "amount").unwrap_or_default();
     let amount_cents = match parse_amount_to_cents(&amount_str) {
         Ok(c) => c,
-        Err(e) => return bad_request(&format!("vpnctl admin: invalid amount: {e}")),
+        Err(e) => return bad_request(&format!("invalid amount: {e}")),
     };
 
     let currency = form_field(&body, "currency")
@@ -43,7 +43,7 @@ pub(crate) async fn server_set_billing(
         .trim()
         .to_uppercase();
     if currency.is_empty() || currency.len() > 8 {
-        return bad_request("vpnctl admin: currency must be 1-8 characters");
+        return bad_request("currency must be 1-8 characters");
     }
 
     let auto_renew = matches!(
@@ -56,7 +56,7 @@ pub(crate) async fn server_set_billing(
         .filter(|s| !s.is_empty());
     if let Some(ref u) = billing_url {
         if !u.starts_with("http://") && !u.starts_with("https://") {
-            return bad_request("vpnctl admin: billing_url must start with http:// or https://");
+            return bad_request("billing_url must start with http:// or https://");
         }
     }
 

@@ -122,13 +122,13 @@ pub(crate) async fn server_set_naive_config(
 
     const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
     if domain.is_empty() {
-        return bad_request("vpnctl admin: naive domain is required");
+        return bad_request("naive domain is required");
     }
     if domain.chars().count() > 253 || domain.contains(ILLEGAL) {
-        return bad_request("vpnctl admin: invalid naive domain");
+        return bad_request("invalid naive domain");
     }
     if email.chars().count() > 254 || email.contains(ILLEGAL) {
-        return bad_request("vpnctl admin: invalid naive ACME email");
+        return bad_request("invalid naive ACME email");
     }
 
     if let Err(e) = state
@@ -186,16 +186,16 @@ pub(crate) async fn server_set_vlessws_config(
 
     const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
     if domain.is_empty() {
-        return bad_request("vpnctl admin: vless-ws domain is required");
+        return bad_request("vless-ws domain is required");
     }
     if domain.chars().count() > 253 || domain.contains(ILLEGAL) {
-        return bad_request("vpnctl admin: invalid vless-ws domain");
+        return bad_request("invalid vless-ws domain");
     }
     if email.chars().count() > 254 || email.contains(ILLEGAL) {
-        return bad_request("vpnctl admin: invalid vless-ws ACME email");
+        return bad_request("invalid vless-ws ACME email");
     }
     if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
-        return bad_request("vpnctl admin: invalid vless-ws front port (1..=65535)");
+        return bad_request("invalid vless-ws front port (1..=65535)");
     }
 
     let mut candidate = match state.inv.list_server_secrets(&sid).await {
@@ -310,7 +310,7 @@ pub(crate) async fn server_set_display_name(
 
     let name = form_field(&body, "display_name").unwrap_or_default();
     if name.chars().count() > 64 {
-        return bad_request("vpnctl admin: display name too long (max 64 characters)");
+        return bad_request("display name too long (max 64 characters)");
     }
 
     if let Err(e) = state.inv.set_server_display_name(&sid, Some(&name)).await {

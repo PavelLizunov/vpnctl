@@ -54,6 +54,7 @@ pub(crate) async fn monitoring(
         .iter()
         .filter(|(_, h)| h.as_ref().and_then(|h| h.sing_box_active) == Some(true))
         .count();
+    let probed_count = latest.iter().filter(|(_, h)| h.is_some()).count();
     let open_total: u64 = alerts_by_kind.iter().map(|(_, _, n)| *n).sum();
     let open_sub_access: u64 = alerts_by_kind
         .iter()
@@ -164,12 +165,21 @@ pub(crate) async fn monitoring(
         }
 
         div.ed-status-strip style="margin-top: 12px;" {
-            (status_tile_with_warn(
-                tr(lang, "fleet", "флот"),
-                &format!("{up_count} / {probeable_total} up"),
-                if up_count == probeable_total { "var(--green)" } else { "var(--red)" },
-                up_count != probeable_total,
-            ))
+            @if probed_count == 0 {
+                (status_tile_with_warn(
+                    tr(lang, "fleet", "флот"),
+                    tr(lang, "not probed yet", "ещё не опрошен"),
+                    "var(--mute)",
+                    false,
+                ))
+            } @else {
+                (status_tile_with_warn(
+                    tr(lang, "fleet", "флот"),
+                    &format!("{up_count} / {probeable_total} up"),
+                    if up_count == probeable_total { "var(--green)" } else { "var(--red)" },
+                    up_count != probeable_total,
+                ))
+            }
             (status_tile_with_warn(
                 tr(lang, "open alerts", "открытых алертов"),
                 &open_total.to_string(),
@@ -191,6 +201,7 @@ pub(crate) async fn monitoring(
             (status_tile_with_warn(
                 tr(lang, "version drift", "дрейф версий"),
                 &match drifted.len() {
+                    0 if probed_count == 0 => "—".to_string(),
                     0 => tr(lang, "in sync", "синхронно").to_string(),
                     n => format!("{n} {}", tr(lang, "node(s)", "нод")),
                 },
@@ -402,7 +413,7 @@ pub(crate) async fn monitoring(
                                 (crate::node_probe_poller::DEFAULT_UNREACHABLE_THRESHOLD)
                                 (tr(lang, "× fails", "× сбоя"))
                             }
-                            td.num { (probeable_total - up_count) }
+                            td.num { (probed_count - up_count.min(probed_count)) }
                             td.ed-grid__mut { (tr(lang, "fleet", "флот")) }
                             td { (state_cell(has_open("server.unreachable"))) }
                         }

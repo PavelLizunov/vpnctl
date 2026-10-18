@@ -55,7 +55,7 @@ pub(super) fn server_detail_live_activity_section(
             b style="color: var(--ink);" { (last_seen_str) }
             " · "
             (activity.distinct_users_attributed)
-            (tr(lang, " users attributed (NM-11: sing-box upstream strips per-user from clash-api; server-wide totals work)", " юзеров attributed (NM-11: sing-box upstream удаляет per-user из clash-api; сервер-агрегатные totals работают)"))
+            (tr(lang, " users attributed (sing-box does not report users per connection; server-wide totals are exact)", " юзеров атрибутировано (sing-box не сообщает юзера для соединения; итоги по серверу точные)"))
         }
     }
 }
@@ -187,8 +187,8 @@ pub(super) fn server_detail_live_connections_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Per-connection detail from clash-api. NM-11 (sing-box upstream) drops the `user` field on the wire, so we attribute connections to users via the source-IP ↔ subscription-fetch IP correlation (last 7 days). Best-effort — accuracy drops for NAT collisions.",
-                "Деталь per-connection из clash-api. NM-11 (sing-box upstream) убирает поле `user` из wire-формата, поэтому атрибуция идёт через корреляцию source IP ↔ IP запроса подписки (последние 7 дней). Best-effort — точность падает при коллизии NAT.",
+                "Per-connection detail from clash-api. sing-box does not report the user of a connection, so we attribute connections to users via the source-IP ↔ subscription-fetch IP correlation (last 7 days). Best-effort — accuracy drops for NAT collisions.",
+                "Деталь по соединениям из clash-api. sing-box не сообщает юзера соединения, поэтому атрибуция идёт через корреляцию source IP ↔ IP запроса подписки (последние 7 дней). Best-effort — точность падает при коллизии NAT.",
             ))
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 18px;" {
@@ -366,8 +366,8 @@ pub(super) fn server_detail_top_users_section(
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
                     (tr(
                         lang,
-                        "No per-user traffic attributed on this server yet. Per-user attribution is NULL upstream — clash-api drops the user field (NM-11); see the dashboard note. Server-wide totals still work in the traffic chart below.",
-                        "Трафик по пользователям на этом сервере пока не атрибутирован. Атрибуция per-user пустая на уровне upstream — clash-api убирает поле user (NM-11); см. заметку на дашборде. Серверные итоги всё равно работают в графике трафика ниже.",
+                        "No per-user traffic attributed on this server yet. sing-box does not report users per connection; see the dashboard note. Server-wide totals still work in the traffic chart below.",
+                        "Трафик по пользователям на этом сервере пока не атрибутирован. sing-box не сообщает юзера для соединения; см. заметку на дашборде. Серверные итоги всё равно работают в графике трафика ниже.",
                     ))
                 }
             } @else {

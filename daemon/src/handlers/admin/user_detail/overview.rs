@@ -73,7 +73,7 @@ pub(crate) fn user_overview_summary(
             }
             @if traffic.is_empty() {
                 p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
-                    (tr(lang, "No per-server traffic recorded yet (NM-11).", "Трафик по серверам пока не записан (NM-11)."))
+                    (tr(lang, "No per-server traffic recorded yet.", "Трафик по серверам пока не записан."))
                 }
             } @else {
                 table.ed-grid style="margin-top: 8px;" {

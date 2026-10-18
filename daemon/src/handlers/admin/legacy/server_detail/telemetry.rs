@@ -118,14 +118,14 @@ pub(super) fn server_detail_hero(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 (tr(
                     lang,
-                    "No probes yet. The node-telemetry poller SSHes ",
-                    "Probe-ов пока нет. Поллер телеметрии SSH-ит ",
+                    "No probes yet for ",
+                    "Проверок пока не было для ",
                 ))
                 span.ed-mono { (server.address) }
                 (tr(
                     lang,
-                    " every 10 min for disk/mem/load + listening ports. Blank here means the first probe hasn't landed (fresh server / daemon restart), the node is unreachable over SSH, or this server has no sing-box kernel (only sing-box nodes are probed).",
-                    " каждые 10 минут за disk/mem/load + слушающими портами. Пусто значит: первый probe ещё не прошёл (новый сервер / рестарт демона), нода недоступна по SSH, либо у сервера нет ядра sing-box (probe-ятся только sing-box ноды).",
+                    ". It appears after the first successful deploy and health check (every 10 min).",
+                    ". Они появятся после первого успешного деплоя и проверки (каждые 10 минут).",
                 ))
             }
         };

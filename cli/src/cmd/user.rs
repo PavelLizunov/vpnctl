@@ -31,8 +31,7 @@ pub(crate) enum UserCmd {
         #[arg(long, conflicts_with = "gen_wireguard")]
         wireguard_pubkey: Option<String>,
         /// Generate a fresh WireGuard / AmneziaWG keypair server-side
-        /// and store BOTH halves (per CLAUDE.md "users are assumed
-        /// maximally low-tech" — the recipient gets a single
+        /// and store BOTH halves (the recipient gets a single
         /// ready-to-import `.conf` via `/sub/<token>` with no
         /// keygen step on their device). Mutually exclusive with
         /// `--wireguard-pubkey`. The private key is SECRET; it lives

@@ -589,6 +589,7 @@
   display:flex; gap: 28px;
   border-bottom: 1px solid var(--ink);
   padding: 0;
+  margin-top: 24px;
   margin-bottom: 22px;
   font-family: var(--serif);
   font-size: 16px;
@@ -990,4 +991,12 @@ form[data-submitting] .ed-abtn,
   .ed-tb__who button, .ed-tb__who a { min-height: 24px; padding: 4px 2px; }
   .ed-main button, .ed-main .ed-abtn { min-height: 24px; }
   .ed-users-new { margin-left: 0 !important; padding-left: 0 !important; border-left: none !important; width: 100%; }
+  .ed-main table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .ed-main pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+  .ed-main form { flex-wrap: wrap; max-width: 100%; }
+  .ed-main input:not([type="checkbox"]):not([type="radio"]), .ed-main select { max-width: 100%; min-width: 0 !important; box-sizing: border-box; }
+  .ed-time-row, .ed-time--compact .ed-time-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ed-time-row > * { min-width: 0; overflow-wrap: anywhere; }
+  .ed-dash-cols > *, .ed-status-tile { min-width: 0; }
+  .ed { overflow-x: clip; }
 }

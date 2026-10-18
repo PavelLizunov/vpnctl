@@ -11,7 +11,10 @@
     the offending value + allowed alternatives so the operator can fix the
     request without consulting source.
   - Error copy never contains shell instructions (operator-action policy).
-  - Every empty state quotes a literal CLI command.
+  - Every empty state points at the web action that fills it (no CLI or
+    shell commands; the web UI is the only operator surface).
+  - Browser form errors render inside the admin shell with a back link;
+    non-browser clients get the plain `vpnctl admin: ` text.
 
 ## 2. The six layers
 
@@ -29,9 +32,11 @@ Copy contract sources of truth: `error_text()` in `daemon/src/handlers/admin`
 admin module is reachable). Pinned by
 `admin_backend_error_responses_use_unified_prefix`,
 `admin_frontend_section_headlines_match_voice`,
-`admin_empty_states_quote_cli_commands`.
+`admin_empty_states_point_at_web_actions`,
+`admin_form_errors_render_inside_the_admin_shell_for_browsers`.
 
-Frontend voice: sentence-case, em-dashes, mono-font CLI inline. When adding a
+Frontend voice: sentence-case, em-dashes, no internal ticket or phase tags in
+copy. When adding a
 screen: write headline + deck first, then add a copy-contract test in the SAME
 commit.
 
